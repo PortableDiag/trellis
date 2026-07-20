@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "trellis"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arboard",
  "base64 0.22.1",

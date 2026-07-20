@@ -525,8 +525,19 @@ fn byte_of(s: &str, char_idx: usize) -> usize {
 
 /// Wrap the selection in a symmetric marker (`**`, `*`, `~~`, `` ` ``). With no
 /// selection, inserts the markers and drops the cursor between them.
+///
+/// Leading/trailing whitespace in the selection is left *outside* the markers,
+/// because Markdown emphasis needs the markers to hug the text: `**bold**`, not
+/// `** bold **` (the latter renders as literal asterisks).
 fn wrap_inline(text: &str, sel: (usize, usize), marker: &str) -> (String, CCursorRange) {
-    let (a, b) = sel;
+    let (mut a, mut b) = sel;
+    let chars: Vec<char> = text.chars().collect();
+    while a < b && chars.get(a).is_some_and(|c| c.is_whitespace()) {
+        a += 1;
+    }
+    while b > a && chars.get(b - 1).is_some_and(|c| c.is_whitespace()) {
+        b -= 1;
+    }
     let (ba, bb) = (byte_of(text, a), byte_of(text, b));
     let ml = marker.chars().count();
     let mut out = String::with_capacity(text.len() + ml * 2);
@@ -690,6 +701,15 @@ mod tests {
         let (out, sel) = wrap_inline("hello world", (6, 11), "**");
         assert_eq!(out, "hello **world**");
         assert_eq!(range(&sel), (8, 13)); // selection still spans "world"
+    }
+
+    #[test]
+    fn bold_keeps_markers_inside_surrounding_spaces() {
+        // Selecting " added fuzzy search. " (with spaces) must bold the words,
+        // not produce invalid "** added fuzzy search. **".
+        let text = "x added fuzzy search. y";
+        let (out, _) = wrap_inline(text, (1, 22), "**");
+        assert_eq!(out, "x **added fuzzy search.** y");
     }
 
     #[test]
