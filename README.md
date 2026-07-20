@@ -37,6 +37,9 @@ duplicate, recolor, and delete. The canvas pans; each node remembers its scroll.
 - Full-text **search** across every node title and card (Ctrl+F)
 - Dark / light **theme** toggle
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
+- **Agent API** — a localhost, key-gated HTTP API to add/query/edit/remove nodes
+  and cards, so agents can collaborate on the same notes. Enable it in
+  **Tools → Settings**; see [API.md](API.md).
 
 ## Keyboard
 

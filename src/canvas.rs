@@ -256,15 +256,22 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
     match &card.kind {
         CardKind::Text => {
             if card.editing {
+                let edit_id = ui.make_persistent_id(("card_md_edit", card.id));
+
                 let mut title = card.title.clone();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut title).hint_text("card title").desired_width(f32::INFINITY))
-                    .changed()
-                {
+                let title_resp = ui.add(
+                    egui::TextEdit::singleline(&mut title)
+                        .hint_text("card title")
+                        .desired_width(f32::INFINITY),
+                );
+                if title_resp.changed() {
                     actions.push(CanvasAction::SetTitle(card.id, title));
                 }
+                // Tab from the title jumps straight to the body editor, so a card
+                // can be filled out title-then-body without hitting the toolbar.
+                let tab_to_body = title_resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Tab) && !i.modifiers.shift);
 
-                let edit_id = ui.make_persistent_id(("card_md_edit", card.id));
                 // Last-known selection (from the previous frame) drives the
                 // toolbar; default to the end of the text if nothing's selected.
                 let sel = egui::widgets::text_edit::TextEditState::load(ui.ctx(), edit_id)
@@ -331,9 +338,20 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                     .desired_rows(6)
                     .show(ui);
 
+                // Middle-click pastes the primary selection at the text cursor.
+                if edited.is_none() && out.response.middle_clicked() {
+                    if let Some(paste) = take_primary_selection() {
+                        let at = out.state.cursor.char_range().map(sorted).unwrap_or_else(|| {
+                            let n = card.body.chars().count();
+                            (n, n)
+                        });
+                        edited = Some(replace_range(&card.body, at, &paste));
+                    }
+                }
+
                 if let Some((text, range)) = edited {
-                    // A toolbar op ran: apply it and move the selection over the
-                    // formatted text. (The editor didn't change on a click frame.)
+                    // A toolbar op or paste ran: apply it and place the selection
+                    // over the result. (The editor itself didn't change this frame.)
                     actions.push(CanvasAction::SetBody(card.id, text));
                     let mut state = out.state;
                     state.cursor.set_char_range(Some(range));
@@ -341,6 +359,10 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                     out.response.request_focus();
                 } else if out.response.changed() {
                     actions.push(CanvasAction::SetBody(card.id, body));
+                }
+
+                if tab_to_body {
+                    ui.memory_mut(|m| m.request_focus(edit_id));
                 }
             } else if card.body.trim().is_empty() {
                 ui.weak("(empty — double-click title to edit)");
@@ -357,17 +379,29 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                         actions.push(CanvasAction::SetLang(card.id, l));
                     }
                 });
+                let code_id = ui.make_persistent_id(("card_code_edit", card.id));
                 let mut body = card.body.clone();
-                if ui
-                    .add(
-                        egui::TextEdit::multiline(&mut body)
-                            .font(egui::TextStyle::Monospace)
-                            .code_editor()
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(6),
-                    )
-                    .changed()
-                {
+                let out = egui::TextEdit::multiline(&mut body)
+                    .id(code_id)
+                    .font(egui::TextStyle::Monospace)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(6)
+                    .show(ui);
+                if out.response.middle_clicked() {
+                    if let Some(paste) = take_primary_selection() {
+                        let at = out.state.cursor.char_range().map(sorted).unwrap_or_else(|| {
+                            let n = card.body.chars().count();
+                            (n, n)
+                        });
+                        let (text, range) = replace_range(&card.body, at, &paste);
+                        actions.push(CanvasAction::SetBody(card.id, text));
+                        let mut state = out.state;
+                        state.cursor.set_char_range(Some(range));
+                        state.store(ui.ctx(), code_id);
+                        out.response.request_focus();
+                    }
+                } else if out.response.changed() {
                     actions.push(CanvasAction::SetBody(card.id, body));
                 }
             } else {
@@ -592,6 +626,39 @@ fn insert_hr(text: &str, sel: (usize, usize)) -> (String, CCursorRange) {
     out.push_str(&text[ba..]);
     let pos = a + ins.chars().count();
     (out, ccrange(pos, pos))
+}
+
+/// (min, max) char indices of a selection range.
+fn sorted(r: CCursorRange) -> (usize, usize) {
+    let (p, s) = (r.primary.index, r.secondary.index);
+    (p.min(s), p.max(s))
+}
+
+/// Replace the `[a, b)` char range with `insert`; the cursor lands after it.
+fn replace_range(text: &str, sel: (usize, usize), insert: &str) -> (String, CCursorRange) {
+    let (a, b) = sel;
+    let (ba, bb) = (byte_of(text, a), byte_of(text, b));
+    let mut out = String::with_capacity(text.len() + insert.len());
+    out.push_str(&text[..ba]);
+    out.push_str(insert);
+    out.push_str(&text[bb..]);
+    let pos = a + insert.chars().count();
+    (out, ccrange(pos, pos))
+}
+
+/// The X11/Wayland PRIMARY selection — the source for middle-click paste.
+/// Empty or unavailable selections yield `None`.
+#[cfg(target_os = "linux")]
+fn take_primary_selection() -> Option<String> {
+    use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind};
+    let mut cb = Clipboard::new().ok()?;
+    let text = cb.get().clipboard(LinuxClipboardKind::Primary).text().ok()?;
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn take_primary_selection() -> Option<String> {
+    None
 }
 
 fn draw_grid(painter: &egui::Painter, rect: egui::Rect, pan: egui::Vec2, color: egui::Color32) {

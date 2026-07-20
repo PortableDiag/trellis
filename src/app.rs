@@ -5,14 +5,20 @@ use crate::canvas::{self, CanvasAction, Env};
 use crate::images::TextureCache;
 use crate::model::{CardKind, ChecklistItem, Document, NodeId};
 use crate::tree::{self, TreeAction};
+use crate::api::{self, ApiCommand};
 use egui_commonmark::CommonMarkCache;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 
 const MIN_CARD: egui::Vec2 = egui::Vec2::new(140.0, 90.0);
 
-/// eframe storage key holding the path of the document open at last exit.
+/// eframe storage keys.
 const LAST_DOC_KEY: &str = "last_doc_path";
+const API_KEY_KEY: &str = "api_key";
+const API_PORT_KEY: &str = "api_port";
+const DEFAULT_API_PORT: u16 = 7373;
 
 pub struct TrellisApp {
     doc: Document,
@@ -35,6 +41,15 @@ pub struct TrellisApp {
     show_about: bool,
     dark: bool,
     zoom: f32,
+
+    // Agent HTTP API.
+    api_rx: Option<Receiver<ApiCommand>>,
+    /// Shared with the server thread so key edits take effect without a restart.
+    api_shared_key: Arc<Mutex<String>>,
+    api_key: String,
+    api_port: u16,
+    api_status: String,
+    show_settings: bool,
 }
 
 impl TrellisApp {
@@ -73,6 +88,30 @@ impl TrellisApp {
             s.visuals.window_rounding = 8.0.into();
         });
 
+        // Agent API: load config, then start the localhost server. It binds
+        // regardless of key so toggling the key in Settings works live; requests
+        // are rejected while the key is empty.
+        let api_key = cc
+            .storage
+            .and_then(|s| s.get_string(API_KEY_KEY))
+            .unwrap_or_default();
+        let api_port = cc
+            .storage
+            .and_then(|s| s.get_string(API_PORT_KEY))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_API_PORT);
+        let api_shared_key = Arc::new(Mutex::new(api_key.clone()));
+        let (api_tx, api_rx) = std::sync::mpsc::channel::<ApiCommand>();
+        let api_status = match api::serve(
+            api_port,
+            cc.egui_ctx.clone(),
+            api_tx,
+            Arc::clone(&api_shared_key),
+        ) {
+            Ok(()) => format!("Listening on http://127.0.0.1:{api_port}/api"),
+            Err(e) => format!("Failed to start on port {api_port}: {e}"),
+        };
+
         Self {
             doc,
             selected,
@@ -89,6 +128,35 @@ impl TrellisApp {
             show_about: false,
             dark: true,
             zoom: 1.0,
+            api_rx: Some(api_rx),
+            api_shared_key,
+            api_key,
+            api_port,
+            api_status,
+            show_settings: false,
+        }
+    }
+
+    /// Drain and apply any pending API commands from the server thread.
+    fn pump_api(&mut self) {
+        let mut cmds = Vec::new();
+        if let Some(rx) = &self.api_rx {
+            while let Ok(cmd) = rx.try_recv() {
+                cmds.push(cmd);
+            }
+        }
+        for cmd in cmds {
+            let (changed, resp) = api::process(&mut self.doc, cmd.req);
+            if changed {
+                self.dirty = true;
+                // A deleted node may have been the selection.
+                if let Some(sel) = self.selected {
+                    if !self.doc.nodes.contains_key(&sel) {
+                        self.selected = self.doc.roots.first().copied();
+                    }
+                }
+            }
+            let _ = cmd.resp.send(resp);
         }
     }
 
@@ -486,6 +554,12 @@ impl TrellisApp {
                         ui.close_menu();
                     }
                 });
+                ui.menu_button("Tools", |ui| {
+                    if ui.button("Settings…").clicked() {
+                        self.show_settings = true;
+                        ui.close_menu();
+                    }
+                });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About Trellis").clicked() {
                         self.show_about = true;
@@ -494,6 +568,93 @@ impl TrellisApp {
                 });
             });
         });
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_settings;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.heading("Agent API");
+                ui.label(
+                    "A localhost HTTP API for agents to add, query, edit and remove \
+                     nodes and cards. Bound to 127.0.0.1 only.",
+                );
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(&self.api_status).weak());
+                ui.add_space(6.0);
+
+                egui::Grid::new("api_settings").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+                    ui.label("API key");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.api_key)
+                                    .desired_width(240.0)
+                                    .hint_text("empty = API disabled"),
+                            )
+                            .changed()
+                        {
+                            self.sync_api_key();
+                        }
+                        if ui.button("Generate").clicked() {
+                            self.api_key = generate_key();
+                            self.sync_api_key();
+                        }
+                        if ui.button("Copy").clicked() {
+                            ui.ctx().copy_text(self.api_key.clone());
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Port");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut self.api_port).range(1024..=65535));
+                        ui.weak("(restart to apply a port change)");
+                    });
+                    ui.end_row();
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label("Authenticate with a header, then call the endpoints:");
+                ui.add_space(4.0);
+                let port = self.api_port;
+                ui.code(format!(
+                    "curl -H 'X-API-Key: {}' \\\n     http://127.0.0.1:{}/api/tree",
+                    if self.api_key.is_empty() { "<key>" } else { &self.api_key },
+                    port
+                ));
+                ui.add_space(4.0);
+                ui.collapsing("Endpoints", |ui| {
+                    for line in [
+                        "GET    /api/health                     (no auth)",
+                        "GET    /api/tree",
+                        "GET    /api/nodes",
+                        "POST   /api/nodes            {parent?, title}",
+                        "GET    /api/nodes/{id}",
+                        "PATCH  /api/nodes/{id}       {title?, color?}",
+                        "DELETE /api/nodes/{id}",
+                        "GET    /api/nodes/{id}/cards",
+                        "POST   /api/nodes/{id}/cards {kind, title?, body?, lang?, items?, pos?}",
+                        "PATCH  /api/nodes/{id}/cards/{cid}  {title?, body?}",
+                        "DELETE /api/nodes/{id}/cards/{cid}",
+                        "GET    /api/search?q=...",
+                    ] {
+                        ui.monospace(line);
+                    }
+                });
+            });
+        self.show_settings = open;
+    }
+
+    fn sync_api_key(&mut self) {
+        if let Ok(mut k) = self.api_shared_key.lock() {
+            *k = self.api_key.clone();
+        }
     }
 
     fn search_panel(&mut self, ctx: &egui::Context) {
@@ -545,6 +706,9 @@ impl TrellisApp {
 
 impl eframe::App for TrellisApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Apply any API requests from the server thread first.
+        self.pump_api();
+
         // Theme + zoom.
         ctx.set_visuals(if self.dark {
             egui::Visuals::dark()
@@ -653,6 +817,10 @@ impl eframe::App for TrellisApp {
                     }
                 });
         }
+
+        if self.show_settings {
+            self.settings_window(ctx);
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -661,6 +829,8 @@ impl eframe::App for TrellisApp {
         if let Some(p) = &self.doc_path {
             storage.set_string(LAST_DOC_KEY, p.display().to_string());
         }
+        storage.set_string(API_KEY_KEY, self.api_key.clone());
+        storage.set_string(API_PORT_KEY, self.api_port.to_string());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -695,6 +865,24 @@ fn setup_fonts(ctx: &egui::Context) {
         .or_default()
         .insert(0, "dejavu-mono".to_owned());
     ctx.set_fonts(fonts);
+}
+
+/// A random API key (48 hex chars from the OS RNG, falling back to a weak
+/// time/pid mix if `/dev/urandom` is unavailable).
+fn generate_key() -> String {
+    let mut buf = [0u8; 24];
+    let ok = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
+        .is_ok();
+    if ok {
+        buf.iter().map(|b| format!("{b:02x}")).collect()
+    } else {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("trellis-{}-{:x}", std::process::id(), t)
+    }
 }
 
 fn default_autosave_path() -> PathBuf {
