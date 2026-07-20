@@ -7,6 +7,7 @@
 
 mod app;
 mod canvas;
+mod images;
 mod model;
 mod tree;
 
@@ -14,8 +15,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Trellis")
-            .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([640.0, 400.0]),
+            .with_inner_size([1200.0, 780.0])
+            .with_min_inner_size([720.0, 460.0]),
         ..Default::default()
     };
 

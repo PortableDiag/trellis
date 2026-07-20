@@ -6,36 +6,54 @@ Two proven ideas, woven together:
 
 - **The tree** — an outliner-style hierarchy of nodes for structure and navigation.
 - **The basket** — each node's body is not a linear document but a free-form
-  2-D canvas where you drop, drag, and arrange rich cards.
+  2-D canvas where you drop, drag, resize, and arrange rich cards.
 
 Structure lives in the tree; spatial thinking lives in the basket. A trellis is
 a lattice that supports branching growth — the tree *and* the weave in one.
 
-## Status
+## Features
 
-Early v0. Working today:
+**Tree**
+- Add root / child / sibling nodes; inline rename (double-click); delete subtrees
+- Reorder siblings (move up/down), indent / outdent to reshape the hierarchy
+- Expand / collapse, per-node colour tags
 
-- Tree panel: add root / child nodes, rename, delete subtrees, expand/collapse.
-- Basket canvas per node: double-click to drop a card, drag by the title bar to
-  move, right-click the title to delete, drag empty space to pan. Each card is
-  freely editable text.
-- Autosave to disk (RON) on exit and `Ctrl+S`; reloads on launch.
+**Basket canvas** — four real card types:
+- **Text** — CommonMark markdown, rendered live, with edit/preview toggle. Fenced
+  code blocks are syntax-highlighted.
+- **Code** — dedicated code editor with a language selector and highlighting.
+- **Checklist** — real checkboxes with add/remove/edit per item.
+- **Image** — pick a file from disk; the bytes are embedded in the document.
 
-## Roadmap
+Cards drag by the title bar, resize from the corner, raise to front on click,
+duplicate, recolour, and delete. The canvas pans; each node remembers its scroll.
 
-- Rich text inside cards (bold/italic/lists, inline code).
-- Card types: images, files, links, code blocks with syntax highlighting.
-- HTML import/export per node (CherryTree-style fidelity).
-- Zoom, card resize, and connectors between cards.
-- Full-text search across the tree.
+**Documents & interop**
+- Native New / Open / Save / Save As (RON format), plus autosave on exit
+- **Export** the whole tree to a standalone, styled **HTML** file
+- **Import** Markdown or HTML as a new node (HTML is converted to markdown)
 
-## Build
+**App**
+- Full-text **search** across every node title and card (Ctrl+F)
+- Dark / light **theme** toggle
+- **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
+
+## Keyboard
+
+| Shortcut | Action |
+|---|---|
+| Ctrl+S | Save |
+| Ctrl+F | Toggle search |
+| Ctrl+N | New document |
+| Ctrl+`+` / `-` / `0` | Zoom in / out / reset |
+
+## Build & run
 
 ```sh
 cargo run --release
 ```
 
-Requires a recent stable Rust toolchain.
+Requires a recent stable Rust toolchain. Tests: `cargo test`.
 
 ## License
 
