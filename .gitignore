@@ -1,1 +1,4 @@
 /target
+
+# Trellis documents may contain private notes/credentials — never commit them.
+*.ron

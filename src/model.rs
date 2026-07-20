@@ -87,7 +87,7 @@ pub struct Node {
     pub cards: Vec<Card>,
     #[serde(default = "default_true")]
     pub expanded: bool,
-    /// Optional per-node tag colour shown as a dot in the tree.
+    /// Optional per-node tag color shown as a dot in the tree.
     #[serde(default)]
     pub color: Option<[u8; 3]>,
 }
@@ -133,6 +133,17 @@ impl Default for Document {
 }
 
 impl Document {
+    /// An empty document with no nodes. Unlike [`Document::default`], which seeds
+    /// a welcome node, this is the blank slate importers build onto.
+    pub fn empty() -> Self {
+        Document {
+            nodes: HashMap::new(),
+            roots: Vec::new(),
+            next_node_id: 1,
+            next_card_id: 1,
+        }
+    }
+
     // --- lookup helpers -----------------------------------------------------
 
     pub fn card_mut(&mut self, node: NodeId, card: CardId) -> Option<&mut Card> {
@@ -393,6 +404,12 @@ impl Document {
             self.export_node_html(child, depth + 1, s);
         }
         s.push_str("</section>\n");
+    }
+
+    /// Serialize the whole document to pretty-printed JSON. Image cards embed
+    /// their bytes as a JSON array, so exports stay self-contained.
+    pub fn export_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
     }
 
     /// Create a new root node from imported text, splitting nothing — the whole

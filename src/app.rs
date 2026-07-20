@@ -11,6 +11,9 @@ use std::path::PathBuf;
 
 const MIN_CARD: egui::Vec2 = egui::Vec2::new(140.0, 90.0);
 
+/// eframe storage key holding the path of the document open at last exit.
+const LAST_DOC_KEY: &str = "last_doc_path";
+
 pub struct TrellisApp {
     doc: Document,
     selected: Option<NodeId>,
@@ -37,11 +40,32 @@ pub struct TrellisApp {
 impl TrellisApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        setup_fonts(&cc.egui_ctx);
         let autosave_path = default_autosave_path();
 
-        let doc = std::fs::read_to_string(&autosave_path)
-            .ok()
-            .and_then(|s| ron::from_str::<Document>(&s).ok())
+        // Reopen the document from the last session if possible; otherwise fall
+        // back to the autosave slot, then to a fresh welcome document.
+        let last_path = cc
+            .storage
+            .and_then(|s| s.get_string(LAST_DOC_KEY))
+            .map(PathBuf::from);
+        let mut doc_path: Option<PathBuf> = None;
+        let mut doc: Option<Document> = None;
+        if let Some(p) = &last_path {
+            if let Ok(d) = std::fs::read_to_string(p)
+                .map_err(|_| ())
+                .and_then(|s| ron::from_str::<Document>(&s).map_err(|_| ()))
+            {
+                doc = Some(d);
+                doc_path = Some(p.clone());
+            }
+        }
+        let doc = doc
+            .or_else(|| {
+                std::fs::read_to_string(&autosave_path)
+                    .ok()
+                    .and_then(|s| ron::from_str::<Document>(&s).ok())
+            })
             .unwrap_or_default();
         let selected = doc.roots.first().copied();
 
@@ -56,7 +80,7 @@ impl TrellisApp {
             md_cache: CommonMarkCache::default(),
             tex_cache: TextureCache::default(),
             renaming: None,
-            doc_path: None,
+            doc_path,
             autosave_path,
             dirty: false,
             status: "Ready".to_string(),
@@ -193,10 +217,27 @@ impl TrellisApp {
         }
     }
 
+    fn export_json(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .set_file_name("trellis-export.json")
+            .save_file()
+        {
+            match self.doc.export_json() {
+                Ok(s) => match std::fs::write(&path, s) {
+                    Ok(_) => self.status = format!("Exported JSON → {}", path.display()),
+                    Err(e) => self.status = format!("Export failed: {e}"),
+                },
+                Err(e) => self.status = format!("Serialize failed: {e}"),
+            }
+        }
+    }
+
     // --- action application -------------------------------------------------
 
     fn apply_tree(&mut self, actions: Vec<TreeAction>) {
-        if !actions.is_empty() {
+        // Selection isn't persisted, so a pure Select must not dirty the doc.
+        if actions.iter().any(|a| !matches!(a, TreeAction::Select(_))) {
             self.dirty = true;
         }
         for a in actions {
@@ -250,7 +291,8 @@ impl TrellisApp {
     }
 
     fn apply_canvas(&mut self, node: NodeId, actions: Vec<CanvasAction>) {
-        if !actions.is_empty() {
+        // ResetView only nudges the (unsaved) pan, so it must not dirty the doc.
+        if actions.iter().any(|a| !matches!(a, CanvasAction::ResetView)) {
             self.dirty = true;
         }
         for a in actions {
@@ -338,6 +380,9 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::LoadImage(cid) => self.load_image_into(node, cid),
+                CanvasAction::ResetView => {
+                    self.pans.insert(node, egui::Vec2::ZERO);
+                }
             }
         }
     }
@@ -399,6 +444,10 @@ impl TrellisApp {
                         self.export_html();
                         ui.close_menu();
                     }
+                    if ui.button("Export JSON…").clicked() {
+                        self.export_json();
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -455,7 +504,7 @@ impl TrellisApp {
                 ui.horizontal(|ui| {
                     ui.heading("Search");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("✕").clicked() {
+                        if ui.button("×").clicked() {
                             self.search_open = false;
                         }
                     });
@@ -534,7 +583,7 @@ impl eframe::App for TrellisApp {
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("💾 Save").clicked() {
+                if ui.button("Save").clicked() {
                     self.save();
                 }
                 ui.separator();
@@ -606,11 +655,46 @@ impl eframe::App for TrellisApp {
         }
     }
 
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Remember which file to reopen next launch (untitled docs live in the
+        // autosave slot and need no key).
+        if let Some(p) = &self.doc_path {
+            storage.set_string(LAST_DOC_KEY, p.display().to_string());
+        }
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Best-effort autosave to the working file (or the autosave slot).
         let path = self.target_path();
         self.write_to(path);
     }
+}
+
+/// Install DejaVu as the primary UI font. It carries the arrows, bullets,
+/// dashes and box-drawing that egui's default fonts lack, so UI glyphs and the
+/// wide Unicode common in dev/sysadmin notes render instead of showing tofu.
+/// The egui defaults stay as fallback (emoji, Cyrillic, …).
+fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "dejavu".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/DejaVuSans.ttf")),
+    );
+    fonts.font_data.insert(
+        "dejavu-mono".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/DejaVuSansMono.ttf")),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "dejavu".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .insert(0, "dejavu-mono".to_owned());
+    ctx.set_fonts(fonts);
 }
 
 fn default_autosave_path() -> PathBuf {

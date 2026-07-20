@@ -3,6 +3,7 @@
 
 use crate::images::TextureCache;
 use crate::model::{Card, CardId, CardKind, ChecklistItem, Node};
+use egui::text::{CCursor, CCursorRange};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 /// Shared, frame-persistent caches the canvas needs.
@@ -24,6 +25,7 @@ pub enum CanvasAction {
     SetEditing(CardId, bool),
     Duplicate(CardId),
     Remove(CardId),
+    ResetView,
     ChecklistToggle(CardId, usize),
     ChecklistSetText(CardId, usize, String),
     ChecklistAdd(CardId),
@@ -50,6 +52,13 @@ pub fn ui(ui: &mut egui::Ui, node: &Node, pan: &mut egui::Vec2, env: &mut Env) -
         *pan += canvas_resp.drag_delta();
     }
 
+    // Wheel scrolls the canvas when the pointer is over empty space; card
+    // bodies keep their own inner scrolling when hovered directly.
+    if canvas_resp.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta);
+        *pan += scroll;
+    }
+
     // Double-click empty canvas → drop a text card there.
     if canvas_resp.double_clicked() {
         if let Some(p) = canvas_resp.interact_pointer_pos() {
@@ -66,15 +75,15 @@ pub fn ui(ui: &mut egui::Ui, node: &Node, pan: &mut egui::Vec2, env: &mut Env) -
         let cp = menu_pos
             .map(|p| p - canvas_rect.min.to_vec2() - *pan)
             .unwrap_or(egui::pos2(40.0, 40.0));
-        if ui.button("📝  Text").clicked() {
+        if ui.button("Text").clicked() {
             actions.push(CanvasAction::AddCard(CardKind::Text, cp));
             ui.close_menu();
         }
-        if ui.button("💻  Code").clicked() {
+        if ui.button("Code").clicked() {
             actions.push(CanvasAction::AddCard(CardKind::Code { lang: "rust".into() }, cp));
             ui.close_menu();
         }
-        if ui.button("☑  Checklist").clicked() {
+        if ui.button("Checklist").clicked() {
             actions.push(CanvasAction::AddCard(
                 CardKind::Checklist {
                     items: vec![ChecklistItem { done: false, text: String::new() }],
@@ -83,7 +92,7 @@ pub fn ui(ui: &mut egui::Ui, node: &Node, pan: &mut egui::Vec2, env: &mut Env) -
             ));
             ui.close_menu();
         }
-        if ui.button("🖼  Image").clicked() {
+        if ui.button("Image").clicked() {
             actions.push(CanvasAction::AddCard(
                 CardKind::Image { data: Vec::new(), name: String::new() },
                 cp,
@@ -95,6 +104,24 @@ pub fn ui(ui: &mut egui::Ui, node: &Node, pan: &mut egui::Vec2, env: &mut Env) -
     let origin = canvas_rect.min.to_vec2() + *pan;
     for card in &node.cards {
         card_ui(ui, card, origin, canvas_rect, env, &mut actions);
+    }
+
+    // Reset-view button (top-right) — snaps the pan back to the origin.
+    let btn_rect = egui::Rect::from_min_size(
+        egui::pos2(canvas_rect.right() - 104.0, canvas_rect.top() + 8.0),
+        egui::vec2(96.0, 24.0),
+    );
+    let mut btn_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(btn_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    if btn_ui
+        .button("Reset view")
+        .on_hover_text("Recenter the canvas at the top-left")
+        .clicked()
+    {
+        actions.push(CanvasAction::ResetView);
     }
 
     // Hint line.
@@ -165,15 +192,15 @@ fn card_ui(
     // Edit/view toggle button on the right of the title bar (for text/code).
     if supports_edit(&card.kind) {
         let btn_rect = egui::Rect::from_min_size(
-            egui::pos2(title_rect.right() - 26.0, title_rect.top() + 2.0),
-            egui::vec2(22.0, TITLE_H - 4.0),
+            egui::pos2(title_rect.right() - 46.0, title_rect.top() + 2.0),
+            egui::vec2(42.0, TITLE_H - 4.0),
         );
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
         ));
-        let glyph = if card.editing { "👁" } else { "✏" };
+        let label = if card.editing { "view" } else { "edit" };
         if child
-            .add(egui::Button::new(glyph).frame(false).small())
+            .add(egui::Button::new(label).frame(false).small())
             .on_hover_text(if card.editing { "Preview" } else { "Edit" })
             .clicked()
         {
@@ -229,7 +256,6 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
     match &card.kind {
         CardKind::Text => {
             if card.editing {
-                let mut body = card.body.clone();
                 let mut title = card.title.clone();
                 if ui
                     .add(egui::TextEdit::singleline(&mut title).hint_text("card title").desired_width(f32::INFINITY))
@@ -237,15 +263,83 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                 {
                     actions.push(CanvasAction::SetTitle(card.id, title));
                 }
-                if ui
-                    .add(
-                        egui::TextEdit::multiline(&mut body)
-                            .hint_text("Markdown…")
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(6),
-                    )
-                    .changed()
-                {
+
+                let edit_id = ui.make_persistent_id(("card_md_edit", card.id));
+                // Last-known selection (from the previous frame) drives the
+                // toolbar; default to the end of the text if nothing's selected.
+                let sel = egui::widgets::text_edit::TextEditState::load(ui.ctx(), edit_id)
+                    .and_then(|s| s.cursor.char_range())
+                    .map(|r| {
+                        let (p, s) = (r.primary.index, r.secondary.index);
+                        (p.min(s), p.max(s))
+                    })
+                    .unwrap_or_else(|| {
+                        let n = card.body.chars().count();
+                        (n, n)
+                    });
+
+                let mut edited: Option<(String, CCursorRange)> = None;
+                ui.horizontal_wrapped(|ui| {
+                    if fmt_btn(ui, "B", "Bold") {
+                        edited = Some(wrap_inline(&card.body, sel, "**"));
+                    }
+                    if fmt_btn(ui, "I", "Italic") {
+                        edited = Some(wrap_inline(&card.body, sel, "*"));
+                    }
+                    if fmt_btn(ui, "S", "Strikethrough") {
+                        edited = Some(wrap_inline(&card.body, sel, "~~"));
+                    }
+                    if fmt_btn(ui, "<>", "Inline code") {
+                        edited = Some(wrap_inline(&card.body, sel, "`"));
+                    }
+                    ui.separator();
+                    if fmt_btn(ui, "H1", "Heading 1") {
+                        edited = Some(line_prefix(&card.body, sel, "# "));
+                    }
+                    if fmt_btn(ui, "H2", "Heading 2") {
+                        edited = Some(line_prefix(&card.body, sel, "## "));
+                    }
+                    if fmt_btn(ui, "•", "Bullet list") {
+                        edited = Some(line_prefix(&card.body, sel, "- "));
+                    }
+                    if fmt_btn(ui, "1.", "Numbered list") {
+                        edited = Some(line_prefix(&card.body, sel, "1. "));
+                    }
+                    if fmt_btn(ui, "\u{201C}\u{201D}", "Quote") {
+                        edited = Some(line_prefix(&card.body, sel, "> "));
+                    }
+                    if fmt_btn(ui, "[ ]", "Task item") {
+                        edited = Some(line_prefix(&card.body, sel, "- [ ] "));
+                    }
+                    ui.separator();
+                    if fmt_btn(ui, "{ }", "Code block") {
+                        edited = Some(wrap_block(&card.body, sel));
+                    }
+                    if fmt_btn(ui, "link", "Link") {
+                        edited = Some(make_link(&card.body, sel));
+                    }
+                    if fmt_btn(ui, "\u{2014}", "Horizontal rule") {
+                        edited = Some(insert_hr(&card.body, sel));
+                    }
+                });
+
+                let mut body = card.body.clone();
+                let out = egui::TextEdit::multiline(&mut body)
+                    .id(edit_id)
+                    .hint_text("Markdown… (select text, then a button wraps it)")
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(6)
+                    .show(ui);
+
+                if let Some((text, range)) = edited {
+                    // A toolbar op ran: apply it and move the selection over the
+                    // formatted text. (The editor didn't change on a click frame.)
+                    actions.push(CanvasAction::SetBody(card.id, text));
+                    let mut state = out.state;
+                    state.cursor.set_char_range(Some(range));
+                    state.store(ui.ctx(), edit_id);
+                    out.response.request_focus();
+                } else if out.response.changed() {
                     actions.push(CanvasAction::SetBody(card.id, body));
                 }
             } else if card.body.trim().is_empty() {
@@ -297,18 +391,18 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                     if resp.changed() {
                         actions.push(CanvasAction::ChecklistSetText(card.id, i, text));
                     }
-                    if ui.add(egui::Button::new("✕").frame(false).small()).clicked() {
+                    if ui.add(egui::Button::new("×").frame(false).small()).clicked() {
                         actions.push(CanvasAction::ChecklistRemove(card.id, i));
                     }
                 });
             }
-            if ui.button("＋ item").clicked() {
+            if ui.button("+ item").clicked() {
                 actions.push(CanvasAction::ChecklistAdd(card.id));
             }
         }
         CardKind::Image { data, name } => {
             if data.is_empty() {
-                if ui.button("🖼  Load image…").clicked() {
+                if ui.button("Load image…").clicked() {
                     actions.push(CanvasAction::LoadImage(card.id));
                 }
             } else if let Some(tex) = env.tex.get(ui.ctx(), card.id, data) {
@@ -335,17 +429,17 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
 
 fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
     if supports_edit(&card.kind) {
-        let (glyph, label) = if card.editing { ("👁", "Preview") } else { ("✏", "Edit") };
-        if ui.button(format!("{glyph}  {label}")).clicked() {
+        let label = if card.editing { "Preview" } else { "Edit" };
+        if ui.button(label).clicked() {
             actions.push(CanvasAction::SetEditing(card.id, !card.editing));
             ui.close_menu();
         }
     }
-    if ui.button("⧉  Duplicate").clicked() {
+    if ui.button("Duplicate").clicked() {
         actions.push(CanvasAction::Duplicate(card.id));
         ui.close_menu();
     }
-    ui.menu_button("🎨  Colour", |ui| {
+    ui.menu_button("Color", |ui| {
         let swatches: [(&str, [u8; 3]); 6] = [
             ("Blue", [0x3b, 0x82, 0xf6]),
             ("Green", [0x22, 0xc5, 0x5e]),
@@ -362,7 +456,7 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
         }
     });
     ui.separator();
-    if ui.button("🗑  Delete card").clicked() {
+    if ui.button("Delete card").clicked() {
         actions.push(CanvasAction::Remove(card.id));
         ui.close_menu();
     }
@@ -370,6 +464,134 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
 
 fn supports_edit(kind: &CardKind) -> bool {
     matches!(kind, CardKind::Text | CardKind::Code { .. })
+}
+
+// --- Markdown formatting toolbar helpers ------------------------------------
+//
+// All operate on char indices (egui cursors are char-based) and return the new
+// body text plus the selection to place over the formatted region.
+
+fn fmt_btn(ui: &mut egui::Ui, label: &str, tip: &str) -> bool {
+    ui.add(egui::Button::new(label).small())
+        .on_hover_text(tip)
+        .clicked()
+}
+
+fn ccrange(min: usize, max: usize) -> CCursorRange {
+    CCursorRange::two(
+        CCursor { index: min, prefer_next_row: false },
+        CCursor { index: max, prefer_next_row: false },
+    )
+}
+
+/// Byte offset of the `n`th char (or the string length if out of range).
+fn byte_of(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+/// Wrap the selection in a symmetric marker (`**`, `*`, `~~`, `` ` ``). With no
+/// selection, inserts the markers and drops the cursor between them.
+fn wrap_inline(text: &str, sel: (usize, usize), marker: &str) -> (String, CCursorRange) {
+    let (a, b) = sel;
+    let (ba, bb) = (byte_of(text, a), byte_of(text, b));
+    let ml = marker.chars().count();
+    let mut out = String::with_capacity(text.len() + ml * 2);
+    out.push_str(&text[..ba]);
+    out.push_str(marker);
+    out.push_str(&text[ba..bb]);
+    out.push_str(marker);
+    out.push_str(&text[bb..]);
+    (out, ccrange(a + ml, b + ml))
+}
+
+/// Prepend `prefix` to every line the selection touches (headings, lists, quote).
+fn line_prefix(text: &str, sel: (usize, usize), prefix: &str) -> (String, CCursorRange) {
+    let chars: Vec<char> = text.chars().collect();
+    let (a, b) = sel;
+    // Start of the line containing `a`.
+    let mut start = a.min(chars.len());
+    while start > 0 && chars[start - 1] != '\n' {
+        start -= 1;
+    }
+    let mut points = vec![start];
+    let mut i = start;
+    while i < b.min(chars.len()) {
+        if chars[i] == '\n' {
+            points.push(i + 1);
+        }
+        i += 1;
+    }
+    let pchars: Vec<char> = prefix.chars().collect();
+    let pset: std::collections::HashSet<usize> = points.iter().copied().collect();
+    let mut newv: Vec<char> = Vec::with_capacity(chars.len() + pchars.len() * points.len());
+    for (idx, c) in chars.iter().enumerate() {
+        if pset.contains(&idx) {
+            newv.extend(pchars.iter().copied());
+        }
+        newv.push(*c);
+    }
+    if pset.contains(&chars.len()) {
+        newv.extend(pchars.iter().copied());
+    }
+    let added = pchars.len() * points.len();
+    (newv.into_iter().collect(), ccrange(a + pchars.len(), b + added))
+}
+
+/// Wrap the selection in a fenced ``` code block on its own lines.
+fn wrap_block(text: &str, sel: (usize, usize)) -> (String, CCursorRange) {
+    let (a, b) = sel;
+    let (ba, bb) = (byte_of(text, a), byte_of(text, b));
+    let inner = &text[ba..bb];
+    let nl_before = ba > 0 && !text[..ba].ends_with('\n');
+    let nl_after = bb < text.len() && !text[bb..].starts_with('\n');
+    let mut out = String::new();
+    out.push_str(&text[..ba]);
+    if nl_before {
+        out.push('\n');
+    }
+    out.push_str("```\n");
+    out.push_str(inner);
+    out.push_str("\n```");
+    if nl_after {
+        out.push('\n');
+    }
+    out.push_str(&text[bb..]);
+    // Cursor after the opening fence line, spanning the inner text.
+    let pos = a + if nl_before { 1 } else { 0 } + 4; // "```\n"
+    (out, ccrange(pos, pos + inner.chars().count()))
+}
+
+/// Turn the selection into a `[label](url)` link, selecting the `url` placeholder.
+fn make_link(text: &str, sel: (usize, usize)) -> (String, CCursorRange) {
+    let (a, b) = sel;
+    let (ba, bb) = (byte_of(text, a), byte_of(text, b));
+    let label = &text[ba..bb];
+    let label_len = label.chars().count();
+    let mut out = String::new();
+    out.push_str(&text[..ba]);
+    out.push('[');
+    out.push_str(label);
+    out.push_str("](url)");
+    out.push_str(&text[bb..]);
+    let url_start = a + 1 + label_len + 2; // '[' + label + ']('
+    (out, ccrange(url_start, url_start + 3))
+}
+
+/// Insert a `---` horizontal rule on its own line at the cursor.
+fn insert_hr(text: &str, sel: (usize, usize)) -> (String, CCursorRange) {
+    let a = sel.0;
+    let ba = byte_of(text, a);
+    let mut ins = String::new();
+    if ba > 0 && !text[..ba].ends_with('\n') {
+        ins.push('\n');
+    }
+    ins.push_str("---\n");
+    let mut out = String::new();
+    out.push_str(&text[..ba]);
+    out.push_str(&ins);
+    out.push_str(&text[ba..]);
+    let pos = a + ins.chars().count();
+    (out, ccrange(pos, pos))
 }
 
 fn draw_grid(painter: &egui::Painter, rect: egui::Rect, pan: egui::Vec2, color: egui::Color32) {
@@ -384,5 +606,61 @@ fn draw_grid(painter: &egui::Painter, rect: egui::Rect, pan: egui::Vec2, color: 
     while y < rect.max.y {
         painter.line_segment([egui::pos2(rect.min.x, y), egui::pos2(rect.max.x, y)], stroke);
         y += step;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(r: &CCursorRange) -> (usize, usize) {
+        (r.secondary.index, r.primary.index) // (min, max) as built by ccrange
+    }
+
+    #[test]
+    fn bold_wraps_selection_and_reselects_inner() {
+        // "hello world", select "world" (chars 6..11).
+        let (out, sel) = wrap_inline("hello world", (6, 11), "**");
+        assert_eq!(out, "hello **world**");
+        assert_eq!(range(&sel), (8, 13)); // selection still spans "world"
+    }
+
+    #[test]
+    fn bold_with_empty_selection_puts_cursor_between_markers() {
+        let (out, sel) = wrap_inline("", (0, 0), "**");
+        assert_eq!(out, "****");
+        assert_eq!(range(&sel), (2, 2));
+    }
+
+    #[test]
+    fn inline_code_handles_multibyte_offsets() {
+        // "café x" — 'é' is 2 bytes; select "x" (char index 5..6).
+        let (out, _sel) = wrap_inline("café x", (5, 6), "`");
+        assert_eq!(out, "café `x`");
+    }
+
+    #[test]
+    fn heading_prefixes_single_line() {
+        let (out, _) = line_prefix("title", (0, 0), "# ");
+        assert_eq!(out, "# title");
+    }
+
+    #[test]
+    fn bullet_prefixes_each_selected_line() {
+        let (out, _) = line_prefix("a\nb\nc", (0, 5), "- ");
+        assert_eq!(out, "- a\n- b\n- c");
+    }
+
+    #[test]
+    fn code_block_wraps_on_own_lines() {
+        let (out, _) = wrap_block("x", (0, 1));
+        assert_eq!(out, "```\nx\n```");
+    }
+
+    #[test]
+    fn link_selects_url_placeholder() {
+        let (out, sel) = make_link("site", (0, 4));
+        assert_eq!(out, "[site](url)");
+        assert_eq!(range(&sel), (7, 10)); // "url"
     }
 }

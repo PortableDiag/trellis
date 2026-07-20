@@ -31,7 +31,7 @@ pub fn ui(
     ui.horizontal(|ui| {
         ui.heading("Trellis");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("＋").on_hover_text("Add a root node").clicked() {
+            if ui.button("+").on_hover_text("Add a root node").clicked() {
                 actions.push(TreeAction::AddRoot);
             }
         });
@@ -77,7 +77,7 @@ fn node_ui(
             }
         }
 
-        // Colour dot.
+        // Color dot.
         if let Some(c) = node.color {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
             ui.painter().circle_filled(
@@ -96,14 +96,26 @@ fn node_ui(
                         .desired_width(f32::INFINITY)
                         .hint_text("node title"),
                 );
-                resp.request_focus();
-                let commit = resp.lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape))
-                    || resp.lost_focus();
-                if commit {
-                    let text = buf.clone();
-                    actions.push(TreeAction::Rename(id, text));
+                // Grab focus only on the first frame of editing this node.
+                // Requesting every frame would hog focus from card editors and
+                // prevent the field from ever losing focus (so it couldn't exit).
+                let focus_key = egui::Id::new("trellis_rename_focused");
+                let focused = ui.memory(|m| m.data.get_temp::<NodeId>(focus_key));
+                if focused != Some(id) {
+                    resp.request_focus();
+                    ui.memory_mut(|m| m.data.insert_temp(focus_key, id));
+                }
+                let clear_focus = |ui: &egui::Ui| {
+                    ui.memory_mut(|m| m.data.remove::<NodeId>(focus_key));
+                };
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    *renaming = None; // Escape cancels: discard the edited buffer.
+                    clear_focus(ui);
+                } else if resp.lost_focus() {
+                    // Enter or clicking away commits the new title.
+                    actions.push(TreeAction::Rename(id, buf.clone()));
                     *renaming = None;
+                    clear_focus(ui);
                 }
             }
         } else {
@@ -116,16 +128,16 @@ fn node_ui(
                 *renaming = Some((id, node.title.clone()));
             }
             resp.context_menu(|ui| {
-                if ui.button("✏  Rename").clicked() {
+                if ui.button("Rename").clicked() {
                     *renaming = Some((id, node.title.clone()));
                     ui.close_menu();
                 }
                 ui.separator();
-                if ui.button("＋  Add child").clicked() {
+                if ui.button("+  Add child").clicked() {
                     actions.push(TreeAction::AddChild(id));
                     ui.close_menu();
                 }
-                if ui.button("＋  Add sibling").clicked() {
+                if ui.button("+  Add sibling").clicked() {
                     actions.push(TreeAction::AddSibling(id));
                     ui.close_menu();
                 }
@@ -147,7 +159,7 @@ fn node_ui(
                     ui.close_menu();
                 }
                 ui.separator();
-                ui.menu_button("🎨  Colour", |ui| {
+                ui.menu_button("Color", |ui| {
                     let swatches: [(&str, Option<[u8; 3]>); 6] = [
                         ("None", None),
                         ("Red", Some([0xef, 0x44, 0x44])),
@@ -164,7 +176,7 @@ fn node_ui(
                     }
                 });
                 ui.separator();
-                if ui.button("🗑  Delete subtree").clicked() {
+                if ui.button("Delete subtree").clicked() {
                     actions.push(TreeAction::Remove(id));
                     ui.close_menu();
                 }

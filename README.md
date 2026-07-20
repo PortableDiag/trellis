@@ -16,7 +16,7 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 **Tree**
 - Add root / child / sibling nodes; inline rename (double-click); delete subtrees
 - Reorder siblings (move up/down), indent / outdent to reshape the hierarchy
-- Expand / collapse, per-node colour tags
+- Expand / collapse, per-node color tags
 
 **Basket canvas** — four real card types:
 - **Text** — CommonMark markdown, rendered live, with edit/preview toggle. Fenced
@@ -26,7 +26,7 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 - **Image** — pick a file from disk; the bytes are embedded in the document.
 
 Cards drag by the title bar, resize from the corner, raise to front on click,
-duplicate, recolour, and delete. The canvas pans; each node remembers its scroll.
+duplicate, recolor, and delete. The canvas pans; each node remembers its scroll.
 
 **Documents & interop**
 - Native New / Open / Save / Save As (RON format), plus autosave on exit
