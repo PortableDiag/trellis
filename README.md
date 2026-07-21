@@ -49,6 +49,7 @@ duplicate, recolor, and delete. The canvas pans; each node remembers its scroll.
 | Ctrl+F | Toggle search |
 | Ctrl+N | New document |
 | Ctrl+`+` / `-` / `0` | Zoom in / out / reset |
+| Ctrl+scroll | Zoom (toggle in Settings; on by default) |
 
 ## Build & run
 

@@ -19,6 +19,9 @@ const LAST_DOC_KEY: &str = "last_doc_path";
 const API_KEY_KEY: &str = "api_key";
 const API_PORT_KEY: &str = "api_port";
 const DEFAULT_API_PORT: u16 = 7373;
+const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
+const MIN_ZOOM: f32 = 0.5;
+const MAX_ZOOM: f32 = 3.0;
 
 pub struct TrellisApp {
     doc: Document,
@@ -41,6 +44,8 @@ pub struct TrellisApp {
     show_about: bool,
     dark: bool,
     zoom: f32,
+    /// Whether Ctrl+scroll / Ctrl +/- zoom the UI (Settings; on by default).
+    zoom_enabled: bool,
 
     // Agent HTTP API.
     api_rx: Option<Receiver<ApiCommand>>,
@@ -87,6 +92,15 @@ impl TrellisApp {
         cc.egui_ctx.style_mut(|s| {
             s.visuals.window_rounding = 8.0.into();
         });
+        // We manage zoom ourselves (so it can be toggled and reset), so turn off
+        // egui's built-in keyboard zoom to avoid double-stepping.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+
+        let zoom_enabled = cc
+            .storage
+            .and_then(|s| s.get_string(ZOOM_ENABLED_KEY))
+            .map(|s| s != "false")
+            .unwrap_or(true);
 
         // Agent API: load config, then start the localhost server. It binds
         // regardless of key so toggling the key in Settings works live; requests
@@ -128,6 +142,7 @@ impl TrellisApp {
             show_about: false,
             dark: true,
             zoom: 1.0,
+            zoom_enabled,
             api_rx: Some(api_rx),
             api_shared_key,
             api_key,
@@ -135,6 +150,10 @@ impl TrellisApp {
             api_status,
             show_settings: false,
         }
+    }
+
+    fn set_zoom(&mut self, z: f32) {
+        self.zoom = z.clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
     /// Drain and apply any pending API commands from the server thread.
@@ -450,6 +469,7 @@ impl TrellisApp {
                 CanvasAction::LoadImage(cid) => self.load_image_into(node, cid),
                 CanvasAction::ResetView => {
                     self.pans.insert(node, egui::Vec2::ZERO);
+                    self.zoom = 1.0;
                 }
             }
         }
@@ -618,6 +638,14 @@ impl TrellisApp {
                     ui.end_row();
                 });
 
+                ui.add_space(10.0);
+                ui.heading("Canvas");
+                ui.checkbox(
+                    &mut self.zoom_enabled,
+                    "Zoom with Ctrl+scroll and Ctrl +/−",
+                )
+                .on_hover_text("Ctrl+0 and Reset view still reset zoom when this is off.");
+
                 ui.add_space(8.0);
                 ui.separator();
                 ui.label("Authenticate with a header, then call the endpoints:");
@@ -733,12 +761,20 @@ impl eframe::App for TrellisApp {
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::N)) {
             self.new_document();
         }
-        if cmd && ctx.input(|i| i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
-            self.zoom = (self.zoom + 0.1).min(3.0);
+        if self.zoom_enabled {
+            if cmd && ctx.input(|i| i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
+                self.set_zoom(self.zoom + 0.1);
+            }
+            if cmd && ctx.input(|i| i.key_pressed(egui::Key::Minus)) {
+                self.set_zoom(self.zoom - 0.1);
+            }
+            // Ctrl/Cmd + scroll and trackpad pinch zoom smoothly.
+            let zoom_delta = ctx.input(|i| i.zoom_delta());
+            if (zoom_delta - 1.0).abs() > f32::EPSILON {
+                self.set_zoom(self.zoom * zoom_delta);
+            }
         }
-        if cmd && ctx.input(|i| i.key_pressed(egui::Key::Minus)) {
-            self.zoom = (self.zoom - 0.1).max(0.5);
-        }
+        // Reset (Ctrl+0) works regardless, so you can't get stuck zoomed.
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::Num0)) {
             self.zoom = 1.0;
         }
@@ -831,6 +867,7 @@ impl eframe::App for TrellisApp {
         }
         storage.set_string(API_KEY_KEY, self.api_key.clone());
         storage.set_string(API_PORT_KEY, self.api_port.to_string());
+        storage.set_string(ZOOM_ENABLED_KEY, self.zoom_enabled.to_string());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

@@ -118,7 +118,7 @@ pub fn ui(ui: &mut egui::Ui, node: &Node, pan: &mut egui::Vec2, env: &mut Env) -
     );
     if btn_ui
         .button("Reset view")
-        .on_hover_text("Recenter the canvas at the top-left")
+        .on_hover_text("Reset zoom to 100% and recenter the canvas")
         .clicked()
     {
         actions.push(CanvasAction::ResetView);
