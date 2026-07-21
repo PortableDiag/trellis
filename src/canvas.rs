@@ -350,13 +350,12 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
             if card.editing {
                 let edit_id = ui.make_persistent_id(("card_md_edit", card.id));
 
-                let mut title = card.title.clone();
-                let title_resp = ui.add(
-                    egui::TextEdit::singleline(&mut title)
-                        .hint_text("card title")
-                        .desired_width(f32::INFINITY),
-                );
-                if title_resp.changed() {
+                let title_id = ui.make_persistent_id(("card_title_edit", card.id));
+                let (title, title_changed, title_resp) =
+                    singleline_primary(ui, title_id, &card.title, |te| {
+                        te.hint_text("card title").desired_width(f32::INFINITY)
+                    });
+                if title_changed {
                     actions.push(CanvasAction::SetTitle(card.id, title));
                 }
                 // Tab from the title jumps straight to the body editor, so a card
@@ -469,8 +468,10 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
             if card.editing {
                 ui.horizontal(|ui| {
                     ui.label("lang:");
-                    let mut l = lang.clone();
-                    if ui.add(egui::TextEdit::singleline(&mut l).desired_width(90.0)).changed() {
+                    let lang_id = ui.make_persistent_id(("card_lang_edit", card.id));
+                    let (l, l_changed, _) =
+                        singleline_primary(ui, lang_id, lang, |te| te.desired_width(90.0));
+                    if l_changed {
                         actions.push(CanvasAction::SetLang(card.id, l));
                     }
                 });
@@ -512,13 +513,12 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                     if ui.checkbox(&mut done, "").changed() {
                         actions.push(CanvasAction::ChecklistToggle(card.id, i));
                     }
-                    let mut text = item.text.clone();
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut text)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("item"),
-                    );
-                    if resp.changed() {
+                    let item_id = ui.make_persistent_id(("card_check_edit", card.id, i));
+                    let (text, changed, _) =
+                        singleline_primary(ui, item_id, &item.text, |te| {
+                            te.desired_width(f32::INFINITY).hint_text("item")
+                        });
+                    if changed {
                         actions.push(CanvasAction::ChecklistSetText(card.id, i, text));
                     }
                     if ui.add(egui::Button::new("×").frame(false).small()).clicked() {
@@ -833,6 +833,38 @@ fn mirror_selection_to_primary(
             set_primary_selection(ui, &sel);
         }
     }
+}
+
+/// A singleline editor wired for the X11 primary selection like the body editor:
+/// its selection mirrors to primary, and middle-click pastes primary at the
+/// cursor. `build` customises the `TextEdit` (hint, width, …). Returns the
+/// (possibly edited) text, whether it changed, and the response.
+fn singleline_primary(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    initial: &str,
+    build: impl FnOnce(egui::TextEdit<'_>) -> egui::TextEdit<'_>,
+) -> (String, bool, egui::Response) {
+    let mut text = initial.to_string();
+    let out = build(egui::TextEdit::singleline(&mut text).id(id)).show(ui);
+    mirror_selection_to_primary(ui, &out, &text);
+    let mut changed = out.response.changed();
+    if out.response.middle_clicked() {
+        if let Some(paste) = take_primary_selection() {
+            let at = out.state.cursor.char_range().map(sorted).unwrap_or_else(|| {
+                let n = text.chars().count();
+                (n, n)
+            });
+            let (new_text, range) = replace_range(&text, at, &paste);
+            text = new_text;
+            let mut state = out.state.clone();
+            state.cursor.set_char_range(Some(range));
+            state.store(ui.ctx(), id);
+            out.response.request_focus();
+            changed = true;
+        }
+    }
+    (text, changed, out.response)
 }
 
 fn draw_grid(painter: &egui::Painter, rect: egui::Rect, view: TSTransform, color: egui::Color32) {
