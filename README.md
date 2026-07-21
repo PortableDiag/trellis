@@ -26,12 +26,13 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 - **Image** — pick a file from disk; the bytes are embedded in the document.
 
 Cards drag by the title bar, resize from the corner, raise to front on click,
-duplicate, recolor, and delete. The canvas pans; each node remembers its scroll.
+duplicate, recolor, copy/paste into another basket, and delete. The canvas pans
+and zooms (Ctrl+scroll); each node remembers its view.
 
 **Documents & interop**
 - Native New / Open / Save / Save As (RON format), plus autosave on exit
-- **Export** the whole tree to a standalone, styled **HTML** file
-- **Import** Markdown or HTML as a new node (HTML is converted to markdown)
+- **File → Export** the whole tree as **Markdown**, standalone styled **HTML**, or **JSON**
+- **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
 
 **App**
 - Full-text **search** across every node title and card (Ctrl+F)

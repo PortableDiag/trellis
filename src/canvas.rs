@@ -29,6 +29,8 @@ pub enum CanvasAction {
     SetColor(CardId, [u8; 3]),
     SetEditing(CardId, bool),
     Duplicate(CardId),
+    CopyCard(CardId),
+    PasteCard(egui::Pos2),
     Remove(CardId),
     ResetView,
     ChecklistToggle(CardId, usize),
@@ -49,6 +51,7 @@ pub fn ui(
     node: &Node,
     view: &mut TSTransform,
     zoom_enabled: bool,
+    can_paste: bool,
     env: &mut Env,
 ) -> Vec<CanvasAction> {
     let mut actions = Vec::new();
@@ -135,6 +138,14 @@ pub fn ui(
                 CardKind::Image { data: Vec::new(), name: String::new() },
                 cp,
             ));
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(can_paste, egui::Button::new("Paste card"))
+            .clicked()
+        {
+            actions.push(CanvasAction::PasteCard(cp));
             ui.close_menu();
         }
     });
@@ -556,6 +567,10 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
     }
     if ui.button("Duplicate").clicked() {
         actions.push(CanvasAction::Duplicate(card.id));
+        ui.close_menu();
+    }
+    if ui.button("Copy card").clicked() {
+        actions.push(CanvasAction::CopyCard(card.id));
         ui.close_menu();
     }
     ui.menu_button("Color", |ui| {

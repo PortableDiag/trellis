@@ -127,6 +127,8 @@ pub struct TrellisApp {
     zoom_enabled: bool,
     /// When on, tree nodes are draggable for reordering (off = click selects).
     reorder_mode: bool,
+    /// A copied card, ready to paste into any basket.
+    card_clipboard: Option<crate::model::Card>,
 
     // Agent HTTP API.
     api_rx: Option<Receiver<ApiCommand>>,
@@ -229,6 +231,7 @@ impl TrellisApp {
             theme,
             zoom_enabled,
             reorder_mode: false,
+            card_clipboard: None,
             api_rx: Some(api_rx),
             api_shared_key,
             api_key,
@@ -418,6 +421,41 @@ impl TrellisApp {
         }
     }
 
+    fn export_markdown(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Markdown", &["md"])
+            .set_file_name("trellis-export.md")
+            .save_file()
+        {
+            match std::fs::write(&path, self.doc.export_markdown()) {
+                Ok(_) => self.status = format!("Exported Markdown → {}", path.display()),
+                Err(e) => self.status = format!("Export failed: {e}"),
+            }
+        }
+    }
+
+    /// Load a JSON-exported document, replacing the current one. JSON isn't the
+    /// native save format, so the result is treated as an unsaved document.
+    fn import_json(&mut self) {
+        if !self.confirm_discard() {
+            return;
+        }
+        if let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+            match std::fs::read_to_string(&path).map(|s| serde_json::from_str::<Document>(&s)) {
+                Ok(Ok(doc)) => {
+                    self.doc = doc;
+                    self.selected = self.doc.roots.first().copied();
+                    self.views.clear();
+                    self.doc_path = None;
+                    self.dirty = true;
+                    self.status = format!("Imported {}", path.display());
+                }
+                Ok(Err(e)) => self.status = format!("JSON parse error: {e}"),
+                Err(e) => self.status = format!("Read error: {e}"),
+            }
+        }
+    }
+
     // --- action application -------------------------------------------------
 
     fn apply_tree(&mut self, actions: Vec<TreeAction>) {
@@ -486,7 +524,10 @@ impl TrellisApp {
 
     fn apply_canvas(&mut self, node: NodeId, actions: Vec<CanvasAction>) {
         // ResetView only nudges the (unsaved) pan, so it must not dirty the doc.
-        if actions.iter().any(|a| !matches!(a, CanvasAction::ResetView)) {
+        if actions
+            .iter()
+            .any(|a| !matches!(a, CanvasAction::ResetView | CanvasAction::CopyCard(_)))
+        {
             self.dirty = true;
         }
         for a in actions {
@@ -534,6 +575,20 @@ impl TrellisApp {
                 }
                 CanvasAction::Duplicate(cid) => {
                     self.doc.duplicate_card(node, cid);
+                }
+                CanvasAction::CopyCard(cid) => {
+                    if let Some(n) = self.doc.nodes.get(&node) {
+                        if let Some(c) = n.cards.iter().find(|c| c.id == cid) {
+                            self.card_clipboard = Some(c.clone());
+                            self.status = "Copied card".to_string();
+                        }
+                    }
+                }
+                CanvasAction::PasteCard(pos) => {
+                    if let Some(tmpl) = self.card_clipboard.clone() {
+                        self.doc.add_card_from(node, &tmpl, pos);
+                        self.status = "Pasted card".to_string();
+                    }
                 }
                 CanvasAction::Remove(cid) => {
                     self.doc.remove_card(node, cid);
@@ -626,22 +681,34 @@ impl TrellisApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Import Markdown…").clicked() {
-                        self.import(false);
-                        ui.close_menu();
-                    }
-                    if ui.button("Import HTML…").clicked() {
-                        self.import(true);
-                        ui.close_menu();
-                    }
-                    if ui.button("Export HTML…").clicked() {
-                        self.export_html();
-                        ui.close_menu();
-                    }
-                    if ui.button("Export JSON…").clicked() {
-                        self.export_json();
-                        ui.close_menu();
-                    }
+                    ui.menu_button("Import", |ui| {
+                        if ui.button("Markdown…").clicked() {
+                            self.import(false);
+                            ui.close_menu();
+                        }
+                        if ui.button("HTML…").clicked() {
+                            self.import(true);
+                            ui.close_menu();
+                        }
+                        if ui.button("JSON…").clicked() {
+                            self.import_json();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("Export", |ui| {
+                        if ui.button("Markdown…").clicked() {
+                            self.export_markdown();
+                            ui.close_menu();
+                        }
+                        if ui.button("HTML…").clicked() {
+                            self.export_html();
+                            ui.close_menu();
+                        }
+                        if ui.button("JSON…").clicked() {
+                            self.export_json();
+                            ui.close_menu();
+                        }
+                    });
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -918,7 +985,9 @@ impl eframe::App for TrellisApp {
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
                     };
-                    let actions = canvas::ui(ui, node, &mut view, self.zoom_enabled, &mut env);
+                    let can_paste = self.card_clipboard.is_some();
+                    let actions =
+                        canvas::ui(ui, node, &mut view, self.zoom_enabled, can_paste, &mut env);
                     self.views.insert(sel, view);
                     self.apply_canvas(sel, actions);
                 } else {

@@ -235,6 +235,20 @@ impl Document {
         Some(id)
     }
 
+    /// Add a copy of `template` (a card from anywhere) to `node`, with a fresh
+    /// id and the given position. Used to paste a copied card into a basket.
+    pub fn add_card_from(&mut self, node: NodeId, template: &Card, pos: egui::Pos2) -> Option<CardId> {
+        let id = self.next_card_id;
+        let n = self.nodes.get_mut(&node)?;
+        let mut card = template.clone();
+        card.id = id;
+        card.pos = pos;
+        card.editing = false;
+        n.cards.push(card);
+        self.next_card_id += 1;
+        Some(id)
+    }
+
     pub fn remove_card(&mut self, node: NodeId, card: CardId) {
         if let Some(n) = self.nodes.get_mut(&node) {
             n.cards.retain(|c| c.id != card);
@@ -467,6 +481,49 @@ impl Document {
     /// their bytes as a JSON array, so exports stay self-contained.
     pub fn export_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
+    }
+
+    /// Render the whole tree as a single Markdown document: nodes become
+    /// headings (nesting = heading level), cards become their Markdown.
+    pub fn export_markdown(&self) -> String {
+        let mut s = String::new();
+        for &r in &self.roots {
+            self.export_node_md(r, 1, &mut s);
+        }
+        s
+    }
+
+    fn export_node_md(&self, id: NodeId, depth: usize, s: &mut String) {
+        let Some(node) = self.nodes.get(&id) else { return };
+        s.push_str(&format!("{} {}\n\n", "#".repeat(depth.min(6)), node.title));
+        for card in &node.cards {
+            if !card.title.is_empty() {
+                s.push_str(&format!("**{}**\n\n", card.title));
+            }
+            match &card.kind {
+                CardKind::Text => {
+                    s.push_str(card.body.trim_end());
+                    s.push_str("\n\n");
+                }
+                CardKind::Code { lang } => {
+                    s.push_str(&format!("```{lang}\n{}\n```\n\n", card.body));
+                }
+                CardKind::Checklist { items } => {
+                    for it in items {
+                        let mark = if it.done { "x" } else { " " };
+                        s.push_str(&format!("- [{mark}] {}\n", it.text));
+                    }
+                    s.push('\n');
+                }
+                CardKind::Image { name, .. } => {
+                    s.push_str(&format!("*(image: {name})*\n\n"));
+                }
+            }
+        }
+        let children = node.children.clone();
+        for c in children {
+            self.export_node_md(c, depth + 1, s);
+        }
     }
 
     /// Create a new root node from imported text, splitting nothing — the whole
@@ -731,6 +788,34 @@ mod tests {
         let node = &doc.nodes[&id];
         assert_eq!(node.cards.len(), 1);
         assert!(node.cards[0].body.contains("Hi"));
+    }
+
+    #[test]
+    fn paste_card_into_another_node() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "a".into());
+        let b = doc.add_node(None, "b".into());
+        let cid = doc.add_card(a, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(a, cid).unwrap().body = "hello".into();
+        let template = doc.nodes[&a].cards[0].clone();
+        let new_id = doc.add_card_from(b, &template, egui::pos2(5.0, 5.0)).unwrap();
+        assert_ne!(new_id, cid); // fresh id
+        assert_eq!(doc.nodes[&b].cards.len(), 1);
+        assert_eq!(doc.nodes[&b].cards[0].body, "hello");
+        assert_eq!(doc.nodes[&b].cards[0].pos, egui::pos2(5.0, 5.0));
+        // Original untouched.
+        assert_eq!(doc.nodes[&a].cards.len(), 1);
+    }
+
+    #[test]
+    fn export_markdown_has_headings_and_cards() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Title".into());
+        let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, cid).unwrap().body = "**bold** body".into();
+        let md = doc.export_markdown();
+        assert!(md.contains("# Title"));
+        assert!(md.contains("**bold** body"));
     }
 
     #[test]
