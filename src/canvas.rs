@@ -152,6 +152,9 @@ pub fn ui(
         .order(egui::Order::Foreground)
         .fixed_pos(btn_pos)
         .show(ui.ctx(), |ui| {
+            // Keep the label on one line — the Area would otherwise size narrow
+            // and wrap "Reset view" onto two lines.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             if ui
                 .button("Reset view")
                 .on_hover_text("Reset zoom to 100% and recenter the canvas")
