@@ -33,9 +33,7 @@ const COLS: usize = 2;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let input = args
-        .next()
-        .unwrap_or_else(|| "Notes.txt".to_string());
+    let input = args.next().unwrap_or_else(|| "Notes.txt".to_string());
     let output = args.next().unwrap_or_else(|| "Notes.ron".to_string());
 
     let text = fs::read_to_string(&input).unwrap_or_else(|e| {
