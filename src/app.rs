@@ -748,8 +748,14 @@ impl eframe::App for TrellisApp {
         // Apply any API requests from the server thread first.
         self.pump_api();
 
-        // Theme. (Zoom is per-canvas and handled in canvas::ui, so the whole-UI
-        // zoom factor stays at 1.0 — the chrome never scales.)
+        // Zoom is per-canvas now, so keep the whole-UI zoom factor pinned at 1.0.
+        // egui persists zoom_factor across runs, so an earlier build that scaled
+        // the whole UI would otherwise leave the chrome stuck zoomed. Idempotent.
+        if (ctx.zoom_factor() - 1.0).abs() > f32::EPSILON {
+            ctx.set_zoom_factor(1.0);
+        }
+
+        // Theme.
         ctx.set_visuals(if self.dark {
             egui::Visuals::dark()
         } else {
