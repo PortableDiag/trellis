@@ -21,6 +21,8 @@ pub enum TreeAction {
     SetColor(NodeId, Option<[u8; 3]>),
     /// Drag & drop: put `moved` before/after `target` (adopting its parent).
     Reorder { moved: NodeId, target: NodeId, before: bool },
+    /// Toggle reorder mode (nodes draggable) on/off.
+    ToggleReorder,
 }
 
 /// `renaming` holds the node currently being renamed inline and its edit buffer.
@@ -29,6 +31,7 @@ pub fn ui(
     doc: &Document,
     selected: Option<NodeId>,
     renaming: &mut Option<(NodeId, String)>,
+    reorder_mode: bool,
 ) -> Vec<TreeAction> {
     let mut actions = Vec::new();
 
@@ -37,6 +40,13 @@ pub fn ui(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("+").on_hover_text("Add a root node").clicked() {
                 actions.push(TreeAction::AddRoot);
+            }
+            if ui
+                .selectable_label(reorder_mode, "Reorder")
+                .on_hover_text("Reorder mode: drag nodes to move them")
+                .clicked()
+            {
+                actions.push(TreeAction::ToggleReorder);
             }
         });
     });
@@ -47,7 +57,7 @@ pub fn ui(
         .show(ui, |ui| {
             let roots = doc.roots.clone();
             for root in roots {
-                node_ui(ui, doc, root, selected, renaming, 0, &mut actions);
+                node_ui(ui, doc, root, selected, renaming, reorder_mode, 0, &mut actions);
             }
             ui.add_space(8.0);
         });
@@ -62,6 +72,7 @@ fn node_ui(
     id: NodeId,
     selected: Option<NodeId>,
     renaming: &mut Option<(NodeId, String)>,
+    reorder_mode: bool,
     depth: usize,
     actions: &mut Vec<TreeAction>,
 ) {
@@ -123,35 +134,40 @@ fn node_ui(
                 }
             }
         } else {
-            // The row is a drag source (payload = its id) so nodes can be
-            // dragged to reorder; clicks/double-clicks still select/rename.
-            let egui::InnerResponse { inner: resp, response: drag } = ui.dnd_drag_source(
-                ui.make_persistent_id(("tree_drag", id)),
-                id,
-                |ui| ui.add(egui::SelectableLabel::new(is_sel, &node.title)),
-            );
+            // In reorder mode the row is a drag source (draggable, grab cursor);
+            // otherwise it's a plain selectable label so a click just selects.
+            let resp = if reorder_mode {
+                let egui::InnerResponse { inner: resp, response: drag } = ui.dnd_drag_source(
+                    ui.make_persistent_id(("tree_drag", id)),
+                    id,
+                    |ui| ui.add(egui::SelectableLabel::new(is_sel, &node.title)),
+                );
+                // When another node is dragged over this row, show where it will
+                // land and perform the move on release.
+                if drag.dnd_hover_payload::<NodeId>().is_some() {
+                    let rect = drag.rect;
+                    let before = ui
+                        .input(|i| i.pointer.hover_pos())
+                        .map_or(true, |p| p.y < rect.center().y);
+                    let y = if before { rect.top() } else { rect.bottom() };
+                    ui.painter().hline(
+                        rect.x_range(),
+                        y,
+                        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                    );
+                    if let Some(moved) = drag.dnd_release_payload::<NodeId>() {
+                        actions.push(TreeAction::Reorder { moved: *moved, target: id, before });
+                    }
+                }
+                resp
+            } else {
+                ui.add(egui::SelectableLabel::new(is_sel, &node.title))
+            };
             if resp.clicked() {
                 actions.push(TreeAction::Select(id));
             }
             if resp.double_clicked() {
                 *renaming = Some((id, node.title.clone()));
-            }
-            // When another node is dragged over this row, show where it will land
-            // and perform the move on release.
-            if drag.dnd_hover_payload::<NodeId>().is_some() {
-                let rect = drag.rect;
-                let before = ui
-                    .input(|i| i.pointer.hover_pos())
-                    .map_or(true, |p| p.y < rect.center().y);
-                let y = if before { rect.top() } else { rect.bottom() };
-                ui.painter().hline(
-                    rect.x_range(),
-                    y,
-                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
-                );
-                if let Some(moved) = drag.dnd_release_payload::<NodeId>() {
-                    actions.push(TreeAction::Reorder { moved: *moved, target: id, before });
-                }
             }
             resp.context_menu(|ui| {
                 if ui.button("Rename").clicked() {
@@ -221,7 +237,7 @@ fn node_ui(
     if node.expanded {
         let children = node.children.clone();
         for child in children {
-            node_ui(ui, doc, child, selected, renaming, depth + 1, actions);
+            node_ui(ui, doc, child, selected, renaming, reorder_mode, depth + 1, actions);
         }
     }
 }

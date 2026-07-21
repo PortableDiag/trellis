@@ -21,6 +21,87 @@ const API_KEY_KEY: &str = "api_key";
 const API_PORT_KEY: &str = "api_port";
 const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
+const THEME_KEY: &str = "theme";
+
+/// Selectable color schemes. Dark/Light are egui's built-ins; add new variants
+/// here (and to `ALL`) to grow the list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Theme {
+    Dark,
+    Light,
+    TerminalGreen,
+}
+
+impl Theme {
+    const ALL: [(Theme, &'static str); 3] = [
+        (Theme::Dark, "Dark"),
+        (Theme::Light, "Light"),
+        (Theme::TerminalGreen, "Terminal Green"),
+    ];
+
+    fn from_key(s: &str) -> Theme {
+        match s {
+            "Light" => Theme::Light,
+            "TerminalGreen" => Theme::TerminalGreen,
+            _ => Theme::Dark,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Theme::Dark => "Dark",
+            Theme::Light => "Light",
+            Theme::TerminalGreen => "TerminalGreen",
+        }
+    }
+
+    fn visuals(self) -> egui::Visuals {
+        match self {
+            Theme::Light => egui::Visuals::light(),
+            Theme::Dark => egui::Visuals::dark(),
+            Theme::TerminalGreen => terminal_green_visuals(),
+        }
+    }
+}
+
+/// A phosphor green-on-black terminal scheme.
+fn terminal_green_visuals() -> egui::Visuals {
+    use egui::{Color32, Stroke};
+    let green = Color32::from_rgb(0x33, 0xff, 0x6a);
+    let dim = Color32::from_rgb(0x1e, 0xa8, 0x48);
+    let bg = Color32::from_rgb(0x04, 0x09, 0x05);
+    let panel = Color32::from_rgb(0x08, 0x10, 0x0a);
+
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(green);
+    v.hyperlink_color = green;
+    v.panel_fill = panel;
+    v.window_fill = panel;
+    v.extreme_bg_color = bg;
+    v.faint_bg_color = Color32::from_rgb(0x0c, 0x17, 0x0f);
+    v.code_bg_color = bg;
+    v.window_stroke = Stroke::new(1.0, dim);
+    v.selection.bg_fill = green.gamma_multiply(0.22);
+    v.selection.stroke = Stroke::new(1.0, green);
+
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = panel;
+    w.noninteractive.weak_bg_fill = panel;
+    w.noninteractive.fg_stroke = Stroke::new(1.0, dim);
+    w.inactive.bg_fill = Color32::from_rgb(0x0e, 0x1c, 0x12);
+    w.inactive.weak_bg_fill = Color32::from_rgb(0x0e, 0x1c, 0x12);
+    w.inactive.fg_stroke = Stroke::new(1.0, green);
+    w.hovered.bg_fill = Color32::from_rgb(0x13, 0x28, 0x19);
+    w.hovered.weak_bg_fill = Color32::from_rgb(0x13, 0x28, 0x19);
+    w.hovered.fg_stroke = Stroke::new(1.5, green);
+    w.hovered.bg_stroke = Stroke::new(1.0, dim);
+    w.active.bg_fill = Color32::from_rgb(0x18, 0x33, 0x20);
+    w.active.weak_bg_fill = Color32::from_rgb(0x18, 0x33, 0x20);
+    w.active.fg_stroke = Stroke::new(1.5, green);
+    w.active.bg_stroke = Stroke::new(1.0, green);
+    w.open.fg_stroke = Stroke::new(1.0, green);
+    v
+}
 
 pub struct TrellisApp {
     doc: Document,
@@ -41,9 +122,11 @@ pub struct TrellisApp {
     search_open: bool,
     search_query: String,
     show_about: bool,
-    dark: bool,
+    theme: Theme,
     /// Whether Ctrl+scroll / Ctrl +/- zoom the canvas (Settings; on by default).
     zoom_enabled: bool,
+    /// When on, tree nodes are draggable for reordering (off = click selects).
+    reorder_mode: bool,
 
     // Agent HTTP API.
     api_rx: Option<Receiver<ApiCommand>>,
@@ -99,6 +182,11 @@ impl TrellisApp {
             .and_then(|s| s.get_string(ZOOM_ENABLED_KEY))
             .map(|s| s != "false")
             .unwrap_or(true);
+        let theme = cc
+            .storage
+            .and_then(|s| s.get_string(THEME_KEY))
+            .map(|s| Theme::from_key(&s))
+            .unwrap_or(Theme::Dark);
 
         // Agent API: load config, then start the localhost server. It binds
         // regardless of key so toggling the key in Settings works live; requests
@@ -138,8 +226,9 @@ impl TrellisApp {
             search_open: false,
             search_query: String::new(),
             show_about: false,
-            dark: true,
+            theme,
             zoom_enabled,
+            reorder_mode: false,
             api_rx: Some(api_rx),
             api_shared_key,
             api_key,
@@ -332,8 +421,11 @@ impl TrellisApp {
     // --- action application -------------------------------------------------
 
     fn apply_tree(&mut self, actions: Vec<TreeAction>) {
-        // Selection isn't persisted, so a pure Select must not dirty the doc.
-        if actions.iter().any(|a| !matches!(a, TreeAction::Select(_))) {
+        // Selection and the reorder-mode toggle aren't document edits.
+        if actions
+            .iter()
+            .any(|a| !matches!(a, TreeAction::Select(_) | TreeAction::ToggleReorder))
+        {
             self.dirty = true;
         }
         for a in actions {
@@ -380,6 +472,7 @@ impl TrellisApp {
                 TreeAction::Reorder { moved, target, before } => {
                     self.doc.reorder(moved, target, before)
                 }
+                TreeAction::ToggleReorder => self.reorder_mode = !self.reorder_mode,
                 TreeAction::Indent(id) => self.doc.indent(id),
                 TreeAction::Outdent(id) => self.doc.outdent(id),
                 TreeAction::SetColor(id, col) => {
@@ -567,10 +660,14 @@ impl TrellisApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    if ui.button(if self.dark { "Light theme" } else { "Dark theme" }).clicked() {
-                        self.dark = !self.dark;
-                        ui.close_menu();
-                    }
+                    ui.menu_button("Theme", |ui| {
+                        for (t, label) in Theme::ALL {
+                            if ui.selectable_label(self.theme == t, label).clicked() {
+                                self.theme = t;
+                                ui.close_menu();
+                            }
+                        }
+                    });
                     ui.separator();
                     let has_sel = self.selected.is_some();
                     if ui.add_enabled(has_sel, egui::Button::new("Zoom in")).clicked() {
@@ -760,12 +857,8 @@ impl eframe::App for TrellisApp {
             ctx.set_zoom_factor(1.0);
         }
 
-        // Theme.
-        ctx.set_visuals(if self.dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        });
+        // Theme / color scheme.
+        ctx.set_visuals(self.theme.visuals());
 
         // Keyboard shortcuts (canvas zoom keys are handled in canvas::ui).
         let cmd = ctx.input(|i| i.modifiers.command);
@@ -811,7 +904,8 @@ impl eframe::App for TrellisApp {
             .resizable(true)
             .default_width(240.0)
             .show(ctx, |ui| {
-                let actions = tree::ui(ui, &self.doc, self.selected, &mut self.renaming);
+                let actions =
+                    tree::ui(ui, &self.doc, self.selected, &mut self.renaming, self.reorder_mode);
                 self.apply_tree(actions);
             });
 
@@ -868,6 +962,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(API_KEY_KEY, self.api_key.clone());
         storage.set_string(API_PORT_KEY, self.api_port.to_string());
         storage.set_string(ZOOM_ENABLED_KEY, self.zoom_enabled.to_string());
+        storage.set_string(THEME_KEY, self.theme.key().to_string());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
