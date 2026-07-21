@@ -350,14 +350,7 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
             if card.editing {
                 let edit_id = ui.make_persistent_id(("card_md_edit", card.id));
 
-                let title_id = ui.make_persistent_id(("card_title_edit", card.id));
-                let (title, title_changed, title_resp) =
-                    singleline_primary(ui, title_id, &card.title, |te| {
-                        te.hint_text("card title").desired_width(f32::INFINITY)
-                    });
-                if title_changed {
-                    actions.push(CanvasAction::SetTitle(card.id, title));
-                }
+                let title_resp = title_field(ui, card, actions);
                 // Tab from the title jumps straight to the body editor, so a card
                 // can be filled out title-then-body without hitting the toolbar.
                 let tab_to_body = title_resp.lost_focus()
@@ -484,7 +477,8 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
             } else if card.body.trim().is_empty() {
                 ui.weak("(empty — double-click title to edit)");
             } else {
-                CommonMarkViewer::new().show(ui, env.md, &card.body);
+                // Render single newlines as line breaks (see hard_wrap).
+                CommonMarkViewer::new().show(ui, env.md, &crate::model::hard_wrap(&card.body));
             }
         }
         CardKind::Code { lang } => {
@@ -554,6 +548,11 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
             }
         }
         CardKind::Image { data, name } => {
+            // Editing an image card just means naming it, so you can tell a few
+            // apart. The image itself always shows.
+            if card.editing {
+                title_field(ui, card, actions);
+            }
             if data.is_empty() {
                 if ui.button("Load image…").clicked() {
                     actions.push(CanvasAction::LoadImage(card.id));
@@ -619,8 +618,23 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
     }
 }
 
+/// Render the card's title editor (a singleline field with primary-selection
+/// support) and push a `SetTitle` action when it changes. Returns the field
+/// response so callers can react to focus (e.g. Tab-to-body). Shared by text
+/// and image cards.
+fn title_field(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) -> egui::Response {
+    let title_id = ui.make_persistent_id(("card_title_edit", card.id));
+    let (title, changed, resp) = singleline_primary(ui, title_id, &card.title, |te| {
+        te.hint_text("card title").desired_width(f32::INFINITY)
+    });
+    if changed {
+        actions.push(CanvasAction::SetTitle(card.id, title));
+    }
+    resp
+}
+
 fn supports_edit(kind: &CardKind) -> bool {
-    matches!(kind, CardKind::Text | CardKind::Code { .. })
+    matches!(kind, CardKind::Text | CardKind::Code { .. } | CardKind::Image { .. })
 }
 
 // --- Markdown formatting toolbar helpers ------------------------------------

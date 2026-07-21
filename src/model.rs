@@ -610,9 +610,42 @@ fn snippet_around(text: &str, pos: usize, len: usize) -> String {
 
 fn md_to_html(md: &str) -> String {
     use pulldown_cmark::{html, Options, Parser};
-    let parser = Parser::new_ext(md, Options::all());
+    let wrapped = hard_wrap(md);
+    let parser = Parser::new_ext(&wrapped, Options::all());
     let mut out = String::new();
     html::push_html(&mut out, parser);
+    out
+}
+
+/// Turn single newlines into Markdown hard breaks so a rendered card matches
+/// what the user typed line-for-line. CommonMark treats a lone newline as a
+/// "soft break" (rendered as a space), so without this you'd need a blank line
+/// between every line; users expect each Enter to break. We append the two
+/// trailing spaces that mark a hard break to each non-empty line, skipping
+/// fenced code blocks (``` / ~~~) where newlines are already literal.
+pub(crate) fn hard_wrap(md: &str) -> String {
+    let mut out = String::with_capacity(md.len() + 16);
+    let mut in_fence = false;
+    let mut lines = md.lines().peekable();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            out.push_str(line);
+        } else if in_fence || line.trim_end().is_empty() {
+            // Code-block content or a blank paragraph separator: leave as-is.
+            out.push_str(line);
+        } else {
+            out.push_str(line.trim_end());
+            out.push_str("  "); // two trailing spaces = hard break
+        }
+        if lines.peek().is_some() {
+            out.push('\n');
+        }
+    }
+    if md.ends_with('\n') {
+        out.push('\n');
+    }
     out
 }
 
@@ -663,6 +696,22 @@ article.card h4{color:#aaa}:not(pre)>code{background:#333}}";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hard_wrap_breaks_single_newlines_but_not_code_or_blank_lines() {
+        // Single newlines get two trailing spaces (a Markdown hard break)...
+        assert_eq!(hard_wrap("a\nb"), "a  \nb  ");
+        // ...blank paragraph separators are left alone...
+        assert_eq!(hard_wrap("a\n\nb"), "a  \n\nb  ");
+        // ...and fenced code blocks are untouched.
+        assert_eq!(hard_wrap("```\nx\ny\n```"), "```\nx\ny\n```");
+    }
+
+    #[test]
+    fn hard_wrap_renders_as_line_breaks_in_html() {
+        // The whole point: two lines become two visual lines (<br>), not one.
+        assert!(md_to_html("line one\nline two").contains("<br"));
+    }
 
     #[test]
     fn ron_round_trips() {
