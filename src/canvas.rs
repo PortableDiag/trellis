@@ -139,10 +139,10 @@ pub fn ui(
         }
     });
 
-    // Cards live in transformed layers so they (and their text) zoom.
-    let clip_world = to_screen.inverse() * canvas_rect;
+    // Cards are drawn directly at their zoomed screen rects (see card_ui), which
+    // keeps text selection/editing working (transformed layers broke it).
     for card in &node.cards {
-        card_ui(ui, card, to_screen, clip_world, env, &mut actions);
+        card_ui(ui, card, to_screen, canvas_rect, env, &mut actions);
     }
 
     // Reset-view button — in a foreground layer, untransformed, so it stays put
@@ -192,49 +192,51 @@ fn zoom_at(view: &mut TSTransform, canvas_rect: egui::Rect, screen_pt: egui::Pos
         * TSTransform::from_translation(-anchor);
 }
 
-fn card_ui(
-    base: &mut egui::Ui,
-    card: &Card,
-    to_screen: TSTransform,
-    clip_world: egui::Rect,
-    env: &mut Env,
-    actions: &mut Vec<CanvasAction>,
-) {
-    let rect = egui::Rect::from_min_size(card.pos, card.size);
-    // Cull cards fully outside the visible (world) region.
-    if !clip_world.intersects(rect) {
+/// Scale a child ui's fonts/spacing by `zoom` so card text zooms with the
+/// canvas while still being drawn directly (which keeps text selection working).
+fn scale_fonts(ui: &mut egui::Ui, zoom: f32) {
+    if (zoom - 1.0).abs() < 1e-3 {
         return;
     }
-
-    // Each card is its own layer, positioned in world coords and scaled by the
-    // canvas transform — so the card and all its text zoom together, and input
-    // is transformed to match.
-    let area = egui::Area::new(base.id().with(("card_area", card.id)))
-        .order(egui::Order::Middle)
-        .fixed_pos(card.pos)
-        .constrain(false)
-        .show(base.ctx(), |ui| {
-            ui.set_clip_rect(clip_world);
-            card_contents(ui, card, rect, env, actions);
-        });
-    base.ctx().set_transform_layer(area.response.layer_id, to_screen);
+    let mut style: egui::Style = (**ui.style()).clone();
+    for (_, font) in style.text_styles.iter_mut() {
+        font.size *= zoom;
+    }
+    let sp = &mut style.spacing;
+    sp.item_spacing *= zoom;
+    sp.button_padding *= zoom;
+    sp.interact_size *= zoom;
+    sp.icon_width *= zoom;
+    sp.icon_width_inner *= zoom;
+    sp.icon_spacing *= zoom;
+    ui.set_style(style);
 }
 
-fn card_contents(
+fn card_ui(
     ui: &mut egui::Ui,
     card: &Card,
-    rect: egui::Rect,
+    to_screen: TSTransform,
+    clip: egui::Rect,
     env: &mut Env,
     actions: &mut Vec<CanvasAction>,
 ) {
-    ui.allocate_rect(rect, egui::Sense::hover());
-    let accent = egui::Color32::from_rgb(card.color[0], card.color[1], card.color[2]);
-    let p = ui.painter().clone();
-    p.rect_filled(rect, 6.0, ui.visuals().panel_fill);
-    p.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, accent));
+    let zoom = to_screen.scaling;
+    // Draw the card directly at its zoomed screen rect. (An earlier version put
+    // each card in a transformed layer, which broke text selection.)
+    let rect = to_screen.mul_rect(egui::Rect::from_min_size(card.pos, card.size));
+    if !clip.intersects(rect) {
+        return;
+    }
+    let r = 6.0 * zoom;
+    let title_h = TITLE_H * zoom;
 
-    let title_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), TITLE_H));
-    p.rect_filled(title_rect, 6.0, accent.gamma_multiply(0.35));
+    let accent = egui::Color32::from_rgb(card.color[0], card.color[1], card.color[2]);
+    let p = ui.painter_at(clip);
+    p.rect_filled(rect, r, ui.visuals().panel_fill);
+    p.rect_stroke(rect, r, egui::Stroke::new(1.0, accent));
+
+    let title_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), title_h));
+    p.rect_filled(title_rect, r, accent.gamma_multiply(0.35));
 
     // --- title bar: drag to move, double-click to toggle edit, menu on RMB ---
     let handle = ui.interact(
@@ -246,7 +248,8 @@ fn card_contents(
         actions.push(CanvasAction::RaiseCard(card.id));
     }
     if handle.dragged() {
-        actions.push(CanvasAction::MoveCard(card.id, handle.drag_delta()));
+        // Screen delta → world delta.
+        actions.push(CanvasAction::MoveCard(card.id, handle.drag_delta() / zoom));
     }
     if handle.double_clicked() && supports_edit(&card.kind) {
         actions.push(CanvasAction::SetEditing(card.id, !card.editing));
@@ -260,22 +263,23 @@ fn card_contents(
         card.title.clone()
     };
     p.text(
-        title_rect.left_center() + egui::vec2(8.0, 0.0),
+        title_rect.left_center() + egui::vec2(8.0 * zoom, 0.0),
         egui::Align2::LEFT_CENTER,
         title_text,
-        egui::FontId::proportional(13.0),
+        egui::FontId::proportional(13.0 * zoom),
         ui.visuals().strong_text_color(),
     );
 
     // Edit/view toggle button on the right of the title bar (for text/code).
     if supports_edit(&card.kind) {
         let btn_rect = egui::Rect::from_min_size(
-            egui::pos2(title_rect.right() - 46.0, title_rect.top() + 2.0),
-            egui::vec2(42.0, TITLE_H - 4.0),
+            egui::pos2(title_rect.right() - 46.0 * zoom, title_rect.top() + 2.0 * zoom),
+            egui::vec2(42.0 * zoom, title_h - 4.0 * zoom),
         );
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
         ));
+        scale_fonts(&mut child, zoom);
         let label = if card.editing { "view" } else { "edit" };
         if child
             .add(egui::Button::new(label).frame(false).small())
@@ -287,13 +291,15 @@ fn card_contents(
     }
 
     // --- body ---------------------------------------------------------------
+    let pad = 6.0 * zoom;
     let body_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.min.x + 6.0, rect.min.y + TITLE_H + 4.0),
-        rect.max - egui::vec2(6.0, 6.0),
+        egui::pos2(rect.min.x + pad, rect.min.y + title_h + 4.0 * zoom),
+        rect.max - egui::vec2(pad, pad),
     );
     if body_rect.height() > 6.0 {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
-        child.set_clip_rect(body_rect.intersect(ui.clip_rect()));
+        child.set_clip_rect(body_rect.intersect(clip));
+        scale_fonts(&mut child, zoom);
         egui::ScrollArea::vertical()
             .id_salt(("card_body", card.id))
             .auto_shrink([false, false])
@@ -303,29 +309,26 @@ fn card_contents(
     }
 
     // --- resize handle (bottom-right) --------------------------------------
-    let grip = egui::Rect::from_min_size(rect.max - egui::vec2(14.0, 14.0), egui::vec2(14.0, 14.0));
-    let grip_resp = ui.interact(
-        grip,
-        ui.id().with(("card_grip", card.id)),
-        egui::Sense::drag(),
-    );
+    let g = 14.0 * zoom;
+    let grip = egui::Rect::from_min_size(rect.max - egui::vec2(g, g), egui::vec2(g, g));
+    let grip_resp = ui.interact(grip, ui.id().with(("card_grip", card.id)), egui::Sense::drag());
     let gcol = if grip_resp.hovered() {
         accent
     } else {
         ui.visuals().weak_text_color()
     };
     for i in 1..=3 {
-        let o = i as f32 * 3.5;
+        let o = i as f32 * 3.5 * zoom;
         p.line_segment(
             [
-                egui::pos2(rect.max.x - o, rect.max.y - 2.0),
-                egui::pos2(rect.max.x - 2.0, rect.max.y - o),
+                egui::pos2(rect.max.x - o, rect.max.y - 2.0 * zoom),
+                egui::pos2(rect.max.x - 2.0 * zoom, rect.max.y - o),
             ],
             egui::Stroke::new(1.2, gcol),
         );
     }
     if grip_resp.dragged() {
-        actions.push(CanvasAction::ResizeCard(card.id, grip_resp.drag_delta()));
+        actions.push(CanvasAction::ResizeCard(card.id, grip_resp.drag_delta() / zoom));
     }
 }
 
@@ -416,6 +419,9 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                     .desired_rows(6)
                     .show(ui);
 
+                // Make the selection middle-click-pasteable elsewhere.
+                mirror_selection_to_primary(ui, &out, &body);
+
                 // Middle-click pastes the primary selection at the text cursor.
                 if edited.is_none() && out.response.middle_clicked() {
                     if let Some(paste) = take_primary_selection() {
@@ -466,6 +472,7 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                     .desired_width(f32::INFINITY)
                     .desired_rows(6)
                     .show(ui);
+                mirror_selection_to_primary(ui, &out, &body);
                 if out.response.middle_clicked() {
                     if let Some(paste) = take_primary_selection() {
                         let at = out.state.cursor.char_range().map(sorted).unwrap_or_else(|| {
@@ -735,19 +742,82 @@ fn replace_range(text: &str, sel: (usize, usize), insert: &str) -> (String, CCur
     (out, ccrange(pos, pos))
 }
 
-/// The X11/Wayland PRIMARY selection — the source for middle-click paste.
-/// Empty or unavailable selections yield `None`.
+/// Read the X11 PRIMARY selection (the middle-click paste source) via xclip or
+/// xsel. arboard can't reliably serve/read the primary selection across apps.
 #[cfg(target_os = "linux")]
 fn take_primary_selection() -> Option<String> {
-    use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind};
-    let mut cb = Clipboard::new().ok()?;
-    let text = cb.get().clipboard(LinuxClipboardKind::Primary).text().ok()?;
-    (!text.is_empty()).then_some(text)
+    for (cmd, args) in [
+        ("xclip", &["-selection", "primary", "-o"][..]),
+        ("xsel", &["--primary", "--output"][..]),
+    ] {
+        if let Ok(out) = std::process::Command::new(cmd).args(args).output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).into_owned();
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(not(target_os = "linux"))]
 fn take_primary_selection() -> Option<String> {
     None
+}
+
+/// Own the X11 PRIMARY selection with `text` via xclip/xsel (they daemonize to
+/// serve it to other apps — arboard/egui can't). Only runs when the selection
+/// changed, on a detached thread so writing can't stall the UI.
+#[cfg(target_os = "linux")]
+fn set_primary_selection(ui: &egui::Ui, text: &str) {
+    let key = egui::Id::new("trellis_primary_sel");
+    if ui.memory(|m| m.data.get_temp::<String>(key)).as_deref() == Some(text) {
+        return;
+    }
+    ui.memory_mut(|m| m.data.insert_temp(key, text.to_string()));
+    let text = text.to_string();
+    std::thread::spawn(move || {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        for (cmd, args) in [
+            ("xclip", &["-selection", "primary"][..]),
+            ("xsel", &["--primary", "--input"][..]),
+        ] {
+            if let Ok(mut child) = Command::new(cmd)
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                if let Some(mut si) = child.stdin.take() {
+                    let _ = si.write_all(text.as_bytes());
+                }
+                let _ = child.wait(); // xclip/xsel fork to a daemon, so this returns
+                return;
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_primary_selection(_ui: &egui::Ui, _text: &str) {}
+
+/// Copy the editor's current selection (if any) to the primary selection.
+fn mirror_selection_to_primary(
+    ui: &egui::Ui,
+    out: &egui::widgets::text_edit::TextEditOutput,
+    text: &str,
+) {
+    if let Some(range) = out.state.cursor.char_range() {
+        let (a, b) = sorted(range);
+        if a != b {
+            let sel: String = text.chars().skip(a).take(b - a).collect();
+            set_primary_selection(ui, &sel);
+        }
+    }
 }
 
 fn draw_grid(painter: &egui::Painter, rect: egui::Rect, view: TSTransform, color: egui::Color32) {
