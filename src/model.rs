@@ -118,6 +118,100 @@ fn default_true() -> bool {
     true
 }
 
+/// Font used by the PDF/image exporters (also embedded in the PDF).
+const EXPORT_FONT: &[u8] = include_bytes!("../assets/DejaVuSans.ttf");
+
+/// One laid-out line for the PDF/image exporters. `size` is a point size; an
+/// empty `text` is a vertical spacer.
+struct ExportLine {
+    text: String,
+    size: f32,
+}
+
+/// Width of `s` in the same units as `size_px`, using the font's advances.
+fn text_width(font: &ab_glyph::FontRef, size_px: f32, s: &str) -> f32 {
+    use ab_glyph::{Font, PxScale, ScaleFont};
+    let scaled = font.as_scaled(PxScale::from(size_px));
+    let mut w = 0.0;
+    let mut last = None;
+    for c in s.chars() {
+        let g = scaled.glyph_id(c);
+        if let Some(l) = last {
+            w += scaled.kern(l, g);
+        }
+        w += scaled.h_advance(g);
+        last = Some(g);
+    }
+    w
+}
+
+/// Greedy word-wrap `text` to `max_w` (same units as `size_px`), preserving the
+/// text's own newlines as hard breaks.
+fn wrap_text(font: &ab_glyph::FontRef, size_px: f32, text: &str, max_w: f32) -> Vec<String> {
+    let space = text_width(font, size_px, " ");
+    let mut lines = Vec::new();
+    for para in text.split('\n') {
+        let mut cur = String::new();
+        let mut cur_w = 0.0;
+        for word in para.split(' ').filter(|w| !w.is_empty()) {
+            let ww = text_width(font, size_px, word);
+            if !cur.is_empty() && cur_w + space + ww > max_w {
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0.0;
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+                cur_w += space;
+            }
+            cur.push_str(word);
+            cur_w += ww;
+        }
+        lines.push(cur);
+    }
+    lines
+}
+
+/// Rasterize `text` onto `img` with its baseline at `baseline`, black on white.
+fn draw_text(
+    img: &mut image::RgbaImage,
+    font: &ab_glyph::FontRef,
+    size_px: f32,
+    x0: f32,
+    baseline: f32,
+    text: &str,
+) {
+    use ab_glyph::{Font, PxScale, ScaleFont};
+    let scale = PxScale::from(size_px);
+    let scaled = font.as_scaled(scale);
+    let (w, h) = (img.width(), img.height());
+    let mut x = x0;
+    let mut last = None;
+    for c in text.chars() {
+        let gid = scaled.glyph_id(c);
+        if let Some(l) = last {
+            x += scaled.kern(l, gid);
+        }
+        let glyph = gid.with_scale_and_position(scale, ab_glyph::point(x, baseline));
+        if let Some(og) = font.outline_glyph(glyph) {
+            let bb = og.px_bounds();
+            og.draw(|gx, gy, cov| {
+                let px = bb.min.x + gx as f32;
+                let py = bb.min.y + gy as f32;
+                if px >= 0.0 && py >= 0.0 && (px as u32) < w && (py as u32) < h {
+                    let a = (cov * 255.0) as u32;
+                    let p = img.get_pixel_mut(px as u32, py as u32);
+                    // Black text: scale existing (white) channels down by coverage.
+                    p[0] = ((p[0] as u32 * (255 - a)) / 255) as u8;
+                    p[1] = ((p[1] as u32 * (255 - a)) / 255) as u8;
+                    p[2] = ((p[2] as u32 * (255 - a)) / 255) as u8;
+                }
+            });
+        }
+        x += scaled.h_advance(gid);
+        last = Some(gid);
+    }
+}
+
 /// Drop group containers that no longer have any member cards.
 fn prune_groups(n: &mut Node) {
     let used: std::collections::HashSet<GroupId> = n.cards.iter().filter_map(|c| c.group).collect();
@@ -667,6 +761,135 @@ impl Document {
         s
     }
 
+    /// Flatten the whole document into a sequence of laid-out text lines, shared
+    /// by the PDF and image exporters. Blank lines (empty text) act as spacers.
+    fn export_lines(&self) -> Vec<ExportLine> {
+        let mut out = Vec::new();
+        for &r in &self.roots {
+            self.export_node_lines(r, 1, &mut out);
+        }
+        out
+    }
+
+    fn export_node_lines(&self, id: NodeId, depth: usize, out: &mut Vec<ExportLine>) {
+        let Some(node) = self.nodes.get(&id) else { return };
+        let hsize = match depth {
+            1 => 18.0,
+            2 => 15.0,
+            3 => 13.0,
+            _ => 12.0,
+        };
+        out.push(ExportLine { text: node.title.clone(), size: hsize });
+        out.push(ExportLine { text: String::new(), size: 6.0 });
+        for card in &node.cards {
+            if !card.title.is_empty() {
+                out.push(ExportLine { text: card.title.clone(), size: 12.0 });
+            }
+            match &card.kind {
+                CardKind::Text => {
+                    let body = card.body.trim_end();
+                    if !body.is_empty() {
+                        out.push(ExportLine { text: body.to_string(), size: 10.5 });
+                    }
+                }
+                CardKind::Code { .. } => {
+                    for line in card.body.trim_end().split('\n') {
+                        out.push(ExportLine { text: line.to_string(), size: 10.0 });
+                    }
+                }
+                CardKind::Checklist { items } => {
+                    for it in items {
+                        let mark = if it.done { "[x]" } else { "[ ]" };
+                        out.push(ExportLine { text: format!("{mark} {}", it.text), size: 10.5 });
+                    }
+                }
+                CardKind::Image { name, .. } => {
+                    out.push(ExportLine { text: format!("(image: {name})"), size: 10.5 });
+                }
+            }
+            out.push(ExportLine { text: String::new(), size: 5.0 });
+        }
+        for c in node.children.clone() {
+            self.export_node_lines(c, depth + 1, out);
+        }
+    }
+
+    /// Render the whole document to a PDF (A4, paginated). Returns the file bytes.
+    pub fn export_pdf(&self) -> Result<Vec<u8>, String> {
+        use printpdf::{Mm, PdfDocument};
+        let font_ab = ab_glyph::FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?;
+        let (w_mm, h_mm, margin) = (210.0_f32, 297.0_f32, 20.0_f32);
+        const MM_TO_PT: f32 = 2.834_646;
+        let content_w_pt = (w_mm - margin * 2.0) * MM_TO_PT;
+        let (doc, page1, layer1) =
+            PdfDocument::new("Trellis export", Mm(w_mm), Mm(h_mm), "Layer 1");
+        let font = doc
+            .add_external_font(std::io::Cursor::new(EXPORT_FONT))
+            .map_err(|e| e.to_string())?;
+        let mut layer = doc.get_page(page1).get_layer(layer1);
+        let mut y = h_mm - margin;
+        for l in self.export_lines() {
+            let leading = (l.size * 1.4) / MM_TO_PT;
+            let wrapped = if l.text.is_empty() {
+                vec![String::new()]
+            } else {
+                wrap_text(&font_ab, l.size, &l.text, content_w_pt)
+            };
+            for line in wrapped {
+                if y < margin {
+                    let (p, lay) = doc.add_page(Mm(w_mm), Mm(h_mm), "Layer");
+                    layer = doc.get_page(p).get_layer(lay);
+                    y = h_mm - margin;
+                }
+                if !line.is_empty() {
+                    layer.use_text(&line, l.size, Mm(margin), Mm(y), &font);
+                }
+                y -= leading;
+            }
+        }
+        doc.save_to_bytes().map_err(|e| e.to_string())
+    }
+
+    /// Render the whole document to a raster image (PNG, or GIF if `gif`).
+    /// Returns the encoded file bytes. One tall page, black text on white.
+    pub fn export_image(&self, gif: bool) -> Result<Vec<u8>, String> {
+        use ab_glyph::FontRef;
+        use image::{Rgba, RgbaImage};
+        let font = FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?;
+        let scale = 2.0_f32; // px per point
+        let margin = 40.0_f32;
+        let content_w = 760.0_f32;
+        let width = (content_w + margin * 2.0) as u32;
+
+        // Pre-wrap every line, remembering its pixel size, to size the canvas.
+        let mut rows: Vec<(String, f32)> = Vec::new();
+        for l in self.export_lines() {
+            let px = l.size * scale;
+            if l.text.is_empty() {
+                rows.push((String::new(), px));
+            } else {
+                for w in wrap_text(&font, px, &l.text, content_w) {
+                    rows.push((w, px));
+                }
+            }
+        }
+        let total_h: f32 = margin * 2.0 + rows.iter().map(|(_, s)| s * 1.5).sum::<f32>();
+        let height = (total_h as u32).max(1);
+        let mut img = RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255]));
+
+        let mut y = margin;
+        for (text, px) in &rows {
+            if !text.is_empty() {
+                draw_text(&mut img, &font, *px, margin, y + *px, text);
+            }
+            y += px * 1.5;
+        }
+        let mut buf = Vec::new();
+        let fmt = if gif { image::ImageFormat::Gif } else { image::ImageFormat::Png };
+        img.write_to(&mut std::io::Cursor::new(&mut buf), fmt).map_err(|e| e.to_string())?;
+        Ok(buf)
+    }
+
     fn export_node_md(&self, id: NodeId, depth: usize, s: &mut String) {
         let Some(node) = self.nodes.get(&id) else { return };
         s.push_str(&format!("{} {}\n\n", "#".repeat(depth.min(6)), node.title));
@@ -1075,6 +1298,27 @@ mod tests {
         assert_eq!(doc.nodes[&b].cards[0].pos, egui::pos2(5.0, 5.0));
         // Original untouched.
         assert_eq!(doc.nodes[&a].cards.len(), 1);
+    }
+
+    #[test]
+    fn export_pdf_and_image_produce_valid_files() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Report".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().title = "Intro".into();
+        doc.card_mut(n, c).unwrap().body =
+            "A fairly long paragraph that should wrap across several lines when \
+             laid out into a fixed-width page so we exercise the wrapper too."
+                .into();
+
+        let pdf = doc.export_pdf().expect("pdf");
+        assert!(pdf.starts_with(b"%PDF"), "PDF magic header");
+
+        let png = doc.export_image(false).expect("png");
+        assert_eq!(&png[1..4], b"PNG", "PNG magic header");
+
+        let gif = doc.export_image(true).expect("gif");
+        assert!(gif.starts_with(b"GIF8"), "GIF magic header");
     }
 
     #[test]

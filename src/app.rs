@@ -460,6 +460,37 @@ impl TrellisApp {
         }
     }
 
+    fn export_pdf(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_file_name("trellis-export.pdf")
+            .save_file()
+        {
+            match self.doc.export_pdf().and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
+                Ok(_) => self.status = format!("Exported PDF → {}", path.display()),
+                Err(e) => self.status = format!("Export failed: {e}"),
+            }
+        }
+    }
+
+    fn export_image(&mut self, gif: bool) {
+        let (label, ext, name) = if gif {
+            ("GIF", "gif", "trellis-export.gif")
+        } else {
+            ("PNG", "png", "trellis-export.png")
+        };
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter(label, &[ext])
+            .set_file_name(name)
+            .save_file()
+        {
+            match self.doc.export_image(gif).and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
+                Ok(_) => self.status = format!("Exported {label} → {}", path.display()),
+                Err(e) => self.status = format!("Export failed: {e}"),
+            }
+        }
+    }
+
     /// Load a JSON-exported document, replacing the current one. JSON isn't the
     /// native save format, so the result is treated as an unsaved document.
     fn import_json(&mut self) {
@@ -759,6 +790,19 @@ impl TrellisApp {
                         }
                         if ui.button("JSON…").clicked() {
                             self.export_json();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("PDF…").clicked() {
+                            self.export_pdf();
+                            ui.close_menu();
+                        }
+                        if ui.button("PNG image…").clicked() {
+                            self.export_image(false);
+                            ui.close_menu();
+                        }
+                        if ui.button("GIF image…").clicked() {
+                            self.export_image(true);
                             ui.close_menu();
                         }
                     });

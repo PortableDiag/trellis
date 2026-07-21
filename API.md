@@ -43,17 +43,32 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `parent` | integer or null | null = root node |
 | `children` | array of ids | ordered |
 | `color` | `[r,g,b]` or null | 0–255 each; tag dot in the tree |
+| `groups` | array | card containers in this basket (see [Groups](#groups)) |
 
 **Card** — `kind` is one of `text`, `code`, `checklist`, `image`.
 | field | applies to | notes |
 |---|---|---|
 | `id` | all | |
-| `title` | all | |
+| `title` | all | shown in the card's title bar (all kinds, incl. `image`) |
 | `kind` | all | `"text"` \| `"code"` \| `"checklist"` \| `"image"` |
+| `pos` | all | `[x,y]` top-left on the basket canvas |
+| `size` | all | `[w,h]` in canvas units |
+| `color` | all | `[r,g,b]` title-bar accent |
+| `group` | all | group id this card belongs to, or null |
+| `docked_to` | all | id of the card this one is docked to, or null |
 | `body` | text, code | Markdown (text) or source (code) |
 | `lang` | code | syntax-highlight language, e.g. `"rust"` |
 | `items` | checklist | `[{ "done": bool, "text": string }]` |
 | `image_name`, `bytes` | image | image bytes can't be set via the API |
+
+**Group** — a labeled container that a set of cards belong to; drawn as a box you
+can drag by its header. Membership lives on each card's `group` field.
+| field | type | notes |
+|---|---|---|
+| `id` | integer | stable within the node |
+| `title` | string | shown on the group header |
+| `color` | `[r,g,b]` | container accent |
+| `cards` | array of ids | current members |
 
 Text card bodies are **CommonMark Markdown** (headings, lists, tables, task
 lists, fenced code with highlighting, bold/italic/strikethrough). There is no
@@ -77,7 +92,7 @@ GET /api/nodes
   → 200 {"nodes":[ {id,title,parent,children:[ids],cards:<count>} ]}
 
 GET /api/nodes/{id}
-  → 200 {id,title,parent,children:[ids],color,cards:[<card>…]}   | 404
+  → 200 {id,title,parent,children:[ids],color,groups:[<group>…],cards:[<card>…]}   | 404
 
 GET /api/nodes/{id}/cards
   → 200 {"cards":[<card>…]}                                      | 404
@@ -106,15 +121,54 @@ PATCH /api/nodes/{id}              {title?, color?}
   → 200 {"id":<id>}    | 404
         color is [r,g,b]; setting only (can't clear via API)
 
-PATCH /api/nodes/{id}/cards/{cid}  {title?, body?}
-  → 200 {"id":<cid>}   | 404
+PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, lang?, pos?, size?, items?}
+  → 200 {<updated card>}   | 404
 ```
+Every field is optional; only those present are changed. `pos`/`size` are
+`[x,y]`/`[w,h]`; `color` is `[r,g,b]`; `lang` applies to code cards, `items`
+replaces a checklist's items. The response is the full updated card object.
 
 ### Delete
 ```
 DELETE /api/nodes/{id}             → 200 {"deleted":<id>}    | 404   (removes the whole subtree)
 DELETE /api/nodes/{id}/cards/{cid} → 200 {"deleted":<cid>}   | 404
 ```
+
+### Groups
+Bundle 2+ cards into a labeled container that moves as one.
+```
+GET    /api/nodes/{id}/groups            → 200 {"groups":[ {id,title,color,cards:[ids]} ]}   | 404
+
+POST   /api/nodes/{id}/groups            {cards:[ids], title?}
+  → 201 {"id":<gid>}   | 400 (need ≥2 existing cards)  | 404
+
+PATCH  /api/nodes/{id}/groups/{gid}      {title?, color?}
+  → 200 {"id":<gid>}   | 404
+
+DELETE /api/nodes/{id}/groups/{gid}      → 200 {"ungrouped":<gid>}   | 404   (cards remain, container removed)
+```
+
+### Docking
+Stick one card to another so they move together (`card` docks onto `anchor`).
+```
+POST   /api/nodes/{id}/cards/{cid}/dock  {anchor:<cid>}
+  → 200 {"card":<cid>,"docked_to":<anchor>}   | 400 (would form a cycle)  | 404
+
+DELETE /api/nodes/{id}/cards/{cid}/dock  → 200 {"card":<cid>,"docked_to":null}   | 404
+```
+Moving a card in the app (or via `pos`) moves everything docked to it. A card
+can be both grouped and docked.
+
+### Export
+Export the **whole document** in a portable format.
+```
+GET /api/export?format=<fmt>
+  → 200 text formats:   {"format":<fmt>,"content":"<string>"}     (markdown|html|json)
+  → 200 binary formats: {"format":<fmt>,"base64":"<b64 bytes>"}   (pdf|png|gif)
+  | 400 unknown format
+```
+`format` defaults to `markdown`. `pdf` is a paginated A4 document; `png`/`gif`
+are a single rendered image of the document text. Decode `base64` to get the file.
 
 ## Errors
 
@@ -165,6 +219,20 @@ curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"title":"Renamed","color":[59,130,246
 
 # Edit a card body
 curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"body":"updated text"}' $API/nodes/$NID/cards/1
+
+# Move + recolor a card (spatial edits)
+curl -s -X PATCH -H "X-API-Key: $KEY" \
+  -d '{"pos":[360,40],"size":[300,220],"color":[34,197,94]}' $API/nodes/$NID/cards/1
+
+# Group cards 1 and 2 into a container
+curl -s -H "X-API-Key: $KEY" -d '{"cards":[1,2],"title":"Cluster"}' $API/nodes/$NID/groups
+
+# Dock card 2 onto card 1 (they now move together)
+curl -s -H "X-API-Key: $KEY" -d '{"anchor":1}' $API/nodes/$NID/cards/2/dock
+
+# Export the whole document to PDF and save it
+curl -s -H "X-API-Key: $KEY" "$API/export?format=pdf" \
+  | python3 -c 'import sys,json,base64;open("trellis.pdf","wb").write(base64.b64decode(json.load(sys.stdin)["base64"]))'
 ```
 
 ## Notes for agents collaborating on notes
@@ -172,7 +240,13 @@ curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"body":"updated text"}' $API/nodes/$N
 - **Discover before writing:** `GET /api/tree` (structure) or `GET /api/search?q=`
   to find the right node instead of creating duplicates.
 - **Placement:** the canvas is spatial. Give cards distinct `pos` values (e.g.
-  step `x` by ~320 and `y` by ~200) so they don't overlap.
+  step `x` by ~320 and `y` by ~200) so they don't overlap. Read a card's `pos`/
+  `size` back from `GET /api/nodes/{id}` before repositioning.
+- **Organize spatially:** use **groups** for a named, lasting cluster you drag as
+  one box, or **docking** to stick a couple of related cards together. Either is
+  reversible (`DELETE …/groups/{gid}` ungroups; `DELETE …/dock` detaches).
+- **Handing off a snapshot:** `GET /api/export?format=pdf` (or `png`) returns the
+  whole document as a base64 file — handy for sharing a rendered copy.
 - **Deletes are destructive:** `DELETE /api/nodes/{id}` removes the entire
   subtree. Confirm the id first; there is no undo via the API.
 - **Concurrency:** the app is the single writer — requests are applied one at a

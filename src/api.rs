@@ -8,7 +8,8 @@
 //! Auth: send the key as `X-API-Key: <key>` or `Authorization: Bearer <key>`.
 //! An empty key (the default) disables the API. `GET /api/health` is unauthenticated.
 
-use crate::model::{Card, CardKind, ChecklistItem, Document, NodeId};
+use crate::model::{Card, CardKind, ChecklistItem, Document, GroupId, NodeId};
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::mpsc::{Sender, SyncSender};
@@ -33,8 +34,18 @@ pub enum ApiRequest {
     UpdateNode { id: NodeId, title: Option<String>, color: Option<[u8; 3]> },
     DeleteNode(NodeId),
     AddCard { node: NodeId, input: AddCardInput },
-    UpdateCard { node: NodeId, card: u64, title: Option<String>, body: Option<String> },
+    UpdateCard { node: NodeId, card: u64, patch: UpdateCardInput },
     DeleteCard { node: NodeId, card: u64 },
+    // Grouping.
+    ListGroups(NodeId),
+    CreateGroup { node: NodeId, cards: Vec<u64>, title: Option<String> },
+    UpdateGroup { node: NodeId, group: GroupId, title: Option<String>, color: Option<[u8; 3]> },
+    DeleteGroup { node: NodeId, group: GroupId },
+    // Docking.
+    DockCard { node: NodeId, card: u64, anchor: u64 },
+    DetachCard { node: NodeId, card: u64 },
+    // Whole-document export.
+    Export(String),
     Search(String),
 }
 
@@ -104,11 +115,48 @@ struct ChecklistItemInput {
 }
 
 #[derive(Deserialize)]
-struct UpdateCardInput {
+pub struct UpdateCardInput {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
     body: Option<String>,
+    /// RGB title-bar accent.
+    #[serde(default)]
+    color: Option<[u8; 3]>,
+    /// Syntax-highlight language (code cards only).
+    #[serde(default)]
+    lang: Option<String>,
+    /// Absolute top-left position on the basket canvas.
+    #[serde(default)]
+    pos: Option<[f32; 2]>,
+    /// Card size (width, height).
+    #[serde(default)]
+    size: Option<[f32; 2]>,
+    /// Replacement checklist items (checklist cards only).
+    #[serde(default)]
+    items: Option<Vec<ChecklistItemInput>>,
+}
+
+#[derive(Deserialize)]
+struct CreateGroupInput {
+    /// Ids of the cards to group (need at least two that exist in the node).
+    cards: Vec<u64>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateGroupInput {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    color: Option<[u8; 3]>,
+}
+
+#[derive(Deserialize)]
+struct DockInput {
+    /// The card this one should stick to.
+    anchor: u64,
 }
 
 // --- server thread ----------------------------------------------------------
@@ -221,11 +269,33 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::AddCard { node: pid(id)?, input })
         }
         (Method::Patch, ["api", "nodes", nid, "cards", cid]) => {
-            let i: UpdateCardInput = parse(body)?;
-            Ok(ApiRequest::UpdateCard { node: pid(nid)?, card: pid(cid)?, title: i.title, body: i.body })
+            let patch: UpdateCardInput = parse(body)?;
+            Ok(ApiRequest::UpdateCard { node: pid(nid)?, card: pid(cid)?, patch })
         }
         (Method::Delete, ["api", "nodes", nid, "cards", cid]) => {
             Ok(ApiRequest::DeleteCard { node: pid(nid)?, card: pid(cid)? })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "dock"]) => {
+            let i: DockInput = parse(body)?;
+            Ok(ApiRequest::DockCard { node: pid(nid)?, card: pid(cid)?, anchor: i.anchor })
+        }
+        (Method::Delete, ["api", "nodes", nid, "cards", cid, "dock"]) => {
+            Ok(ApiRequest::DetachCard { node: pid(nid)?, card: pid(cid)? })
+        }
+        (Method::Get, ["api", "nodes", id, "groups"]) => Ok(ApiRequest::ListGroups(pid(id)?)),
+        (Method::Post, ["api", "nodes", id, "groups"]) => {
+            let i: CreateGroupInput = parse(body)?;
+            Ok(ApiRequest::CreateGroup { node: pid(id)?, cards: i.cards, title: i.title })
+        }
+        (Method::Patch, ["api", "nodes", nid, "groups", gid]) => {
+            let i: UpdateGroupInput = parse(body)?;
+            Ok(ApiRequest::UpdateGroup { node: pid(nid)?, group: pid(gid)?, title: i.title, color: i.color })
+        }
+        (Method::Delete, ["api", "nodes", nid, "groups", gid]) => {
+            Ok(ApiRequest::DeleteGroup { node: pid(nid)?, group: pid(gid)? })
+        }
+        (Method::Get, ["api", "export"]) => {
+            Ok(ApiRequest::Export(query_get(query, "format").unwrap_or_else(|| "markdown".into())))
         }
         (Method::Get, ["api", "search"]) => {
             Ok(ApiRequest::Search(query_get(query, "q").unwrap_or_default()))
@@ -375,15 +445,37 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 None => (false, ApiResponse::err(404, "node not found")),
             }
         }
-        ApiRequest::UpdateCard { node, card, title, body } => match doc.card_mut(node, card) {
+        ApiRequest::UpdateCard { node, card, patch } => match doc.card_mut(node, card) {
             Some(c) => {
-                if let Some(t) = title {
+                if let Some(t) = patch.title {
                     c.title = t;
                 }
-                if let Some(b) = body {
+                if let Some(b) = patch.body {
                     c.body = b;
                 }
-                (true, ApiResponse::ok(json!({ "id": card })))
+                if let Some(col) = patch.color {
+                    c.color = col;
+                }
+                if let Some(lang) = patch.lang {
+                    if let CardKind::Code { lang: l } = &mut c.kind {
+                        *l = lang;
+                    }
+                }
+                if let Some([x, y]) = patch.pos {
+                    c.pos = egui::pos2(x, y);
+                }
+                if let Some([w, h]) = patch.size {
+                    c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
+                }
+                if let Some(items) = patch.items {
+                    if let CardKind::Checklist { items: it } = &mut c.kind {
+                        *it = items
+                            .into_iter()
+                            .map(|i| ChecklistItem { done: i.done, text: i.text })
+                            .collect();
+                    }
+                }
+                (true, ApiResponse::ok(card_json(c)))
             }
             None => (false, ApiResponse::err(404, "card not found")),
         },
@@ -399,6 +491,66 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             doc.remove_card(node, card);
             (true, ApiResponse::ok(json!({ "deleted": card })))
         }
+        ApiRequest::ListGroups(node) => match doc.nodes.get(&node) {
+            Some(n) => (false, ApiResponse::ok(json!({ "groups": groups_json(n) }))),
+            None => (false, ApiResponse::err(404, "node not found")),
+        },
+        ApiRequest::CreateGroup { node, cards, title } => {
+            if !doc.nodes.contains_key(&node) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            match doc.group_cards(node, &cards, title.unwrap_or_else(|| "Group".into())) {
+                Some(gid) => (true, ApiResponse::created(json!({ "id": gid }))),
+                None => (false, ApiResponse::err(400, "need at least two existing cards to group")),
+            }
+        }
+        ApiRequest::UpdateGroup { node, group, title, color } => {
+            if !group_exists(doc, node, group) {
+                return (false, ApiResponse::err(404, "group not found"));
+            }
+            if let Some(t) = title {
+                doc.set_group_title(node, group, t);
+            }
+            if let Some(c) = color {
+                doc.set_group_color(node, group, c);
+            }
+            (true, ApiResponse::ok(json!({ "id": group })))
+        }
+        ApiRequest::DeleteGroup { node, group } => {
+            if !group_exists(doc, node, group) {
+                return (false, ApiResponse::err(404, "group not found"));
+            }
+            doc.ungroup(node, group);
+            (true, ApiResponse::ok(json!({ "ungrouped": group })))
+        }
+        ApiRequest::DockCard { node, card, anchor } => {
+            let both = doc
+                .nodes
+                .get(&node)
+                .map(|n| {
+                    n.cards.iter().any(|c| c.id == card) && n.cards.iter().any(|c| c.id == anchor)
+                })
+                .unwrap_or(false);
+            if !both {
+                return (false, ApiResponse::err(404, "card or anchor not found"));
+            }
+            doc.dock_card(node, card, anchor);
+            let docked = doc.card_mut(node, card).and_then(|c| c.docked_to);
+            if docked == Some(anchor) {
+                (true, ApiResponse::ok(json!({ "card": card, "docked_to": docked })))
+            } else {
+                // dock_card refuses cycles / self-docks.
+                (false, ApiResponse::err(400, "cannot dock (would form a cycle)"))
+            }
+        }
+        ApiRequest::DetachCard { node, card } => match doc.card_mut(node, card) {
+            Some(_) => {
+                doc.detach_card(node, card);
+                (true, ApiResponse::ok(json!({ "card": card, "docked_to": Value::Null })))
+            }
+            None => (false, ApiResponse::err(404, "card not found")),
+        },
+        ApiRequest::Export(format) => export_response(doc, &format),
         ApiRequest::Search(q) => {
             let hits: Vec<Value> = doc
                 .search(&q)
@@ -432,12 +584,69 @@ fn node_json(n: &crate::model::Node) -> Value {
         "parent": n.parent,
         "children": n.children,
         "color": n.color,
+        "groups": groups_json(n),
         "cards": n.cards.iter().map(card_json).collect::<Vec<_>>(),
     })
 }
 
+/// JSON for a node's groups, each with its member card ids.
+fn groups_json(n: &crate::model::Node) -> Vec<Value> {
+    n.groups
+        .iter()
+        .map(|g| {
+            json!({
+                "id": g.id,
+                "title": g.title,
+                "color": g.color,
+                "cards": n.cards.iter().filter(|c| c.group == Some(g.id)).map(|c| c.id).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
+fn group_exists(doc: &Document, node: NodeId, group: GroupId) -> bool {
+    doc.nodes.get(&node).map(|n| n.groups.iter().any(|g| g.id == group)).unwrap_or(false)
+}
+
+/// Export the whole document in `format`. Text formats return `content`; binary
+/// formats (pdf/png/gif) return standard base64 in `base64`.
+fn export_response(doc: &Document, format: &str) -> (bool, ApiResponse) {
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let resp = match format {
+        "markdown" | "md" => ApiResponse::ok(json!({ "format": "markdown", "content": doc.export_markdown() })),
+        "html" => ApiResponse::ok(json!({ "format": "html", "content": doc.export_html() })),
+        "json" => match doc.export_json() {
+            Ok(s) => ApiResponse::ok(json!({ "format": "json", "content": s })),
+            Err(e) => ApiResponse::err(500, &e.to_string()),
+        },
+        "pdf" => match doc.export_pdf() {
+            Ok(b) => ApiResponse::ok(json!({ "format": "pdf", "base64": b64(&b) })),
+            Err(e) => ApiResponse::err(500, &e),
+        },
+        "png" => match doc.export_image(false) {
+            Ok(b) => ApiResponse::ok(json!({ "format": "png", "base64": b64(&b) })),
+            Err(e) => ApiResponse::err(500, &e),
+        },
+        "gif" => match doc.export_image(true) {
+            Ok(b) => ApiResponse::ok(json!({ "format": "gif", "base64": b64(&b) })),
+            Err(e) => ApiResponse::err(500, &e),
+        },
+        other => ApiResponse::err(400, &format!("unknown export format: {other}")),
+    };
+    (false, resp)
+}
+
 fn card_json(c: &Card) -> Value {
-    let mut v = json!({ "id": c.id, "title": c.title, "kind": c.kind.label().to_lowercase() });
+    let mut v = json!({
+        "id": c.id,
+        "title": c.title,
+        "kind": c.kind.label().to_lowercase(),
+        "pos": [c.pos.x, c.pos.y],
+        "size": [c.size.x, c.size.y],
+        "color": c.color,
+        "group": c.group,
+        "docked_to": c.docked_to,
+    });
     match &c.kind {
         CardKind::Text => {
             v["body"] = json!(c.body);
@@ -525,6 +734,53 @@ mod tests {
         let (_, s) = process(&mut doc, ApiRequest::Search("needle".into()));
         assert_eq!(s.status, 200);
         assert!(s.body.contains("needle"));
+    }
+
+    #[test]
+    fn update_card_sets_color_and_position() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"color":[1,2,3],"pos":[40,50],"size":[300,200]}"#).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        let c = doc.card_mut(nid, cid).unwrap();
+        assert_eq!(c.color, [1, 2, 3]);
+        assert_eq!(c.pos, egui::pos2(40.0, 50.0));
+        assert_eq!(c.size, egui::vec2(300.0, 200.0));
+    }
+
+    #[test]
+    fn group_dock_and_export_via_api() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let a = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        // Group two cards.
+        let (dirty, resp) = process(
+            &mut doc,
+            ApiRequest::CreateGroup { node: nid, cards: vec![a, b], title: Some("Pair".into()) },
+        );
+        assert!(dirty);
+        assert_eq!(resp.status, 201);
+        let gid = body_id(&resp);
+        assert_eq!(doc.card_mut(nid, a).unwrap().group, Some(gid));
+
+        // Dock a onto b.
+        let (_, dr) = process(&mut doc, ApiRequest::DockCard { node: nid, card: a, anchor: b });
+        assert_eq!(dr.status, 200);
+        assert_eq!(doc.card_mut(nid, a).unwrap().docked_to, Some(b));
+        // Self-cycle refused.
+        let (_, cyc) = process(&mut doc, ApiRequest::DockCard { node: nid, card: b, anchor: a });
+        assert_eq!(cyc.status, 400);
+
+        // Export as PDF returns base64.
+        let (_, ex) = process(&mut doc, ApiRequest::Export("pdf".into()));
+        assert_eq!(ex.status, 200);
+        assert!(ex.body.contains("\"base64\""));
     }
 
     #[test]
