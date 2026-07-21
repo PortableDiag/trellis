@@ -52,9 +52,12 @@ pub enum CanvasAction {
     DockCard(CardId, CardId),
     DetachCard(CardId),
     ToggleDockMode,
+    ToggleSnapMode,
 }
 
 const TITLE_H: f32 = 24.0;
+/// How close (world units) a dragged edge must be to snap to another card's edge.
+const SNAP_DIST: f32 = 8.0;
 
 /// The canvas view: `view.translation` is the pan (screen px, relative to the
 /// canvas top-left) and `view.scaling` is the zoom. Cards live in "world"
@@ -67,6 +70,7 @@ pub fn ui(
     zoom_enabled: bool,
     can_paste: bool,
     dock_mode: bool,
+    snap_mode: bool,
     env: &mut Env,
     selection: &HashSet<CardId>,
 ) -> Vec<CanvasAction> {
@@ -294,7 +298,16 @@ pub fn ui(
     // Cards are drawn directly at their zoomed screen rects (see card_ui), which
     // keeps text selection/editing working (transformed layers broke it).
     for card in &node.cards {
-        card_ui(ui, card, to_screen, canvas_rect, env, selection.contains(&card.id), &mut actions);
+        card_ui(
+            ui,
+            card,
+            to_screen,
+            canvas_rect,
+            env,
+            selection.contains(&card.id),
+            snap_mode.then_some(&node.cards[..]),
+            &mut actions,
+        );
     }
 
     // Drop-target highlight, painted on top of the cards.
@@ -339,6 +352,13 @@ pub fn ui(
                     .clicked()
                 {
                     actions.push(CanvasAction::ToggleDockMode);
+                }
+                if ui
+                    .selectable_label(snap_mode, "Snap")
+                    .on_hover_text("Snap mode: a dragged card's edges align to nearby cards")
+                    .clicked()
+                {
+                    actions.push(CanvasAction::ToggleSnapMode);
                 }
                 if selection.len() >= 2
                     && ui
@@ -406,6 +426,9 @@ fn card_ui(
     clip: egui::Rect,
     env: &mut Env,
     selected: bool,
+    // `Some(all cards)` when snap mode is on: the dragged card's edges snap to
+    // these. `None` = snapping off.
+    snap_others: Option<&[Card]>,
     actions: &mut Vec<CanvasAction>,
 ) {
     let zoom = to_screen.scaling;
@@ -449,8 +472,15 @@ fn card_ui(
         egui::Sense::click_and_drag(),
     );
     let cmd = ui.input(|i| i.modifiers.command);
+    let grab_key = ui.id().with(("card_grab", card.id));
     if handle.drag_started() {
         actions.push(CanvasAction::RaiseCard(card.id));
+        // Remember where on the card we grabbed (world units), so snapping can
+        // track the pointer's intended position without drift.
+        if let Some(pp) = handle.interact_pointer_pos() {
+            let grab = (to_screen.inverse() * pp) - card.pos;
+            ui.memory_mut(|m| m.data.insert_temp(grab_key, grab));
+        }
     }
     if handle.clicked() {
         if cmd {
@@ -462,8 +492,27 @@ fn card_ui(
         }
     }
     if handle.dragged() {
-        // Screen delta → world delta.
-        actions.push(CanvasAction::MoveCard(card.id, handle.drag_delta() / zoom));
+        let grab = ui.memory(|m| m.data.get_temp::<egui::Vec2>(grab_key));
+        match (snap_others, handle.interact_pointer_pos(), grab) {
+            (Some(others), Some(pp), Some(grab)) => {
+                // Snap the pointer-intended top-left to nearby card edges.
+                let intended = (to_screen.inverse() * pp) - grab;
+                let (snapped, gx, gy) =
+                    snap_position(intended, card.size, others, card.id, SNAP_DIST);
+                actions.push(CanvasAction::MoveCard(card.id, snapped - card.pos));
+                // Guide lines at the snapped edges.
+                let guide = egui::Stroke::new(1.0, egui::Color32::from_rgb(0xff, 0xd1, 0x66));
+                if let Some(x) = gx {
+                    let sx = (to_screen * egui::pos2(x, 0.0)).x;
+                    p.line_segment([egui::pos2(sx, clip.top()), egui::pos2(sx, clip.bottom())], guide);
+                }
+                if let Some(y) = gy {
+                    let sy = (to_screen * egui::pos2(0.0, y)).y;
+                    p.line_segment([egui::pos2(clip.left(), sy), egui::pos2(clip.right(), sy)], guide);
+                }
+            }
+            _ => actions.push(CanvasAction::MoveCard(card.id, handle.drag_delta() / zoom)),
+        }
     }
     if handle.double_clicked() && supports_edit(&card.kind) {
         actions.push(CanvasAction::SetEditing(card.id, !card.editing));
@@ -780,6 +829,49 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
             }
         }
     }
+}
+
+/// Snap a card's would-be top-left `pos` to nearby card edges. Each axis snaps
+/// independently to the closest edge (left/right, top/bottom) of another card
+/// within `threshold`. Returns the adjusted position plus the world x/y of any
+/// snapped edge (for guide lines). `self_id` is excluded from the candidates.
+fn snap_position(
+    pos: egui::Pos2,
+    size: egui::Vec2,
+    others: &[Card],
+    self_id: CardId,
+    threshold: f32,
+) -> (egui::Pos2, Option<f32>, Option<f32>) {
+    let (l, r) = (pos.x, pos.x + size.x);
+    let (t, b) = (pos.y, pos.y + size.y);
+    // (distance, adjust, guide-line world coord)
+    let mut best_x: Option<(f32, f32, f32)> = None;
+    let mut best_y: Option<(f32, f32, f32)> = None;
+    for o in others {
+        if o.id == self_id {
+            continue;
+        }
+        let orect = egui::Rect::from_min_size(o.pos, o.size);
+        for (mine, theirs) in
+            [(l, orect.left()), (l, orect.right()), (r, orect.left()), (r, orect.right())]
+        {
+            let d = theirs - mine;
+            if d.abs() <= threshold && best_x.map_or(true, |(bd, _, _)| d.abs() < bd) {
+                best_x = Some((d.abs(), d, theirs));
+            }
+        }
+        for (mine, theirs) in
+            [(t, orect.top()), (t, orect.bottom()), (b, orect.top()), (b, orect.bottom())]
+        {
+            let d = theirs - mine;
+            if d.abs() <= threshold && best_y.map_or(true, |(bd, _, _)| d.abs() < bd) {
+                best_y = Some((d.abs(), d, theirs));
+            }
+        }
+    }
+    let dx = best_x.map_or(0.0, |(_, d, _)| d);
+    let dy = best_y.map_or(0.0, |(_, d, _)| d);
+    (egui::pos2(pos.x + dx, pos.y + dy), best_x.map(|(_, _, g)| g), best_y.map(|(_, _, g)| g))
 }
 
 fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
@@ -1224,6 +1316,25 @@ mod tests {
         let (out, sel) = wrap_inline("", (0, 0), "**");
         assert_eq!(out, "****");
         assert_eq!(range(&sel), (2, 2));
+    }
+
+    #[test]
+    fn snap_aligns_edge_to_edge_and_ignores_far_cards() {
+        // Anchor at (100,100), default size 240x160 → right edge x=340.
+        let anchor = Card::new(1, egui::pos2(100.0, 100.0), CardKind::Text);
+        let others = [anchor];
+        // Dragged card's left edge at 344 is 4px from the anchor's right (340) and
+        // its top (100) already lines up → both axes snap.
+        let (snapped, gx, gy) =
+            snap_position(egui::pos2(344.0, 100.0), egui::vec2(240.0, 160.0), &others, 2, 8.0);
+        assert_eq!(snapped, egui::pos2(340.0, 100.0));
+        assert_eq!(gx, Some(340.0));
+        assert_eq!(gy, Some(100.0));
+        // Far away → no snap, position unchanged.
+        let (far, fx, fy) =
+            snap_position(egui::pos2(900.0, 900.0), egui::vec2(240.0, 160.0), &others, 2, 8.0);
+        assert_eq!(far, egui::pos2(900.0, 900.0));
+        assert!(fx.is_none() && fy.is_none());
     }
 
     #[test]

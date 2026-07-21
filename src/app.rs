@@ -22,6 +22,7 @@ const API_PORT_KEY: &str = "api_port";
 const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
+const SNAP_MODE_KEY: &str = "snap_mode";
 const THEME_KEY: &str = "theme";
 
 /// Selectable color schemes. Dark/Light are egui's built-ins; add new variants
@@ -131,6 +132,8 @@ pub struct TrellisApp {
     /// When on, dragging a card onto another docks (sticks) it there; dragging a
     /// docked card off detaches it. Off = plain moves never change dock bonds.
     dock_mode: bool,
+    /// When on, a dragged card's edges snap to nearby cards' edges.
+    snap_mode: bool,
     /// A copied card, ready to paste into any basket.
     card_clipboard: Option<crate::model::Card>,
     /// Runtime multi-selection of cards in the current basket, used to build a
@@ -198,6 +201,11 @@ impl TrellisApp {
             .and_then(|s| s.get_string(DOCK_MODE_KEY))
             .map(|s| s == "true")
             .unwrap_or(false);
+        let snap_mode = cc
+            .storage
+            .and_then(|s| s.get_string(SNAP_MODE_KEY))
+            .map(|s| s == "true")
+            .unwrap_or(false);
         let theme = cc
             .storage
             .and_then(|s| s.get_string(THEME_KEY))
@@ -246,6 +254,7 @@ impl TrellisApp {
             zoom_enabled,
             reorder_mode: false,
             dock_mode,
+            snap_mode,
             card_clipboard: None,
             card_sel: std::collections::HashSet::new(),
             card_sel_node: None,
@@ -549,6 +558,7 @@ impl TrellisApp {
                     | CanvasAction::ToggleSelect(_)
                     | CanvasAction::ClearSelection
                     | CanvasAction::ToggleDockMode
+                    | CanvasAction::ToggleSnapMode
             )
         }) {
             self.dirty = true;
@@ -658,6 +668,7 @@ impl TrellisApp {
                 }
                 CanvasAction::ClearSelection => self.card_sel.clear(),
                 CanvasAction::ToggleDockMode => self.dock_mode = !self.dock_mode,
+                CanvasAction::ToggleSnapMode => self.snap_mode = !self.snap_mode,
                 CanvasAction::GroupSelected => {
                     let ids: Vec<_> = self.card_sel.iter().copied().collect();
                     if self.doc.group_cards(node, &ids, "Group".to_string()).is_some() {
@@ -872,6 +883,8 @@ impl TrellisApp {
                         "When on, dropping a card on another docks them so they move together; \
                          drag a docked card off to detach. Grouping works regardless.",
                     );
+                ui.checkbox(&mut self.snap_mode, "Snap mode (align card edges while dragging)")
+                    .on_hover_text("When on, a dragged card's edges snap to nearby cards' edges.");
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -1045,6 +1058,7 @@ impl eframe::App for TrellisApp {
                         self.zoom_enabled,
                         can_paste,
                         self.dock_mode,
+                        self.snap_mode,
                         &mut env,
                         &self.card_sel,
                     );
@@ -1092,6 +1106,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(API_PORT_KEY, self.api_port.to_string());
         storage.set_string(ZOOM_ENABLED_KEY, self.zoom_enabled.to_string());
         storage.set_string(DOCK_MODE_KEY, self.dock_mode.to_string());
+        storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
         storage.set_string(THEME_KEY, self.theme.key().to_string());
     }
 
