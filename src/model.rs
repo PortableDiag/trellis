@@ -11,6 +11,16 @@ use std::collections::HashMap;
 
 pub type NodeId = u64;
 pub type CardId = u64;
+pub type GroupId = u64;
+
+/// A named container that a set of cards belong to (via [`Card::group`]). Drawn
+/// as a box around its members; dragging its header moves the whole group.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CardGroup {
+    pub id: GroupId,
+    pub title: String,
+    pub color: [u8; 3],
+}
 
 /// One line of a checklist card.
 #[derive(Clone, Serialize, Deserialize)]
@@ -56,6 +66,13 @@ pub struct Card {
     /// RGB accent used for the card's title bar.
     pub color: [u8; 3],
     pub kind: CardKind,
+    /// Membership in a labeled group container. `None` = ungrouped.
+    #[serde(default)]
+    pub group: Option<GroupId>,
+    /// Dock parent: this card sticks to `docked_to` and moves with it. `None` =
+    /// free-floating.
+    #[serde(default)]
+    pub docked_to: Option<CardId>,
     /// Runtime-only: whether the card is in edit mode. Never persisted.
     #[serde(skip)]
     pub editing: bool,
@@ -72,6 +89,8 @@ impl Card {
             body: String::new(),
             color: [0x3b, 0x82, 0xf6],
             kind,
+            group: None,
+            docked_to: None,
             editing,
         }
     }
@@ -85,6 +104,9 @@ pub struct Node {
     pub parent: Option<NodeId>,
     pub children: Vec<NodeId>,
     pub cards: Vec<Card>,
+    /// Group containers for this basket. Membership lives on [`Card::group`].
+    #[serde(default)]
+    pub groups: Vec<CardGroup>,
     #[serde(default = "default_true")]
     pub expanded: bool,
     /// Optional per-node tag color shown as a dot in the tree.
@@ -96,6 +118,12 @@ fn default_true() -> bool {
     true
 }
 
+/// Drop group containers that no longer have any member cards.
+fn prune_groups(n: &mut Node) {
+    let used: std::collections::HashSet<GroupId> = n.cards.iter().filter_map(|c| c.group).collect();
+    n.groups.retain(|g| used.contains(&g.id));
+}
+
 /// The whole document: an arena of nodes plus ordered roots and id counters.
 #[derive(Serialize, Deserialize)]
 pub struct Document {
@@ -103,6 +131,12 @@ pub struct Document {
     pub roots: Vec<NodeId>,
     next_node_id: NodeId,
     next_card_id: CardId,
+    #[serde(default = "default_next_id")]
+    next_group_id: GroupId,
+}
+
+fn default_next_id() -> GroupId {
+    1
 }
 
 impl Default for Document {
@@ -112,6 +146,7 @@ impl Default for Document {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_group_id: 1,
         };
         let root = doc.add_node(None, "Welcome to Trellis".to_string());
         if let Some(id) = doc.add_card(root, egui::pos2(60.0, 60.0), CardKind::Text) {
@@ -141,6 +176,7 @@ impl Document {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_group_id: 1,
         }
     }
 
@@ -176,6 +212,7 @@ impl Document {
                 parent,
                 children: Vec::new(),
                 cards: Vec::new(),
+                groups: Vec::new(),
                 expanded: true,
                 color: None,
             },
@@ -204,6 +241,7 @@ impl Document {
                 parent,
                 children: Vec::new(),
                 cards: Vec::new(),
+                groups: Vec::new(),
                 expanded: true,
                 color: None,
             },
@@ -252,6 +290,142 @@ impl Document {
     pub fn remove_card(&mut self, node: NodeId, card: CardId) {
         if let Some(n) = self.nodes.get_mut(&node) {
             n.cards.retain(|c| c.id != card);
+            // Detach anything that was docked to the removed card.
+            for c in n.cards.iter_mut() {
+                if c.docked_to == Some(card) {
+                    c.docked_to = None;
+                }
+            }
+            prune_groups(n);
+        }
+    }
+
+    // --- groups -------------------------------------------------------------
+
+    /// Put `cards` (2 or more) into a fresh group and return its id. No-op
+    /// (returns `None`) if fewer than two of them exist in the node.
+    pub fn group_cards(
+        &mut self,
+        node: NodeId,
+        cards: &[CardId],
+        title: String,
+    ) -> Option<GroupId> {
+        let gid = self.next_group_id.max(1);
+        let n = self.nodes.get_mut(&node)?;
+        let count = n.cards.iter().filter(|c| cards.contains(&c.id)).count();
+        if count < 2 {
+            return None;
+        }
+        for c in n.cards.iter_mut() {
+            if cards.contains(&c.id) {
+                c.group = Some(gid);
+            }
+        }
+        n.groups.push(CardGroup { id: gid, title, color: [0x64, 0x74, 0x8b] });
+        self.next_group_id = gid + 1;
+        Some(gid)
+    }
+
+    pub fn ungroup(&mut self, node: NodeId, group: GroupId) {
+        if let Some(n) = self.nodes.get_mut(&node) {
+            for c in n.cards.iter_mut() {
+                if c.group == Some(group) {
+                    c.group = None;
+                }
+            }
+            n.groups.retain(|g| g.id != group);
+        }
+    }
+
+    pub fn set_group_title(&mut self, node: NodeId, group: GroupId, title: String) {
+        if let Some(n) = self.nodes.get_mut(&node) {
+            if let Some(g) = n.groups.iter_mut().find(|g| g.id == group) {
+                g.title = title;
+            }
+        }
+    }
+
+    pub fn set_group_color(&mut self, node: NodeId, group: GroupId, color: [u8; 3]) {
+        if let Some(n) = self.nodes.get_mut(&node) {
+            if let Some(g) = n.groups.iter_mut().find(|g| g.id == group) {
+                g.color = color;
+            }
+        }
+    }
+
+    /// Move every member of `group` (and anything docked to a member) by `delta`.
+    pub fn move_group(&mut self, node: NodeId, group: GroupId, delta: egui::Vec2) {
+        let members: Vec<CardId> = self
+            .nodes
+            .get(&node)
+            .map(|n| n.cards.iter().filter(|c| c.group == Some(group)).map(|c| c.id).collect())
+            .unwrap_or_default();
+        let mut ids: std::collections::HashSet<CardId> = std::collections::HashSet::new();
+        for m in members {
+            ids.extend(self.dock_tree_ids(node, m));
+        }
+        if let Some(n) = self.nodes.get_mut(&node) {
+            for c in n.cards.iter_mut() {
+                if ids.contains(&c.id) {
+                    c.pos += delta;
+                }
+            }
+        }
+    }
+
+    // --- docking ------------------------------------------------------------
+
+    /// `card` plus every card docked to it, transitively (its dock subtree).
+    fn dock_tree_ids(&self, node: NodeId, root: CardId) -> Vec<CardId> {
+        let mut ids = vec![root];
+        if let Some(n) = self.nodes.get(&node) {
+            loop {
+                let mut added = false;
+                for c in &n.cards {
+                    if let Some(p) = c.docked_to {
+                        if ids.contains(&p) && !ids.contains(&c.id) {
+                            ids.push(c.id);
+                            added = true;
+                        }
+                    }
+                }
+                if !added {
+                    break;
+                }
+            }
+        }
+        ids
+    }
+
+    /// Stick `child` onto `anchor`. Ignored if it would create a cycle (anchor
+    /// is inside child's own dock subtree) or they're the same card.
+    pub fn dock_card(&mut self, node: NodeId, child: CardId, anchor: CardId) {
+        if child == anchor {
+            return;
+        }
+        if self.dock_tree_ids(node, child).contains(&anchor) {
+            return;
+        }
+        if let Some(c) = self.card_mut(node, child) {
+            c.docked_to = Some(anchor);
+        }
+    }
+
+    pub fn detach_card(&mut self, node: NodeId, card: CardId) {
+        if let Some(c) = self.card_mut(node, card) {
+            c.docked_to = None;
+        }
+    }
+
+    /// Move `card` and its whole dock subtree by `delta`.
+    pub fn move_card_tree(&mut self, node: NodeId, card: CardId, delta: egui::Vec2) {
+        let ids = self.dock_tree_ids(node, card);
+        if let Some(n) = self.nodes.get_mut(&node) {
+            for c in n.cards.iter_mut() {
+                if ids.contains(&c.id) {
+                    c.pos += delta;
+                }
+            }
         }
     }
 
@@ -714,6 +888,49 @@ mod tests {
     }
 
     #[test]
+    fn grouping_and_docking() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let a = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(n, egui::pos2(50.0, 0.0), CardKind::Text).unwrap();
+        let c = doc.add_card(n, egui::pos2(100.0, 0.0), CardKind::Text).unwrap();
+
+        // Group needs 2+ cards.
+        assert!(doc.group_cards(n, &[a], "x".into()).is_none());
+        let g = doc.group_cards(n, &[a, b], "Pair".into()).unwrap();
+        assert_eq!(doc.card_mut(n, a).unwrap().group, Some(g));
+        assert_eq!(doc.card_mut(n, b).unwrap().group, Some(g));
+        assert_eq!(doc.nodes[&n].groups.len(), 1);
+
+        // Ungroup clears membership and drops the container.
+        doc.ungroup(n, g);
+        assert_eq!(doc.card_mut(n, a).unwrap().group, None);
+        assert!(doc.nodes[&n].groups.is_empty());
+
+        // Dock c onto a; moving a drags c along, b stays put.
+        doc.dock_card(n, c, a);
+        assert_eq!(doc.card_mut(n, c).unwrap().docked_to, Some(a));
+        doc.move_card_tree(n, a, egui::vec2(10.0, 5.0));
+        assert_eq!(doc.card_mut(n, a).unwrap().pos, egui::pos2(10.0, 5.0));
+        assert_eq!(doc.card_mut(n, c).unwrap().pos, egui::pos2(110.0, 5.0));
+        assert_eq!(doc.card_mut(n, b).unwrap().pos, egui::pos2(50.0, 0.0));
+    }
+
+    #[test]
+    fn dock_rejects_cycles_and_remove_detaches() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let a = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.dock_card(n, b, a); // b sticks to a
+        doc.dock_card(n, a, b); // would cycle → ignored
+        assert_eq!(doc.card_mut(n, a).unwrap().docked_to, None);
+        // Removing the anchor detaches its dependents.
+        doc.remove_card(n, a);
+        assert_eq!(doc.card_mut(n, b).unwrap().docked_to, None);
+    }
+
+    #[test]
     fn ron_round_trips() {
         let doc = Document::default();
         let s = ron::ser::to_string(&doc).unwrap();
@@ -729,6 +946,7 @@ mod tests {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_group_id: 1,
         };
         let a = doc.add_node(None, "a".into());
         let b = doc.add_node(None, "b".into());
@@ -786,6 +1004,7 @@ mod tests {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_group_id: 1,
         };
         let a = doc.add_node(None, "a".into());
         let b = doc.add_node(Some(a), "b".into());
@@ -804,6 +1023,7 @@ mod tests {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_group_id: 1,
         };
         let n = doc.add_node(None, "Node & <title>".into());
         let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
@@ -832,6 +1052,7 @@ mod tests {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_group_id: 1,
         };
         let id = doc.import_as_node("page".into(), "<h1>Hi</h1><p>there</p>", true);
         let node = &doc.nodes[&id];
@@ -874,6 +1095,7 @@ mod tests {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_group_id: 1,
         };
         let n = doc.add_node(None, "Groceries".into());
         let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();

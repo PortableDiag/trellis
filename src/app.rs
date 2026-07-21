@@ -21,6 +21,7 @@ const API_KEY_KEY: &str = "api_key";
 const API_PORT_KEY: &str = "api_port";
 const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
+const DOCK_MODE_KEY: &str = "dock_mode";
 const THEME_KEY: &str = "theme";
 
 /// Selectable color schemes. Dark/Light are egui's built-ins; add new variants
@@ -127,8 +128,16 @@ pub struct TrellisApp {
     zoom_enabled: bool,
     /// When on, tree nodes are draggable for reordering (off = click selects).
     reorder_mode: bool,
+    /// When on, dragging a card onto another docks (sticks) it there; dragging a
+    /// docked card off detaches it. Off = plain moves never change dock bonds.
+    dock_mode: bool,
     /// A copied card, ready to paste into any basket.
     card_clipboard: Option<crate::model::Card>,
+    /// Runtime multi-selection of cards in the current basket, used to build a
+    /// group. Cleared when the selected node changes. Never persisted.
+    card_sel: std::collections::HashSet<crate::model::CardId>,
+    /// Which node `card_sel` belongs to, so it resets when the basket changes.
+    card_sel_node: Option<NodeId>,
 
     // Agent HTTP API.
     api_rx: Option<Receiver<ApiCommand>>,
@@ -184,6 +193,11 @@ impl TrellisApp {
             .and_then(|s| s.get_string(ZOOM_ENABLED_KEY))
             .map(|s| s != "false")
             .unwrap_or(true);
+        let dock_mode = cc
+            .storage
+            .and_then(|s| s.get_string(DOCK_MODE_KEY))
+            .map(|s| s == "true")
+            .unwrap_or(false);
         let theme = cc
             .storage
             .and_then(|s| s.get_string(THEME_KEY))
@@ -231,7 +245,10 @@ impl TrellisApp {
             theme,
             zoom_enabled,
             reorder_mode: false,
+            dock_mode,
             card_clipboard: None,
+            card_sel: std::collections::HashSet::new(),
+            card_sel_node: None,
             api_rx: Some(api_rx),
             api_shared_key,
             api_key,
@@ -524,10 +541,16 @@ impl TrellisApp {
 
     fn apply_canvas(&mut self, node: NodeId, actions: Vec<CanvasAction>) {
         // ResetView only nudges the (unsaved) pan, so it must not dirty the doc.
-        if actions
-            .iter()
-            .any(|a| !matches!(a, CanvasAction::ResetView | CanvasAction::CopyCard(_)))
-        {
+        if actions.iter().any(|a| {
+            !matches!(
+                a,
+                CanvasAction::ResetView
+                    | CanvasAction::CopyCard(_)
+                    | CanvasAction::ToggleSelect(_)
+                    | CanvasAction::ClearSelection
+                    | CanvasAction::ToggleDockMode
+            )
+        }) {
             self.dirty = true;
         }
         for a in actions {
@@ -536,9 +559,8 @@ impl TrellisApp {
                     self.doc.add_card(node, pos, kind);
                 }
                 CanvasAction::MoveCard(cid, delta) => {
-                    if let Some(c) = self.doc.card_mut(node, cid) {
-                        c.pos += delta;
-                    }
+                    // Moves the card plus anything docked to it.
+                    self.doc.move_card_tree(node, cid, delta);
                 }
                 CanvasAction::ResizeCard(cid, delta) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {
@@ -629,6 +651,26 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::LoadImage(cid) => self.load_image_into(node, cid),
+                CanvasAction::ToggleSelect(cid) => {
+                    if !self.card_sel.insert(cid) {
+                        self.card_sel.remove(&cid);
+                    }
+                }
+                CanvasAction::ClearSelection => self.card_sel.clear(),
+                CanvasAction::ToggleDockMode => self.dock_mode = !self.dock_mode,
+                CanvasAction::GroupSelected => {
+                    let ids: Vec<_> = self.card_sel.iter().copied().collect();
+                    if self.doc.group_cards(node, &ids, "Group".to_string()).is_some() {
+                        self.status = format!("Grouped {} cards", ids.len());
+                    }
+                    self.card_sel.clear();
+                }
+                CanvasAction::Ungroup(g) => self.doc.ungroup(node, g),
+                CanvasAction::MoveGroup(g, delta) => self.doc.move_group(node, g, delta),
+                CanvasAction::SetGroupTitle(g, t) => self.doc.set_group_title(node, g, t),
+                CanvasAction::SetGroupColor(g, c) => self.doc.set_group_color(node, g, c),
+                CanvasAction::DockCard(child, anchor) => self.doc.dock_card(node, child, anchor),
+                CanvasAction::DetachCard(cid) => self.doc.detach_card(node, cid),
                 CanvasAction::ResetView => {
                     self.views.insert(node, TSTransform::IDENTITY);
                 }
@@ -825,6 +867,11 @@ impl TrellisApp {
                     "Zoom with Ctrl+scroll and Ctrl +/−",
                 )
                 .on_hover_text("Ctrl+0 and Reset view still reset zoom when this is off.");
+                ui.checkbox(&mut self.dock_mode, "Dock mode (drag a card onto another to stick it)")
+                    .on_hover_text(
+                        "When on, dropping a card on another docks them so they move together; \
+                         drag a docked card off to detach. Grouping works regardless.",
+                    );
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -979,6 +1026,11 @@ impl eframe::App for TrellisApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(sel) = self.selected {
                 if self.doc.nodes.contains_key(&sel) {
+                    // Card multi-selection is per-basket; reset it on node change.
+                    if self.card_sel_node != Some(sel) {
+                        self.card_sel.clear();
+                        self.card_sel_node = Some(sel);
+                    }
                     let mut view = self.views.get(&sel).copied().unwrap_or_default();
                     let node = self.doc.nodes.get(&sel).unwrap();
                     let mut env = Env {
@@ -986,8 +1038,16 @@ impl eframe::App for TrellisApp {
                         tex: &mut self.tex_cache,
                     };
                     let can_paste = self.card_clipboard.is_some();
-                    let actions =
-                        canvas::ui(ui, node, &mut view, self.zoom_enabled, can_paste, &mut env);
+                    let actions = canvas::ui(
+                        ui,
+                        node,
+                        &mut view,
+                        self.zoom_enabled,
+                        can_paste,
+                        self.dock_mode,
+                        &mut env,
+                        &self.card_sel,
+                    );
                     self.views.insert(sel, view);
                     self.apply_canvas(sel, actions);
                 } else {
@@ -1031,6 +1091,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(API_KEY_KEY, self.api_key.clone());
         storage.set_string(API_PORT_KEY, self.api_port.to_string());
         storage.set_string(ZOOM_ENABLED_KEY, self.zoom_enabled.to_string());
+        storage.set_string(DOCK_MODE_KEY, self.dock_mode.to_string());
         storage.set_string(THEME_KEY, self.theme.key().to_string());
     }
 

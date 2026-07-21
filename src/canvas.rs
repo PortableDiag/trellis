@@ -2,7 +2,8 @@
 //! cards. Each card renders according to its `CardKind`.
 
 use crate::images::TextureCache;
-use crate::model::{Card, CardId, CardKind, ChecklistItem, Node};
+use crate::model::{Card, CardGroup, CardId, CardKind, ChecklistItem, GroupId, Node};
+use std::collections::{HashMap, HashSet};
 use egui::text::{CCursor, CCursorRange};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use emath::TSTransform;
@@ -38,6 +39,19 @@ pub enum CanvasAction {
     ChecklistAdd(CardId),
     ChecklistRemove(CardId, usize),
     LoadImage(CardId),
+    // Multi-select (runtime only; used to build a group).
+    ToggleSelect(CardId),
+    ClearSelection,
+    // Grouping.
+    GroupSelected,
+    Ungroup(GroupId),
+    MoveGroup(GroupId, egui::Vec2),
+    SetGroupTitle(GroupId, String),
+    SetGroupColor(GroupId, [u8; 3]),
+    // Docking (stick a card onto another).
+    DockCard(CardId, CardId),
+    DetachCard(CardId),
+    ToggleDockMode,
 }
 
 const TITLE_H: f32 = 24.0;
@@ -52,7 +66,9 @@ pub fn ui(
     view: &mut TSTransform,
     zoom_enabled: bool,
     can_paste: bool,
+    dock_mode: bool,
     env: &mut Env,
+    selection: &HashSet<CardId>,
 ) -> Vec<CanvasAction> {
     let mut actions = Vec::new();
 
@@ -108,6 +124,11 @@ pub fn ui(
         }
     }
 
+    // Clicking empty canvas clears any card multi-selection.
+    if canvas_resp.clicked() {
+        actions.push(CanvasAction::ClearSelection);
+    }
+
     // Right-click empty canvas → choose a card kind to add.
     let menu_pos = canvas_resp.interact_pointer_pos();
     canvas_resp.context_menu(|ui| {
@@ -150,10 +171,139 @@ pub fn ui(
         }
     });
 
+    let zoom = to_screen.scaling;
+    let world_rect = |c: &Card| egui::Rect::from_min_size(c.pos, c.size);
+    let screen_rect = |c: &Card| to_screen.mul_rect(world_rect(c));
+
+    // --- group containers, drawn behind their member cards ------------------
+    let mut gbounds: HashMap<GroupId, egui::Rect> = HashMap::new();
+    for card in &node.cards {
+        if let Some(g) = card.group {
+            let wr = world_rect(card);
+            gbounds.entry(g).and_modify(|r| *r = r.union(wr)).or_insert(wr);
+        }
+    }
+    let bg = ui.painter_at(canvas_rect);
+    for group in &node.groups {
+        let Some(wb) = gbounds.get(&group.id) else { continue };
+        let srect = to_screen.mul_rect(wb.expand(10.0));
+        let gcol = egui::Color32::from_rgb(group.color[0], group.color[1], group.color[2]);
+        bg.rect(
+            srect,
+            6.0 * zoom,
+            gcol.gamma_multiply(0.06),
+            egui::Stroke::new(1.5, gcol.gamma_multiply(0.75)),
+        );
+        // Header strip above the box: drag to move the whole group, RMB for menu.
+        let hh = 18.0 * zoom;
+        let header = egui::Rect::from_min_size(
+            egui::pos2(srect.min.x, srect.min.y - hh - 3.0 * zoom),
+            egui::vec2(srect.width(), hh),
+        );
+        bg.rect_filled(header, 4.0 * zoom, gcol.gamma_multiply(0.9));
+        let label = if group.title.is_empty() { "Group" } else { group.title.as_str() };
+        bg.text(
+            header.left_center() + egui::vec2(6.0 * zoom, 0.0),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(11.0 * zoom),
+            egui::Color32::from_gray(240),
+        );
+        let hresp =
+            ui.interact(header, ui.id().with(("group_hdr", group.id)), egui::Sense::click_and_drag());
+        if hresp.dragged() {
+            actions.push(CanvasAction::MoveGroup(group.id, hresp.drag_delta() / zoom));
+        }
+        hresp.context_menu(|ui| group_menu(ui, group, &mut actions));
+    }
+
+    // --- dock connectors: faint links between stuck cards -------------------
+    for card in &node.cards {
+        if let Some(anchor_id) = card.docked_to {
+            if let Some(anchor) = node.cards.iter().find(|c| c.id == anchor_id) {
+                bg.line_segment(
+                    [to_screen * world_rect(card).center(), to_screen * world_rect(anchor).center()],
+                    egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
+                );
+            }
+        }
+    }
+
+    // --- docking: detach on drag start, dock on drop, highlight the target --
+    // `card + its dock subtree` — excluded from being its own drop target.
+    let subtree = |root: CardId| -> Vec<CardId> {
+        let mut ids = vec![root];
+        loop {
+            let mut added = false;
+            for c in &node.cards {
+                if let Some(p) = c.docked_to {
+                    if ids.contains(&p) && !ids.contains(&c.id) {
+                        ids.push(c.id);
+                        added = true;
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+        ids
+    };
+    let card_at = |pt: egui::Pos2, exclude: &[CardId]| -> Option<CardId> {
+        node.cards
+            .iter()
+            .rev()
+            .find(|c| !exclude.contains(&c.id) && screen_rect(c).contains(pt))
+            .map(|c| c.id)
+    };
+    let mut dragging: Option<CardId> = None;
+    for card in &node.cards {
+        if ui.ctx().is_being_dragged(ui.id().with(("card_handle", card.id))) {
+            dragging = Some(card.id);
+        }
+    }
+    let mut dock_highlight: Option<egui::Rect> = None;
+    if dock_mode {
+        let mem_key = ui.id().with("canvas_dragging_card");
+        let prev: Option<CardId> =
+            ui.memory(|m| m.data.get_temp::<Option<CardId>>(mem_key)).flatten();
+        ui.memory_mut(|m| m.data.insert_temp(mem_key, dragging));
+        if let (Some(cur), None) = (dragging, prev) {
+            // Drag just started: pop the card out of its current dock.
+            actions.push(CanvasAction::DetachCard(cur));
+        }
+        if let Some(cur) = dragging {
+            if let Some(pt) = ui.input(|i| i.pointer.hover_pos()) {
+                if let Some(target) = card_at(pt, &subtree(cur)) {
+                    if let Some(t) = node.cards.iter().find(|c| c.id == target) {
+                        dock_highlight = Some(screen_rect(t));
+                    }
+                }
+            }
+        }
+        if let (None, Some(pc)) = (dragging, prev) {
+            // Drag just ended: dock onto whatever card is under the drop point.
+            if let Some(pt) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.latest_pos())) {
+                if let Some(target) = card_at(pt, &subtree(pc)) {
+                    actions.push(CanvasAction::DockCard(pc, target));
+                }
+            }
+        }
+    }
+
     // Cards are drawn directly at their zoomed screen rects (see card_ui), which
     // keeps text selection/editing working (transformed layers broke it).
     for card in &node.cards {
-        card_ui(ui, card, to_screen, canvas_rect, env, &mut actions);
+        card_ui(ui, card, to_screen, canvas_rect, env, selection.contains(&card.id), &mut actions);
+    }
+
+    // Drop-target highlight, painted on top of the cards.
+    if let Some(hr) = dock_highlight {
+        ui.painter_at(canvas_rect).rect_stroke(
+            hr.expand(2.0 * zoom),
+            6.0 * zoom,
+            egui::Stroke::new(2.5, egui::Color32::from_rgb(0x4a, 0xde, 0x80)),
+        );
     }
 
     // Reset-view button — in a foreground layer, untransformed, so it stays put
@@ -175,11 +325,37 @@ pub fn ui(
             }
         });
 
+    // Card tools (top-left): Dock-mode toggle and, when 2+ cards are selected,
+    // a Group button.
+    egui::Area::new(ui.id().with("card_tools"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(canvas_rect.left() + 8.0, canvas_rect.top() + 8.0))
+        .show(ui.ctx(), |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(dock_mode, "Dock")
+                    .on_hover_text("Dock mode: drag a card onto another to stick them together")
+                    .clicked()
+                {
+                    actions.push(CanvasAction::ToggleDockMode);
+                }
+                if selection.len() >= 2
+                    && ui
+                        .button(format!("Group {} cards", selection.len()))
+                        .on_hover_text("Wrap the selected cards in a container")
+                        .clicked()
+                {
+                    actions.push(CanvasAction::GroupSelected);
+                }
+            });
+        });
+
     // Hint line (screen space).
     ui.painter().text(
         canvas_rect.left_bottom() + egui::vec2(8.0, -6.0),
         egui::Align2::LEFT_BOTTOM,
-        "double-click: text card · right-click: any card · drag title: move · corner: resize · drag empty: pan · ctrl+scroll: zoom",
+        "double-click: text card · right-click: any card · drag title: move · ctrl+click: select · drag group header: move group · ctrl+scroll: zoom",
         egui::FontId::proportional(11.0),
         ui.visuals().weak_text_color(),
     );
@@ -229,6 +405,7 @@ fn card_ui(
     to_screen: TSTransform,
     clip: egui::Rect,
     env: &mut Env,
+    selected: bool,
     actions: &mut Vec<CanvasAction>,
 ) {
     let zoom = to_screen.scaling;
@@ -245,9 +422,25 @@ fn card_ui(
     let p = ui.painter_at(clip);
     p.rect_filled(rect, r, ui.visuals().panel_fill);
     p.rect_stroke(rect, r, egui::Stroke::new(1.0, accent));
+    // Multi-select outline (Ctrl+click builds a selection to group).
+    if selected {
+        p.rect_stroke(
+            rect.expand(2.5 * zoom),
+            r + 2.0 * zoom,
+            egui::Stroke::new((2.0 * zoom).max(1.5), egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
+        );
+    }
 
     let title_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), title_h));
     p.rect_filled(title_rect, r, accent.gamma_multiply(0.35));
+    // Small marker on a docked card's title bar.
+    if card.docked_to.is_some() {
+        p.circle_filled(
+            title_rect.right_center() - egui::vec2(52.0 * zoom, 0.0),
+            2.5 * zoom,
+            ui.visuals().strong_text_color(),
+        );
+    }
 
     // --- title bar: drag to move, double-click to toggle edit, menu on RMB ---
     let handle = ui.interact(
@@ -255,8 +448,18 @@ fn card_ui(
         ui.id().with(("card_handle", card.id)),
         egui::Sense::click_and_drag(),
     );
-    if handle.drag_started() || handle.clicked() {
+    let cmd = ui.input(|i| i.modifiers.command);
+    if handle.drag_started() {
         actions.push(CanvasAction::RaiseCard(card.id));
+    }
+    if handle.clicked() {
+        if cmd {
+            // Ctrl/Cmd+click toggles the card in the group selection.
+            actions.push(CanvasAction::ToggleSelect(card.id));
+        } else {
+            actions.push(CanvasAction::RaiseCard(card.id));
+            actions.push(CanvasAction::ClearSelection);
+        }
     }
     if handle.dragged() {
         // Screen delta → world delta.
@@ -611,9 +814,51 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
             }
         }
     });
+    if card.docked_to.is_some() && ui.button("Detach from dock").clicked() {
+        actions.push(CanvasAction::DetachCard(card.id));
+        ui.close_menu();
+    }
+    if let Some(g) = card.group {
+        if ui.button("Ungroup").clicked() {
+            actions.push(CanvasAction::Ungroup(g));
+            ui.close_menu();
+        }
+    }
     ui.separator();
     if ui.button("Delete card").clicked() {
         actions.push(CanvasAction::Remove(card.id));
+        ui.close_menu();
+    }
+}
+
+/// Context menu for a group's header: rename, recolor, or ungroup.
+fn group_menu(ui: &mut egui::Ui, group: &CardGroup, actions: &mut Vec<CanvasAction>) {
+    ui.horizontal(|ui| {
+        ui.label("Name:");
+        let mut title = group.title.clone();
+        if ui.text_edit_singleline(&mut title).changed() {
+            actions.push(CanvasAction::SetGroupTitle(group.id, title));
+        }
+    });
+    ui.menu_button("Color", |ui| {
+        let swatches: [(&str, [u8; 3]); 6] = [
+            ("Blue", [0x3b, 0x82, 0xf6]),
+            ("Green", [0x22, 0xc5, 0x5e]),
+            ("Amber", [0xf5, 0x9e, 0x0b]),
+            ("Red", [0xef, 0x44, 0x44]),
+            ("Violet", [0x8b, 0x5c, 0xf6]),
+            ("Slate", [0x64, 0x74, 0x8b]),
+        ];
+        for (name, col) in swatches {
+            if ui.button(name).clicked() {
+                actions.push(CanvasAction::SetGroupColor(group.id, col));
+                ui.close_menu();
+            }
+        }
+    });
+    ui.separator();
+    if ui.button("Ungroup").clicked() {
+        actions.push(CanvasAction::Ungroup(group.id));
         ui.close_menu();
     }
 }
