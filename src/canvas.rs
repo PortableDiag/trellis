@@ -419,6 +419,29 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                     if fmt_btn(ui, "\u{2014}", "Horizontal rule") {
                         edited = Some(insert_hr(&card.body, sel));
                     }
+                    ui.separator();
+                    // Text color: pick a color, then apply it to the selection.
+                    // Wraps the text in an inline HTML span, which renders colored
+                    // in the HTML export. (The in-app CommonMark preview drops raw
+                    // HTML, so the color only shows once exported.)
+                    let ckey = egui::Id::new("trellis_text_color");
+                    let mut rgb =
+                        ui.data(|d| d.get_temp::<[u8; 3]>(ckey)).unwrap_or([0xef, 0x44, 0x44]);
+                    if ui
+                        .color_edit_button_srgb(&mut rgb)
+                        .on_hover_text("Pick text color")
+                        .changed()
+                    {
+                        ui.data_mut(|d| d.insert_temp(ckey, rgb));
+                    }
+                    let swatch = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new("A").color(swatch)).small())
+                        .on_hover_text("Color selected text (shows in HTML export)")
+                        .clicked()
+                    {
+                        edited = Some(wrap_color(&card.body, sel, rgb));
+                    }
                 });
 
                 let mut body = card.body.clone();
@@ -647,6 +670,33 @@ fn wrap_inline(text: &str, sel: (usize, usize), marker: &str) -> (String, CCurso
     out.push_str(marker);
     out.push_str(&text[bb..]);
     (out, ccrange(a + ml, b + ml))
+}
+
+/// Wrap the selection in an inline HTML color span (`<span style="color:#rrggbb">
+/// …</span>`). Renders colored in the HTML export; the in-app CommonMark viewer
+/// drops raw HTML, so the color only appears once exported. Whitespace is kept
+/// outside the span, like [`wrap_inline`]. With no selection, inserts an empty
+/// span and drops the cursor inside it.
+fn wrap_color(text: &str, sel: (usize, usize), rgb: [u8; 3]) -> (String, CCursorRange) {
+    let (mut a, mut b) = sel;
+    let chars: Vec<char> = text.chars().collect();
+    while a < b && chars.get(a).is_some_and(|c| c.is_whitespace()) {
+        a += 1;
+    }
+    while b > a && chars.get(b - 1).is_some_and(|c| c.is_whitespace()) {
+        b -= 1;
+    }
+    let open = format!("<span style=\"color:#{:02x}{:02x}{:02x}\">", rgb[0], rgb[1], rgb[2]);
+    let close = "</span>";
+    let (ba, bb) = (byte_of(text, a), byte_of(text, b));
+    let mut out = String::with_capacity(text.len() + open.len() + close.len());
+    out.push_str(&text[..ba]);
+    out.push_str(&open);
+    out.push_str(&text[ba..bb]);
+    out.push_str(close);
+    out.push_str(&text[bb..]);
+    let ol = open.chars().count();
+    (out, ccrange(a + ol, b + ol))
 }
 
 /// Prepend `prefix` to every line the selection touches (headings, lists, quote).
@@ -915,6 +965,22 @@ mod tests {
         let (out, sel) = wrap_inline("", (0, 0), "**");
         assert_eq!(out, "****");
         assert_eq!(range(&sel), (2, 2));
+    }
+
+    #[test]
+    fn color_wraps_selection_in_html_span_and_reselects_inner() {
+        // "hello world", select "world" (chars 6..11), red.
+        let (out, sel) = wrap_color("hello world", (6, 11), [0xef, 0x44, 0x44]);
+        assert_eq!(out, "hello <span style=\"color:#ef4444\">world</span>");
+        // Selection still spans "world": starts after the 30-char opening span.
+        let ol = "<span style=\"color:#ef4444\">".chars().count();
+        assert_eq!(range(&sel), (6 + ol, 11 + ol));
+    }
+
+    #[test]
+    fn color_keeps_span_inside_surrounding_spaces() {
+        let (out, _) = wrap_color("x hi y", (1, 5), [0x00, 0xff, 0x00]);
+        assert_eq!(out, "x <span style=\"color:#00ff00\">hi</span> y");
     }
 
     #[test]

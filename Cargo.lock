@@ -3136,7 +3136,7 @@ dependencies = [
 
 [[package]]
 name = "trellis"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "base64 0.22.1",
  "directories",
