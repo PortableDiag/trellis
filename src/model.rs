@@ -272,6 +272,63 @@ impl Document {
         }
     }
 
+    /// Move a node to the top (`top`) or bottom of its sibling list.
+    pub fn move_to_edge(&mut self, id: NodeId, top: bool) {
+        if let Some(list) = self.sibling_list_mut(id) {
+            if let Some(i) = list.iter().position(|x| *x == id) {
+                let item = list.remove(i);
+                if top {
+                    list.insert(0, item);
+                } else {
+                    list.push(item);
+                }
+            }
+        }
+    }
+
+    /// Reorder via drag & drop: place `moved` immediately before/after `target`,
+    /// adopting `target`'s parent (so this also reparents across lists). No-ops
+    /// if it would drop a node into its own subtree.
+    pub fn reorder(&mut self, moved: NodeId, target: NodeId, before: bool) {
+        if moved == target
+            || !self.nodes.contains_key(&moved)
+            || !self.nodes.contains_key(&target)
+            || self.is_descendant(target, moved)
+        {
+            return;
+        }
+        let new_parent = self.nodes.get(&target).and_then(|n| n.parent);
+        if let Some(list) = self.sibling_list_mut(moved) {
+            list.retain(|x| *x != moved);
+        }
+        if let Some(n) = self.nodes.get_mut(&moved) {
+            n.parent = new_parent;
+        }
+        let list = match new_parent {
+            Some(p) => self.nodes.get_mut(&p).map(|n| &mut n.children),
+            None => Some(&mut self.roots),
+        };
+        if let Some(list) = list {
+            let pos = list
+                .iter()
+                .position(|x| *x == target)
+                .map_or(list.len(), |i| if before { i } else { i + 1 });
+            list.insert(pos, moved);
+        }
+    }
+
+    /// Is `node` inside the subtree rooted at `ancestor`?
+    fn is_descendant(&self, node: NodeId, ancestor: NodeId) -> bool {
+        let mut cur = self.nodes.get(&node).and_then(|n| n.parent);
+        while let Some(c) = cur {
+            if c == ancestor {
+                return true;
+            }
+            cur = self.nodes.get(&c).and_then(|n| n.parent);
+        }
+        false
+    }
+
     /// Move a node one slot earlier (`up`) or later among its siblings.
     pub fn move_sibling(&mut self, id: NodeId, up: bool) {
         if let Some(list) = self.sibling_list_mut(id) {
@@ -579,6 +636,41 @@ mod tests {
         assert_eq!(doc.nodes[&b].parent, None);
         assert!(doc.nodes[&a].children.is_empty());
         assert_eq!(doc.roots, vec![a, b]);
+    }
+
+    #[test]
+    fn move_to_edge_and_reorder() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "a".into());
+        let b = doc.add_node(None, "b".into());
+        let c = doc.add_node(None, "c".into());
+        // roots: [a, b, c]
+        doc.move_to_edge(c, true);
+        assert_eq!(doc.roots, vec![c, a, b]);
+        doc.move_to_edge(c, false);
+        assert_eq!(doc.roots, vec![a, b, c]);
+        // Drop c before a.
+        doc.reorder(c, a, true);
+        assert_eq!(doc.roots, vec![c, a, b]);
+        // Drop a after b.
+        doc.reorder(a, b, false);
+        assert_eq!(doc.roots, vec![c, b, a]);
+    }
+
+    #[test]
+    fn reorder_reparents_and_blocks_cycles() {
+        let mut doc = Document::empty();
+        let parent = doc.add_node(None, "p".into());
+        let child = doc.add_node(Some(parent), "c".into());
+        let other = doc.add_node(None, "o".into());
+        // Move `other` under parent, before child.
+        doc.reorder(other, child, true);
+        assert_eq!(doc.nodes[&other].parent, Some(parent));
+        assert_eq!(doc.nodes[&parent].children, vec![other, child]);
+        assert!(doc.roots.contains(&parent) && !doc.roots.contains(&other));
+        // Dropping a parent into its own child is refused.
+        doc.reorder(parent, child, true);
+        assert_eq!(doc.nodes[&parent].parent, None);
     }
 
     #[test]

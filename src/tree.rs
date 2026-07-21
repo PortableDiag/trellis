@@ -14,9 +14,13 @@ pub enum TreeAction {
     ToggleExpand(NodeId),
     MoveUp(NodeId),
     MoveDown(NodeId),
+    MoveToTop(NodeId),
+    MoveToBottom(NodeId),
     Indent(NodeId),
     Outdent(NodeId),
     SetColor(NodeId, Option<[u8; 3]>),
+    /// Drag & drop: put `moved` before/after `target` (adopting its parent).
+    Reorder { moved: NodeId, target: NodeId, before: bool },
 }
 
 /// `renaming` holds the node currently being renamed inline and its edit buffer.
@@ -119,13 +123,35 @@ fn node_ui(
                 }
             }
         } else {
-            let label = egui::SelectableLabel::new(is_sel, &node.title);
-            let resp = ui.add(label);
+            // The row is a drag source (payload = its id) so nodes can be
+            // dragged to reorder; clicks/double-clicks still select/rename.
+            let egui::InnerResponse { inner: resp, response: drag } = ui.dnd_drag_source(
+                ui.make_persistent_id(("tree_drag", id)),
+                id,
+                |ui| ui.add(egui::SelectableLabel::new(is_sel, &node.title)),
+            );
             if resp.clicked() {
                 actions.push(TreeAction::Select(id));
             }
             if resp.double_clicked() {
                 *renaming = Some((id, node.title.clone()));
+            }
+            // When another node is dragged over this row, show where it will land
+            // and perform the move on release.
+            if drag.dnd_hover_payload::<NodeId>().is_some() {
+                let rect = drag.rect;
+                let before = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .map_or(true, |p| p.y < rect.center().y);
+                let y = if before { rect.top() } else { rect.bottom() };
+                ui.painter().hline(
+                    rect.x_range(),
+                    y,
+                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                );
+                if let Some(moved) = drag.dnd_release_payload::<NodeId>() {
+                    actions.push(TreeAction::Reorder { moved: *moved, target: id, before });
+                }
             }
             resp.context_menu(|ui| {
                 if ui.button("Rename").clicked() {
@@ -142,12 +168,20 @@ fn node_ui(
                     ui.close_menu();
                 }
                 ui.separator();
+                if ui.button("Move to top").clicked() {
+                    actions.push(TreeAction::MoveToTop(id));
+                    ui.close_menu();
+                }
                 if ui.button("▲  Move up").clicked() {
                     actions.push(TreeAction::MoveUp(id));
                     ui.close_menu();
                 }
                 if ui.button("▼  Move down").clicked() {
                     actions.push(TreeAction::MoveDown(id));
+                    ui.close_menu();
+                }
+                if ui.button("Move to bottom").clicked() {
+                    actions.push(TreeAction::MoveToBottom(id));
                     ui.close_menu();
                 }
                 if ui.button("→  Indent").clicked() {

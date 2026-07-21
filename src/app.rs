@@ -375,6 +375,11 @@ impl TrellisApp {
                 }
                 TreeAction::MoveUp(id) => self.doc.move_sibling(id, true),
                 TreeAction::MoveDown(id) => self.doc.move_sibling(id, false),
+                TreeAction::MoveToTop(id) => self.doc.move_to_edge(id, true),
+                TreeAction::MoveToBottom(id) => self.doc.move_to_edge(id, false),
+                TreeAction::Reorder { moved, target, before } => {
+                    self.doc.reorder(moved, target, before)
+                }
                 TreeAction::Indent(id) => self.doc.indent(id),
                 TreeAction::Outdent(id) => self.doc.outdent(id),
                 TreeAction::SetColor(id, col) => {
