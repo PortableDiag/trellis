@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
+use emath::TSTransform;
 
 const MIN_CARD: egui::Vec2 = egui::Vec2::new(140.0, 90.0);
 
@@ -20,14 +21,12 @@ const API_KEY_KEY: &str = "api_key";
 const API_PORT_KEY: &str = "api_port";
 const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
-const MIN_ZOOM: f32 = 0.5;
-const MAX_ZOOM: f32 = 3.0;
 
 pub struct TrellisApp {
     doc: Document,
     selected: Option<NodeId>,
-    /// Per-node canvas pan offset, so each basket remembers its scroll.
-    pans: HashMap<NodeId, egui::Vec2>,
+    /// Per-node canvas view (pan + zoom), so each basket remembers its position.
+    views: HashMap<NodeId, TSTransform>,
     md_cache: CommonMarkCache,
     tex_cache: TextureCache,
     renaming: Option<(NodeId, String)>,
@@ -43,8 +42,7 @@ pub struct TrellisApp {
     search_query: String,
     show_about: bool,
     dark: bool,
-    zoom: f32,
-    /// Whether Ctrl+scroll / Ctrl +/- zoom the UI (Settings; on by default).
+    /// Whether Ctrl+scroll / Ctrl +/- zoom the canvas (Settings; on by default).
     zoom_enabled: bool,
 
     // Agent HTTP API.
@@ -129,7 +127,7 @@ impl TrellisApp {
         Self {
             doc,
             selected,
-            pans: HashMap::new(),
+            views: HashMap::new(),
             md_cache: CommonMarkCache::default(),
             tex_cache: TextureCache::default(),
             renaming: None,
@@ -141,7 +139,6 @@ impl TrellisApp {
             search_query: String::new(),
             show_about: false,
             dark: true,
-            zoom: 1.0,
             zoom_enabled,
             api_rx: Some(api_rx),
             api_shared_key,
@@ -152,8 +149,20 @@ impl TrellisApp {
         }
     }
 
-    fn set_zoom(&mut self, z: f32) {
-        self.zoom = z.clamp(MIN_ZOOM, MAX_ZOOM);
+    /// Zoom the selected node's canvas view by `factor` (menu buttons).
+    fn zoom_selected(&mut self, factor: f32) {
+        if let Some(sel) = self.selected {
+            let v = self.views.entry(sel).or_insert(TSTransform::IDENTITY);
+            v.scaling = (v.scaling * factor).clamp(canvas::MIN_ZOOM, canvas::MAX_ZOOM);
+        }
+    }
+
+    /// The zoom percentage of the selected node's canvas (for the status bar).
+    fn current_zoom_pct(&self) -> f32 {
+        self.selected
+            .and_then(|s| self.views.get(&s))
+            .map_or(1.0, |v| v.scaling)
+            * 100.0
     }
 
     /// Drain and apply any pending API commands from the server thread.
@@ -239,7 +248,7 @@ impl TrellisApp {
         }
         self.doc = Document::default();
         self.selected = self.doc.roots.first().copied();
-        self.pans.clear();
+        self.views.clear();
         self.doc_path = None;
         self.dirty = false;
         self.status = "New document".to_string();
@@ -257,7 +266,7 @@ impl TrellisApp {
                 Ok(Ok(doc)) => {
                     self.doc = doc;
                     self.selected = self.doc.roots.first().copied();
-                    self.pans.clear();
+                    self.views.clear();
                     self.doc_path = Some(path.clone());
                     self.dirty = false;
                     self.status = format!("Opened {}", path.display());
@@ -468,8 +477,7 @@ impl TrellisApp {
                 }
                 CanvasAction::LoadImage(cid) => self.load_image_into(node, cid),
                 CanvasAction::ResetView => {
-                    self.pans.insert(node, egui::Vec2::ZERO);
-                    self.zoom = 1.0;
+                    self.views.insert(node, TSTransform::IDENTITY);
                 }
             }
         }
@@ -559,14 +567,17 @@ impl TrellisApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Zoom in").clicked() {
-                        self.zoom = (self.zoom + 0.1).min(3.0);
+                    let has_sel = self.selected.is_some();
+                    if ui.add_enabled(has_sel, egui::Button::new("Zoom in")).clicked() {
+                        self.zoom_selected(1.1);
                     }
-                    if ui.button("Zoom out").clicked() {
-                        self.zoom = (self.zoom - 0.1).max(0.5);
+                    if ui.add_enabled(has_sel, egui::Button::new("Zoom out")).clicked() {
+                        self.zoom_selected(1.0 / 1.1);
                     }
-                    if ui.button("Reset zoom").clicked() {
-                        self.zoom = 1.0;
+                    if ui.add_enabled(has_sel, egui::Button::new("Reset zoom")).clicked() {
+                        if let Some(sel) = self.selected {
+                            self.views.insert(sel, TSTransform::IDENTITY);
+                        }
                     }
                     ui.separator();
                     if ui.button("Find… (Ctrl+F)").clicked() {
@@ -737,20 +748,15 @@ impl eframe::App for TrellisApp {
         // Apply any API requests from the server thread first.
         self.pump_api();
 
-        // Theme + zoom.
+        // Theme. (Zoom is per-canvas and handled in canvas::ui, so the whole-UI
+        // zoom factor stays at 1.0 — the chrome never scales.)
         ctx.set_visuals(if self.dark {
             egui::Visuals::dark()
         } else {
             egui::Visuals::light()
         });
-        ctx.set_zoom_factor(self.zoom);
 
-        // Keyboard shortcuts.
-        ctx.input(|i| {
-            if i.modifiers.command && i.key_pressed(egui::Key::S) {
-                // handled after borrow ends via flag
-            }
-        });
+        // Keyboard shortcuts (canvas zoom keys are handled in canvas::ui).
         let cmd = ctx.input(|i| i.modifiers.command);
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::S)) {
             self.save();
@@ -760,23 +766,6 @@ impl eframe::App for TrellisApp {
         }
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::N)) {
             self.new_document();
-        }
-        if self.zoom_enabled {
-            if cmd && ctx.input(|i| i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
-                self.set_zoom(self.zoom + 0.1);
-            }
-            if cmd && ctx.input(|i| i.key_pressed(egui::Key::Minus)) {
-                self.set_zoom(self.zoom - 0.1);
-            }
-            // Ctrl/Cmd + scroll and trackpad pinch zoom smoothly.
-            let zoom_delta = ctx.input(|i| i.zoom_delta());
-            if (zoom_delta - 1.0).abs() > f32::EPSILON {
-                self.set_zoom(self.zoom * zoom_delta);
-            }
-        }
-        // Reset (Ctrl+0) works regardless, so you can't get stuck zoomed.
-        if cmd && ctx.input(|i| i.key_pressed(egui::Key::Num0)) {
-            self.zoom = 1.0;
         }
 
         self.menu_bar(ctx);
@@ -798,7 +787,7 @@ impl eframe::App for TrellisApp {
                 ui.separator();
                 ui.label(&self.status);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!("{:.0}%", self.zoom * 100.0));
+                    ui.label(format!("{:.0}%", self.current_zoom_pct()));
                 });
             });
         });
@@ -818,14 +807,14 @@ impl eframe::App for TrellisApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(sel) = self.selected {
                 if self.doc.nodes.contains_key(&sel) {
-                    let mut pan = self.pans.get(&sel).copied().unwrap_or_default();
+                    let mut view = self.views.get(&sel).copied().unwrap_or_default();
                     let node = self.doc.nodes.get(&sel).unwrap();
                     let mut env = Env {
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
                     };
-                    let actions = canvas::ui(ui, node, &mut pan, &mut env);
-                    self.pans.insert(sel, pan);
+                    let actions = canvas::ui(ui, node, &mut view, self.zoom_enabled, &mut env);
+                    self.views.insert(sel, view);
                     self.apply_canvas(sel, actions);
                 } else {
                     self.selected = None;

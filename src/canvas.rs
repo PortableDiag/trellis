@@ -5,6 +5,11 @@ use crate::images::TextureCache;
 use crate::model::{Card, CardId, CardKind, ChecklistItem, Node};
 use egui::text::{CCursor, CCursorRange};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use emath::TSTransform;
+
+/// Zoom bounds for the canvas view.
+pub const MIN_ZOOM: f32 = 0.2;
+pub const MAX_ZOOM: f32 = 3.0;
 
 /// Shared, frame-persistent caches the canvas needs.
 pub struct Env<'a> {
@@ -35,7 +40,17 @@ pub enum CanvasAction {
 
 const TITLE_H: f32 = 24.0;
 
-pub fn ui(ui: &mut egui::Ui, node: &Node, pan: &mut egui::Vec2, env: &mut Env) -> Vec<CanvasAction> {
+/// The canvas view: `view.translation` is the pan (screen px, relative to the
+/// canvas top-left) and `view.scaling` is the zoom. Cards live in "world"
+/// coordinates (`card.pos`); the layer transform below maps world → screen so
+/// that only the cards zoom — the surrounding chrome never does.
+pub fn ui(
+    ui: &mut egui::Ui,
+    node: &Node,
+    view: &mut TSTransform,
+    zoom_enabled: bool,
+    env: &mut Env,
+) -> Vec<CanvasAction> {
     let mut actions = Vec::new();
 
     let (canvas_rect, canvas_resp) =
@@ -45,25 +60,48 @@ pub fn ui(ui: &mut egui::Ui, node: &Node, pan: &mut egui::Vec2, env: &mut Env) -
     // Background + grid.
     let painter = ui.painter_at(canvas_rect);
     painter.rect_filled(canvas_rect, 0.0, ui.visuals().extreme_bg_color);
-    draw_grid(&painter, canvas_rect, *pan, ui.visuals().weak_text_color());
+    draw_grid(&painter, canvas_rect, *view, ui.visuals().weak_text_color());
 
-    // Pan by dragging empty canvas.
+    // Pan by dragging empty canvas (screen-space delta).
     if canvas_resp.dragged_by(egui::PointerButton::Primary) {
-        *pan += canvas_resp.drag_delta();
+        view.translation += canvas_resp.drag_delta();
     }
 
-    // Wheel scrolls the canvas when the pointer is over empty space; card
-    // bodies keep their own inner scrolling when hovered directly.
+    // Wheel over empty canvas pans; Ctrl+wheel (and pinch) zoom instead — egui
+    // routes Ctrl+scroll into zoom_delta and out of smooth_scroll_delta.
     if canvas_resp.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta);
-        *pan += scroll;
+        view.translation += ui.input(|i| i.smooth_scroll_delta);
+        if zoom_enabled {
+            let zd = ui.input(|i| i.zoom_delta());
+            if (zd - 1.0).abs() > f32::EPSILON {
+                if let Some(ptr) = ui.input(|i| i.pointer.hover_pos()) {
+                    zoom_at(view, canvas_rect, ptr, zd);
+                }
+            }
+        }
     }
 
-    // Double-click empty canvas → drop a text card there.
+    // Keyboard zoom (canvas-only): +/- around the canvas centre, Ctrl+0 resets.
+    let cmd = ui.input(|i| i.modifiers.command);
+    if zoom_enabled && cmd {
+        if ui.input(|i| i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
+            zoom_at(view, canvas_rect, canvas_rect.center(), 1.1);
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Minus)) {
+            zoom_at(view, canvas_rect, canvas_rect.center(), 1.0 / 1.1);
+        }
+    }
+    if cmd && ui.input(|i| i.key_pressed(egui::Key::Num0)) {
+        *view = TSTransform::IDENTITY; // reset works even if zoom is disabled
+    }
+
+    // world → screen for this canvas.
+    let to_screen = TSTransform::from_translation(canvas_rect.min.to_vec2()) * *view;
+
+    // Double-click empty canvas → drop a text card at that world position.
     if canvas_resp.double_clicked() {
         if let Some(p) = canvas_resp.interact_pointer_pos() {
-            let cp = p - canvas_rect.min.to_vec2() - *pan;
-            actions.push(CanvasAction::AddCard(CardKind::Text, cp));
+            actions.push(CanvasAction::AddCard(CardKind::Text, to_screen.inverse() * p));
         }
     }
 
@@ -73,7 +111,7 @@ pub fn ui(ui: &mut egui::Ui, node: &Node, pan: &mut egui::Vec2, env: &mut Env) -
         ui.label("Add card");
         ui.separator();
         let cp = menu_pos
-            .map(|p| p - canvas_rect.min.to_vec2() - *pan)
+            .map(|p| to_screen.inverse() * p)
             .unwrap_or(egui::pos2(40.0, 40.0));
         if ui.button("Text").clicked() {
             actions.push(CanvasAction::AddCard(CardKind::Text, cp));
@@ -101,34 +139,33 @@ pub fn ui(ui: &mut egui::Ui, node: &Node, pan: &mut egui::Vec2, env: &mut Env) -
         }
     });
 
-    let origin = canvas_rect.min.to_vec2() + *pan;
+    // Cards live in transformed layers so they (and their text) zoom.
+    let clip_world = to_screen.inverse() * canvas_rect;
     for card in &node.cards {
-        card_ui(ui, card, origin, canvas_rect, env, &mut actions);
+        card_ui(ui, card, to_screen, clip_world, env, &mut actions);
     }
 
-    // Reset-view button (top-right) — snaps the pan back to the origin.
-    let btn_rect = egui::Rect::from_min_size(
-        egui::pos2(canvas_rect.right() - 104.0, canvas_rect.top() + 8.0),
-        egui::vec2(96.0, 24.0),
-    );
-    let mut btn_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(btn_rect)
-            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-    );
-    if btn_ui
-        .button("Reset view")
-        .on_hover_text("Reset zoom to 100% and recenter the canvas")
-        .clicked()
-    {
-        actions.push(CanvasAction::ResetView);
-    }
+    // Reset-view button — in a foreground layer, untransformed, so it stays put
+    // and clickable above the cards.
+    let btn_pos = egui::pos2(canvas_rect.right() - 104.0, canvas_rect.top() + 8.0);
+    egui::Area::new(ui.id().with("reset_view"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(btn_pos)
+        .show(ui.ctx(), |ui| {
+            if ui
+                .button("Reset view")
+                .on_hover_text("Reset zoom to 100% and recenter the canvas")
+                .clicked()
+            {
+                actions.push(CanvasAction::ResetView);
+            }
+        });
 
-    // Hint line.
+    // Hint line (screen space).
     ui.painter().text(
         canvas_rect.left_bottom() + egui::vec2(8.0, -6.0),
         egui::Align2::LEFT_BOTTOM,
-        "double-click: text card · right-click: any card · drag title: move · corner: resize · drag empty: pan",
+        "double-click: text card · right-click: any card · drag title: move · corner: resize · drag empty: pan · ctrl+scroll: zoom",
         egui::FontId::proportional(11.0),
         ui.visuals().weak_text_color(),
     );
@@ -136,22 +173,60 @@ pub fn ui(ui: &mut egui::Ui, node: &Node, pan: &mut egui::Vec2, env: &mut Env) -
     actions
 }
 
+/// Apply a multiplicative zoom `factor` anchored at `screen_pt`, clamped so the
+/// resulting scale stays within [`MIN_ZOOM`, `MAX_ZOOM`].
+fn zoom_at(view: &mut TSTransform, canvas_rect: egui::Rect, screen_pt: egui::Pos2, factor: f32) {
+    let target = (view.scaling * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+    let factor = target / view.scaling;
+    if (factor - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+    let to_screen = TSTransform::from_translation(canvas_rect.min.to_vec2()) * *view;
+    let anchor = (to_screen.inverse() * screen_pt).to_vec2();
+    *view = *view
+        * TSTransform::from_translation(anchor)
+        * TSTransform::from_scaling(factor)
+        * TSTransform::from_translation(-anchor);
+}
+
 fn card_ui(
-    ui: &mut egui::Ui,
+    base: &mut egui::Ui,
     card: &Card,
-    origin: egui::Vec2,
-    clip: egui::Rect,
+    to_screen: TSTransform,
+    clip_world: egui::Rect,
     env: &mut Env,
     actions: &mut Vec<CanvasAction>,
 ) {
-    let rect = egui::Rect::from_min_size(card.pos + origin, card.size);
-    // Cull cards fully outside the viewport.
-    if !clip.intersects(rect) {
+    let rect = egui::Rect::from_min_size(card.pos, card.size);
+    // Cull cards fully outside the visible (world) region.
+    if !clip_world.intersects(rect) {
         return;
     }
 
+    // Each card is its own layer, positioned in world coords and scaled by the
+    // canvas transform — so the card and all its text zoom together, and input
+    // is transformed to match.
+    let area = egui::Area::new(base.id().with(("card_area", card.id)))
+        .order(egui::Order::Middle)
+        .fixed_pos(card.pos)
+        .constrain(false)
+        .show(base.ctx(), |ui| {
+            ui.set_clip_rect(clip_world);
+            card_contents(ui, card, rect, env, actions);
+        });
+    base.ctx().set_transform_layer(area.response.layer_id, to_screen);
+}
+
+fn card_contents(
+    ui: &mut egui::Ui,
+    card: &Card,
+    rect: egui::Rect,
+    env: &mut Env,
+    actions: &mut Vec<CanvasAction>,
+) {
+    ui.allocate_rect(rect, egui::Sense::hover());
     let accent = egui::Color32::from_rgb(card.color[0], card.color[1], card.color[2]);
-    let p = ui.painter_at(clip);
+    let p = ui.painter().clone();
     p.rect_filled(rect, 6.0, ui.visuals().panel_fill);
     p.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, accent));
 
@@ -215,7 +290,7 @@ fn card_ui(
     );
     if body_rect.height() > 6.0 {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
-        child.set_clip_rect(body_rect.intersect(clip));
+        child.set_clip_rect(body_rect.intersect(ui.clip_rect()));
         egui::ScrollArea::vertical()
             .id_salt(("card_body", card.id))
             .auto_shrink([false, false])
@@ -672,15 +747,18 @@ fn take_primary_selection() -> Option<String> {
     None
 }
 
-fn draw_grid(painter: &egui::Painter, rect: egui::Rect, pan: egui::Vec2, color: egui::Color32) {
-    let step = 32.0;
+fn draw_grid(painter: &egui::Painter, rect: egui::Rect, view: TSTransform, color: egui::Color32) {
+    let step = 32.0 * view.scaling;
+    if step < 6.0 {
+        return; // too dense to be useful when zoomed far out
+    }
     let stroke = egui::Stroke::new(1.0, color.gamma_multiply(0.25));
-    let mut x = rect.min.x + pan.x.rem_euclid(step);
+    let mut x = rect.min.x + view.translation.x.rem_euclid(step);
     while x < rect.max.x {
         painter.line_segment([egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y)], stroke);
         x += step;
     }
-    let mut y = rect.min.y + pan.y.rem_euclid(step);
+    let mut y = rect.min.y + view.translation.y.rem_euclid(step);
     while y < rect.max.y {
         painter.line_segment([egui::pos2(rect.min.x, y), egui::pos2(rect.max.x, y)], stroke);
         y += step;
