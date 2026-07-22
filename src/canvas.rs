@@ -689,6 +689,49 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                     }
                 });
 
+                // Auto-continue Markdown lists: Enter on a list line inserts the
+                // next marker; Enter on an empty item ends the list. Done before
+                // the editor shows so we can swallow the newline it would insert.
+                if edited.is_none()
+                    && ui.memory(|m| m.has_focus(edit_id))
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.any())
+                {
+                    if let Some(range) =
+                        egui::widgets::text_edit::TextEditState::load(ui.ctx(), edit_id)
+                            .and_then(|s| s.cursor.char_range())
+                    {
+                        if range.primary.index == range.secondary.index {
+                            let at = range.primary.index;
+                            let start = line_start(&card.body, at);
+                            let line: String =
+                                card.body.chars().skip(start).take(at - start).collect();
+                            match list_enter(&line) {
+                                Some(ListEnter::Continue(marker)) => {
+                                    edited = Some(replace_range(&card.body, (at, at), &marker));
+                                }
+                                Some(ListEnter::Exit) => {
+                                    edited = Some(replace_range(&card.body, (start, at), ""));
+                                }
+                                None => {}
+                            }
+                            if edited.is_some() {
+                                ui.input_mut(|i| {
+                                    i.events.retain(|e| {
+                                        !matches!(
+                                            e,
+                                            egui::Event::Key {
+                                                key: egui::Key::Enter,
+                                                pressed: true,
+                                                ..
+                                            }
+                                        )
+                                    })
+                                });
+                            }
+                        }
+                    }
+                }
+
                 let mut body = card.body.clone();
                 let out = egui::TextEdit::multiline(&mut body)
                     .id(edit_id)
@@ -1050,6 +1093,70 @@ fn wrap_color(text: &str, sel: (usize, usize), rgb: [u8; 3]) -> (String, CCursor
     (out, ccrange(a + ol, b + ol))
 }
 
+/// What pressing Enter on a Markdown list line should do.
+enum ListEnter {
+    /// Insert this text (a newline plus the next marker) to continue the list.
+    Continue(String),
+    /// The current item is empty — clear its marker and leave the list.
+    Exit,
+}
+
+/// Char index of the start of the line containing char index `at`.
+fn line_start(text: &str, at: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = at.min(chars.len());
+    while i > 0 && chars[i - 1] != '\n' {
+        i -= 1;
+    }
+    i
+}
+
+/// Given the current line up to the cursor, decide how Enter continues a list:
+/// bullets (`-`/`*`/`+`), task items (`- [ ]`), and numbered (`1.`/`1)`), with
+/// indentation preserved. An empty item ends the list. `None` = not a list line.
+fn list_enter(line: &str) -> Option<ListEnter> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, rest) = line.split_at(indent_len);
+    // Task list items first (they start with a bullet too).
+    for pfx in ["- [ ] ", "- [x] ", "- [X] "] {
+        if let Some(after) = rest.strip_prefix(pfx) {
+            return Some(if after.trim().is_empty() {
+                ListEnter::Exit
+            } else {
+                ListEnter::Continue(format!("\n{indent}- [ ] "))
+            });
+        }
+    }
+    // Plain bullets.
+    for m in ['-', '*', '+'] {
+        let pfx = format!("{m} ");
+        if let Some(after) = rest.strip_prefix(pfx.as_str()) {
+            return Some(if after.trim().is_empty() {
+                ListEnter::Exit
+            } else {
+                ListEnter::Continue(format!("\n{indent}{m} "))
+            });
+        }
+    }
+    // Numbered: digits then ". " or ") ".
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if !digits.is_empty() {
+        let after_num = &rest[digits.len()..];
+        for sep in [". ", ") "] {
+            if let Some(after) = after_num.strip_prefix(sep) {
+                return Some(if after.trim().is_empty() {
+                    ListEnter::Exit
+                } else {
+                    let n: u64 = digits.parse().unwrap_or(0);
+                    let sep_ch = sep.chars().next().unwrap();
+                    ListEnter::Continue(format!("\n{indent}{}{sep_ch} ", n + 1))
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Prepend `prefix` to every line the selection touches (headings, lists, quote).
 fn line_prefix(text: &str, sel: (usize, usize), prefix: &str) -> (String, CCursorRange) {
     let chars: Vec<char> = text.chars().collect();
@@ -1316,6 +1423,35 @@ mod tests {
         let (out, sel) = wrap_inline("", (0, 0), "**");
         assert_eq!(out, "****");
         assert_eq!(range(&sel), (2, 2));
+    }
+
+    #[test]
+    fn list_enter_continues_and_exits() {
+        // Numbered: next number, indentation kept.
+        assert!(matches!(
+            list_enter("1. first"),
+            Some(ListEnter::Continue(s)) if s == "\n2. "
+        ));
+        assert!(matches!(
+            list_enter("   3. nested"),
+            Some(ListEnter::Continue(s)) if s == "\n   4. "
+        ));
+        // Bullets and tasks.
+        assert!(matches!(list_enter("- item"), Some(ListEnter::Continue(s)) if s == "\n- "));
+        assert!(matches!(
+            list_enter("- [ ] todo"),
+            Some(ListEnter::Continue(s)) if s == "\n- [ ] "
+        ));
+        assert!(matches!(
+            list_enter("- [x] done"),
+            Some(ListEnter::Continue(s)) if s == "\n- [ ] "
+        ));
+        // Empty item ends the list.
+        assert!(matches!(list_enter("1. "), Some(ListEnter::Exit)));
+        assert!(matches!(list_enter("- "), Some(ListEnter::Exit)));
+        // Not a list.
+        assert!(list_enter("just text").is_none());
+        assert!(list_enter("").is_none());
     }
 
     #[test]
