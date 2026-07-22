@@ -136,14 +136,23 @@ pub fn ui(
         actions.push(CanvasAction::ClearSelection);
     }
 
-    // Right-click empty canvas → choose a card kind to add.
-    let menu_pos = canvas_resp.interact_pointer_pos();
+    // Right-click empty canvas → choose a card kind to add, at the click spot.
+    // The click's world position is captured when the menu opens: on the later
+    // frame where a menu item is actually clicked, the pointer is on the menu,
+    // not the canvas, so reading interact_pointer_pos() then would yield None
+    // (which used to drop new cards at world (40,40) — the "top area" bug).
+    let menu_world_key = ui.id().with("canvas_menu_world_pos");
+    if canvas_resp.secondary_clicked() {
+        if let Some(p) = canvas_resp.interact_pointer_pos() {
+            ui.memory_mut(|m| m.data.insert_temp(menu_world_key, to_screen.inverse() * p));
+        }
+    }
     canvas_resp.context_menu(|ui| {
         ui.label("Add card");
         ui.separator();
-        let cp = menu_pos
-            .map(|p| to_screen.inverse() * p)
-            .unwrap_or(egui::pos2(40.0, 40.0));
+        let cp = ui
+            .memory(|m| m.data.get_temp::<egui::Pos2>(menu_world_key))
+            .unwrap_or_else(|| to_screen.inverse() * canvas_rect.center());
         if ui.button("Text").clicked() {
             actions.push(CanvasAction::AddCard(CardKind::Text, cp));
             ui.close_menu();

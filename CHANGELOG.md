@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.17.1]
+
+### Fixed
+- Cards added from the right-click menu now appear at the spot you right-clicked.
+  Previously the click position was lost by the time a menu item was chosen, so
+  new cards landed at the canvas origin ("the top area"). If the position is
+  ever unavailable, new cards fall back to the center of the visible canvas
+  instead of the origin. (Double-click already placed text cards correctly.)
+
 ## [0.17.0]
 
 ### Added
