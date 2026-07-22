@@ -1,5 +1,5 @@
-//! Decoding embedded image bytes into egui textures, with a small cache keyed by
-//! card id so we only upload to the GPU once per image.
+//! Decoding embedded image bytes into egui textures, with a small cache keyed
+//! by card id + image index so we only upload to the GPU once per image.
 
 use crate::model::CardId;
 use std::collections::HashMap;
@@ -7,7 +7,7 @@ use std::collections::HashMap;
 /// Cached texture plus the byte-length it was built from, so we can detect when
 /// a card's image was replaced and rebuild it.
 pub struct TextureCache {
-    entries: HashMap<CardId, (usize, egui::TextureHandle)>,
+    entries: HashMap<(CardId, usize), (usize, egui::TextureHandle)>,
 }
 
 impl Default for TextureCache {
@@ -19,27 +19,30 @@ impl Default for TextureCache {
 }
 
 impl TextureCache {
-    /// Return a texture for the given card's image bytes, decoding and uploading
-    /// on first use (or after the bytes change). `None` if decoding fails.
+    /// Return a texture for the `index`th image of a card, decoding and
+    /// uploading on first use (or after the bytes change). `None` if decoding
+    /// fails.
     pub fn get(
         &mut self,
         ctx: &egui::Context,
         card: CardId,
+        index: usize,
         bytes: &[u8],
     ) -> Option<egui::TextureHandle> {
-        if let Some((len, tex)) = self.entries.get(&card) {
+        if let Some((len, tex)) = self.entries.get(&(card, index)) {
             if *len == bytes.len() {
                 return Some(tex.clone());
             }
         }
         let image = decode(bytes)?;
-        let tex = ctx.load_texture(format!("card-image-{card}"), image, Default::default());
-        self.entries.insert(card, (bytes.len(), tex.clone()));
+        let tex = ctx.load_texture(format!("card-image-{card}-{index}"), image, Default::default());
+        self.entries.insert((card, index), (bytes.len(), tex.clone()));
         Some(tex)
     }
 
+    /// Drop all cached textures for a card (its image list changed).
     pub fn forget(&mut self, card: CardId) {
-        self.entries.remove(&card);
+        self.entries.retain(|(c, _), _| *c != card);
     }
 }
 

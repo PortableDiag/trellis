@@ -29,6 +29,14 @@ pub struct ChecklistItem {
     pub text: String,
 }
 
+/// One additional image of an Image card. The first image lives in the
+/// variant's `data`/`name` fields so pre-multi-image documents load unchanged.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ImageEntry {
+    pub data: Vec<u8>,
+    pub name: String,
+}
+
 /// What a card holds. `Text`/`Code` use the card's `body` string; the others
 /// carry their own data.
 #[derive(Clone, Serialize, Deserialize)]
@@ -38,8 +46,14 @@ pub enum CardKind {
     /// `body` is source code; `lang` selects syntax highlighting.
     Code { lang: String },
     Checklist { items: Vec<ChecklistItem> },
-    /// Image bytes embedded directly in the document for portability.
-    Image { data: Vec<u8>, name: String },
+    /// Image bytes embedded directly in the document for portability. `data`/
+    /// `name` hold the first image; `extra` any further ones (shown as a grid).
+    Image {
+        data: Vec<u8>,
+        name: String,
+        #[serde(default)]
+        extra: Vec<ImageEntry>,
+    },
 }
 
 impl CardKind {
@@ -49,6 +63,22 @@ impl CardKind {
             CardKind::Code { .. } => "Code",
             CardKind::Checklist { .. } => "Checklist",
             CardKind::Image { .. } => "Image",
+        }
+    }
+
+    /// All images of an Image card in display order: the primary `data`/`name`
+    /// pair (when loaded), then `extra`. Empty for other kinds.
+    pub fn images(&self) -> Vec<(&[u8], &str)> {
+        match self {
+            CardKind::Image { data, name, extra } => {
+                let mut v: Vec<(&[u8], &str)> = Vec::new();
+                if !data.is_empty() {
+                    v.push((data.as_slice(), name.as_str()));
+                }
+                v.extend(extra.iter().map(|e| (e.data.as_slice(), e.name.as_str())));
+                v
+            }
+            _ => Vec::new(),
         }
     }
 }
@@ -282,6 +312,54 @@ impl Document {
             .cards
             .iter_mut()
             .find(|c| c.id == card)
+    }
+
+    /// Append an image to an Image card (the first load fills the primary
+    /// slot). Returns false if the card isn't an Image card.
+    pub fn add_image(&mut self, node: NodeId, card: CardId, bytes: Vec<u8>, img_name: String) -> bool {
+        match self.card_mut(node, card).map(|c| &mut c.kind) {
+            Some(CardKind::Image { data, name, extra }) => {
+                if data.is_empty() && extra.is_empty() {
+                    *data = bytes;
+                    *name = img_name;
+                } else {
+                    extra.push(ImageEntry { data: bytes, name: img_name });
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Remove the `idx`th image (display order) from an Image card. Removing
+    /// the primary image promotes the next `extra` entry into its place.
+    pub fn remove_image(&mut self, node: NodeId, card: CardId, idx: usize) -> bool {
+        match self.card_mut(node, card).map(|c| &mut c.kind) {
+            Some(CardKind::Image { data, name, extra }) => {
+                if idx == 0 && !data.is_empty() {
+                    if extra.is_empty() {
+                        data.clear();
+                        name.clear();
+                    } else {
+                        let e = extra.remove(0);
+                        *data = e.data;
+                        *name = e.name;
+                    }
+                    true
+                } else {
+                    // Display index counts the primary image when present.
+                    let base = if data.is_empty() { 0 } else { 1 };
+                    let i = idx - base;
+                    if i < extra.len() {
+                        extra.remove(i);
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+            _ => false,
+        }
     }
 
     /// The ordered sibling list a node lives in (its parent's children, or the
@@ -727,13 +805,15 @@ impl Document {
                     }
                     s.push_str("</ul>\n");
                 }
-                CardKind::Image { data, name } => {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
-                    let mime = mime_for(name);
-                    s.push_str(&format!(
-                        "<img alt=\"{}\" src=\"data:{mime};base64,{b64}\">\n",
-                        escape_html(name)
-                    ));
+                k @ CardKind::Image { .. } => {
+                    for (data, name) in k.images() {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+                        let mime = mime_for(name);
+                        s.push_str(&format!(
+                            "<img alt=\"{}\" src=\"data:{mime};base64,{b64}\">\n",
+                            escape_html(name)
+                        ));
+                    }
                 }
             }
             s.push_str("</article>\n");
@@ -803,8 +883,10 @@ impl Document {
                         out.push(ExportLine { text: format!("{mark} {}", it.text), size: 10.5 });
                     }
                 }
-                CardKind::Image { name, .. } => {
-                    out.push(ExportLine { text: format!("(image: {name})"), size: 10.5 });
+                k @ CardKind::Image { .. } => {
+                    for (_, name) in k.images() {
+                        out.push(ExportLine { text: format!("(image: {name})"), size: 10.5 });
+                    }
                 }
             }
             out.push(ExportLine { text: String::new(), size: 5.0 });
@@ -912,8 +994,10 @@ impl Document {
                     }
                     s.push('\n');
                 }
-                CardKind::Image { name, .. } => {
-                    s.push_str(&format!("*(image: {name})*\n\n"));
+                k @ CardKind::Image { .. } => {
+                    for (_, name) in k.images() {
+                        s.push_str(&format!("*(image: {name})*\n\n"));
+                    }
                 }
             }
         }
@@ -986,7 +1070,12 @@ fn searchable_body(card: &Card) -> String {
             .map(|i| i.text.as_str())
             .collect::<Vec<_>>()
             .join(" "),
-        CardKind::Image { name, .. } => name.clone(),
+        k @ CardKind::Image { .. } => k
+            .images()
+            .iter()
+            .map(|(_, n)| *n)
+            .collect::<Vec<_>>()
+            .join(" "),
     }
 }
 
@@ -1108,6 +1197,48 @@ mod tests {
     fn hard_wrap_renders_as_line_breaks_in_html() {
         // The whole point: two lines become two visual lines (<br>), not one.
         assert!(md_to_html("line one\nline two").contains("<br"));
+    }
+
+    #[test]
+    fn image_cards_hold_multiple_images_and_legacy_ron_loads() {
+        // A pre-multi-image card (no `extra` field in the RON) still loads.
+        let legacy = r#"(
+            id: 1, pos: (x: 0.0, y: 0.0), size: (x: 10.0, y: 10.0),
+            title: "", body: "", color: (1, 2, 3),
+            kind: Image(data: [9, 9], name: "old.png"),
+        )"#;
+        let card: Card = ron::from_str(legacy).expect("legacy image card RON loads");
+        let imgs = card.kind.images();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].1, "old.png");
+
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let c = doc
+            .add_card(
+                n,
+                egui::pos2(0.0, 0.0),
+                CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new() },
+            )
+            .unwrap();
+
+        // First load fills the primary slot; later loads append.
+        assert!(doc.add_image(n, c, vec![1], "a.png".into()));
+        assert!(doc.add_image(n, c, vec![2], "b.png".into()));
+        assert!(doc.add_image(n, c, vec![3], "c.png".into()));
+        let names: Vec<String> = doc.card_mut(n, c).unwrap().kind.images()
+            .iter().map(|(_, s)| s.to_string()).collect();
+        assert_eq!(names, ["a.png", "b.png", "c.png"]);
+
+        // Removing the primary promotes the next image; indices stay stable.
+        assert!(doc.remove_image(n, c, 0));
+        assert!(doc.remove_image(n, c, 1));
+        let names: Vec<String> = doc.card_mut(n, c).unwrap().kind.images()
+            .iter().map(|(_, s)| s.to_string()).collect();
+        assert_eq!(names, ["b.png"]);
+        assert!(!doc.remove_image(n, c, 5));
+        assert!(doc.remove_image(n, c, 0));
+        assert!(doc.card_mut(n, c).unwrap().kind.images().is_empty());
     }
 
     #[test]

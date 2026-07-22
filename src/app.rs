@@ -43,6 +43,18 @@ use emath::TSTransform;
 
 const MIN_CARD: egui::Vec2 = egui::Vec2::new(140.0, 90.0);
 
+/// State of the full-screen image viewer (shadowbox).
+struct Lightbox {
+    node: NodeId,
+    card: crate::model::CardId,
+    /// Display index into the card's image list.
+    index: usize,
+    /// Zoom on top of fit-to-screen; 1.0 = fit.
+    zoom: f32,
+    /// Drag offset from screen center, in points.
+    pan: egui::Vec2,
+}
+
 /// eframe storage keys.
 const LAST_DOC_KEY: &str = "last_doc_path";
 const API_KEY_KEY: &str = "api_key";
@@ -147,6 +159,8 @@ pub struct TrellisApp {
     /// Fallback autosave location used when the document is untitled.
     autosave_path: PathBuf,
     dialog_parent: Option<DialogParent>,
+    /// Full-screen image viewer, opened by double-clicking an image card image.
+    lightbox: Option<Lightbox>,
     dirty: bool,
     status: String,
 
@@ -275,6 +289,7 @@ impl TrellisApp {
             doc_path,
             autosave_path,
             dialog_parent: None,
+            lightbox: None,
             dirty: false,
             status: "Ready".to_string(),
             search_open: false,
@@ -740,6 +755,21 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::LoadImage(cid) => self.load_image_into(node, cid),
+                CanvasAction::RemoveImage(cid, idx) => {
+                    if self.doc.remove_image(node, cid, idx) {
+                        self.tex_cache.forget(cid);
+                        self.dirty = true;
+                    }
+                }
+                CanvasAction::OpenLightbox(cid, idx) => {
+                    self.lightbox = Some(Lightbox {
+                        node,
+                        card: cid,
+                        index: idx,
+                        zoom: 1.0,
+                        pan: egui::Vec2::ZERO,
+                    });
+                }
                 CanvasAction::ToggleSelect(cid) => {
                     if !self.card_sel.insert(cid) {
                         self.card_sel.remove(&cid);
@@ -779,14 +809,164 @@ impl TrellisApp {
                         .file_name()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    if let Some(c) = self.doc.card_mut(node, card) {
-                        c.kind = CardKind::Image { data: bytes, name };
+                    if self.doc.add_image(node, card, bytes, name) {
+                        self.tex_cache.forget(card);
+                        self.dirty = true;
+                        self.status = "Loaded image".to_string();
                     }
-                    self.tex_cache.forget(card);
-                    self.status = "Loaded image".to_string();
                 }
                 Err(e) => self.status = format!("Image read error: {e}"),
             }
+        }
+    }
+
+    /// Full-screen image viewer: dark backdrop, fit-to-screen image, scroll or
+    /// +/- to zoom, drag to pan, ←/→ (keys or buttons) to flip through the
+    /// card's images, Esc / × / backdrop click to close.
+    fn lightbox_ui(&mut self, ctx: &egui::Context) {
+        let (node_id, card_id) = match &self.lightbox {
+            Some(l) => (l.node, l.card),
+            None => return,
+        };
+        let images: Vec<(&[u8], &str)> = match self
+            .doc
+            .nodes
+            .get(&node_id)
+            .and_then(|n| n.cards.iter().find(|c| c.id == card_id))
+        {
+            Some(c) => c.kind.images(),
+            None => Vec::new(),
+        };
+        let n = images.len();
+        if n == 0 {
+            self.lightbox = None;
+            return;
+        }
+
+        let (mut index, mut zoom, mut pan) = {
+            let l = self.lightbox.as_ref().unwrap();
+            (l.index.min(n - 1), l.zoom, l.pan)
+        };
+        let mut close = false;
+        let mut step = 0isize;
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::Escape) {
+                close = true;
+            }
+            if i.key_pressed(egui::Key::ArrowRight) {
+                step = 1;
+            }
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                step = -1;
+            }
+            if i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) {
+                zoom = (zoom * 1.25).min(10.0);
+            }
+            if i.key_pressed(egui::Key::Minus) {
+                zoom = (zoom / 1.25).max(0.2);
+            }
+            let scroll = i.raw_scroll_delta.y;
+            if scroll != 0.0 {
+                zoom = (zoom * (1.0015f32).powf(scroll)).clamp(0.2, 10.0);
+            }
+        });
+
+        egui::Area::new(egui::Id::new("lightbox"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::Pos2::ZERO)
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                // Backdrop swallows canvas interactions; clicking it closes.
+                let bg = ui.allocate_rect(screen, egui::Sense::click());
+                ui.painter()
+                    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(235));
+                if bg.clicked() {
+                    close = true;
+                }
+
+                let (bytes, name) = images[index];
+                let caption;
+                if let Some(tex) = self.tex_cache.get(ctx, card_id, index, bytes) {
+                    let img = tex.size_vec2();
+                    let fit = (screen.width() * 0.94 / img.x)
+                        .min(screen.height() * 0.88 / img.y)
+                        .min(1.0);
+                    let rect = egui::Rect::from_center_size(
+                        screen.center() + pan,
+                        img * fit * zoom,
+                    );
+                    let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                    if resp.dragged() {
+                        pan += resp.drag_delta();
+                    }
+                    if resp.double_clicked() {
+                        // Double-click toggles between fit and 2x.
+                        zoom = if (zoom - 1.0).abs() < 0.01 { 2.0 } else { 1.0 };
+                        pan = egui::Vec2::ZERO;
+                    }
+                    egui::Image::from_texture(egui::load::SizedTexture::from_handle(&tex))
+                        .paint_at(ui, rect);
+                    caption = format!(
+                        "{} — {}/{} · {:.0}% · scroll or +/- to zoom · drag to pan · ←/→ next · Esc to close",
+                        name,
+                        index + 1,
+                        n,
+                        fit * zoom * 100.0
+                    );
+                } else {
+                    caption = format!("{name} — unreadable image");
+                }
+
+                let fid = egui::FontId::proportional(14.0);
+                ui.painter().text(
+                    egui::pos2(screen.center().x, screen.bottom() - 14.0),
+                    egui::Align2::CENTER_CENTER,
+                    &caption,
+                    fid,
+                    egui::Color32::from_gray(0xd0),
+                );
+
+                // Controls on top of everything.
+                let btn = |ui: &mut egui::Ui, r: egui::Rect, label: &str| {
+                    ui.put(r, egui::Button::new(egui::RichText::new(label).size(20.0)))
+                };
+                let close_r = egui::Rect::from_min_size(
+                    egui::pos2(screen.right() - 44.0, screen.top() + 8.0),
+                    egui::vec2(36.0, 36.0),
+                );
+                if btn(ui, close_r, "×").clicked() {
+                    close = true;
+                }
+                if n > 1 {
+                    let side = egui::vec2(36.0, 72.0);
+                    let prev_r = egui::Rect::from_center_size(
+                        egui::pos2(screen.left() + 30.0, screen.center().y),
+                        side,
+                    );
+                    let next_r = egui::Rect::from_center_size(
+                        egui::pos2(screen.right() - 30.0, screen.center().y),
+                        side,
+                    );
+                    if btn(ui, prev_r, "◀").clicked() {
+                        step = -1;
+                    }
+                    if btn(ui, next_r, "▶").clicked() {
+                        step = 1;
+                    }
+                }
+            });
+
+        if step != 0 {
+            index = (index as isize + step).rem_euclid(n as isize) as usize;
+            zoom = 1.0;
+            pan = egui::Vec2::ZERO;
+        }
+        if close {
+            self.lightbox = None;
+        } else if let Some(l) = self.lightbox.as_mut() {
+            l.index = index;
+            l.zoom = zoom;
+            l.pan = pan;
         }
     }
 
@@ -1192,6 +1372,8 @@ impl eframe::App for TrellisApp {
         if self.show_settings {
             self.settings_window(ctx);
         }
+
+        self.lightbox_ui(ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

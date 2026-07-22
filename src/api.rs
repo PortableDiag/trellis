@@ -426,7 +426,11 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         .map(|i| ChecklistItem { done: i.done, text: i.text })
                         .collect(),
                 },
-                "image" => CardKind::Image { data: Vec::new(), name: input.title.clone() },
+                "image" => CardKind::Image {
+                    data: Vec::new(),
+                    name: input.title.clone(),
+                    extra: Vec::new(),
+                },
                 _ => CardKind::Text,
             };
             let pos = input
@@ -661,9 +665,11 @@ fn card_json(c: &Card) -> Value {
                 .map(|i| json!({ "done": i.done, "text": i.text }))
                 .collect::<Vec<_>>());
         }
-        CardKind::Image { name, data } => {
-            v["image_name"] = json!(name);
-            v["bytes"] = json!(data.len());
+        k @ CardKind::Image { .. } => {
+            let images = k.images();
+            v["image_name"] = json!(images.first().map(|(_, n)| *n).unwrap_or(""));
+            v["image_names"] = json!(images.iter().map(|(_, n)| *n).collect::<Vec<_>>());
+            v["bytes"] = json!(images.iter().map(|(d, _)| d.len()).sum::<usize>());
         }
     }
     v

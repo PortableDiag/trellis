@@ -39,6 +39,9 @@ pub enum CanvasAction {
     ChecklistAdd(CardId),
     ChecklistRemove(CardId, usize),
     LoadImage(CardId),
+    RemoveImage(CardId, usize),
+    /// Open the full-screen image viewer at the given image of a card.
+    OpenLightbox(CardId, usize),
     // Multi-select (runtime only; used to build a group).
     ToggleSelect(CardId),
     ClearSelection,
@@ -160,7 +163,7 @@ pub fn ui(
         }
         if ui.button("Image").clicked() {
             actions.push(CanvasAction::AddCard(
-                CardKind::Image { data: Vec::new(), name: String::new() },
+                CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new() },
                 cp,
             ));
             ui.close_menu();
@@ -865,33 +868,80 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                 actions.push(CanvasAction::ChecklistAdd(card.id));
             }
         }
-        CardKind::Image { data, name } => {
+        k @ CardKind::Image { .. } => {
             // Editing an image card just means naming it, so you can tell a few
-            // apart. The image itself always shows.
+            // apart. The images themselves always show.
             if card.editing {
                 title_field(ui, card, actions);
             }
-            if data.is_empty() {
+            let images = k.images();
+            if images.is_empty() {
                 if ui.button("Load image…").clicked() {
                     actions.push(CanvasAction::LoadImage(card.id));
                 }
-            } else if let Some(tex) = env.tex.get(ui.ctx(), card.id, data) {
-                let avail = ui.available_width().max(32.0);
-                let img_size = tex.size_vec2();
-                let scale = (avail / img_size.x).min(1.0);
-                let src = egui::load::SizedTexture::from_handle(&tex);
-                ui.add(egui::Image::from_texture(src).fit_to_exact_size(img_size * scale));
+            } else {
+                // Grid of images: chunked rows, each image fit to its cell
+                // width. Double-click opens the full-screen viewer.
+                let cols = grid_cols(images.len());
+                let spacing = ui.spacing().item_spacing.x;
+                let cell_w =
+                    ((ui.available_width() - spacing * (cols as f32 - 1.0)) / cols as f32).max(32.0);
+                for (row_i, row) in images.chunks(cols).enumerate() {
+                    ui.horizontal(|ui| {
+                        for (col_i, (data, name)) in row.iter().enumerate() {
+                            let idx = row_i * cols + col_i;
+                            match env.tex.get(ui.ctx(), card.id, idx, data) {
+                                Some(tex) => {
+                                    let img_size = tex.size_vec2();
+                                    let scale = (cell_w / img_size.x).min(1.0);
+                                    let src = egui::load::SizedTexture::from_handle(&tex);
+                                    let resp = ui
+                                        .add(
+                                            egui::Image::from_texture(src)
+                                                .fit_to_exact_size(img_size * scale)
+                                                .sense(egui::Sense::click()),
+                                        )
+                                        .on_hover_text(format!("{name} — double-click to view"));
+                                    if resp.double_clicked() {
+                                        actions.push(CanvasAction::OpenLightbox(card.id, idx));
+                                    }
+                                    resp.context_menu(|ui| {
+                                        if ui.button("View").clicked() {
+                                            actions.push(CanvasAction::OpenLightbox(card.id, idx));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Remove image").clicked() {
+                                            actions.push(CanvasAction::RemoveImage(card.id, idx));
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                                None => {
+                                    let resp = ui.colored_label(
+                                        egui::Color32::from_rgb(0xef, 0x44, 0x44),
+                                        format!("unreadable: {name}"),
+                                    );
+                                    resp.context_menu(|ui| {
+                                        if ui.button("Remove image").clicked() {
+                                            actions.push(CanvasAction::RemoveImage(card.id, idx));
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    });
+                }
                 ui.horizontal(|ui| {
-                    ui.weak(name.as_str());
-                    if ui.small_button("replace").clicked() {
+                    if images.len() == 1 {
+                        ui.weak(images[0].1);
+                    } else {
+                        ui.weak(format!("{} images", images.len()));
+                    }
+                    if ui.small_button("add image").clicked() {
                         actions.push(CanvasAction::LoadImage(card.id));
                     }
                 });
-            } else {
-                ui.colored_label(egui::Color32::from_rgb(0xef, 0x44, 0x44), "unreadable image");
-                if ui.small_button("load another").clicked() {
-                    actions.push(CanvasAction::LoadImage(card.id));
-                }
             }
         }
     }
@@ -1034,6 +1084,16 @@ fn title_field(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) 
         actions.push(CanvasAction::SetTitle(card.id, title));
     }
     resp
+}
+
+/// Grid columns for an image card: single image full-width, up to four in two
+/// columns, then three.
+fn grid_cols(n: usize) -> usize {
+    match n {
+        0 | 1 => 1,
+        2..=4 => 2,
+        _ => 3,
+    }
 }
 
 fn supports_edit(kind: &CardKind) -> bool {
@@ -1515,8 +1575,18 @@ mod tests {
         let img = Card::new(3, egui::pos2(0.0, 0.0), CardKind::Image {
             data: vec![],
             name: "pic".into(),
+            extra: vec![],
         });
         assert_eq!(copyable_text(&img), None);
+    }
+
+    #[test]
+    fn grid_cols_scales_with_image_count() {
+        assert_eq!(grid_cols(1), 1);
+        assert_eq!(grid_cols(2), 2);
+        assert_eq!(grid_cols(4), 2);
+        assert_eq!(grid_cols(5), 3);
+        assert_eq!(grid_cols(9), 3);
     }
 
     #[test]

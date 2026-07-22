@@ -59,7 +59,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `body` | text, code | Markdown (text) or source (code) |
 | `lang` | code | syntax-highlight language, e.g. `"rust"` |
 | `items` | checklist | `[{ "done": bool, "text": string }]` |
-| `image_name`, `bytes` | image | image bytes can't be set via the API |
+| `image_name`, `image_names`, `bytes` | image | first/all image names + total bytes; image bytes can't be set via the API |
 
 **Group** — a labeled container that a set of cards belong to; drawn as a box you
 can drag by its header. Membership lives on each card's `group` field.

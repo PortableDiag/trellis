@@ -4,6 +4,19 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.17.0]
+
+### Added
+- Image cards can hold **multiple images**, shown as a grid ("add image" appends;
+  right-click an image to remove it; removing all returns the card to the
+  "Load image…" state). Existing single-image documents load unchanged.
+- **Full-screen image viewer**: double-click any image in a card to open it in a
+  shadowbox — scroll or `+`/`-` to zoom, drag to pan, `←`/`→` (keys or on-screen
+  buttons) to move through the card's images, double-click to toggle fit/200%,
+  Esc / `×` / backdrop click to close.
+- Exports (HTML/PDF/PNG/Markdown), full-text search, and the API card JSON
+  (`image_names`) now cover all images of a card.
+
 ## [0.16.2]
 
 ### Fixed

@@ -26,8 +26,11 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   (Enter adds the next `-`/`1.`/`- [ ]` marker; empty item ends the list).
 - **Code** — dedicated code editor with a language selector and highlighting.
 - **Checklist** — real checkboxes with add/remove/edit per item.
-- **Image** — pick a file from disk (bytes embedded); give it a **title** to tell
-  a few apart.
+- **Image** — hold **any number of images** (bytes embedded), laid out in a
+  grid; give the card a **title** to tell a few apart. **Double-click an image**
+  to open it in a full-screen viewer — scroll or `+`/`-` to zoom, drag to pan,
+  `←`/`→` (keys or buttons) to flip through the card's images, Esc to close.
+  Right-click an image to remove it.
 
 Cards drag by the title bar, resize from the corner, raise to front on click,
 duplicate, recolor, copy/paste into another basket, and delete. A 🗐 button on
