@@ -646,7 +646,7 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                         edited = Some(line_prefix(&card.body, sel, "- "));
                     }
                     if fmt_btn(ui, "1.", "Numbered list") {
-                        edited = Some(line_prefix(&card.body, sel, "1. "));
+                        edited = Some(numbered_prefix(&card.body, sel));
                     }
                     if fmt_btn(ui, "\u{201C}\u{201D}", "Quote") {
                         edited = Some(line_prefix(&card.body, sel, "> "));
@@ -1190,6 +1190,52 @@ fn line_prefix(text: &str, sel: (usize, usize), prefix: &str) -> (String, CCurso
     (newv.into_iter().collect(), ccrange(a + pchars.len(), b + added))
 }
 
+/// Like [`line_prefix`] but numbers each touched line `1. `, `2. `, `3. `…
+/// (the fixed-prefix version would make every line `1.`).
+fn numbered_prefix(text: &str, sel: (usize, usize)) -> (String, CCursorRange) {
+    let chars: Vec<char> = text.chars().collect();
+    let (a, b) = sel;
+    let mut start = a.min(chars.len());
+    while start > 0 && chars[start - 1] != '\n' {
+        start -= 1;
+    }
+    let mut points = vec![start];
+    let mut i = start;
+    while i < b.min(chars.len()) {
+        if chars[i] == '\n' {
+            points.push(i + 1);
+        }
+        i += 1;
+    }
+    // Each line start → its numbered marker.
+    let markers: std::collections::HashMap<usize, Vec<char>> = points
+        .iter()
+        .enumerate()
+        .map(|(k, &p)| (p, format!("{}. ", k + 1).chars().collect()))
+        .collect();
+    let mut newv: Vec<char> = Vec::with_capacity(chars.len() + points.len() * 3);
+    let mut before_a = 0usize;
+    let mut total = 0usize;
+    for (idx, c) in chars.iter().enumerate() {
+        if let Some(m) = markers.get(&idx) {
+            newv.extend(m.iter().copied());
+            total += m.len();
+            if idx <= a {
+                before_a += m.len();
+            }
+        }
+        newv.push(*c);
+    }
+    if let Some(m) = markers.get(&chars.len()) {
+        newv.extend(m.iter().copied());
+        total += m.len();
+        if chars.len() <= a {
+            before_a += m.len();
+        }
+    }
+    (newv.into_iter().collect(), ccrange(a + before_a, b + total))
+}
+
 /// Wrap the selection in a fenced ``` code block on its own lines.
 fn wrap_block(text: &str, sel: (usize, usize)) -> (String, CCursorRange) {
     let (a, b) = sel;
@@ -1423,6 +1469,16 @@ mod tests {
         let (out, sel) = wrap_inline("", (0, 0), "**");
         assert_eq!(out, "****");
         assert_eq!(range(&sel), (2, 2));
+    }
+
+    #[test]
+    fn numbered_prefix_increments_each_line() {
+        let text = "one\ntwo\nthree";
+        let (out, _) = numbered_prefix(text, (0, text.chars().count()));
+        assert_eq!(out, "1. one\n2. two\n3. three");
+        // A single line just gets "1. ".
+        let (one, _) = numbered_prefix("solo", (0, 4));
+        assert_eq!(one, "1. solo");
     }
 
     #[test]
