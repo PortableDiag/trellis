@@ -4,6 +4,14 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.16.0]
+
+### Added
+- Copy button (🗐) on card title bars, left of the edit/view toggle: copies
+  the card's text — Text/Code bodies as-is, checklists as Markdown task lines —
+  to **both** the system clipboard and the X11 PRIMARY selection (middle-click
+  paste). Image cards have no text and no copy button.
+
 ## [0.15.0]
 
 ### Changed

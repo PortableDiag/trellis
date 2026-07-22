@@ -459,7 +459,7 @@ fn card_ui(
     // Small marker on a docked card's title bar.
     if card.docked_to.is_some() {
         p.circle_filled(
-            title_rect.right_center() - egui::vec2(52.0 * zoom, 0.0),
+            title_rect.right_center() - egui::vec2(74.0 * zoom, 0.0),
             2.5 * zoom,
             ui.visuals().strong_text_color(),
         );
@@ -550,6 +550,29 @@ fn card_ui(
             .clicked()
         {
             actions.push(CanvasAction::SetEditing(card.id, !card.editing));
+        }
+    }
+
+    // Copy button (left of edit/view): card text to both clipboards.
+    if let Some(text) = copyable_text(card) {
+        let from_right = if supports_edit(&card.kind) { 66.0 } else { 24.0 };
+        let btn_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                title_rect.right() - from_right * zoom,
+                title_rect.top() + 2.0 * zoom,
+            ),
+            egui::vec2(18.0 * zoom, title_h - 4.0 * zoom),
+        );
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
+            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+        ));
+        scale_fonts(&mut child, zoom);
+        if child
+            .add(egui::Button::new("🗐").frame(false).small())
+            .on_hover_text("Copy text (clipboard + primary selection)")
+            .clicked()
+        {
+            copy_both(&child, &text);
         }
     }
 
@@ -1017,6 +1040,31 @@ fn supports_edit(kind: &CardKind) -> bool {
     matches!(kind, CardKind::Text | CardKind::Code { .. } | CardKind::Image { .. })
 }
 
+/// The card's plain-text content for the title-bar copy button, if it has any.
+/// Checklists render as Markdown task lines.
+fn copyable_text(card: &Card) -> Option<String> {
+    match &card.kind {
+        CardKind::Text | CardKind::Code { .. } => Some(card.body.clone()),
+        CardKind::Checklist { items } => Some(
+            items
+                .iter()
+                .map(|it| format!("- [{}] {}", if it.done { 'x' } else { ' ' }, it.text))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        CardKind::Image { .. } => None,
+    }
+}
+
+/// Copy `text` to both the system clipboard and the X11 PRIMARY selection.
+fn copy_both(ui: &egui::Ui, text: &str) {
+    ui.ctx().copy_text(text.to_string());
+    // Drop the dedup key so the PRIMARY write happens even if we wrote this
+    // same text before — another app may have overwritten PRIMARY since.
+    ui.memory_mut(|m| m.data.remove::<String>(egui::Id::new("trellis_primary_sel")));
+    set_primary_selection(ui, text);
+}
+
 // --- Markdown formatting toolbar helpers ------------------------------------
 //
 // All operate on char indices (egui cursors are char-based) and return the new
@@ -1445,6 +1493,30 @@ mod tests {
 
     fn range(r: &CCursorRange) -> (usize, usize) {
         (r.secondary.index, r.primary.index) // (min, max) as built by ccrange
+    }
+
+    #[test]
+    fn copyable_text_covers_body_and_checklist_but_not_images() {
+        use crate::model::ChecklistItem;
+        let mut card = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Text);
+        card.body = "hello **world**".into();
+        assert_eq!(copyable_text(&card).as_deref(), Some("hello **world**"));
+
+        let items = vec![
+            ChecklistItem { done: true, text: "done item".into() },
+            ChecklistItem { done: false, text: "todo item".into() },
+        ];
+        let cl = Card::new(2, egui::pos2(0.0, 0.0), CardKind::Checklist { items });
+        assert_eq!(
+            copyable_text(&cl).as_deref(),
+            Some("- [x] done item\n- [ ] todo item")
+        );
+
+        let img = Card::new(3, egui::pos2(0.0, 0.0), CardKind::Image {
+            data: vec![],
+            name: "pic".into(),
+        });
+        assert_eq!(copyable_text(&img), None);
     }
 
     #[test]

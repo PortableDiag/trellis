@@ -30,7 +30,9 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   a few apart.
 
 Cards drag by the title bar, resize from the corner, raise to front on click,
-duplicate, recolor, copy/paste into another basket, and delete. The canvas pans
+duplicate, recolor, copy/paste into another basket, and delete. A 🗐 button on
+the title bar copies the card's text (checklists as Markdown task lines) to
+both the clipboard and the X11 primary selection. The canvas pans
 and zooms (Ctrl+scroll); each node remembers its view.
 
 **Organizing cards**
