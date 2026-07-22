@@ -4,6 +4,12 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.16.1]
+
+### Fixed
+- File and message dialogs (Open, Save As, Import/Export, Load image…) are now
+  parented to the main window, so they no longer open behind the app.
+
 ## [0.16.0]
 
 ### Added

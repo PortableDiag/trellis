@@ -9,8 +9,36 @@ use crate::api::{self, ApiCommand};
 use egui_commonmark::CommonMarkCache;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
+
+/// Parent-window handles for rfd dialogs. Without a parent, X11/portal file
+/// dialogs get no transient-for hint and can open *behind* the app window.
+/// Raw handles are `Copy + 'static`, so they can be captured each frame from
+/// eframe and lent back out for the (blocking, modal) dialog call, during
+/// which the window is guaranteed alive.
+#[derive(Clone, Copy)]
+struct DialogParent {
+    window: raw_window_handle::RawWindowHandle,
+    display: raw_window_handle::RawDisplayHandle,
+}
+
+impl raw_window_handle::HasWindowHandle for DialogParent {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.window) })
+    }
+}
+
+impl raw_window_handle::HasDisplayHandle for DialogParent {
+    fn display_handle(
+        &self,
+    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(self.display) })
+    }
+}
 use emath::TSTransform;
 
 const MIN_CARD: egui::Vec2 = egui::Vec2::new(140.0, 90.0);
@@ -118,6 +146,7 @@ pub struct TrellisApp {
     doc_path: Option<PathBuf>,
     /// Fallback autosave location used when the document is untitled.
     autosave_path: PathBuf,
+    dialog_parent: Option<DialogParent>,
     dirty: bool,
     status: String,
 
@@ -245,6 +274,7 @@ impl TrellisApp {
             renaming: None,
             doc_path,
             autosave_path,
+            dialog_parent: None,
             dirty: false,
             status: "Ready".to_string(),
             search_open: false,
@@ -306,6 +336,24 @@ impl TrellisApp {
         }
     }
 
+    /// A file dialog parented to the app window (falls back to unparented).
+    fn file_dialog(&self) -> rfd::FileDialog {
+        let d = self.file_dialog();
+        match &self.dialog_parent {
+            Some(p) => d.set_parent(p),
+            None => d,
+        }
+    }
+
+    /// A message dialog parented to the app window (falls back to unparented).
+    fn message_dialog(&self) -> rfd::MessageDialog {
+        let d = self.message_dialog();
+        match &self.dialog_parent {
+            Some(p) => d.set_parent(p),
+            None => d,
+        }
+    }
+
     // --- persistence --------------------------------------------------------
 
     fn target_path(&self) -> PathBuf {
@@ -336,7 +384,7 @@ impl TrellisApp {
     }
 
     fn save_as(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = self.file_dialog()
             .add_filter("Trellis document", &["ron"])
             .set_file_name("untitled.ron")
             .save_file()
@@ -351,7 +399,7 @@ impl TrellisApp {
             return true;
         }
         matches!(
-            rfd::MessageDialog::new()
+            self.message_dialog()
                 .set_title("Unsaved changes")
                 .set_description("Discard the current document?")
                 .set_buttons(rfd::MessageButtons::YesNo)
@@ -376,7 +424,7 @@ impl TrellisApp {
         if !self.confirm_discard() {
             return;
         }
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = self.file_dialog()
             .add_filter("Trellis document", &["ron"])
             .pick_file()
         {
@@ -401,7 +449,7 @@ impl TrellisApp {
         } else {
             ("Markdown", &["md", "markdown", "txt"])
         };
-        if let Some(path) = rfd::FileDialog::new().add_filter(label, exts).pick_file() {
+        if let Some(path) = self.file_dialog().add_filter(label, exts).pick_file() {
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     let title = path
@@ -419,7 +467,7 @@ impl TrellisApp {
     }
 
     fn export_html(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = self.file_dialog()
             .add_filter("HTML", &["html"])
             .set_file_name("trellis-export.html")
             .save_file()
@@ -432,7 +480,7 @@ impl TrellisApp {
     }
 
     fn export_json(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = self.file_dialog()
             .add_filter("JSON", &["json"])
             .set_file_name("trellis-export.json")
             .save_file()
@@ -448,7 +496,7 @@ impl TrellisApp {
     }
 
     fn export_markdown(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = self.file_dialog()
             .add_filter("Markdown", &["md"])
             .set_file_name("trellis-export.md")
             .save_file()
@@ -461,7 +509,7 @@ impl TrellisApp {
     }
 
     fn export_pdf(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = self.file_dialog()
             .add_filter("PDF", &["pdf"])
             .set_file_name("trellis-export.pdf")
             .save_file()
@@ -479,7 +527,7 @@ impl TrellisApp {
         } else {
             ("PNG", "png", "trellis-export.png")
         };
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = self.file_dialog()
             .add_filter(label, &[ext])
             .set_file_name(name)
             .save_file()
@@ -497,7 +545,7 @@ impl TrellisApp {
         if !self.confirm_discard() {
             return;
         }
-        if let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+        if let Some(path) = self.file_dialog().add_filter("JSON", &["json"]).pick_file() {
             match std::fs::read_to_string(&path).map(|s| serde_json::from_str::<Document>(&s)) {
                 Ok(Ok(doc)) => {
                     self.doc = doc;
@@ -721,7 +769,7 @@ impl TrellisApp {
     }
 
     fn load_image_into(&mut self, node: NodeId, card: crate::model::CardId) {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = self.file_dialog()
             .add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
             .pick_file()
         {
@@ -1017,7 +1065,13 @@ impl TrellisApp {
 }
 
 impl eframe::App for TrellisApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Capture the window handles so file/message dialogs can be parented
+        // to the app window instead of opening behind it.
+        if let (Ok(w), Ok(d)) = (frame.window_handle(), frame.display_handle()) {
+            self.dialog_parent = Some(DialogParent { window: w.as_raw(), display: d.as_raw() });
+        }
+
         // Apply any API requests from the server thread first.
         self.pump_api();
 
