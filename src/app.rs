@@ -338,7 +338,7 @@ impl TrellisApp {
 
     /// A file dialog parented to the app window (falls back to unparented).
     fn file_dialog(&self) -> rfd::FileDialog {
-        let d = self.file_dialog();
+        let d = rfd::FileDialog::new();
         match &self.dialog_parent {
             Some(p) => d.set_parent(p),
             None => d,
@@ -347,7 +347,7 @@ impl TrellisApp {
 
     /// A message dialog parented to the app window (falls back to unparented).
     fn message_dialog(&self) -> rfd::MessageDialog {
-        let d = self.message_dialog();
+        let d = rfd::MessageDialog::new();
         match &self.dialog_parent {
             Some(p) => d.set_parent(p),
             None => d,

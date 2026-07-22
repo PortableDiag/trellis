@@ -4,6 +4,12 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.16.2]
+
+### Fixed
+- Crash (stack overflow) when opening any file dialog — the v0.16.1
+  dialog-parenting helpers accidentally called themselves recursively.
+
 ## [0.16.1]
 
 ### Fixed
