@@ -64,10 +64,12 @@ and zooms (Ctrl+scroll); each node remembers its view.
 - Full-text **search** across every node title and card (Ctrl+F)
 - Dark / light **theme** toggle
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
-- **Agent API** — a localhost, key-gated HTTP API to add/query/edit/remove nodes
-  and cards, move/recolor/resize them, build groups, dock cards, and export the
-  document (incl. PDF/PNG) — so agents can collaborate on the same notes. Enable
-  it in **Tools → Settings**; see [API.md](API.md).
+- **Agent API** — a localhost, key-gated HTTP API with full parity to the app:
+  add/query/edit/remove nodes and cards, move/recolor/resize, convert a card's
+  kind, edit tables cell-by-cell (colors, headers, rows/cols), upload images,
+  build groups, join/leave and dock cards, and export the document (incl.
+  PDF/PNG) — so agents can collaborate on the same notes. Enable it in **Tools →
+  Settings**; see [API.md](API.md).
 
 ## Keyboard
 

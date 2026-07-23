@@ -4,6 +4,22 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.22.0]
+
+### Added — full agent-API parity for cards
+Agents can now do everything the GUI can to a card:
+- **Convert a card's kind** via `PATCH` (`kind`) — text/code/checklist/table/image;
+  kind-specific fields in the same PATCH land in the converted card.
+- **Rich table editing** — `POST …/cards/{cid}/table` ops: `set_cell`, `set_bg`,
+  `set_fg` (cell colors), `insert_row`/`remove_row`, `insert_col`/`remove_col`,
+  `set_col_width`, `set_header`. Plus `header` on the card `PATCH`.
+- **Image bytes** — `POST …/cards/{cid}/images` (base64) to attach real images,
+  `DELETE …/images/{idx}` to remove one, and `image_base64` on card create.
+- **Group join/leave** — `POST`/`DELETE …/cards/{cid}/group` to add an existing
+  card to an existing group or remove it (beyond create-new-group).
+
+`API.md` documents every new endpoint, field, and table op with examples.
+
 ## [0.21.2]
 
 ### Fixed

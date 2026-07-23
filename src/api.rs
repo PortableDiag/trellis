@@ -44,6 +44,13 @@ pub enum ApiRequest {
     // Docking.
     DockCard { node: NodeId, card: u64, anchor: u64 },
     DetachCard { node: NodeId, card: u64 },
+    // Card group membership (join an existing group / leave).
+    SetCardGroup { node: NodeId, card: u64, group: Option<GroupId> },
+    // Fine-grained table editing (cell colors, header, widths, row/col ops).
+    TableOp { node: NodeId, card: u64, op: TableOpInput },
+    // Image bytes.
+    AddImage { node: NodeId, card: u64, name: String, bytes: Vec<u8> },
+    RemoveImage { node: NodeId, card: u64, index: usize },
     // Whole-document export.
     Export(String),
     Search(String),
@@ -106,6 +113,9 @@ pub struct AddCardInput {
     /// RGB title-bar accent (array, hex, or name — see `de_color_opt`).
     #[serde(default, deserialize_with = "de_color_opt")]
     color: Option<[u8; 3]>,
+    /// Base64 image bytes for an `image` card's first image (name = `title`).
+    #[serde(default)]
+    image_base64: Option<String>,
 }
 
 fn default_kind() -> String {
@@ -144,6 +154,13 @@ pub struct UpdateCardInput {
     /// Replacement cell values (table cards only); colors reset.
     #[serde(default)]
     rows: Option<Vec<Vec<String>>>,
+    /// Convert the card to another kind: `text`/`code`/`checklist`/`table`/`image`.
+    /// Existing body/items/table are kept when compatible; a new kind starts empty.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Header-row flag (table cards only).
+    #[serde(default)]
+    header: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -166,6 +183,45 @@ struct UpdateGroupInput {
 struct DockInput {
     /// The card this one should stick to.
     anchor: u64,
+}
+
+#[derive(Deserialize)]
+struct GroupCardInput {
+    /// The group the card should join.
+    group: GroupId,
+}
+
+#[derive(Deserialize)]
+struct AddImageInput {
+    #[serde(default)]
+    name: String,
+    /// Base64-encoded image file bytes (png/jpeg/gif/bmp/webp).
+    data_base64: String,
+}
+
+/// One fine-grained table edit. `op` selects the operation; the other fields
+/// carry its arguments (unused ones are ignored).
+#[derive(Deserialize)]
+pub struct TableOpInput {
+    /// `set_cell` | `set_bg` | `set_fg` | `insert_row` | `remove_row` |
+    /// `insert_col` | `remove_col` | `set_col_width` | `set_header`.
+    op: String,
+    #[serde(default)]
+    row: Option<usize>,
+    #[serde(default)]
+    col: Option<usize>,
+    /// Index for insert/remove row/col (insert puts the new line *at* this index).
+    #[serde(default)]
+    at: Option<usize>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    width: Option<f32>,
+    #[serde(default)]
+    header: Option<bool>,
+    /// Cell color for `set_bg`/`set_fg`: array/hex/name, or null/absent to clear.
+    #[serde(default)]
+    color: Value,
 }
 
 // --- server thread ----------------------------------------------------------
@@ -290,6 +346,28 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Delete, ["api", "nodes", nid, "cards", cid, "dock"]) => {
             Ok(ApiRequest::DetachCard { node: pid(nid)?, card: pid(cid)? })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "group"]) => {
+            let i: GroupCardInput = parse(body)?;
+            Ok(ApiRequest::SetCardGroup { node: pid(nid)?, card: pid(cid)?, group: Some(i.group) })
+        }
+        (Method::Delete, ["api", "nodes", nid, "cards", cid, "group"]) => {
+            Ok(ApiRequest::SetCardGroup { node: pid(nid)?, card: pid(cid)?, group: None })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "table"]) => {
+            let op: TableOpInput = parse(body)?;
+            Ok(ApiRequest::TableOp { node: pid(nid)?, card: pid(cid)?, op })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "images"]) => {
+            let i: AddImageInput = parse(body)?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(i.data_base64.trim())
+                .map_err(|e| (400, format!("invalid base64 image data: {e}")))?;
+            Ok(ApiRequest::AddImage { node: pid(nid)?, card: pid(cid)?, name: i.name, bytes })
+        }
+        (Method::Delete, ["api", "nodes", nid, "cards", cid, "images", idx]) => {
+            let index = idx.parse::<usize>().map_err(|_| (400, format!("bad index: {idx}")))?;
+            Ok(ApiRequest::RemoveImage { node: pid(nid)?, card: pid(cid)?, index })
         }
         (Method::Get, ["api", "nodes", id, "groups"]) => Ok(ApiRequest::ListGroups(pid(id)?)),
         (Method::Post, ["api", "nodes", id, "groups"]) => {
@@ -529,6 +607,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .pos
                 .map(|[x, y]| egui::pos2(x, y))
                 .unwrap_or_else(|| egui::pos2(40.0, 40.0));
+            let img_name = input.title.clone();
             match doc.add_card(node, pos, kind) {
                 Some(cid) => {
                     if let Some(c) = doc.card_mut(node, cid) {
@@ -540,6 +619,14 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         }
                         if let Some([w, h]) = input.size {
                             c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
+                        }
+                    }
+                    // Optional initial image bytes for an image card.
+                    if let Some(b64) = input.image_base64 {
+                        if let Ok(bytes) =
+                            base64::engine::general_purpose::STANDARD.decode(b64.trim())
+                        {
+                            doc.add_image(node, cid, bytes, img_name);
                         }
                     }
                     (true, ApiResponse::created(json!({ "id": cid })))
@@ -557,6 +644,35 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some(col) = patch.color {
                     c.color = col;
+                }
+                // Convert to another kind first, so kind-specific fields below
+                // (lang/items/rows/header) land in the new kind. Existing
+                // body/items/table content is preserved where it stays valid.
+                if let Some(k) = &patch.kind {
+                    let new = match k.as_str() {
+                        "text" => Some(CardKind::Text),
+                        "code" => Some(CardKind::Code { lang: "text".into() }),
+                        "checklist" => Some(CardKind::Checklist { items: Vec::new() }),
+                        "table" => {
+                            Some(CardKind::Table { table: crate::model::TableData::empty(3, 3) })
+                        }
+                        "image" => Some(CardKind::Image {
+                            data: Vec::new(),
+                            name: c.title.clone(),
+                            extra: Vec::new(),
+                        }),
+                        _ => None,
+                    };
+                    if let Some(nk) = new {
+                        if std::mem::discriminant(&nk) != std::mem::discriminant(&c.kind) {
+                            c.kind = nk;
+                        }
+                    }
+                }
+                if let Some(h) = patch.header {
+                    if let CardKind::Table { table } = &mut c.kind {
+                        table.header = h;
+                    }
                 }
                 if let Some(lang) = patch.lang {
                     if let CardKind::Code { lang: l } = &mut c.kind {
@@ -657,6 +773,66 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             }
             None => (false, ApiResponse::err(404, "card not found")),
         },
+        ApiRequest::SetCardGroup { node, card, group } => {
+            if doc.set_card_group(node, card, group) {
+                let c = doc.card_mut(node, card).unwrap();
+                (true, ApiResponse::ok(card_json(c)))
+            } else {
+                (false, ApiResponse::err(404, "card or group not found"))
+            }
+        }
+        ApiRequest::TableOp { node, card, op } => {
+            let ok = match op.op.as_str() {
+                "set_cell" => doc.table_set_cell(
+                    node,
+                    card,
+                    op.row.unwrap_or(0),
+                    op.col.unwrap_or(0),
+                    op.text.unwrap_or_default(),
+                ),
+                "set_bg" => {
+                    let color = color_from_value(&op.color).unwrap_or(None);
+                    doc.table_set_bg(node, card, op.row.unwrap_or(0), op.col.unwrap_or(0), color)
+                }
+                "set_fg" => {
+                    let color = color_from_value(&op.color).unwrap_or(None);
+                    doc.table_set_fg(node, card, op.row.unwrap_or(0), op.col.unwrap_or(0), color)
+                }
+                "insert_row" => doc.table_insert_row(node, card, op.at.unwrap_or(0)),
+                "remove_row" => doc.table_remove_row(node, card, op.at.unwrap_or(0)),
+                "insert_col" => doc.table_insert_col(node, card, op.at.unwrap_or(0)),
+                "remove_col" => doc.table_remove_col(node, card, op.at.unwrap_or(0)),
+                "set_col_width" => {
+                    doc.table_set_col_width(node, card, op.col.unwrap_or(0), op.width.unwrap_or(110.0))
+                }
+                "set_header" => doc.table_set_header(node, card, op.header.unwrap_or(true)),
+                other => {
+                    return (false, ApiResponse::err(400, &format!("unknown table op: {other}")));
+                }
+            };
+            if ok {
+                let c = doc.card_mut(node, card).unwrap();
+                (true, ApiResponse::ok(card_json(c)))
+            } else {
+                (false, ApiResponse::err(400, "table op failed (not a table, or index out of range)"))
+            }
+        }
+        ApiRequest::AddImage { node, card, name, bytes } => {
+            if doc.add_image(node, card, bytes, name) {
+                let c = doc.card_mut(node, card).unwrap();
+                (true, ApiResponse::created(card_json(c)))
+            } else {
+                (false, ApiResponse::err(404, "card not found or not an image card"))
+            }
+        }
+        ApiRequest::RemoveImage { node, card, index } => {
+            if doc.remove_image(node, card, index) {
+                let c = doc.card_mut(node, card).unwrap();
+                (true, ApiResponse::ok(card_json(c)))
+            } else {
+                (false, ApiResponse::err(404, "card/image not found or not an image card"))
+            }
+        }
         ApiRequest::Export(format) => export_response(doc, &format),
         ApiRequest::Search(q) => {
             let hits: Vec<Value> = doc
@@ -939,6 +1115,101 @@ mod tests {
             let (_d, resp) = process(&mut doc, ApiRequest::AddCard { node: nid, input });
             assert_eq!(resp.status == 201, want, "kind {kind}");
         }
+    }
+
+    #[test]
+    fn patch_can_change_card_kind() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        // text -> checklist, then set items in the same surface.
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"kind":"checklist"}"#).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        assert!(matches!(doc.nodes[&nid].cards[0].kind, CardKind::Checklist { .. }));
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"items":[{"done":false,"text":"a"}]}"#).unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        let CardKind::Checklist { items } = &doc.nodes[&nid].cards[0].kind else { panic!() };
+        assert_eq!(items[0].text, "a");
+    }
+
+    #[test]
+    fn table_ops_via_api() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc
+            .add_card(nid, egui::pos2(0.0, 0.0), CardKind::Table { table: crate::model::TableData::empty(2, 2) })
+            .unwrap();
+        // Color a cell (by name), add a row, turn the header off.
+        for body in [
+            r#"{"op":"set_bg","row":0,"col":0,"color":"red"}"#,
+            r#"{"op":"insert_row","at":1}"#,
+            r#"{"op":"set_header","header":false}"#,
+        ] {
+            let op: TableOpInput = serde_json::from_str(body).unwrap();
+            let (dirty, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
+            assert!(dirty, "op {body}");
+            assert_eq!(resp.status, 200, "op {body}");
+        }
+        let CardKind::Table { table } = &doc.nodes[&nid].cards[0].kind else { panic!() };
+        assert_eq!(table.rows[0][0].bg, Some([0xef, 0x44, 0x44]));
+        assert_eq!(table.rows.len(), 3);
+        assert!(!table.header);
+        // An unknown op is a 400.
+        let op: TableOpInput = serde_json::from_str(r#"{"op":"bogus"}"#).unwrap();
+        let (_d, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
+        assert_eq!(resp.status, 400);
+    }
+
+    #[test]
+    fn image_bytes_add_and_remove_via_api() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc
+            .add_card(nid, egui::pos2(0.0, 0.0), CardKind::Image {
+                data: Vec::new(),
+                name: String::new(),
+                extra: Vec::new(),
+            })
+            .unwrap();
+        let (dirty, resp) = process(
+            &mut doc,
+            ApiRequest::AddImage { node: nid, card: cid, name: "pic".into(), bytes: vec![1, 2, 3, 4] },
+        );
+        assert!(dirty);
+        assert_eq!(resp.status, 201);
+        assert_eq!(doc.nodes[&nid].cards[0].kind.images().len(), 1);
+        let (_d, resp) =
+            process(&mut doc, ApiRequest::RemoveImage { node: nid, card: cid, index: 0 });
+        assert_eq!(resp.status, 200);
+        assert_eq!(doc.nodes[&nid].cards[0].kind.images().len(), 0);
+    }
+
+    #[test]
+    fn card_joins_and_leaves_a_group_via_api() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let a = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let c = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let g = doc.group_cards(nid, &[a, b], "grp".into()).unwrap();
+        // Join c to the existing group, then leave.
+        let (dirty, resp) =
+            process(&mut doc, ApiRequest::SetCardGroup { node: nid, card: c, group: Some(g) });
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        assert_eq!(doc.card_mut(nid, c).unwrap().group, Some(g));
+        let (_d, resp) =
+            process(&mut doc, ApiRequest::SetCardGroup { node: nid, card: c, group: None });
+        assert_eq!(resp.status, 200);
+        assert_eq!(doc.card_mut(nid, c).unwrap().group, None);
+        // Joining a non-existent group is a 404.
+        let (_d, resp) =
+            process(&mut doc, ApiRequest::SetCardGroup { node: nid, card: c, group: Some(999) });
+        assert_eq!(resp.status, 404);
     }
 
     #[test]

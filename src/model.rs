@@ -576,6 +576,11 @@ impl Document {
             .is_some()
     }
 
+    /// Set (rather than toggle) the table's header-row flag.
+    pub fn table_set_header(&mut self, node: NodeId, card: CardId, header: bool) -> bool {
+        self.table_mut(node, card).map(|t| t.header = header).is_some()
+    }
+
     /// Replace the whole table with imported plain values.
     pub fn table_replace(&mut self, node: NodeId, card: CardId, values: Vec<Vec<String>>) -> bool {
         self.table_mut(node, card)
@@ -775,6 +780,25 @@ impl Document {
                 }
             }
             n.groups.retain(|g| g.id != group);
+        }
+    }
+
+    /// Set a card's group membership. `Some(g)` joins an existing group (the
+    /// card leaves any previous one); `None` removes it from its group. Returns
+    /// false if the card, or the target group, doesn't exist in the node.
+    pub fn set_card_group(&mut self, node: NodeId, card: CardId, group: Option<GroupId>) -> bool {
+        let Some(n) = self.nodes.get_mut(&node) else { return false };
+        if let Some(g) = group {
+            if !n.groups.iter().any(|grp| grp.id == g) {
+                return false;
+            }
+        }
+        match n.cards.iter_mut().find(|c| c.id == card) {
+            Some(c) => {
+                c.group = group;
+                true
+            }
+            None => false,
         }
     }
 

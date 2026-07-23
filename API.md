@@ -50,17 +50,17 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 |---|---|---|
 | `id` | all | |
 | `title` | all | shown in the card's title bar (all kinds, incl. `image`) |
-| `kind` | all | `"text"` \| `"code"` \| `"checklist"` \| `"table"` \| `"image"` |
+| `kind` | all | `"text"` \| `"code"` \| `"checklist"` \| `"table"` \| `"image"`; PATCH can convert an existing card to another kind |
 | `pos` | all | `[x,y]` top-left on the basket canvas |
 | `size` | all | `[w,h]` in canvas units |
 | `color` | all | title-bar accent — set as `[r,g,b]` (0–255), a hex string (`"#ef4444"`, `"#e44"`), or a name (`"red"`, `"green"`, `"blue"`, …) |
-| `group` | all | group id this card belongs to, or null |
-| `docked_to` | all | id of the card this one is docked to, or null |
+| `group` | all | group id this card belongs to, or null — set via the group sub-resource (below) |
+| `docked_to` | all | id of the card this one is docked to, or null — set via the dock sub-resource |
 | `body` | text, code | Markdown (text) or source (code) |
 | `lang` | code | syntax-highlight language, e.g. `"rust"` |
 | `items` | checklist | `[{ "done": bool, "text": string }]` |
-| `image_name`, `image_names`, `bytes` | image | first/all image names + total bytes; image bytes can't be set via the API |
-| `rows` | table | set: `[["a","b"],…]` replaces all cell values (colors reset); get: cells as `{text,bg,fg}` plus `header` |
+| `image_name`, `image_names`, `bytes` | image | first/all image names + total byte count (read); set image bytes via the images sub-resource (below) |
+| `rows`, `header` | table | `rows` set: `[["a","b"],…]` bulk-replaces cell text (colors reset); get: cells as `{text,bg,fg}`. `header` (bool) toggles the header row. Fine-grained edits (cell colors, widths, row/col ops) use the table sub-resource (below) |
 
 **Group** — a labeled container that a set of cards belong to; drawn as a box you
 can drag by its header. Membership lives on each card's `group` field.
@@ -109,15 +109,16 @@ returns the **full card objects**.
 POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
-POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, color?}
+POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, color?, image_base64?}
   → 201 {"id":<new>}   | 404 if node doesn't exist
 ```
 `kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
-`table` (starts as an empty 3×3), or `image` (starts empty — image bytes can't
-be set via the API). `pos` is `[x,y]` canvas coordinates (default `[40,40]`);
-pass distinct positions to avoid stacking cards on top of each other. `size` is
-`[w,h]`. `color` sets the title-bar accent at creation (see the accepted formats
-below). `items` is used only for `checklist`; `lang` only for `code`.
+`table` (starts as an empty 3×3), or `image`. `pos` is `[x,y]` canvas coordinates
+(default `[40,40]`); pass distinct positions to avoid stacking cards on top of
+each other. `size` is `[w,h]`. `color` sets the title-bar accent at creation (see
+the accepted formats below). `items` is used only for `checklist`; `lang` only
+for `code`. `image_base64` gives an `image` card its first image (base64 file
+bytes; the `title` becomes its name).
 
 ### Update
 ```
@@ -125,12 +126,16 @@ PATCH /api/nodes/{id}              {title?, color?}
   → 200 {"id":<id>}    | 404
         color: setting only (can't clear via API)
 
-PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, lang?, pos?, size?, items?}
+PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, lang?, pos?, size?, items?, rows?, header?}
   → 200 {<updated card>}   | 404
 ```
 Every field is optional; only those present are changed. `pos`/`size` are
 `[x,y]`/`[w,h]`; `lang` applies to code cards, `items` replaces a checklist's
-items. The response is the full updated card object.
+items, `rows` bulk-replaces a table's cell text, `header` toggles a table's
+header row. **`kind` converts the card to another kind** (`text`/`code`/
+`checklist`/`table`/`image`) — apply it in the same PATCH as `items`/`rows`/etc.
+and the new content lands in the converted card. The response is the full updated
+card object.
 
 **Color format** — anywhere the API takes a `color` (nodes, cards, groups, on
 create or update) you may send an `[r,g,b]` array (0–255 each), a hex string
@@ -172,6 +177,44 @@ DELETE /api/nodes/{id}/cards/{cid}/dock  → 200 {"card":<cid>,"docked_to":null}
 ```
 Moving a card in the app (or via `pos`) moves everything docked to it. A card
 can be both grouped and docked.
+
+### Card group membership
+Add an existing card to an existing group, or remove it — beyond the bulk
+`POST …/groups` that creates a new group from 2+ cards.
+```
+POST   /api/nodes/{id}/cards/{cid}/group  {group:<gid>}
+  → 200 {<updated card>}   | 404 (card or group not found)
+
+DELETE /api/nodes/{id}/cards/{cid}/group  → 200 {<updated card>}   | 404
+```
+
+### Table editing
+Fine-grained edits to a `table` card. One operation per request; `op` selects it.
+```
+POST /api/nodes/{id}/cards/{cid}/table  {op, …}
+  → 200 {<updated card>}   | 400 (unknown op / not a table / index out of range)  | 404
+```
+| `op` | args | effect |
+|---|---|---|
+| `set_cell` | `row`, `col`, `text` | set one cell's text |
+| `set_bg` | `row`, `col`, `color` | cell background (color format below; null/absent clears) |
+| `set_fg` | `row`, `col`, `color` | cell font color (null/absent clears) |
+| `insert_row` | `at` | insert a blank row at index `at` |
+| `remove_row` | `at` | delete row `at` (never below 1 row) |
+| `insert_col` | `at` | insert a blank column at index `at` |
+| `remove_col` | `at` | delete column `at` (never below 1 col) |
+| `set_col_width` | `col`, `width` | set a column's pixel width |
+| `set_header` | `header` | set the header-row flag (bool) |
+
+### Images
+Attach or remove image bytes on an `image` card (grid layout; first image is the
+primary). Bytes are png/jpeg/gif/bmp/webp.
+```
+POST   /api/nodes/{id}/cards/{cid}/images        {data_base64, name?}
+  → 201 {<updated card>}   | 400 (bad base64)  | 404 (not an image card)
+
+DELETE /api/nodes/{id}/cards/{cid}/images/{idx}  → 200 {<updated card>}   | 404
+```
 
 ### Export
 Export the **whole document** in a portable format.
@@ -248,6 +291,23 @@ curl -s -H "X-API-Key: $KEY" -d '{"cards":[1,2],"title":"Cluster"}' $API/nodes/$
 
 # Dock card 2 onto card 1 (they now move together)
 curl -s -H "X-API-Key: $KEY" -d '{"anchor":1}' $API/nodes/$NID/cards/2/dock
+
+# Convert card 1 to a checklist and fill it in one PATCH
+curl -s -X PATCH -H "X-API-Key: $KEY" \
+  -d '{"kind":"checklist","items":[{"done":false,"text":"first"}]}' $API/nodes/$NID/cards/1
+
+# Table card: color a cell red, add a row, drop the header
+curl -s -H "X-API-Key: $KEY" -d '{"op":"set_bg","row":0,"col":0,"color":"red"}' $API/nodes/$NID/cards/1/table
+curl -s -H "X-API-Key: $KEY" -d '{"op":"insert_row","at":1}'                    $API/nodes/$NID/cards/1/table
+curl -s -H "X-API-Key: $KEY" -d '{"op":"set_header","header":false}'            $API/nodes/$NID/cards/1/table
+
+# Upload an image into an image card
+curl -s -H "X-API-Key: $KEY" \
+  -d "{\"name\":\"receipt.png\",\"data_base64\":\"$(base64 -w0 receipt.png)\"}" \
+  $API/nodes/$NID/cards/1/images
+
+# Add existing card 3 to group 1 (then it moves with the group)
+curl -s -H "X-API-Key: $KEY" -d '{"group":1}' $API/nodes/$NID/cards/3/group
 
 # Export the whole document to PDF and save it
 curl -s -H "X-API-Key: $KEY" "$API/export?format=pdf" \
