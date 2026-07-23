@@ -145,6 +145,53 @@ fn terminal_green_visuals() -> egui::Visuals {
     v
 }
 
+/// How a canvas action participates in undo history.
+enum UndoKind {
+    /// Not an undo point (text typing, selection, view/zoom, z-order).
+    None,
+    /// A one-shot edit; each gets its own undo step.
+    Discrete,
+    /// Part of a continuous gesture (a drag); frames sharing this tag while the
+    /// pointer is held collapse into a single undo step.
+    Continuous(&'static str),
+}
+
+fn undo_kind(a: &CanvasAction) -> UndoKind {
+    use CanvasAction as A;
+    match a {
+        A::MoveCard(..) | A::MoveGroup(..) => UndoKind::Continuous("move"),
+        A::ResizeCard(..) => UndoKind::Continuous("resize"),
+        A::TableSetColWidth(..) => UndoKind::Continuous("colwidth"),
+        A::AddCard(..)
+        | A::PasteCard(_)
+        | A::DropFiles(..)
+        | A::Remove(_)
+        | A::Duplicate(_)
+        | A::SetColor(..)
+        | A::SetFontScale(..)
+        | A::ChecklistToggle(..)
+        | A::ChecklistAdd(_)
+        | A::ChecklistRemove(..)
+        | A::ChecklistMove(..)
+        | A::LoadImage(_)
+        | A::RemoveImage(..)
+        | A::GroupSelected
+        | A::Ungroup(_)
+        | A::DockCard(..)
+        | A::DetachCard(_)
+        | A::SetGroupColor(..)
+        | A::TableSetBg(..)
+        | A::TableSetFg(..)
+        | A::TableInsertRow(..)
+        | A::TableRemoveRow(..)
+        | A::TableInsertCol(..)
+        | A::TableRemoveCol(..)
+        | A::TableToggleHeader(_)
+        | A::TableImport(_) => UndoKind::Discrete,
+        _ => UndoKind::None,
+    }
+}
+
 pub struct TrellisApp {
     doc: Document,
     selected: Option<NodeId>,
@@ -193,6 +240,13 @@ pub struct TrellisApp {
     api_port: u16,
     api_status: String,
     show_settings: bool,
+
+    /// Per-node undo/redo history. Each entry snapshots one node before a canvas
+    /// edit (moves, autosort, add/remove, etc.); a whole drag coalesces into one.
+    undo: Vec<(NodeId, crate::model::Node)>,
+    redo: Vec<(NodeId, crate::model::Node)>,
+    /// Coalesce key for the in-progress gesture, so a drag is one undo step.
+    undo_coalesce: Option<&'static str>,
 }
 
 impl TrellisApp {
@@ -309,7 +363,63 @@ impl TrellisApp {
             api_port,
             api_status,
             show_settings: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            undo_coalesce: None,
         }
+    }
+
+    /// Drop all undo/redo history (on load/new — the old snapshots belong to a
+    /// different document).
+    fn reset_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.undo_coalesce = None;
+    }
+
+    /// Snapshot `node` onto the undo stack before it is mutated (clears redo).
+    /// Cheap: clones one node, not the whole document. Capped history.
+    fn push_undo(&mut self, node: NodeId) {
+        if let Some(n) = self.doc.nodes.get(&node) {
+            self.redo.clear();
+            self.undo.push((node, n.clone()));
+            const MAX_UNDO: usize = 40;
+            if self.undo.len() > MAX_UNDO {
+                self.undo.remove(0);
+            }
+        }
+    }
+
+    /// Restore the most recent still-present snapshot (Ctrl+Z). Pushes the
+    /// current state onto the redo stack so it can be reapplied.
+    fn undo(&mut self) {
+        while let Some((nid, node)) = self.undo.pop() {
+            if let Some(cur) = self.doc.nodes.get(&nid) {
+                self.redo.push((nid, cur.clone()));
+                self.doc.nodes.insert(nid, node);
+                self.selected = Some(nid);
+                self.dirty = true;
+                self.undo_coalesce = None;
+                self.status = "Undo".to_string();
+                return;
+            }
+        }
+        self.status = "Nothing to undo".to_string();
+    }
+
+    fn redo(&mut self) {
+        while let Some((nid, node)) = self.redo.pop() {
+            if let Some(cur) = self.doc.nodes.get(&nid) {
+                self.undo.push((nid, cur.clone()));
+                self.doc.nodes.insert(nid, node);
+                self.selected = Some(nid);
+                self.dirty = true;
+                self.undo_coalesce = None;
+                self.status = "Redo".to_string();
+                return;
+            }
+        }
+        self.status = "Nothing to redo".to_string();
     }
 
     /// Zoom the selected node's canvas view by `factor` (menu buttons).
@@ -430,6 +540,7 @@ impl TrellisApp {
         self.doc = Document::default();
         self.selected = self.doc.roots.first().copied();
         self.views.clear();
+        self.reset_history();
         self.doc_path = None;
         self.dirty = false;
         self.status = "New document".to_string();
@@ -448,6 +559,7 @@ impl TrellisApp {
                     self.doc = doc;
                     self.selected = self.doc.roots.first().copied();
                     self.views.clear();
+                    self.reset_history();
                     self.doc_path = Some(path.clone());
                     self.dirty = false;
                     self.status = format!("Opened {}", path.display());
@@ -566,6 +678,7 @@ impl TrellisApp {
                     self.doc = doc;
                     self.selected = self.doc.roots.first().copied();
                     self.views.clear();
+                    self.reset_history();
                     self.doc_path = None;
                     self.dirty = true;
                     self.status = format!("Imported {}", path.display());
@@ -692,7 +805,7 @@ impl TrellisApp {
         }
     }
 
-    fn apply_canvas(&mut self, node: NodeId, actions: Vec<CanvasAction>) {
+    fn apply_canvas(&mut self, node: NodeId, actions: Vec<CanvasAction>, pointer_down: bool) {
         // ResetView only nudges the (unsaved) pan, so it must not dirty the doc.
         if actions.iter().any(|a| {
             !matches!(
@@ -706,6 +819,31 @@ impl TrellisApp {
             )
         }) {
             self.dirty = true;
+        }
+        // Undo: snapshot the node *before* mutating it. A discrete edit is its
+        // own step; a held drag (same coalesce tag while the button is down)
+        // collapses into one. Text/selection/view actions don't snapshot — egui
+        // handles text-field undo itself.
+        if !pointer_down {
+            self.undo_coalesce = None;
+        }
+        let mut discrete = false;
+        let mut cont: Option<&'static str> = None;
+        for a in &actions {
+            match undo_kind(a) {
+                UndoKind::Discrete => discrete = true,
+                UndoKind::Continuous(t) => cont = Some(t),
+                UndoKind::None => {}
+            }
+        }
+        if discrete {
+            self.push_undo(node);
+            self.undo_coalesce = None;
+        } else if let Some(t) = cont {
+            if self.undo_coalesce != Some(t) {
+                self.push_undo(node);
+                self.undo_coalesce = Some(t);
+            }
         }
         for a in actions {
             match a {
@@ -1221,6 +1359,23 @@ impl TrellisApp {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
+                    if ui
+                        .add_enabled(!self.undo.is_empty(), egui::Button::new("Undo"))
+                        .on_hover_text("Ctrl+Z — undo card moves, autosort, add/remove, etc.")
+                        .clicked()
+                    {
+                        self.undo();
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(!self.redo.is_empty(), egui::Button::new("Redo"))
+                        .on_hover_text("Ctrl+Shift+Z / Ctrl+Y")
+                        .clicked()
+                    {
+                        self.redo();
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Add root node").clicked() {
                         self.apply_tree(vec![TreeAction::AddRoot]);
                         ui.close_menu();
@@ -1267,9 +1422,12 @@ impl TrellisApp {
                         .clicked()
                     {
                         if let Some(sel) = self.selected {
+                            self.push_undo(sel);
                             if self.doc.autosort(sel) {
                                 self.dirty = true;
                                 self.status = "Autosorted cards into a grid".to_string();
+                            } else {
+                                self.undo.pop(); // nothing changed; drop the snapshot
                             }
                         }
                         ui.close_menu();
@@ -1470,6 +1628,19 @@ impl eframe::App for TrellisApp {
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::N)) {
             self.new_document();
         }
+        // Undo/redo — but not while a text field is capturing the keyboard, so
+        // egui's built-in in-field text undo keeps Ctrl+Z while you type in a card.
+        if !ctx.wants_keyboard_input() {
+            let shift = ctx.input(|i| i.modifiers.shift);
+            if cmd && !shift && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
+                self.undo();
+            }
+            if cmd && ((shift && ctx.input(|i| i.key_pressed(egui::Key::Z)))
+                || ctx.input(|i| i.key_pressed(egui::Key::Y)))
+            {
+                self.redo();
+            }
+        }
 
         self.menu_bar(ctx);
 
@@ -1535,7 +1706,8 @@ impl eframe::App for TrellisApp {
                         &self.card_sel,
                     );
                     self.views.insert(sel, view);
-                    self.apply_canvas(sel, actions);
+                    let pointer_down = ui.input(|i| i.pointer.any_down());
+                    self.apply_canvas(sel, actions, pointer_down);
                 } else {
                     self.selected = None;
                 }

@@ -4,6 +4,16 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.25.0]
+
+### Added
+- **Undo / redo** (`Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y`, also **Edit → Undo/Redo**)
+  for canvas edits: card moves and resizes, autosort, add/remove/duplicate/paste,
+  color, font size, grouping, docking, image and table structural edits. A whole
+  drag collapses into a single undo step. History is per-basket and light
+  (snapshots one node, not the whole document); it defers to egui's built-in
+  text-field undo while you're typing in a card.
+
 ## [0.24.0]
 
 ### Added

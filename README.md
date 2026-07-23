@@ -81,6 +81,7 @@ and zooms (Ctrl+scroll); each node remembers its view.
 
 | Shortcut | Action |
 |---|---|
+| Ctrl+Z / Ctrl+Shift+Z | Undo / redo canvas edits (moves, autosort, …) |
 | Ctrl+S | Save |
 | Ctrl+F | Toggle search |
 | Ctrl+N | New document |
