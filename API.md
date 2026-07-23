@@ -45,7 +45,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `color` | `[r,g,b]` or null | 0–255 each; tag dot in the tree |
 | `groups` | array | card containers in this basket (see [Groups](#groups)) |
 
-**Card** — `kind` is one of `text`, `code`, `checklist`, `image`.
+**Card** — `kind` is one of `text`, `code`, `checklist`, `table`, `image`.
 | field | applies to | notes |
 |---|---|---|
 | `id` | all | |
@@ -60,6 +60,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `lang` | code | syntax-highlight language, e.g. `"rust"` |
 | `items` | checklist | `[{ "done": bool, "text": string }]` |
 | `image_name`, `image_names`, `bytes` | image | first/all image names + total bytes; image bytes can't be set via the API |
+| `rows` | table | set: `[["a","b"],…]` replaces all cell values (colors reset); get: cells as `{text,bg,fg}` plus `header` |
 
 **Group** — a labeled container that a set of cards belong to; drawn as a box you
 can drag by its header. Membership lives on each card's `group` field.

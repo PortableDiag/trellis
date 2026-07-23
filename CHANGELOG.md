@@ -4,6 +4,17 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.18.0]
+
+### Added
+- **Table cards** — a spreadsheet card type: grid of cells with inline editing,
+  insert/delete rows and columns via the row-number / column-letter handles,
+  draggable column widths, optional header row, and per-cell **background and
+  font colors**. **Import and export CSV/XLSX** from the card's edit toolbar
+  (XLSX export preserves colors). Tables flow through HTML/Markdown/PDF/image
+  export, full-text search, the title-bar copy button (as CSV), and the agent
+  API (`kind: "table"`, `rows` in card JSON and PATCH).
+
 ## [0.17.1]
 
 ### Fixed

@@ -40,6 +40,19 @@ pub enum CanvasAction {
     ChecklistRemove(CardId, usize),
     LoadImage(CardId),
     RemoveImage(CardId, usize),
+    // Table (spreadsheet) cards.
+    TableSetCell(CardId, usize, usize, String),
+    TableSetBg(CardId, usize, usize, Option<[u8; 3]>),
+    TableSetFg(CardId, usize, usize, Option<[u8; 3]>),
+    TableInsertRow(CardId, usize),
+    TableRemoveRow(CardId, usize),
+    TableInsertCol(CardId, usize),
+    TableRemoveCol(CardId, usize),
+    TableSetColWidth(CardId, usize, f32),
+    TableToggleHeader(CardId),
+    TableImport(CardId),
+    TableExportCsv(CardId),
+    TableExportXlsx(CardId),
     /// Open the full-screen image viewer at the given image of a card.
     OpenLightbox(CardId, usize),
     // Multi-select (runtime only; used to build a group).
@@ -166,6 +179,13 @@ pub fn ui(
                 CardKind::Checklist {
                     items: vec![ChecklistItem { done: false, text: String::new() }],
                 },
+                cp,
+            ));
+            ui.close_menu();
+        }
+        if ui.button("Table").clicked() {
+            actions.push(CanvasAction::AddCard(
+                CardKind::Table { table: crate::model::TableData::empty(3, 3) },
                 cp,
             ));
             ui.close_menu();
@@ -877,6 +897,16 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                 actions.push(CanvasAction::ChecklistAdd(card.id));
             }
         }
+        CardKind::Table { table } => {
+            if card.editing {
+                title_field(ui, card, actions);
+            }
+            egui::ScrollArea::horizontal()
+                .id_salt(("table_h", card.id))
+                .show(ui, |ui| {
+                    table_ui(ui, card, table, actions);
+                });
+        }
         k @ CardKind::Image { .. } => {
             // Editing an image card just means naming it, so you can tell a few
             // apart. The images themselves always show.
@@ -1106,14 +1136,235 @@ fn grid_cols(n: usize) -> usize {
 }
 
 fn supports_edit(kind: &CardKind) -> bool {
-    matches!(kind, CardKind::Text | CardKind::Code { .. } | CardKind::Image { .. })
+    matches!(
+        kind,
+        CardKind::Text | CardKind::Code { .. } | CardKind::Image { .. } | CardKind::Table { .. }
+    )
+}
+
+const TABLE_ROW_H: f32 = 24.0;
+const TABLE_HANDLE_W: f32 = 20.0;
+
+/// The spreadsheet card body. Edit mode shows a toolbar (rows/cols, colors,
+/// import/export), row/column handles with insert/delete menus, draggable
+/// column-resize grips, and a TextEdit per cell. View mode renders the same
+/// grid read-only with cell colors.
+fn table_ui(ui: &mut egui::Ui, card: &Card, table: &crate::model::TableData, actions: &mut Vec<CanvasAction>) {
+    let id = card.id;
+    let cols = table.n_cols();
+    let focus_key = ui.id().with(("table_focus", id));
+
+    if card.editing {
+        // --- toolbar ------------------------------------------------------
+        ui.horizontal_wrapped(|ui| {
+            if ui.small_button("+ row").clicked() {
+                actions.push(CanvasAction::TableInsertRow(id, table.rows.len()));
+            }
+            if ui.small_button("+ col").clicked() {
+                actions.push(CanvasAction::TableInsertCol(id, cols));
+            }
+            let mut header = table.header;
+            if ui.checkbox(&mut header, "header").changed() {
+                actions.push(CanvasAction::TableToggleHeader(id));
+            }
+            ui.separator();
+            if ui.small_button("Import…").on_hover_text("Load a CSV or XLSX file").clicked() {
+                actions.push(CanvasAction::TableImport(id));
+            }
+            if ui.small_button("CSV…").on_hover_text("Export as CSV").clicked() {
+                actions.push(CanvasAction::TableExportCsv(id));
+            }
+            if ui.small_button("XLSX…").on_hover_text("Export as Excel (keeps colors)").clicked() {
+                actions.push(CanvasAction::TableExportXlsx(id));
+            }
+        });
+        // Cell colors: pick, then apply to the focused cell.
+        let focus = ui.data(|d| d.get_temp::<(usize, usize)>(focus_key));
+        ui.horizontal(|ui| {
+            let bkey = egui::Id::new("trellis_table_bg");
+            let fkey = egui::Id::new("trellis_table_fg");
+            let mut bg = ui.data(|d| d.get_temp::<[u8; 3]>(bkey)).unwrap_or([0xfd, 0xe6, 0x8a]);
+            let mut fg = ui.data(|d| d.get_temp::<[u8; 3]>(fkey)).unwrap_or([0xef, 0x44, 0x44]);
+            if ui.color_edit_button_srgb(&mut bg).on_hover_text("Cell background color").changed() {
+                ui.data_mut(|d| d.insert_temp(bkey, bg));
+            }
+            if ui.small_button("fill").on_hover_text("Apply background to the selected cell").clicked() {
+                if let Some((r, c)) = focus {
+                    actions.push(CanvasAction::TableSetBg(id, r, c, Some(bg)));
+                }
+            }
+            ui.separator();
+            if ui.color_edit_button_srgb(&mut fg).on_hover_text("Cell font color").changed() {
+                ui.data_mut(|d| d.insert_temp(fkey, fg));
+            }
+            if ui.small_button("A").on_hover_text("Apply font color to the selected cell").clicked() {
+                if let Some((r, c)) = focus {
+                    actions.push(CanvasAction::TableSetFg(id, r, c, Some(fg)));
+                }
+            }
+            ui.separator();
+            if ui.small_button("clear").on_hover_text("Remove colors from the selected cell").clicked() {
+                if let Some((r, c)) = focus {
+                    actions.push(CanvasAction::TableSetBg(id, r, c, None));
+                    actions.push(CanvasAction::TableSetFg(id, r, c, None));
+                }
+            }
+            match focus {
+                Some((r, c)) => ui.weak(format!("cell {}{}", col_letter(c), r + 1)),
+                None => ui.weak("click a cell first"),
+            };
+        });
+
+        // --- column header strip (letters + resize grips) -----------------
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.add_space(TABLE_HANDLE_W + 2.0);
+            for c in 0..cols {
+                let w = table.col_width(c);
+                let btn = ui.add_sized(
+                    [(w - 10.0).max(20.0), 16.0],
+                    egui::Button::new(egui::RichText::new(col_letter(c)).size(10.0)).small(),
+                );
+                btn.context_menu(|ui| {
+                    if ui.button("Insert column left").clicked() {
+                        actions.push(CanvasAction::TableInsertCol(id, c));
+                        ui.close_menu();
+                    }
+                    if ui.button("Insert column right").clicked() {
+                        actions.push(CanvasAction::TableInsertCol(id, c + 1));
+                        ui.close_menu();
+                    }
+                    if ui.button("Delete column").clicked() {
+                        actions.push(CanvasAction::TableRemoveCol(id, c));
+                        ui.close_menu();
+                    }
+                });
+                // Resize grip.
+                let (grip, gresp) =
+                    ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::drag());
+                let gcol = if gresp.hovered() || gresp.dragged() {
+                    ui.visuals().strong_text_color()
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                ui.painter().line_segment(
+                    [grip.center_top() + egui::vec2(0.0, 2.0), grip.center_bottom() - egui::vec2(0.0, 2.0)],
+                    egui::Stroke::new(2.0, gcol),
+                );
+                if gresp.dragged() && gresp.drag_delta().x != 0.0 {
+                    actions.push(CanvasAction::TableSetColWidth(id, c, w + gresp.drag_delta().x));
+                }
+            }
+        });
+    }
+
+    // --- the grid ---------------------------------------------------------
+    let header_bg = ui.visuals().faint_bg_color;
+    for (r, row) in table.rows.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if card.editing {
+                let rh = ui.add_sized(
+                    [TABLE_HANDLE_W, TABLE_ROW_H],
+                    egui::Button::new(egui::RichText::new(format!("{}", r + 1)).size(10.0)).small(),
+                );
+                rh.context_menu(|ui| {
+                    if ui.button("Insert row above").clicked() {
+                        actions.push(CanvasAction::TableInsertRow(id, r));
+                        ui.close_menu();
+                    }
+                    if ui.button("Insert row below").clicked() {
+                        actions.push(CanvasAction::TableInsertRow(id, r + 1));
+                        ui.close_menu();
+                    }
+                    if ui.button("Delete row").clicked() {
+                        actions.push(CanvasAction::TableRemoveRow(id, r));
+                        ui.close_menu();
+                    }
+                });
+            }
+            for (c, cell) in row.iter().enumerate() {
+                let w = table.col_width(c);
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(w, TABLE_ROW_H), egui::Sense::hover());
+                // Cell background: explicit color, else header shading, else a
+                // faint outline so the grid reads as a grid.
+                if let Some([rr, gg, bb]) = cell.bg {
+                    ui.painter()
+                        .rect_filled(rect, 2.0, egui::Color32::from_rgb(rr, gg, bb));
+                } else if table.header && r == 0 {
+                    ui.painter().rect_filled(rect, 2.0, header_bg);
+                }
+                ui.painter().rect_stroke(
+                    rect,
+                    2.0,
+                    egui::Stroke::new(0.5, ui.visuals().weak_text_color().gamma_multiply(0.5)),
+                );
+                let fg = cell.fg.map(|[rr, gg, bb]| egui::Color32::from_rgb(rr, gg, bb));
+                if card.editing {
+                    let mut text = cell.text.clone();
+                    let mut te = egui::TextEdit::singleline(&mut text)
+                        .frame(false)
+                        .margin(egui::vec2(4.0, 3.0))
+                        .desired_width(w - 8.0);
+                    if let Some(fg) = fg {
+                        te = te.text_color(fg);
+                    }
+                    let resp = ui.put(rect, te);
+                    if resp.has_focus() || resp.gained_focus() {
+                        ui.data_mut(|d| d.insert_temp(focus_key, (r, c)));
+                    }
+                    if resp.changed() {
+                        actions.push(CanvasAction::TableSetCell(id, r, c, text));
+                    }
+                } else {
+                    let clipped = ui.painter_at(rect.shrink2(egui::vec2(4.0, 0.0)));
+                    let galley = ui.fonts(|f| {
+                        f.layout_no_wrap(
+                            cell.text.clone(),
+                            egui::TextStyle::Body.resolve(ui.style()),
+                            fg.unwrap_or_else(|| {
+                                if table.header && r == 0 {
+                                    ui.visuals().strong_text_color()
+                                } else {
+                                    ui.visuals().text_color()
+                                }
+                            }),
+                        )
+                    });
+                    clipped.galley(
+                        egui::pos2(
+                            rect.left() + 4.0,
+                            rect.center().y - galley.size().y / 2.0,
+                        ),
+                        galley,
+                        ui.visuals().text_color(),
+                    );
+                }
+            }
+        });
+    }
+}
+
+/// Spreadsheet-style column label: A, B, …, Z, AA, AB, …
+fn col_letter(mut c: usize) -> String {
+    let mut s = String::new();
+    loop {
+        s.insert(0, (b'A' + (c % 26) as u8) as char);
+        if c < 26 {
+            break;
+        }
+        c = c / 26 - 1;
+    }
+    s
 }
 
 /// The card's plain-text content for the title-bar copy button, if it has any.
-/// Checklists render as Markdown task lines.
+/// Checklists render as Markdown task lines; tables as CSV.
 fn copyable_text(card: &Card) -> Option<String> {
     match &card.kind {
         CardKind::Text | CardKind::Code { .. } => Some(card.body.clone()),
+        CardKind::Table { table } => Some(table.to_csv()),
         CardKind::Checklist { items } => Some(
             items
                 .iter()
@@ -1587,6 +1838,24 @@ mod tests {
             extra: vec![],
         });
         assert_eq!(copyable_text(&img), None);
+    }
+
+    #[test]
+    fn table_copy_button_yields_csv_and_col_letters_extend() {
+        use crate::model::{TableCell, TableData};
+        let mut t = TableData::empty(2, 2);
+        t.rows[0][0] = TableCell::new("a");
+        t.rows[0][1] = TableCell::new("b,x");
+        t.rows[1][0] = TableCell::new("c");
+        let mut card = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Table { table: t });
+        card.editing = false;
+        let csv = copyable_text(&card).unwrap();
+        assert_eq!(csv.trim(), "a,\"b,x\"\nc,");
+
+        assert_eq!(col_letter(0), "A");
+        assert_eq!(col_letter(25), "Z");
+        assert_eq!(col_letter(26), "AA");
+        assert_eq!(col_letter(27), "AB");
     }
 
     #[test]

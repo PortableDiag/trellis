@@ -26,6 +26,10 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   (Enter adds the next `-`/`1.`/`- [ ]` marker; empty item ends the list).
 - **Code** — dedicated code editor with a language selector and highlighting.
 - **Checklist** — real checkboxes with add/remove/edit per item.
+- **Table** — a small spreadsheet: inline cell editing, insert/delete/resize
+  rows and columns (right-click the row/column handles), per-cell **background
+  and font colors**, an optional header row, and **CSV/XLSX import & export**
+  (XLSX export keeps your colors). The copy button copies the table as CSV.
 - **Image** — hold **any number of images** (bytes embedded), laid out in a
   grid; give the card a **title** to tell a few apart. **Double-click an image**
   to open it in a full-screen viewer — scroll or `+`/`-` to zoom, drag to pan,

@@ -29,6 +29,151 @@ pub struct ChecklistItem {
     pub text: String,
 }
 
+/// One cell of a Table card: text plus optional background / font colors.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct TableCell {
+    pub text: String,
+    #[serde(default)]
+    pub bg: Option<[u8; 3]>,
+    #[serde(default)]
+    pub fg: Option<[u8; 3]>,
+}
+
+impl TableCell {
+    pub fn new(text: impl Into<String>) -> Self {
+        TableCell { text: text.into(), bg: None, fg: None }
+    }
+}
+
+/// The grid of a Table card. `rows` is kept rectangular by the Document ops.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TableData {
+    pub rows: Vec<Vec<TableCell>>,
+    /// Per-column widths in canvas units (missing entries = default width).
+    #[serde(default)]
+    pub col_widths: Vec<f32>,
+    /// Style the first row as a header.
+    #[serde(default = "default_true")]
+    pub header: bool,
+}
+
+pub const TABLE_DEFAULT_COL_W: f32 = 110.0;
+
+impl TableData {
+    /// A fresh `rows` x `cols` empty table.
+    pub fn empty(rows: usize, cols: usize) -> Self {
+        TableData {
+            rows: vec![vec![TableCell::default(); cols]; rows],
+            col_widths: Vec::new(),
+            header: true,
+        }
+    }
+
+    pub fn n_cols(&self) -> usize {
+        self.rows.first().map(|r| r.len()).unwrap_or(0)
+    }
+
+    pub fn col_width(&self, c: usize) -> f32 {
+        self.col_widths.get(c).copied().unwrap_or(TABLE_DEFAULT_COL_W)
+    }
+
+    /// Replace all contents with plain text values (import); colors reset.
+    pub fn from_values(values: Vec<Vec<String>>) -> Self {
+        let cols = values.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
+        let mut rows: Vec<Vec<TableCell>> = values
+            .into_iter()
+            .map(|r| {
+                let mut row: Vec<TableCell> = r.into_iter().map(TableCell::new).collect();
+                row.resize(cols, TableCell::default());
+                row
+            })
+            .collect();
+        if rows.is_empty() {
+            rows.push(vec![TableCell::default(); cols]);
+        }
+        TableData { rows, col_widths: Vec::new(), header: true }
+    }
+
+    /// The table as CSV text (used by export and the card copy button).
+    pub fn to_csv(&self) -> String {
+        let mut w = csv::WriterBuilder::new()
+            .flexible(true)
+            .from_writer(Vec::new());
+        for row in &self.rows {
+            let _ = w.write_record(row.iter().map(|c| c.text.as_str()));
+        }
+        String::from_utf8(w.into_inner().unwrap_or_default()).unwrap_or_default()
+    }
+
+    /// The table as an .xlsx file, colors included.
+    pub fn to_xlsx(&self) -> Result<Vec<u8>, String> {
+        use rust_xlsxwriter::{Color, Format, Workbook};
+        let mut wb = Workbook::new();
+        let ws = wb.add_worksheet();
+        for (r, row) in self.rows.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                let mut fmt = Format::new();
+                let mut styled = false;
+                if let Some([rr, gg, bb]) = cell.bg {
+                    fmt = fmt.set_background_color(Color::RGB(
+                        ((rr as u32) << 16) | ((gg as u32) << 8) | bb as u32,
+                    ));
+                    styled = true;
+                }
+                if let Some([rr, gg, bb]) = cell.fg {
+                    fmt = fmt.set_font_color(Color::RGB(
+                        ((rr as u32) << 16) | ((gg as u32) << 8) | bb as u32,
+                    ));
+                    styled = true;
+                }
+                if self.header && r == 0 {
+                    fmt = fmt.set_bold();
+                    styled = true;
+                }
+                let res = if styled {
+                    ws.write_with_format(r as u32, c as u16, &cell.text, &fmt)
+                } else {
+                    ws.write(r as u32, c as u16, &cell.text)
+                };
+                res.map_err(|e| e.to_string())?;
+            }
+        }
+        wb.save_to_buffer().map_err(|e| e.to_string())
+    }
+}
+
+/// Parse CSV bytes into rows of strings.
+pub fn csv_to_values(bytes: &[u8]) -> Result<Vec<Vec<String>>, String> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(bytes);
+    let mut out = Vec::new();
+    for rec in rdr.records() {
+        let rec = rec.map_err(|e| e.to_string())?;
+        out.push(rec.iter().map(|s| s.to_string()).collect());
+    }
+    Ok(out)
+}
+
+/// Parse the first sheet of an .xlsx file into rows of strings.
+pub fn xlsx_to_values(bytes: &[u8]) -> Result<Vec<Vec<String>>, String> {
+    use calamine::Reader;
+    let mut wb = calamine::Xlsx::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let sheet = wb
+        .sheet_names()
+        .first()
+        .cloned()
+        .ok_or("workbook has no sheets")?;
+    let range = wb
+        .worksheet_range(&sheet)
+        .map_err(|e| e.to_string())?;
+    Ok(range
+        .rows()
+        .map(|r| r.iter().map(|c| c.to_string()).collect())
+        .collect())
+}
+
 /// One additional image of an Image card. The first image lives in the
 /// variant's `data`/`name` fields so pre-multi-image documents load unchanged.
 #[derive(Clone, Serialize, Deserialize)]
@@ -46,6 +191,9 @@ pub enum CardKind {
     /// `body` is source code; `lang` selects syntax highlighting.
     Code { lang: String },
     Checklist { items: Vec<ChecklistItem> },
+    /// A small spreadsheet: grid of cells with optional colors, CSV/XLSX
+    /// import/export.
+    Table { table: TableData },
     /// Image bytes embedded directly in the document for portability. `data`/
     /// `name` hold the first image; `extra` any further ones (shown as a grid).
     Image {
@@ -62,6 +210,7 @@ impl CardKind {
             CardKind::Text => "Text",
             CardKind::Code { .. } => "Code",
             CardKind::Checklist { .. } => "Checklist",
+            CardKind::Table { .. } => "Table",
             CardKind::Image { .. } => "Image",
         }
     }
@@ -110,7 +259,8 @@ pub struct Card {
 
 impl Card {
     pub fn new(id: CardId, pos: egui::Pos2, kind: CardKind) -> Self {
-        let editing = matches!(kind, CardKind::Text | CardKind::Code { .. });
+        let editing =
+            matches!(kind, CardKind::Text | CardKind::Code { .. } | CardKind::Table { .. });
         Self {
             id,
             pos,
@@ -312,6 +462,104 @@ impl Document {
             .cards
             .iter_mut()
             .find(|c| c.id == card)
+    }
+
+    fn table_mut(&mut self, node: NodeId, card: CardId) -> Option<&mut TableData> {
+        match self.card_mut(node, card).map(|c| &mut c.kind) {
+            Some(CardKind::Table { table }) => Some(table),
+            _ => None,
+        }
+    }
+
+    pub fn table_set_cell(&mut self, node: NodeId, card: CardId, r: usize, c: usize, text: String) -> bool {
+        self.table_mut(node, card)
+            .and_then(|t| t.rows.get_mut(r)?.get_mut(c).map(|cell| cell.text = text))
+            .is_some()
+    }
+
+    pub fn table_set_bg(&mut self, node: NodeId, card: CardId, r: usize, c: usize, bg: Option<[u8; 3]>) -> bool {
+        self.table_mut(node, card)
+            .and_then(|t| t.rows.get_mut(r)?.get_mut(c).map(|cell| cell.bg = bg))
+            .is_some()
+    }
+
+    pub fn table_set_fg(&mut self, node: NodeId, card: CardId, r: usize, c: usize, fg: Option<[u8; 3]>) -> bool {
+        self.table_mut(node, card)
+            .and_then(|t| t.rows.get_mut(r)?.get_mut(c).map(|cell| cell.fg = fg))
+            .is_some()
+    }
+
+    /// Insert an empty row at `at` (clamped).
+    pub fn table_insert_row(&mut self, node: NodeId, card: CardId, at: usize) -> bool {
+        let Some(t) = self.table_mut(node, card) else { return false };
+        let cols = t.n_cols().max(1);
+        let at = at.min(t.rows.len());
+        t.rows.insert(at, vec![TableCell::default(); cols]);
+        true
+    }
+
+    /// Remove a row (a table always keeps at least one).
+    pub fn table_remove_row(&mut self, node: NodeId, card: CardId, at: usize) -> bool {
+        let Some(t) = self.table_mut(node, card) else { return false };
+        if t.rows.len() <= 1 || at >= t.rows.len() {
+            return false;
+        }
+        t.rows.remove(at);
+        true
+    }
+
+    /// Insert an empty column at `at` (clamped).
+    pub fn table_insert_col(&mut self, node: NodeId, card: CardId, at: usize) -> bool {
+        let Some(t) = self.table_mut(node, card) else { return false };
+        let at = at.min(t.n_cols());
+        for row in &mut t.rows {
+            row.insert(at, TableCell::default());
+        }
+        if at < t.col_widths.len() {
+            t.col_widths.insert(at, TABLE_DEFAULT_COL_W);
+        }
+        true
+    }
+
+    /// Remove a column (a table always keeps at least one).
+    pub fn table_remove_col(&mut self, node: NodeId, card: CardId, at: usize) -> bool {
+        let Some(t) = self.table_mut(node, card) else { return false };
+        if t.n_cols() <= 1 || at >= t.n_cols() {
+            return false;
+        }
+        for row in &mut t.rows {
+            row.remove(at);
+        }
+        if at < t.col_widths.len() {
+            t.col_widths.remove(at);
+        }
+        true
+    }
+
+    pub fn table_set_col_width(&mut self, node: NodeId, card: CardId, c: usize, w: f32) -> bool {
+        let Some(t) = self.table_mut(node, card) else { return false };
+        if c >= t.n_cols() {
+            return false;
+        }
+        if t.col_widths.len() < t.n_cols() {
+            let cols = t.n_cols();
+            t.col_widths.resize(cols, TABLE_DEFAULT_COL_W);
+        }
+        t.col_widths[c] = w.clamp(28.0, 600.0);
+        true
+    }
+
+    pub fn table_toggle_header(&mut self, node: NodeId, card: CardId) -> bool {
+        self.table_mut(node, card)
+            .map(|t| t.header = !t.header)
+            .is_some()
+    }
+
+    /// Replace the whole table with imported plain values.
+    pub fn table_replace(&mut self, node: NodeId, card: CardId, values: Vec<Vec<String>>) -> bool {
+        self.table_mut(node, card)
+            .map(|t| *t = TableData::from_values(values))
+            .is_some()
     }
 
     /// Append an image to an Image card (the first load fills the primary
@@ -805,6 +1053,33 @@ impl Document {
                     }
                     s.push_str("</ul>\n");
                 }
+                CardKind::Table { table } => {
+                    s.push_str("<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">\n");
+                    for (r, row) in table.rows.iter().enumerate() {
+                        s.push_str("<tr>");
+                        for cell in row {
+                            let tag = if table.header && r == 0 { "th" } else { "td" };
+                            let mut style = String::new();
+                            if let Some([rr, gg, bb]) = cell.bg {
+                                style.push_str(&format!("background:#{rr:02x}{gg:02x}{bb:02x};"));
+                            }
+                            if let Some([rr, gg, bb]) = cell.fg {
+                                style.push_str(&format!("color:#{rr:02x}{gg:02x}{bb:02x};"));
+                            }
+                            let style_attr = if style.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" style=\"{style}\"")
+                            };
+                            s.push_str(&format!(
+                                "<{tag}{style_attr}>{}</{tag}>",
+                                escape_html(&cell.text)
+                            ));
+                        }
+                        s.push_str("</tr>\n");
+                    }
+                    s.push_str("</table>\n");
+                }
                 k @ CardKind::Image { .. } => {
                     for (data, name) in k.images() {
                         let b64 = base64::engine::general_purpose::STANDARD.encode(data);
@@ -881,6 +1156,16 @@ impl Document {
                     for it in items {
                         let mark = if it.done { "[x]" } else { "[ ]" };
                         out.push(ExportLine { text: format!("{mark} {}", it.text), size: 10.5 });
+                    }
+                }
+                CardKind::Table { table } => {
+                    for row in &table.rows {
+                        let line = row
+                            .iter()
+                            .map(|c| c.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        out.push(ExportLine { text: line, size: 10.5 });
                     }
                 }
                 k @ CardKind::Image { .. } => {
@@ -994,6 +1279,25 @@ impl Document {
                     }
                     s.push('\n');
                 }
+                CardKind::Table { table } => {
+                    let md_row = |row: &Vec<TableCell>| {
+                        format!(
+                            "| {} |\n",
+                            row.iter()
+                                .map(|c| c.text.replace('|', "\\|"))
+                                .collect::<Vec<_>>()
+                                .join(" | ")
+                        )
+                    };
+                    let cols = table.n_cols();
+                    for (r, row) in table.rows.iter().enumerate() {
+                        s.push_str(&md_row(row));
+                        if r == 0 && table.header && cols > 0 {
+                            s.push_str(&format!("|{}\n", " --- |".repeat(cols)));
+                        }
+                    }
+                    s.push('\n');
+                }
                 k @ CardKind::Image { .. } => {
                     for (_, name) in k.images() {
                         s.push_str(&format!("*(image: {name})*\n\n"));
@@ -1068,6 +1372,12 @@ fn searchable_body(card: &Card) -> String {
         CardKind::Checklist { items } => items
             .iter()
             .map(|i| i.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        CardKind::Table { table } => table
+            .rows
+            .iter()
+            .flat_map(|r| r.iter().map(|c| c.text.as_str()))
             .collect::<Vec<_>>()
             .join(" "),
         k @ CardKind::Image { .. } => k
@@ -1197,6 +1507,59 @@ mod tests {
     fn hard_wrap_renders_as_line_breaks_in_html() {
         // The whole point: two lines become two visual lines (<br>), not one.
         assert!(md_to_html("line one\nline two").contains("<br"));
+    }
+
+    #[test]
+    fn table_ops_keep_grid_rectangular_and_roundtrip_csv_xlsx() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let c = doc
+            .add_card(n, egui::pos2(0.0, 0.0), CardKind::Table { table: TableData::empty(2, 2) })
+            .unwrap();
+
+        assert!(doc.table_set_cell(n, c, 0, 0, "Name".into()));
+        assert!(doc.table_set_cell(n, c, 0, 1, "Qty".into()));
+        assert!(doc.table_set_cell(n, c, 1, 0, "Apples, \"red\"".into()));
+        assert!(doc.table_set_cell(n, c, 1, 1, "3".into()));
+        assert!(doc.table_set_bg(n, c, 0, 0, Some([255, 0, 0])));
+        assert!(doc.table_set_fg(n, c, 1, 1, Some([0, 0, 255])));
+        assert!(!doc.table_set_cell(n, c, 9, 9, "out of range".into()));
+
+        // Row/col ops keep the grid rectangular and never empty.
+        assert!(doc.table_insert_row(n, c, 1));
+        assert!(doc.table_insert_col(n, c, 0));
+        {
+            let CardKind::Table { table } = &doc.nodes[&n].cards[0].kind else { panic!() };
+            assert_eq!(table.rows.len(), 3);
+            assert!(table.rows.iter().all(|r| r.len() == 3));
+        }
+        assert!(doc.table_remove_row(n, c, 1));
+        assert!(doc.table_remove_col(n, c, 0));
+        assert!(doc.table_set_col_width(n, c, 0, 200.0));
+
+        let CardKind::Table { table } = doc.nodes[&n].cards[0].kind.clone() else { panic!() };
+        assert_eq!(table.col_width(0), 200.0);
+
+        // CSV round-trip, quoting included.
+        let csv = table.to_csv();
+        let back = csv_to_values(csv.as_bytes()).unwrap();
+        assert_eq!(back[1][0], "Apples, \"red\"");
+        assert_eq!(back[0], vec!["Name", "Qty"]);
+
+        // XLSX round-trip through calamine; colors live in the file.
+        let xlsx = table.to_xlsx().unwrap();
+        assert_eq!(&xlsx[..2], b"PK"); // zip magic
+        let back = xlsx_to_values(&xlsx).unwrap();
+        assert_eq!(back[0], vec!["Name", "Qty"]);
+        assert_eq!(back[1][1], "3");
+
+        // Exports and search cover the table.
+        let html = doc.export_html();
+        assert!(html.contains("<th style=\"background:#ff0000;\">Name</th>"));
+        assert!(html.contains("<td style=\"color:#0000ff;\">3</td>"));
+        let md = doc.export_markdown();
+        assert!(md.contains("| Name | Qty |"));
+        assert!(md.contains("| --- | --- |"));
     }
 
     #[test]

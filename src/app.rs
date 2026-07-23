@@ -755,6 +755,54 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::LoadImage(cid) => self.load_image_into(node, cid),
+                CanvasAction::TableSetCell(cid, r, c, text) => {
+                    if self.doc.table_set_cell(node, cid, r, c, text) {
+                        self.dirty = true;
+                    }
+                }
+                CanvasAction::TableSetBg(cid, r, c, bg) => {
+                    if self.doc.table_set_bg(node, cid, r, c, bg) {
+                        self.dirty = true;
+                    }
+                }
+                CanvasAction::TableSetFg(cid, r, c, fg) => {
+                    if self.doc.table_set_fg(node, cid, r, c, fg) {
+                        self.dirty = true;
+                    }
+                }
+                CanvasAction::TableInsertRow(cid, at) => {
+                    if self.doc.table_insert_row(node, cid, at) {
+                        self.dirty = true;
+                    }
+                }
+                CanvasAction::TableRemoveRow(cid, at) => {
+                    if self.doc.table_remove_row(node, cid, at) {
+                        self.dirty = true;
+                    }
+                }
+                CanvasAction::TableInsertCol(cid, at) => {
+                    if self.doc.table_insert_col(node, cid, at) {
+                        self.dirty = true;
+                    }
+                }
+                CanvasAction::TableRemoveCol(cid, at) => {
+                    if self.doc.table_remove_col(node, cid, at) {
+                        self.dirty = true;
+                    }
+                }
+                CanvasAction::TableSetColWidth(cid, c, w) => {
+                    if self.doc.table_set_col_width(node, cid, c, w) {
+                        self.dirty = true;
+                    }
+                }
+                CanvasAction::TableToggleHeader(cid) => {
+                    if self.doc.table_toggle_header(node, cid) {
+                        self.dirty = true;
+                    }
+                }
+                CanvasAction::TableImport(cid) => self.table_import(node, cid),
+                CanvasAction::TableExportCsv(cid) => self.table_export(node, cid, false),
+                CanvasAction::TableExportXlsx(cid) => self.table_export(node, cid, true),
                 CanvasAction::RemoveImage(cid, idx) => {
                     if self.doc.remove_image(node, cid, idx) {
                         self.tex_cache.forget(cid);
@@ -795,6 +843,66 @@ impl TrellisApp {
                     self.views.insert(node, TSTransform::IDENTITY);
                 }
             }
+        }
+    }
+
+    /// Import a CSV/XLSX file into a table card (replaces its contents).
+    fn table_import(&mut self, node: NodeId, card: crate::model::CardId) {
+        let Some(path) = self
+            .file_dialog()
+            .add_filter("Table", &["csv", "xlsx"])
+            .pick_file()
+        else {
+            return;
+        };
+        let is_xlsx = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("xlsx"))
+            .unwrap_or(false);
+        let values = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| {
+            if is_xlsx {
+                crate::model::xlsx_to_values(&bytes)
+            } else {
+                crate::model::csv_to_values(&bytes)
+            }
+        });
+        match values {
+            Ok(v) => {
+                if self.doc.table_replace(node, card, v) {
+                    self.dirty = true;
+                    self.status = format!("Imported {}", path.display());
+                }
+            }
+            Err(e) => self.status = format!("Import failed: {e}"),
+        }
+    }
+
+    /// Export a table card as CSV or XLSX (colors survive in XLSX).
+    fn table_export(&mut self, node: NodeId, card: crate::model::CardId, xlsx: bool) {
+        let Some(c) = self.doc.card_mut(node, card) else { return };
+        let CardKind::Table { table } = c.kind.clone() else { return };
+        let (label, ext, default) = if xlsx {
+            ("Excel", "xlsx", "table.xlsx")
+        } else {
+            ("CSV", "csv", "table.csv")
+        };
+        let Some(path) = self
+            .file_dialog()
+            .add_filter(label, &[ext])
+            .set_file_name(default)
+            .save_file()
+        else {
+            return;
+        };
+        let data = if xlsx {
+            table.to_xlsx()
+        } else {
+            Ok(table.to_csv().into_bytes())
+        };
+        match data.and_then(|d| std::fs::write(&path, d).map_err(|e| e.to_string())) {
+            Ok(_) => self.status = format!("Exported → {}", path.display()),
+            Err(e) => self.status = format!("Export failed: {e}"),
         }
     }
 

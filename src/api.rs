@@ -135,6 +135,9 @@ pub struct UpdateCardInput {
     /// Replacement checklist items (checklist cards only).
     #[serde(default)]
     items: Option<Vec<ChecklistItemInput>>,
+    /// Replacement cell values (table cards only); colors reset.
+    #[serde(default)]
+    rows: Option<Vec<Vec<String>>>,
 }
 
 #[derive(Deserialize)]
@@ -426,6 +429,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         .map(|i| ChecklistItem { done: i.done, text: i.text })
                         .collect(),
                 },
+                "table" => CardKind::Table { table: crate::model::TableData::empty(3, 3) },
                 "image" => CardKind::Image {
                     data: Vec::new(),
                     name: input.title.clone(),
@@ -470,6 +474,11 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some([w, h]) = patch.size {
                     c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
+                }
+                if let Some(rows) = patch.rows {
+                    if let CardKind::Table { table } = &mut c.kind {
+                        *table = crate::model::TableData::from_values(rows);
+                    }
                 }
                 if let Some(items) = patch.items {
                     if let CardKind::Checklist { items: it } = &mut c.kind {
@@ -665,6 +674,17 @@ fn card_json(c: &Card) -> Value {
                 .map(|i| json!({ "done": i.done, "text": i.text }))
                 .collect::<Vec<_>>());
         }
+        CardKind::Table { table } => {
+            v["header"] = json!(table.header);
+            v["rows"] = json!(table
+                .rows
+                .iter()
+                .map(|row| row
+                    .iter()
+                    .map(|c| json!({"text": c.text, "bg": c.bg, "fg": c.fg}))
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>());
+        }
         k @ CardKind::Image { .. } => {
             let images = k.images();
             v["image_name"] = json!(images.first().map(|(_, n)| *n).unwrap_or(""));
@@ -740,6 +760,30 @@ mod tests {
         let (_, s) = process(&mut doc, ApiRequest::Search("needle".into()));
         assert_eq!(s.status, 200);
         assert!(s.body.contains("needle"));
+    }
+
+    #[test]
+    fn table_card_create_patch_and_json() {
+        use crate::model::TableData;
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc
+            .add_card(nid, egui::pos2(0.0, 0.0), CardKind::Table { table: TableData::empty(2, 2) })
+            .unwrap();
+
+        // PATCH replaces cell values.
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"rows":[["a","b"],["c","d"]]}"#).unwrap();
+        let (dirty, resp) =
+            process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["rows"][1][1]["text"], "d");
+        assert_eq!(v["header"], true);
+
+        let CardKind::Table { table } = &doc.nodes[&nid].cards[0].kind else { panic!() };
+        assert_eq!(table.rows[0][1].text, "b");
     }
 
     #[test]
