@@ -4,6 +4,20 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.20.0]
+
+### Fixed
+- **Agent API: card color on create** — `POST …/cards` now accepts `color` (and
+  `size`). Previously these were silently dropped at creation, so an agent that
+  "set a card red" on create saw success but no color change.
+
+### Changed
+- **Agent API: flexible color input** — every `color` field (nodes, cards,
+  groups, create or update) now accepts an `[r,g,b]` array, a hex string
+  (`"#ef4444"`, `"#e44"`), or a color name (`"red"`, `"green"`, …). An
+  unrecognized color returns `400`, so success means it was applied. Docs
+  updated; `POST …/cards` documents `table`/`image` kinds and `size`/`color`.
+
 ## [0.19.0]
 
 ### Added

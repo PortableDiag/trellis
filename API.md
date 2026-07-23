@@ -50,10 +50,10 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 |---|---|---|
 | `id` | all | |
 | `title` | all | shown in the card's title bar (all kinds, incl. `image`) |
-| `kind` | all | `"text"` \| `"code"` \| `"checklist"` \| `"image"` |
+| `kind` | all | `"text"` \| `"code"` \| `"checklist"` \| `"table"` \| `"image"` |
 | `pos` | all | `[x,y]` top-left on the basket canvas |
 | `size` | all | `[w,h]` in canvas units |
-| `color` | all | `[r,g,b]` title-bar accent |
+| `color` | all | title-bar accent — set as `[r,g,b]` (0–255), a hex string (`"#ef4444"`, `"#e44"`), or a name (`"red"`, `"green"`, `"blue"`, …) |
 | `group` | all | group id this card belongs to, or null |
 | `docked_to` | all | id of the card this one is docked to, or null |
 | `body` | text, code | Markdown (text) or source (code) |
@@ -109,25 +109,36 @@ returns the **full card objects**.
 POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
-POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?}
+POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, color?}
   → 201 {"id":<new>}   | 404 if node doesn't exist
 ```
-`kind` defaults to `"text"`. `pos` is `[x,y]` canvas coordinates (default
-`[40,40]`); pass distinct positions to avoid stacking cards on top of each other.
-`items` is used only for `checklist`; `lang` only for `code`.
+`kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
+`table` (starts as an empty 3×3), or `image` (starts empty — image bytes can't
+be set via the API). `pos` is `[x,y]` canvas coordinates (default `[40,40]`);
+pass distinct positions to avoid stacking cards on top of each other. `size` is
+`[w,h]`. `color` sets the title-bar accent at creation (see the accepted formats
+below). `items` is used only for `checklist`; `lang` only for `code`.
 
 ### Update
 ```
 PATCH /api/nodes/{id}              {title?, color?}
   → 200 {"id":<id>}    | 404
-        color is [r,g,b]; setting only (can't clear via API)
+        color: setting only (can't clear via API)
 
 PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, lang?, pos?, size?, items?}
   → 200 {<updated card>}   | 404
 ```
 Every field is optional; only those present are changed. `pos`/`size` are
-`[x,y]`/`[w,h]`; `color` is `[r,g,b]`; `lang` applies to code cards, `items`
-replaces a checklist's items. The response is the full updated card object.
+`[x,y]`/`[w,h]`; `lang` applies to code cards, `items` replaces a checklist's
+items. The response is the full updated card object.
+
+**Color format** — anywhere the API takes a `color` (nodes, cards, groups, on
+create or update) you may send an `[r,g,b]` array (0–255 each), a hex string
+(`"#ef4444"`, `"ef4444"`, or shorthand `"#e44"`), or a common color name
+(`"red"`, `"orange"`, `"yellow"`, `"green"`, `"blue"`, `"purple"`, `"pink"`,
+`"teal"`, `"gray"`, `"white"`, `"black"`). Card/group colors are a **title-bar /
+container accent**, not a full fill. An unrecognized color is a `400`, so a
+successful response means the color was applied.
 
 ### Delete
 ```
@@ -210,6 +221,11 @@ curl -s -H "X-API-Key: $KEY" \
 # Add a code card
 curl -s -H "X-API-Key: $KEY" \
   -d '{"kind":"code","title":"snippet","lang":"rust","body":"fn main() {}"}' \
+  $API/nodes/$NID/cards
+
+# Add a card and color its title bar in one call (name, hex, or [r,g,b] all work)
+curl -s -H "X-API-Key: $KEY" \
+  -d '{"kind":"text","title":"Important","body":"read me","color":"red","size":[300,180]}' \
   $API/nodes/$NID/cards
 
 # Find something

@@ -82,7 +82,7 @@ struct CreateNodeInput {
 struct UpdateNodeInput {
     #[serde(default)]
     title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_color_opt")]
     color: Option<[u8; 3]>,
 }
 
@@ -100,6 +100,12 @@ pub struct AddCardInput {
     items: Option<Vec<ChecklistItemInput>>,
     #[serde(default)]
     pos: Option<[f32; 2]>,
+    /// Card size (width, height).
+    #[serde(default)]
+    size: Option<[f32; 2]>,
+    /// RGB title-bar accent (array, hex, or name — see `de_color_opt`).
+    #[serde(default, deserialize_with = "de_color_opt")]
+    color: Option<[u8; 3]>,
 }
 
 fn default_kind() -> String {
@@ -120,8 +126,8 @@ pub struct UpdateCardInput {
     title: Option<String>,
     #[serde(default)]
     body: Option<String>,
-    /// RGB title-bar accent.
-    #[serde(default)]
+    /// RGB title-bar accent (array, hex, or name — see `de_color_opt`).
+    #[serde(default, deserialize_with = "de_color_opt")]
     color: Option<[u8; 3]>,
     /// Syntax-highlight language (code cards only).
     #[serde(default)]
@@ -152,7 +158,7 @@ struct CreateGroupInput {
 struct UpdateGroupInput {
     #[serde(default)]
     title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_color_opt")]
     color: Option<[u8; 3]>,
 }
 
@@ -311,6 +317,83 @@ fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, (u16, String)> {
     serde_json::from_str(body).map_err(|e| (400, format!("invalid JSON body: {e}")))
 }
 
+/// Lenient `color` deserializer for the API: accepts an `[r,g,b]` array
+/// (0–255), a hex string (`"#ef4444"`, `"ef4444"`, `"#e44"`), or a common color
+/// name (`"red"`, `"green"`, …) — so agents can set colors however they phrase
+/// it. `null` / absent → `None`. Used on every `color` field the API accepts.
+fn de_color_opt<'de, D>(d: D) -> Result<Option<[u8; 3]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Value::deserialize(d)?;
+    color_from_value(&v).map_err(serde::de::Error::custom)
+}
+
+fn color_from_value(v: &Value) -> Result<Option<[u8; 3]>, String> {
+    match v {
+        Value::Null => Ok(None),
+        Value::Array(a) => {
+            if a.len() != 3 {
+                return Err(format!("color array must be [r,g,b], got {} items", a.len()));
+            }
+            let mut out = [0u8; 3];
+            for (i, x) in a.iter().enumerate() {
+                let n = x
+                    .as_u64()
+                    .filter(|n| *n <= 255)
+                    .ok_or_else(|| "color components must be integers 0–255".to_string())?;
+                out[i] = n as u8;
+            }
+            Ok(Some(out))
+        }
+        Value::String(s) => {
+            color_from_str(s).map(Some).ok_or_else(|| format!("unrecognized color: {s:?}"))
+        }
+        other => Err(format!("color must be [r,g,b] or a name/hex string, got {other}")),
+    }
+}
+
+/// Parse a hex (`#rgb` / `#rrggbb`, `#` optional) or named color into RGB.
+fn color_from_str(s: &str) -> Option<[u8; 3]> {
+    // Named colors mirror the tree's swatches where they overlap.
+    let named: Option<[u8; 3]> = match s.trim().to_ascii_lowercase().as_str() {
+        "red" => Some([0xef, 0x44, 0x44]),
+        "orange" | "amber" => Some([0xf5, 0x9e, 0x0b]),
+        "yellow" => Some([0xea, 0xb3, 0x08]),
+        "green" => Some([0x22, 0xc5, 0x5e]),
+        "blue" => Some([0x3b, 0x82, 0xf6]),
+        "purple" | "violet" => Some([0x8b, 0x5c, 0xf6]),
+        "pink" | "magenta" => Some([0xec, 0x48, 0x99]),
+        "teal" | "cyan" => Some([0x14, 0xb8, 0xa6]),
+        "gray" | "grey" | "slate" => Some([0x64, 0x74, 0x8b]),
+        "white" => Some([0xff, 0xff, 0xff]),
+        "black" => Some([0x00, 0x00, 0x00]),
+        _ => None,
+    };
+    if named.is_some() {
+        return named;
+    }
+    let h = s.trim().strip_prefix('#').unwrap_or_else(|| s.trim());
+    match h.len() {
+        3 => {
+            let mut out = [0u8; 3];
+            for (i, ch) in h.chars().enumerate() {
+                let d = ch.to_digit(16)? as u8;
+                out[i] = d * 16 + d;
+            }
+            Some(out)
+        }
+        6 => {
+            let mut out = [0u8; 3];
+            for i in 0..3 {
+                out[i] = u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok()?;
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 fn pid(s: &str) -> Result<u64, (u16, String)> {
     s.parse::<u64>().map_err(|_| (400, format!("bad id: {s}")))
 }
@@ -447,6 +530,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         c.title = input.title;
                         c.body = input.body;
                         c.editing = false;
+                        if let Some(col) = input.color {
+                            c.color = col;
+                        }
+                        if let Some([w, h]) = input.size {
+                            c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
+                        }
                     }
                     (true, ApiResponse::created(json!({ "id": cid })))
                 }
@@ -800,6 +889,47 @@ mod tests {
         assert_eq!(c.color, [1, 2, 3]);
         assert_eq!(c.pos, egui::pos2(40.0, 50.0));
         assert_eq!(c.size, egui::vec2(300.0, 200.0));
+    }
+
+    #[test]
+    fn create_card_applies_color_and_size_in_flexible_formats() {
+        // Named, hex, short-hex and array all parse to RGB; the create endpoint
+        // now applies color + size (previously silently dropped).
+        assert_eq!(color_from_str("red"), Some([0xef, 0x44, 0x44]));
+        assert_eq!(color_from_str("#22c55e"), Some([0x22, 0xc5, 0x5e]));
+        assert_eq!(color_from_str("#e44"), Some([0xee, 0x44, 0x44]));
+        assert_eq!(color_from_str("nonsense"), None);
+        assert_eq!(color_from_value(&json!([1, 2, 3])).unwrap(), Some([1, 2, 3]));
+        assert!(color_from_value(&json!([1, 2])).is_err());
+        assert!(color_from_value(&json!([1, 2, 999])).is_err());
+        assert_eq!(color_from_value(&Value::Null).unwrap(), None);
+
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let input: AddCardInput = serde_json::from_str(
+            r#"{"kind":"text","title":"T","color":"red","size":[321,222]}"#,
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::AddCard { node: nid, input });
+        assert!(dirty);
+        assert_eq!(resp.status, 201);
+        let c = &doc.nodes[&nid].cards[0];
+        assert_eq!(c.color, [0xef, 0x44, 0x44]);
+        assert_eq!(c.size, egui::vec2(321.0, 222.0));
+
+        // Every kind is creatable via the API.
+        for (kind, want) in [
+            ("code", true),
+            ("checklist", true),
+            ("table", true),
+            ("image", true),
+            ("text", true),
+        ] {
+            let input: AddCardInput =
+                serde_json::from_str(&format!(r#"{{"kind":"{kind}"}}"#)).unwrap();
+            let (_d, resp) = process(&mut doc, ApiRequest::AddCard { node: nid, input });
+            assert_eq!(resp.status == 201, want, "kind {kind}");
+        }
     }
 
     #[test]
