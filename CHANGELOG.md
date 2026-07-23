@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.21.1]
+
+### Fixed
+- **Group header z-order** — the header no longer bleeds through cards on
+  hover. Its interaction sits behind the cards, so only the visible part of a
+  header responds; clicking that visible part raises the whole group (all its
+  cards) to the front, and the header lifts above the cards only while you're
+  actually dragging it.
+
 ## [0.21.0]
 
 ### Added

@@ -221,10 +221,12 @@ pub fn ui(
         }
     }
     let bg = ui.painter_at(canvas_rect);
-    // Header rects are collected here and made interactive *after* the cards are
-    // drawn, so a group's header handle stays grabbable even when cards pile on
-    // top of it (its interaction wins), while the strip itself draws behind.
-    let mut group_headers: Vec<(GroupId, egui::Rect)> = Vec::new();
+    // The header strip draws behind the cards (bg painter) and its interaction is
+    // registered here, *before* the cards — so where a card overlaps the header,
+    // the card wins and the buried part of the header neither responds nor bleeds
+    // through on hover. Only the visible part is clickable. A header being dragged
+    // is repainted on top after the cards so you can see it while you move it.
+    let mut dragging_header: Option<(GroupId, egui::Rect)> = None;
     for group in &node.groups {
         let Some(wb) = gbounds.get(&group.id) else { continue };
         let srect = to_screen.mul_rect(wb.expand(10.0));
@@ -250,7 +252,17 @@ pub fn ui(
             egui::FontId::proportional(11.0 * zoom),
             egui::Color32::from_gray(240),
         );
-        group_headers.push((group.id, header));
+        let hresp =
+            ui.interact(header, ui.id().with(("group_hdr", group.id)), egui::Sense::click_and_drag());
+        // Clicking a visible part of the header brings the whole group to the top.
+        if hresp.clicked() {
+            actions.push(CanvasAction::RaiseGroup(group.id));
+        }
+        if hresp.dragged() {
+            actions.push(CanvasAction::MoveGroup(group.id, hresp.drag_delta() / zoom));
+            dragging_header = Some((group.id, header));
+        }
+        hresp.context_menu(|ui| group_menu(ui, group, &mut actions));
     }
 
     // --- dock connectors: faint links between stuck cards -------------------
@@ -342,34 +354,21 @@ pub fn ui(
         );
     }
 
-    // Group header handles — interacted after the cards so they win the click
-    // even when buried, and repainted on top while hovered/dragged so the one
-    // you're using comes to the front.
-    let top = ui.painter_at(canvas_rect);
-    for (gid, header) in group_headers {
-        let hresp =
-            ui.interact(header, ui.id().with(("group_hdr", gid)), egui::Sense::click_and_drag());
-        if hresp.clicked() {
-            actions.push(CanvasAction::RaiseGroup(gid));
-        }
-        if hresp.dragged() {
-            actions.push(CanvasAction::MoveGroup(gid, hresp.drag_delta() / zoom));
-        }
+    // While a header is being dragged, repaint it on top of the cards so you can
+    // see the handle you grabbed as the group moves.
+    if let Some((gid, header)) = dragging_header {
         if let Some(group) = node.groups.iter().find(|g| g.id == gid) {
-            if hresp.hovered() || hresp.dragged() {
-                let gcol =
-                    egui::Color32::from_rgb(group.color[0], group.color[1], group.color[2]);
-                top.rect_filled(header, 4.0 * zoom, gcol);
-                let label = if group.title.is_empty() { "Group" } else { group.title.as_str() };
-                top.text(
-                    header.left_center() + egui::vec2(6.0 * zoom, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    label,
-                    egui::FontId::proportional(11.0 * zoom),
-                    egui::Color32::WHITE,
-                );
-            }
-            hresp.context_menu(|ui| group_menu(ui, group, &mut actions));
+            let top = ui.painter_at(canvas_rect);
+            let gcol = egui::Color32::from_rgb(group.color[0], group.color[1], group.color[2]);
+            top.rect_filled(header, 4.0 * zoom, gcol);
+            let label = if group.title.is_empty() { "Group" } else { group.title.as_str() };
+            top.text(
+                header.left_center() + egui::vec2(6.0 * zoom, 0.0),
+                egui::Align2::LEFT_CENTER,
+                label,
+                egui::FontId::proportional(11.0 * zoom),
+                egui::Color32::WHITE,
+            );
         }
     }
 
