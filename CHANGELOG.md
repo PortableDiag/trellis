@@ -4,6 +4,14 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.21.2]
+
+### Fixed
+- **API color names match the palette** — the agent API now accepts every color
+  name in the app's 16-swatch palette (adds `lime`, `indigo`, `stone`, and
+  splits `orange`/`amber`, `teal`/`cyan` to their true swatch colors). Previously
+  a swatch name like `"lime"` returned `400`. `API.md` lists the full set.
+
 ## [0.21.1]
 
 ### Fixed

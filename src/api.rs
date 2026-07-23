@@ -355,19 +355,24 @@ fn color_from_value(v: &Value) -> Result<Option<[u8; 3]>, String> {
 
 /// Parse a hex (`#rgb` / `#rrggbb`, `#` optional) or named color into RGB.
 fn color_from_str(s: &str) -> Option<[u8; 3]> {
-    // Named colors mirror the tree's swatches where they overlap.
+    // Named colors match the shared swatch palette (crate::model::SWATCHES).
     let named: Option<[u8; 3]> = match s.trim().to_ascii_lowercase().as_str() {
         "red" => Some([0xef, 0x44, 0x44]),
-        "orange" | "amber" => Some([0xf5, 0x9e, 0x0b]),
+        "orange" => Some([0xf9, 0x73, 0x16]),
+        "amber" => Some([0xf5, 0x9e, 0x0b]),
         "yellow" => Some([0xea, 0xb3, 0x08]),
+        "lime" => Some([0x84, 0xcc, 0x16]),
         "green" => Some([0x22, 0xc5, 0x5e]),
+        "teal" => Some([0x14, 0xb8, 0xa6]),
+        "cyan" => Some([0x06, 0xb6, 0xd4]),
         "blue" => Some([0x3b, 0x82, 0xf6]),
+        "indigo" => Some([0x63, 0x66, 0xf1]),
         "purple" | "violet" => Some([0x8b, 0x5c, 0xf6]),
         "pink" | "magenta" => Some([0xec, 0x48, 0x99]),
-        "teal" | "cyan" => Some([0x14, 0xb8, 0xa6]),
-        "gray" | "grey" | "slate" => Some([0x64, 0x74, 0x8b]),
+        "slate" | "gray" | "grey" => Some([0x64, 0x74, 0x8b]),
+        "stone" => Some([0x78, 0x71, 0x6c]),
         "white" => Some([0xff, 0xff, 0xff]),
-        "black" => Some([0x00, 0x00, 0x00]),
+        "black" => Some([0x1e, 0x1e, 0x1e]),
         _ => None,
     };
     if named.is_some() {
@@ -896,6 +901,10 @@ mod tests {
         // Named, hex, short-hex and array all parse to RGB; the create endpoint
         // now applies color + size (previously silently dropped).
         assert_eq!(color_from_str("red"), Some([0xef, 0x44, 0x44]));
+        // Every named swatch in the shared palette resolves via the API too.
+        for (name, rgb) in crate::model::SWATCHES {
+            assert_eq!(color_from_str(name), Some(*rgb), "swatch {name}");
+        }
         assert_eq!(color_from_str("#22c55e"), Some([0x22, 0xc5, 0x5e]));
         assert_eq!(color_from_str("#e44"), Some([0xee, 0x44, 0x44]));
         assert_eq!(color_from_str("nonsense"), None);

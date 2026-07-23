@@ -134,11 +134,13 @@ items. The response is the full updated card object.
 
 **Color format** — anywhere the API takes a `color` (nodes, cards, groups, on
 create or update) you may send an `[r,g,b]` array (0–255 each), a hex string
-(`"#ef4444"`, `"ef4444"`, or shorthand `"#e44"`), or a common color name
-(`"red"`, `"orange"`, `"yellow"`, `"green"`, `"blue"`, `"purple"`, `"pink"`,
-`"teal"`, `"gray"`, `"white"`, `"black"`). Card/group colors are a **title-bar /
-container accent**, not a full fill. An unrecognized color is a `400`, so a
-successful response means the color was applied.
+(`"#ef4444"`, `"ef4444"`, or shorthand `"#e44"`), or a color name from the app's
+swatch palette: `"red"`, `"orange"`, `"amber"`, `"yellow"`, `"lime"`, `"green"`,
+`"teal"`, `"cyan"`, `"blue"`, `"indigo"`, `"purple"`/`"violet"`,
+`"pink"`/`"magenta"`, `"slate"`/`"gray"`, `"stone"`, `"white"`, `"black"`.
+Card/group colors are a **title-bar / container accent**, not a full fill. An
+unrecognized color is a `400`, so a successful response means the color was
+applied.
 
 ### Delete
 ```
