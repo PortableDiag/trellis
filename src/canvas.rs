@@ -28,12 +28,15 @@ pub enum CanvasAction {
     SetBody(CardId, String),
     SetLang(CardId, String),
     SetColor(CardId, [u8; 3]),
+    SetFontScale(CardId, f32),
     SetEditing(CardId, bool),
     Duplicate(CardId),
     CopyCard(CardId),
     PasteCard(egui::Pos2),
     Remove(CardId),
     ResetView,
+    /// Files dropped onto the canvas, to become cards at the given world pos.
+    DropFiles(Vec<egui::DroppedFile>, egui::Pos2),
     ChecklistToggle(CardId, usize),
     ChecklistSetText(CardId, usize, String),
     ChecklistAdd(CardId),
@@ -143,6 +146,31 @@ pub fn ui(
         if let Some(p) = canvas_resp.interact_pointer_pos() {
             actions.push(CanvasAction::AddCard(CardKind::Text, to_screen.inverse() * p));
         }
+    }
+
+    // Drag & drop files from the OS: text/markdown → text card, image → image
+    // card, dropped at the pointer. A hint overlay shows while files hover.
+    if ui.input(|i| !i.raw.hovered_files.is_empty()) {
+        let p = ui.painter_at(canvas_rect);
+        p.rect_stroke(
+            canvas_rect.shrink(4.0),
+            8.0,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(0x4a, 0xde, 0x80)),
+        );
+        p.text(
+            canvas_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Drop files to add cards",
+            egui::FontId::proportional(18.0),
+            egui::Color32::from_rgb(0x4a, 0xde, 0x80),
+        );
+    }
+    let dropped = ui.input(|i| i.raw.dropped_files.clone());
+    if !dropped.is_empty() {
+        let screen = ui
+            .input(|i| i.pointer.interact_pos().or(i.pointer.latest_pos()))
+            .unwrap_or_else(|| canvas_rect.center());
+        actions.push(CanvasAction::DropFiles(dropped, to_screen.inverse() * screen));
     }
 
     // Clicking empty canvas clears any card multi-selection.
@@ -772,6 +800,8 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                     {
                         edited = Some(wrap_color(&card.body, sel, rgb));
                     }
+                    ui.separator();
+                    font_scale_menu(ui, card, actions);
                 });
 
                 // Auto-continue Markdown lists: Enter on a list line inserts the
@@ -820,6 +850,7 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                 let mut body = card.body.clone();
                 let out = egui::TextEdit::multiline(&mut body)
                     .id(edit_id)
+                    .font(scaled_font(ui, egui::TextStyle::Body, card.font_scale))
                     .hint_text("Markdown… (select text, then a button wraps it)")
                     .desired_width(f32::INFINITY)
                     .desired_rows(6)
@@ -858,7 +889,9 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                 ui.weak("(empty — double-click title to edit)");
             } else {
                 // Render single newlines as line breaks (see hard_wrap).
-                CommonMarkViewer::new().show(ui, env.md, &crate::model::hard_wrap(&card.body));
+                scale_text(ui, card.font_scale, |ui| {
+                    CommonMarkViewer::new().show(ui, env.md, &crate::model::hard_wrap(&card.body));
+                });
             }
         }
         CardKind::Code { lang } => {
@@ -871,12 +904,14 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                     if l_changed {
                         actions.push(CanvasAction::SetLang(card.id, l));
                     }
+                    ui.separator();
+                    font_scale_menu(ui, card, actions);
                 });
                 let code_id = ui.make_persistent_id(("card_code_edit", card.id));
                 let mut body = card.body.clone();
                 let out = egui::TextEdit::multiline(&mut body)
                     .id(code_id)
-                    .font(egui::TextStyle::Monospace)
+                    .font(scaled_font(ui, egui::TextStyle::Monospace, card.font_scale))
                     .code_editor()
                     .desired_width(f32::INFINITY)
                     .desired_rows(6)
@@ -900,7 +935,9 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                 }
             } else {
                 let fenced = format!("```{}\n{}\n```", lang, card.body);
-                CommonMarkViewer::new().show(ui, env.md, &fenced);
+                scale_text(ui, card.font_scale, |ui| {
+                    CommonMarkViewer::new().show(ui, env.md, &fenced);
+                });
             }
         }
         CardKind::Checklist { items } => {
@@ -1423,6 +1460,49 @@ pub(crate) fn copy_both(ui: &egui::Ui, text: &str) {
     // same text before — another app may have overwritten PRIMARY since.
     ui.memory_mut(|m| m.data.remove::<String>(egui::Id::new("trellis_primary_sel")));
     set_primary_selection(ui, text);
+}
+
+// --- font size ---------------------------------------------------------------
+
+/// A `FontId` from a base text style, scaled by `mult` (per-card font size).
+fn scaled_font(ui: &egui::Ui, style: egui::TextStyle, mult: f32) -> egui::FontId {
+    let mut f = style.resolve(ui.style());
+    f.size *= mult;
+    f
+}
+
+/// Run `body` with all of the ui's text styles scaled by `mult`, isolated to a
+/// child scope so the rest of the canvas keeps the default sizes. Used to size
+/// the rendered (view-mode) card text.
+fn scale_text(ui: &mut egui::Ui, mult: f32, body: impl FnOnce(&mut egui::Ui)) {
+    if (mult - 1.0).abs() < f32::EPSILON {
+        body(ui);
+        return;
+    }
+    ui.scope(|ui| {
+        for f in ui.style_mut().text_styles.values_mut() {
+            f.size *= mult;
+        }
+        body(ui);
+    });
+}
+
+/// Toolbar control: pick the card's body font size (a multiplier). Presets keep
+/// it simple; the label shows the current percentage.
+fn font_scale_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
+    let cur = card.font_scale;
+    ui.menu_button(format!("A {:.0}%", cur * 100.0), |ui| {
+        for (name, s) in
+            [("75%", 0.75f32), ("90%", 0.9), ("100%", 1.0), ("125%", 1.25), ("150%", 1.5), ("200%", 2.0)]
+        {
+            if ui.selectable_label((cur - s).abs() < 0.001, name).clicked() {
+                actions.push(CanvasAction::SetFontScale(card.id, s));
+                ui.close_menu();
+            }
+        }
+    })
+    .response
+    .on_hover_text("Body font size");
 }
 
 // --- Markdown formatting toolbar helpers ------------------------------------

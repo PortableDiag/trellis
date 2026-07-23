@@ -642,6 +642,56 @@ impl TrellisApp {
         }
     }
 
+    /// Turn OS-dropped files into cards: images → an image card, anything that
+    /// decodes as UTF-8 text (txt/md/source/…) → a text card holding the file's
+    /// contents. Cards fan out from the drop position; unknown binaries are
+    /// skipped.
+    fn drop_files(&mut self, node: NodeId, files: Vec<egui::DroppedFile>, pos: egui::Pos2) {
+        let mut n = 0usize;
+        for f in files {
+            let bytes: Vec<u8> = match f.bytes.as_ref() {
+                Some(b) => b.to_vec(),
+                None => match f.path.as_ref().and_then(|p| std::fs::read(p).ok()) {
+                    Some(b) => b,
+                    None => continue,
+                },
+            };
+            let name = f
+                .path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| f.name.clone());
+            let ext = f
+                .path
+                .as_ref()
+                .and_then(|p| p.extension())
+                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            let at = pos + egui::vec2(24.0, 24.0) * n as f32;
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp") {
+                let kind = CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new() };
+                if let Some(cid) = self.doc.add_card(node, at, kind) {
+                    self.doc.add_image(node, cid, bytes, name);
+                    n += 1;
+                }
+            } else if let Ok(text) = String::from_utf8(bytes) {
+                if let Some(cid) = self.doc.add_card(node, at, CardKind::Text) {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        c.title = name;
+                        c.body = text;
+                        c.editing = false;
+                    }
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.dirty = true;
+            self.status = format!("Added {n} card{} from dropped files", if n == 1 { "" } else { "s" });
+        }
+    }
+
     fn apply_canvas(&mut self, node: NodeId, actions: Vec<CanvasAction>) {
         // ResetView only nudges the (unsaved) pan, so it must not dirty the doc.
         if actions.iter().any(|a| {
@@ -693,6 +743,14 @@ impl TrellisApp {
                     if let Some(c) = self.doc.card_mut(node, cid) {
                         c.color = col;
                     }
+                }
+                CanvasAction::SetFontScale(cid, s) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        c.font_scale = s;
+                    }
+                }
+                CanvasAction::DropFiles(files, pos) => {
+                    self.drop_files(node, files, pos);
                 }
                 CanvasAction::SetEditing(cid, ed) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {

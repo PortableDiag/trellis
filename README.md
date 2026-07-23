@@ -24,8 +24,9 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 - **Text** — CommonMark markdown, rendered live, with edit/preview toggle. Fenced
   code blocks are syntax-highlighted. The editor has a formatting toolbar (bold,
   italic, headings, lists, quotes, code, links, rules), a **text color** picker
-  whose color shows live in the rendered card, and **auto-continuing lists**
-  (Enter adds the next `-`/`1.`/`- [ ]` marker; empty item ends the list).
+  whose color shows live in the rendered card, a **font-size** selector
+  (75%–200%, per card), and **auto-continuing lists** (Enter adds the next
+  `-`/`1.`/`- [ ]` marker; empty item ends the list).
 - **Code** — dedicated code editor with a language selector and highlighting.
 - **Checklist** — real checkboxes with add/remove/edit per item.
 - **Table** — a small spreadsheet: inline cell editing, insert/delete/resize
@@ -55,6 +56,8 @@ and zooms (Ctrl+scroll); each node remembers its view.
   guide line.
 
 **Documents & interop**
+- **Drag & drop** text/Markdown or image files onto a basket to create the
+  matching card at the drop point
 - Native New / Open / Save / Save As (RON format), plus autosave on exit
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image

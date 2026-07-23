@@ -4,6 +4,17 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.23.0]
+
+### Added
+- **Per-card font size** — a size selector (`A 100%`) in the text and code card
+  toolbars sets that card's body font (75%–200%), applied in both edit and
+  rendered views. Stored per card (old documents default to 100%).
+- **Drag & drop files** — drop `.txt`/`.md` (or any UTF-8 text) and image files
+  (png/jpg/gif/bmp/webp) onto a basket to create the matching card at the drop
+  point (text cards get the file contents, images embed the bytes). Multiple
+  files fan out; a highlight hint shows while files hover.
+
 ## [0.22.0]
 
 ### Added — full agent-API parity for cards

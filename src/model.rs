@@ -273,9 +273,16 @@ pub struct Card {
     /// free-floating.
     #[serde(default)]
     pub docked_to: Option<CardId>,
+    /// Body font-size multiplier (1.0 = default). Applies to text/code cards.
+    #[serde(default = "default_font_scale")]
+    pub font_scale: f32,
     /// Runtime-only: whether the card is in edit mode. Never persisted.
     #[serde(skip)]
     pub editing: bool,
+}
+
+fn default_font_scale() -> f32 {
+    1.0
 }
 
 impl Card {
@@ -292,6 +299,7 @@ impl Card {
             kind,
             group: None,
             docked_to: None,
+            font_scale: 1.0,
             editing,
         }
     }
