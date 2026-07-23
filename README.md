@@ -47,7 +47,8 @@ and zooms (Ctrl+scroll); each node remembers its view.
 **Organizing cards**
 - **Group** — Ctrl/Cmd+click cards to multi-select, then "Group N cards" wraps
   them in a labeled container you drag as one; right-click the header to rename,
-  recolor, or ungroup.
+  recolor, or ungroup. **Click a group's header to raise the whole group to the
+  front** — the header stays grabbable even when other cards pile on top of it.
 - **Dock** (toggle) — drag one card onto another to stick them so they move
   together; drag a docked card off to detach.
 - **Snap** (toggle) — a dragged card's edges snap to nearby cards' edges, with a

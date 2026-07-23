@@ -13,6 +13,27 @@ pub type NodeId = u64;
 pub type CardId = u64;
 pub type GroupId = u64;
 
+/// Shared accent-color palette used by the card, group and node color menus.
+/// Names mirror the flexible color names the agent API accepts.
+pub const SWATCHES: &[(&str, [u8; 3])] = &[
+    ("Red", [0xef, 0x44, 0x44]),
+    ("Orange", [0xf9, 0x73, 0x16]),
+    ("Amber", [0xf5, 0x9e, 0x0b]),
+    ("Yellow", [0xea, 0xb3, 0x08]),
+    ("Lime", [0x84, 0xcc, 0x16]),
+    ("Green", [0x22, 0xc5, 0x5e]),
+    ("Teal", [0x14, 0xb8, 0xa6]),
+    ("Cyan", [0x06, 0xb6, 0xd4]),
+    ("Blue", [0x3b, 0x82, 0xf6]),
+    ("Indigo", [0x63, 0x66, 0xf1]),
+    ("Violet", [0x8b, 0x5c, 0xf6]),
+    ("Pink", [0xec, 0x48, 0x99]),
+    ("Slate", [0x64, 0x74, 0x8b]),
+    ("Stone", [0x78, 0x71, 0x6c]),
+    ("White", [0xff, 0xff, 0xff]),
+    ("Black", [0x1e, 0x1e, 0x1e]),
+];
+
 /// A named container that a set of cards belong to (via [`Card::group`]). Drawn
 /// as a box around its members; dragging its header moves the whole group.
 #[derive(Clone, Serialize, Deserialize)]
@@ -858,6 +879,17 @@ impl Document {
                     n.cards.push(c);
                 }
             }
+        }
+    }
+
+    /// Bring a whole group's member cards to the front, preserving their
+    /// relative order. Used so clicking a group header raises it above the pile.
+    pub fn raise_group(&mut self, node: NodeId, group: GroupId) {
+        if let Some(n) = self.nodes.get_mut(&node) {
+            let (mut members, others): (Vec<Card>, Vec<Card>) =
+                std::mem::take(&mut n.cards).into_iter().partition(|c| c.group == Some(group));
+            n.cards = others;
+            n.cards.append(&mut members);
         }
     }
 
@@ -1841,5 +1873,21 @@ mod tests {
         assert_eq!(doc.search("grocer").len(), 1);
         assert_eq!(doc.search("avocado").len(), 1);
         assert_eq!(doc.search("zzz").len(), 0);
+    }
+
+    #[test]
+    fn raise_group_moves_members_to_front_keeping_order() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let a = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        // Group the two outer cards, leaving `b` between them in draw order.
+        let g = doc.group_cards(n, &[a, c], "pair".into()).unwrap();
+        // b is on top (added last among ungrouped); raising the group must put
+        // a and c after b, preserving a-before-c.
+        doc.raise_group(n, g);
+        let order: Vec<CardId> = doc.nodes[&n].cards.iter().map(|c| c.id).collect();
+        assert_eq!(order, vec![b, a, c]);
     }
 }

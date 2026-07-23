@@ -4,6 +4,21 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.21.0]
+
+### Added
+- **Editable checklist titles** — checklist cards now have the edit/view toggle
+  (and double-click-title), so you can name them like every other card kind.
+- **Bigger color palette** — the card, group and node color menus now share a
+  16-swatch palette (red → black) shown as a grid of color chips instead of the
+  old six named buttons.
+
+### Changed
+- **Group headers stay grabbable** — a group's header handle is now interacted
+  above the cards, so you can grab it even when cards pile on top; **clicking a
+  header raises the whole group to the front**, and the header you're hovering
+  or dragging is drawn on top so it's visible while in use.
+
 ## [0.20.0]
 
 ### Fixed

@@ -61,6 +61,7 @@ pub enum CanvasAction {
     // Grouping.
     GroupSelected,
     Ungroup(GroupId),
+    RaiseGroup(GroupId),
     MoveGroup(GroupId, egui::Vec2),
     SetGroupTitle(GroupId, String),
     SetGroupColor(GroupId, [u8; 3]),
@@ -220,6 +221,10 @@ pub fn ui(
         }
     }
     let bg = ui.painter_at(canvas_rect);
+    // Header rects are collected here and made interactive *after* the cards are
+    // drawn, so a group's header handle stays grabbable even when cards pile on
+    // top of it (its interaction wins), while the strip itself draws behind.
+    let mut group_headers: Vec<(GroupId, egui::Rect)> = Vec::new();
     for group in &node.groups {
         let Some(wb) = gbounds.get(&group.id) else { continue };
         let srect = to_screen.mul_rect(wb.expand(10.0));
@@ -230,7 +235,7 @@ pub fn ui(
             gcol.gamma_multiply(0.06),
             egui::Stroke::new(1.5, gcol.gamma_multiply(0.75)),
         );
-        // Header strip above the box: drag to move the whole group, RMB for menu.
+        // Header strip above the box: click to raise, drag to move, RMB for menu.
         let hh = 18.0 * zoom;
         let header = egui::Rect::from_min_size(
             egui::pos2(srect.min.x, srect.min.y - hh - 3.0 * zoom),
@@ -245,12 +250,7 @@ pub fn ui(
             egui::FontId::proportional(11.0 * zoom),
             egui::Color32::from_gray(240),
         );
-        let hresp =
-            ui.interact(header, ui.id().with(("group_hdr", group.id)), egui::Sense::click_and_drag());
-        if hresp.dragged() {
-            actions.push(CanvasAction::MoveGroup(group.id, hresp.drag_delta() / zoom));
-        }
-        hresp.context_menu(|ui| group_menu(ui, group, &mut actions));
+        group_headers.push((group.id, header));
     }
 
     // --- dock connectors: faint links between stuck cards -------------------
@@ -340,6 +340,37 @@ pub fn ui(
             snap_mode.then_some(&node.cards[..]),
             &mut actions,
         );
+    }
+
+    // Group header handles — interacted after the cards so they win the click
+    // even when buried, and repainted on top while hovered/dragged so the one
+    // you're using comes to the front.
+    let top = ui.painter_at(canvas_rect);
+    for (gid, header) in group_headers {
+        let hresp =
+            ui.interact(header, ui.id().with(("group_hdr", gid)), egui::Sense::click_and_drag());
+        if hresp.clicked() {
+            actions.push(CanvasAction::RaiseGroup(gid));
+        }
+        if hresp.dragged() {
+            actions.push(CanvasAction::MoveGroup(gid, hresp.drag_delta() / zoom));
+        }
+        if let Some(group) = node.groups.iter().find(|g| g.id == gid) {
+            if hresp.hovered() || hresp.dragged() {
+                let gcol =
+                    egui::Color32::from_rgb(group.color[0], group.color[1], group.color[2]);
+                top.rect_filled(header, 4.0 * zoom, gcol);
+                let label = if group.title.is_empty() { "Group" } else { group.title.as_str() };
+                top.text(
+                    header.left_center() + egui::vec2(6.0 * zoom, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    egui::FontId::proportional(11.0 * zoom),
+                    egui::Color32::WHITE,
+                );
+            }
+            hresp.context_menu(|ui| group_menu(ui, group, &mut actions));
+        }
     }
 
     // Drop-target highlight, painted on top of the cards.
@@ -874,6 +905,9 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
             }
         }
         CardKind::Checklist { items } => {
+            if card.editing {
+                title_field(ui, card, actions);
+            }
             for (i, item) in items.iter().enumerate() {
                 ui.horizontal(|ui| {
                     let mut done = item.done;
@@ -1029,6 +1063,29 @@ fn snap_position(
     (egui::pos2(pos.x + dx, pos.y + dy), best_x.map(|(_, _, g)| g), best_y.map(|(_, _, g)| g))
 }
 
+/// Render the shared accent palette as a wrapped grid of swatch buttons.
+/// Returns the picked color, or `None` if nothing was clicked this frame.
+/// Shared by the card, group and (via `pub(crate)`) tree-node color menus.
+pub(crate) fn swatch_grid(ui: &mut egui::Ui) -> Option<[u8; 3]> {
+    let mut picked = None;
+    ui.set_max_width(8.0 * 22.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        for (name, col) in crate::model::SWATCHES {
+            let color = egui::Color32::from_rgb(col[0], col[1], col[2]);
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+            ui.painter().rect_filled(rect, 3.0, color);
+            ui.painter()
+                .rect_stroke(rect, 3.0, egui::Stroke::new(1.0, egui::Color32::from_gray(90)));
+            if resp.on_hover_text(*name).clicked() {
+                picked = Some(*col);
+            }
+        }
+    });
+    picked
+}
+
 fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
     if supports_edit(&card.kind) {
         let label = if card.editing { "Preview" } else { "Edit" };
@@ -1046,19 +1103,9 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
         ui.close_menu();
     }
     ui.menu_button("Color", |ui| {
-        let swatches: [(&str, [u8; 3]); 6] = [
-            ("Blue", [0x3b, 0x82, 0xf6]),
-            ("Green", [0x22, 0xc5, 0x5e]),
-            ("Amber", [0xf5, 0x9e, 0x0b]),
-            ("Red", [0xef, 0x44, 0x44]),
-            ("Violet", [0x8b, 0x5c, 0xf6]),
-            ("Slate", [0x64, 0x74, 0x8b]),
-        ];
-        for (name, col) in swatches {
-            if ui.button(name).clicked() {
-                actions.push(CanvasAction::SetColor(card.id, col));
-                ui.close_menu();
-            }
+        if let Some(col) = swatch_grid(ui) {
+            actions.push(CanvasAction::SetColor(card.id, col));
+            ui.close_menu();
         }
     });
     if card.docked_to.is_some() && ui.button("Detach from dock").clicked() {
@@ -1088,19 +1135,9 @@ fn group_menu(ui: &mut egui::Ui, group: &CardGroup, actions: &mut Vec<CanvasActi
         }
     });
     ui.menu_button("Color", |ui| {
-        let swatches: [(&str, [u8; 3]); 6] = [
-            ("Blue", [0x3b, 0x82, 0xf6]),
-            ("Green", [0x22, 0xc5, 0x5e]),
-            ("Amber", [0xf5, 0x9e, 0x0b]),
-            ("Red", [0xef, 0x44, 0x44]),
-            ("Violet", [0x8b, 0x5c, 0xf6]),
-            ("Slate", [0x64, 0x74, 0x8b]),
-        ];
-        for (name, col) in swatches {
-            if ui.button(name).clicked() {
-                actions.push(CanvasAction::SetGroupColor(group.id, col));
-                ui.close_menu();
-            }
+        if let Some(col) = swatch_grid(ui) {
+            actions.push(CanvasAction::SetGroupColor(group.id, col));
+            ui.close_menu();
         }
     });
     ui.separator();
@@ -1138,7 +1175,11 @@ fn grid_cols(n: usize) -> usize {
 fn supports_edit(kind: &CardKind) -> bool {
     matches!(
         kind,
-        CardKind::Text | CardKind::Code { .. } | CardKind::Image { .. } | CardKind::Table { .. }
+        CardKind::Text
+            | CardKind::Code { .. }
+            | CardKind::Image { .. }
+            | CardKind::Table { .. }
+            | CardKind::Checklist { .. }
     )
 }
 

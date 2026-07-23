@@ -834,6 +834,7 @@ impl TrellisApp {
                     self.card_sel.clear();
                 }
                 CanvasAction::Ungroup(g) => self.doc.ungroup(node, g),
+                CanvasAction::RaiseGroup(g) => self.doc.raise_group(node, g),
                 CanvasAction::MoveGroup(g, delta) => self.doc.move_group(node, g, delta),
                 CanvasAction::SetGroupTitle(g, t) => self.doc.set_group_title(node, g, t),
                 CanvasAction::SetGroupColor(g, c) => self.doc.set_group_color(node, g, c),

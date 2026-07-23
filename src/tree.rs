@@ -245,19 +245,13 @@ fn node_ui(
                 }
                 ui.separator();
                 ui.menu_button("Color", |ui| {
-                    let swatches: [(&str, Option<[u8; 3]>); 6] = [
-                        ("None", None),
-                        ("Red", Some([0xef, 0x44, 0x44])),
-                        ("Amber", Some([0xf5, 0x9e, 0x0b])),
-                        ("Green", Some([0x22, 0xc5, 0x5e])),
-                        ("Blue", Some([0x3b, 0x82, 0xf6])),
-                        ("Violet", Some([0x8b, 0x5c, 0xf6])),
-                    ];
-                    for (name, col) in swatches {
-                        if ui.button(name).clicked() {
-                            actions.push(TreeAction::SetColor(id, col));
-                            ui.close_menu();
-                        }
+                    if ui.button("None").clicked() {
+                        actions.push(TreeAction::SetColor(id, None));
+                        ui.close_menu();
+                    }
+                    if let Some(col) = crate::canvas::swatch_grid(ui) {
+                        actions.push(TreeAction::SetColor(id, Some(col)));
+                        ui.close_menu();
                     }
                 });
                 ui.separator();
