@@ -2,6 +2,23 @@
 
 use crate::model::{Document, NodeId};
 
+/// Root-to-node breadcrumb of titles, e.g. `HOUSE › ATTIC › VELUX WINDOW`.
+fn node_path(doc: &Document, id: NodeId) -> String {
+    let mut parts = Vec::new();
+    let mut cur = Some(id);
+    while let Some(nid) = cur {
+        match doc.nodes.get(&nid) {
+            Some(n) => {
+                parts.push(n.title.clone());
+                cur = n.parent;
+            }
+            None => break,
+        }
+    }
+    parts.reverse();
+    parts.join(" › ")
+}
+
 /// Actions the tree UI requests; applied by the app after the immutable walk so
 /// we never mutate the arena while iterating it.
 pub enum TreeAction {
@@ -174,6 +191,24 @@ fn node_ui(
                     *renaming = Some((id, node.title.clone()));
                     ui.close_menu();
                 }
+                ui.menu_button("Copy", |ui| {
+                    if ui
+                        .button("Node id")
+                        .on_hover_text("The id agents use: /api/nodes/{id}")
+                        .clicked()
+                    {
+                        crate::canvas::copy_both(ui, &id.to_string());
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("Node path")
+                        .on_hover_text(node_path(doc, id))
+                        .clicked()
+                    {
+                        crate::canvas::copy_both(ui, &node_path(doc, id));
+                        ui.close_menu();
+                    }
+                });
                 ui.separator();
                 if ui.button("+  Add child").clicked() {
                     actions.push(TreeAction::AddChild(id));

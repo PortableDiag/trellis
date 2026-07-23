@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.19.0]
+
+### Added
+- **Copy node id / path** — right-click a tree node → **Copy** → **Node id**
+  (the identifier the agent API uses, `/api/nodes/{id}`) or **Node path** (the
+  root-to-node breadcrumb, e.g. `HOUSE › ATTIC › VELUX WINDOW`). Both copy to the
+  clipboard and the X11 primary selection, so you can tell an agent exactly which
+  node you're working on.
+
 ## [0.18.1]
 
 ### Fixed

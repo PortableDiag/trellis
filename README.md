@@ -17,6 +17,8 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 - Add root / child / sibling nodes; inline rename (double-click); delete subtrees
 - Reorder siblings (move up/down), indent / outdent to reshape the hierarchy
 - Expand / collapse, per-node color tags
+- Right-click → **Copy** a node's **id** (for the agent API, `/api/nodes/{id}`)
+  or its **path** breadcrumb, so you can point an agent at the exact node
 
 **Basket canvas** — four real card types:
 - **Text** — CommonMark markdown, rendered live, with edit/preview toggle. Fenced

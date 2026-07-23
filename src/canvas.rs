@@ -1377,7 +1377,7 @@ fn copyable_text(card: &Card) -> Option<String> {
 }
 
 /// Copy `text` to both the system clipboard and the X11 PRIMARY selection.
-fn copy_both(ui: &egui::Ui, text: &str) {
+pub(crate) fn copy_both(ui: &egui::Ui, text: &str) {
     ui.ctx().copy_text(text.to_string());
     // Drop the dedup key so the PRIMARY write happens even if we wrote this
     // same text before — another app may have overwritten PRIMARY since.
