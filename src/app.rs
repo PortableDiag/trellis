@@ -812,6 +812,9 @@ impl TrellisApp {
                         }
                     }
                 }
+                CanvasAction::ChecklistMove(cid, from, to) => {
+                    self.doc.move_checklist_item(node, cid, from, to);
+                }
                 CanvasAction::LoadImage(cid) => self.load_image_into(node, cid),
                 CanvasAction::TableSetCell(cid, r, c, text) => {
                     if self.doc.table_set_cell(node, cid, r, c, text) {
@@ -1258,6 +1261,19 @@ impl TrellisApp {
                     }
                 });
                 ui.menu_button("Tools", |ui| {
+                    if ui
+                        .add_enabled(self.selected.is_some(), egui::Button::new("Autosort cards"))
+                        .on_hover_text("Arrange this basket's cards into a tidy, non-overlapping grid")
+                        .clicked()
+                    {
+                        if let Some(sel) = self.selected {
+                            if self.doc.autosort(sel) {
+                                self.dirty = true;
+                                self.status = "Autosorted cards into a grid".to_string();
+                            }
+                        }
+                        ui.close_menu();
+                    }
                     if ui.button("Settings…").clicked() {
                         self.show_settings = true;
                         ui.close_menu();

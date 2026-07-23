@@ -4,6 +4,20 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.24.0]
+
+### Added
+- **Reorder checklist items** — each item has a drag grip (`⠇`); drag it onto
+  another row to reorder, with a drop-line indicator. (Agents reorder by sending
+  a checklist's `items` in the new order.)
+- **Tools → Autosort cards** — lay every card in the current basket out in a
+  tidy, non-overlapping grid (clustered by group; docking cleared). Also on the
+  API: `POST /api/nodes/{id}/autosort`.
+- **API: font size** — `font_scale` is now settable on card create and PATCH and
+  reported in card JSON, exposing the per-card font-size feature to agents.
+
+`API.md` updated for `font_scale`, the autosort endpoint, and checklist reorder.
+
 ## [0.23.0]
 
 ### Added

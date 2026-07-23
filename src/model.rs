@@ -925,6 +925,53 @@ impl Document {
         }
     }
 
+    /// Move a checklist item from index `from` so it lands before original index
+    /// `to` (the drag-reorder convention). Returns false if not a checklist or
+    /// the indices are a no-op.
+    pub fn move_checklist_item(&mut self, node: NodeId, card: CardId, from: usize, to: usize) -> bool {
+        match self.card_mut(node, card).map(|c| &mut c.kind) {
+            Some(CardKind::Checklist { items }) if from < items.len() => {
+                let mut dest = to.min(items.len());
+                if dest > from {
+                    dest -= 1;
+                }
+                if dest == from {
+                    return false;
+                }
+                let it = items.remove(from);
+                items.insert(dest.min(items.len()), it);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Lay every card in a node out in a tidy, non-overlapping grid. Cards are
+    /// clustered by group so a group stays contiguous; docking is cleared (a
+    /// grid means nothing stacks). Returns false if the node is empty/missing.
+    pub fn autosort(&mut self, node: NodeId) -> bool {
+        let Some(n) = self.nodes.get_mut(&node) else { return false };
+        let count = n.cards.len();
+        if count == 0 {
+            return false;
+        }
+        // Uniform cells sized to the largest card keep everything clear.
+        const GAP: f32 = 24.0;
+        let cell_w = n.cards.iter().map(|c| c.size.x).fold(0.0, f32::max) + GAP;
+        let cell_h = n.cards.iter().map(|c| c.size.y).fold(0.0, f32::max) + GAP;
+        let cols = (count as f32).sqrt().ceil().max(1.0) as usize;
+        // Placement order: cluster grouped cards together, else keep card order.
+        let mut order: Vec<usize> = (0..count).collect();
+        order.sort_by_key(|&i| (n.cards[i].group.map(|g| g as i128).unwrap_or(i128::MAX), i));
+        let origin = egui::pos2(40.0, 40.0);
+        for (slot, &i) in order.iter().enumerate() {
+            let (r, c) = (slot / cols, slot % cols);
+            n.cards[i].pos = egui::pos2(origin.x + c as f32 * cell_w, origin.y + r as f32 * cell_h);
+            n.cards[i].docked_to = None;
+        }
+        true
+    }
+
     /// Remove a node and its whole subtree; detaches it from its parent/roots.
     pub fn remove_node(&mut self, id: NodeId) {
         let parent = self.nodes.get(&id).and_then(|n| n.parent);
@@ -1905,6 +1952,46 @@ mod tests {
         assert_eq!(doc.search("grocer").len(), 1);
         assert_eq!(doc.search("avocado").len(), 1);
         assert_eq!(doc.search("zzz").len(), 0);
+    }
+
+    #[test]
+    fn move_checklist_item_reorders() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let items = vec![
+            ChecklistItem { done: false, text: "a".into() },
+            ChecklistItem { done: false, text: "b".into() },
+            ChecklistItem { done: false, text: "c".into() },
+        ];
+        let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist { items }).unwrap();
+        // Move "c" (idx 2) to the front (before idx 0).
+        assert!(doc.move_checklist_item(n, cid, 2, 0));
+        let CardKind::Checklist { items } = &doc.nodes[&n].cards[0].kind else { panic!() };
+        assert_eq!(items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(), ["c", "a", "b"]);
+        // No-op move returns false.
+        assert!(!doc.move_checklist_item(n, cid, 1, 1));
+    }
+
+    #[test]
+    fn autosort_lays_cards_in_a_nonoverlapping_grid() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let ids: Vec<_> = (0..5)
+            .map(|_| doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap())
+            .collect();
+        assert!(doc.autosort(n));
+        // No two cards share a position, and none stayed stacked at the origin.
+        let rects: Vec<egui::Rect> = doc.nodes[&n]
+            .cards
+            .iter()
+            .map(|c| egui::Rect::from_min_size(c.pos, c.size))
+            .collect();
+        for i in 0..rects.len() {
+            for j in (i + 1)..rects.len() {
+                assert!(!rects[i].intersects(rects[j]), "cards {i} and {j} overlap");
+            }
+        }
+        assert_eq!(ids.len(), 5);
     }
 
     #[test]

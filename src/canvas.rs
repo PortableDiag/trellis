@@ -41,6 +41,8 @@ pub enum CanvasAction {
     ChecklistSetText(CardId, usize, String),
     ChecklistAdd(CardId),
     ChecklistRemove(CardId, usize),
+    /// Reorder a checklist item from index `from` to before index `to`.
+    ChecklistMove(CardId, usize, usize),
     LoadImage(CardId),
     RemoveImage(CardId, usize),
     // Table (spreadsheet) cards.
@@ -946,6 +948,34 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
             }
             for (i, item) in items.iter().enumerate() {
                 ui.horizontal(|ui| {
+                    // Drag grip: reorder items by dragging this handle onto another
+                    // row. Payload is (card, index) so drags stay within one card.
+                    let egui::InnerResponse { response: drag, .. } = ui.dnd_drag_source(
+                        ui.make_persistent_id(("cl_drag", card.id, i)),
+                        (card.id, i),
+                        |ui| {
+                            ui.add(egui::Label::new("\u{2807}").sense(egui::Sense::drag()))
+                                .on_hover_text("Drag to reorder")
+                        },
+                    );
+                    if let Some(payload) = drag.dnd_hover_payload::<(CardId, usize)>() {
+                        if payload.0 == card.id {
+                            let rect = drag.rect;
+                            let before = ui
+                                .input(|inp| inp.pointer.hover_pos())
+                                .map_or(true, |p| p.y < rect.center().y);
+                            let y = if before { rect.top() } else { rect.bottom() };
+                            ui.painter().hline(
+                                rect.x_range(),
+                                y,
+                                egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                            );
+                            if let Some(p) = drag.dnd_release_payload::<(CardId, usize)>() {
+                                let to = if before { i } else { i + 1 };
+                                actions.push(CanvasAction::ChecklistMove(card.id, p.1, to));
+                            }
+                        }
+                    }
                     let mut done = item.done;
                     if ui.checkbox(&mut done, "").changed() {
                         actions.push(CanvasAction::ChecklistToggle(card.id, i));

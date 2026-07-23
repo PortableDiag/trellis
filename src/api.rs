@@ -51,6 +51,8 @@ pub enum ApiRequest {
     // Image bytes.
     AddImage { node: NodeId, card: u64, name: String, bytes: Vec<u8> },
     RemoveImage { node: NodeId, card: u64, index: usize },
+    // Arrange a node's cards into a tidy non-overlapping grid.
+    Autosort(NodeId),
     // Whole-document export.
     Export(String),
     Search(String),
@@ -116,6 +118,9 @@ pub struct AddCardInput {
     /// Base64 image bytes for an `image` card's first image (name = `title`).
     #[serde(default)]
     image_base64: Option<String>,
+    /// Body font-size multiplier (1.0 = default), for text/code cards.
+    #[serde(default)]
+    font_scale: Option<f32>,
 }
 
 fn default_kind() -> String {
@@ -161,6 +166,9 @@ pub struct UpdateCardInput {
     /// Header-row flag (table cards only).
     #[serde(default)]
     header: Option<bool>,
+    /// Body font-size multiplier (1.0 = default), for text/code cards.
+    #[serde(default)]
+    font_scale: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -381,6 +389,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Delete, ["api", "nodes", nid, "groups", gid]) => {
             Ok(ApiRequest::DeleteGroup { node: pid(nid)?, group: pid(gid)? })
         }
+        (Method::Post, ["api", "nodes", id, "autosort"]) => Ok(ApiRequest::Autosort(pid(id)?)),
         (Method::Get, ["api", "export"]) => {
             Ok(ApiRequest::Export(query_get(query, "format").unwrap_or_else(|| "markdown".into())))
         }
@@ -620,6 +629,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         if let Some([w, h]) = input.size {
                             c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
                         }
+                        if let Some(fs) = input.font_scale {
+                            c.font_scale = fs.clamp(0.25, 4.0);
+                        }
                     }
                     // Optional initial image bytes for an image card.
                     if let Some(b64) = input.image_base64 {
@@ -644,6 +656,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some(col) = patch.color {
                     c.color = col;
+                }
+                if let Some(fs) = patch.font_scale {
+                    c.font_scale = fs.clamp(0.25, 4.0);
                 }
                 // Convert to another kind first, so kind-specific fields below
                 // (lang/items/rows/header) land in the new kind. Existing
@@ -833,6 +848,13 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 (false, ApiResponse::err(404, "card/image not found or not an image card"))
             }
         }
+        ApiRequest::Autosort(node) => {
+            if doc.autosort(node) {
+                (true, ApiResponse::ok(json!({ "sorted": node })))
+            } else {
+                (false, ApiResponse::err(404, "node not found or has no cards"))
+            }
+        }
         ApiRequest::Export(format) => export_response(doc, &format),
         ApiRequest::Search(q) => {
             let hits: Vec<Value> = doc
@@ -929,6 +951,7 @@ fn card_json(c: &Card) -> Value {
         "color": c.color,
         "group": c.group,
         "docked_to": c.docked_to,
+        "font_scale": c.font_scale,
     });
     match &c.kind {
         CardKind::Text => {
@@ -1186,6 +1209,26 @@ mod tests {
             process(&mut doc, ApiRequest::RemoveImage { node: nid, card: cid, index: 0 });
         assert_eq!(resp.status, 200);
         assert_eq!(doc.nodes[&nid].cards[0].kind.images().len(), 0);
+    }
+
+    #[test]
+    fn font_scale_and_autosort_via_api() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        // font_scale on PATCH, echoed back in the card JSON.
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"font_scale":1.5}"#).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        assert_eq!(doc.nodes[&nid].cards[0].font_scale, 1.5);
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["font_scale"], 1.5);
+        // Autosort endpoint arranges the node's cards.
+        doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::Autosort(nid));
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
     }
 
     #[test]

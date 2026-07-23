@@ -28,7 +28,8 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   (75%–200%, per card), and **auto-continuing lists** (Enter adds the next
   `-`/`1.`/`- [ ]` marker; empty item ends the list).
 - **Code** — dedicated code editor with a language selector and highlighting.
-- **Checklist** — real checkboxes with add/remove/edit per item.
+- **Checklist** — real checkboxes with add/remove/edit per item; drag the grip
+  to reorder items.
 - **Table** — a small spreadsheet: inline cell editing, insert/delete/resize
   rows and columns (right-click the row/column handles), per-cell **background
   and font colors**, an optional header row, and **CSV/XLSX import & export**
@@ -54,6 +55,8 @@ and zooms (Ctrl+scroll); each node remembers its view.
   together; drag a docked card off to detach.
 - **Snap** (toggle) — a dragged card's edges snap to nearby cards' edges, with a
   guide line.
+- **Autosort** — **Tools → Autosort cards** lays the whole basket out in a tidy,
+  non-overlapping grid.
 
 **Documents & interop**
 - **Drag & drop** text/Markdown or image files onto a basket to create the

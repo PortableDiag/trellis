@@ -54,6 +54,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `pos` | all | `[x,y]` top-left on the basket canvas |
 | `size` | all | `[w,h]` in canvas units |
 | `color` | all | title-bar accent — set as `[r,g,b]` (0–255), a hex string (`"#ef4444"`, `"#e44"`), or a name (`"red"`, `"green"`, `"blue"`, …) |
+| `font_scale` | text, code | body font-size multiplier (1.0 = default; clamped 0.25–4.0) |
 | `group` | all | group id this card belongs to, or null — set via the group sub-resource (below) |
 | `docked_to` | all | id of the card this one is docked to, or null — set via the dock sub-resource |
 | `body` | text, code | Markdown (text) or source (code) |
@@ -109,7 +110,7 @@ returns the **full card objects**.
 POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
-POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, color?, image_base64?}
+POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, color?, font_scale?, image_base64?}
   → 201 {"id":<new>}   | 404 if node doesn't exist
 ```
 `kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
@@ -126,16 +127,17 @@ PATCH /api/nodes/{id}              {title?, color?}
   → 200 {"id":<id>}    | 404
         color: setting only (can't clear via API)
 
-PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, lang?, pos?, size?, items?, rows?, header?}
+PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, lang?, pos?, size?, items?, rows?, header?}
   → 200 {<updated card>}   | 404
 ```
 Every field is optional; only those present are changed. `pos`/`size` are
-`[x,y]`/`[w,h]`; `lang` applies to code cards, `items` replaces a checklist's
-items, `rows` bulk-replaces a table's cell text, `header` toggles a table's
-header row. **`kind` converts the card to another kind** (`text`/`code`/
-`checklist`/`table`/`image`) — apply it in the same PATCH as `items`/`rows`/etc.
-and the new content lands in the converted card. The response is the full updated
-card object.
+`[x,y]`/`[w,h]`; `font_scale` sizes text/code body font (1.0 = default);
+`lang` applies to code cards, `items` replaces a checklist's items (send them in
+the desired order to **reorder** a checklist), `rows` bulk-replaces a table's cell
+text, `header` toggles a table's header row. **`kind` converts the card to
+another kind** (`text`/`code`/`checklist`/`table`/`image`) — apply it in the same
+PATCH as `items`/`rows`/etc. and the new content lands in the converted card. The
+response is the full updated card object.
 
 **Color format** — anywhere the API takes a `color` (nodes, cards, groups, on
 create or update) you may send an `[r,g,b]` array (0–255 each), a hex string
@@ -214,6 +216,13 @@ POST   /api/nodes/{id}/cards/{cid}/images        {data_base64, name?}
   → 201 {<updated card>}   | 400 (bad base64)  | 404 (not an image card)
 
 DELETE /api/nodes/{id}/cards/{cid}/images/{idx}  → 200 {<updated card>}   | 404
+```
+
+### Autosort
+Arrange a node's cards into a tidy, non-overlapping grid (the same as the app's
+**Tools → Autosort cards**). Cards are clustered by group; docking is cleared.
+```
+POST /api/nodes/{id}/autosort  → 200 {"sorted":<id>}   | 404 (no node / no cards)
 ```
 
 ### Export
@@ -308,6 +317,14 @@ curl -s -H "X-API-Key: $KEY" \
 
 # Add existing card 3 to group 1 (then it moves with the group)
 curl -s -H "X-API-Key: $KEY" -d '{"group":1}' $API/nodes/$NID/cards/3/group
+
+# Tidy the basket: arrange all its cards into a non-overlapping grid
+curl -s -H "X-API-Key: $KEY" -X POST $API/nodes/$NID/autosort
+
+# Reorder a checklist (card 1): just send items in the new order
+curl -s -X PATCH -H "X-API-Key: $KEY" \
+  -d '{"items":[{"done":false,"text":"first"},{"done":true,"text":"second"}]}' \
+  $API/nodes/$NID/cards/1
 
 # Export the whole document to PDF and save it
 curl -s -H "X-API-Key: $KEY" "$API/export?format=pdf" \
