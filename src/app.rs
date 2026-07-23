@@ -957,6 +957,9 @@ impl TrellisApp {
         };
         let mut close = false;
         let mut step = 0isize;
+        let screen_center = ctx.screen_rect().center();
+        let mut scroll = 0.0;
+        let mut pointer = None;
         ctx.input(|i| {
             if i.key_pressed(egui::Key::Escape) {
                 close = true;
@@ -973,11 +976,19 @@ impl TrellisApp {
             if i.key_pressed(egui::Key::Minus) {
                 zoom = (zoom / 1.25).max(0.2);
             }
-            let scroll = i.raw_scroll_delta.y;
-            if scroll != 0.0 {
-                zoom = (zoom * (1.0015f32).powf(scroll)).clamp(0.2, 10.0);
-            }
+            scroll = i.raw_scroll_delta.y;
+            pointer = i.pointer.hover_pos();
         });
+        // Scroll zooms toward the pointer: keep the image point under the cursor
+        // fixed by shifting the pan by the same ratio the zoom changed.
+        if scroll != 0.0 {
+            let old = zoom;
+            zoom = (zoom * (1.0015f32).powf(scroll)).clamp(0.2, 10.0);
+            if let Some(p) = pointer {
+                let r = zoom / old;
+                pan = (p - screen_center) * (1.0 - r) + pan * r;
+            }
+        }
 
         egui::Area::new(egui::Id::new("lightbox"))
             .order(egui::Order::Foreground)

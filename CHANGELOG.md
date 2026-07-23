@@ -4,6 +4,13 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.18.1]
+
+### Fixed
+- **Image viewer** — scroll-wheel zoom now zooms toward the pointer instead of
+  the image center, so you can zoom into the top (or any edge) of a long
+  screenshot without fighting the pan.
+
 ## [0.18.0]
 
 ### Added
