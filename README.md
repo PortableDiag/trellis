@@ -16,7 +16,8 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 **Tree**
 - Add root / child / sibling nodes; inline rename (double-click); delete subtrees
 - Reorder siblings (move up/down), indent / outdent to reshape the hierarchy
-- Expand / collapse, per-node color tags
+- Expand / collapse, per-node color tags, and a per-node **basket background
+  color** (right-click → **Basket color**; the black grid stays the default)
 - Right-click → **Copy** a node's **id** (for the agent API, `/api/nodes/{id}`)
   or its **path** breadcrumb, so you can point an agent at the exact node
 
@@ -46,7 +47,9 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 Cards drag by the title bar, resize from the corner, raise to front on click,
 duplicate, recolor, copy/paste into another basket, and delete. A 🗐 button on
 the title bar copies the card's text (checklists as Markdown task lines) to
-both the clipboard and the X11 primary selection. The canvas pans
+both the clipboard and the X11 primary selection. Right-click → **Copy** →
+**Card id** / **Card path** copies the card's identifier or breadcrumb, so you
+can point an agent at that exact card. The canvas pans
 and zooms (Ctrl+scroll); each node remembers its view.
 
 **Organizing cards**
@@ -71,7 +74,7 @@ and zooms (Ctrl+scroll); each node remembers its view.
 
 **App**
 - Full-text **search** across every node title and card (Ctrl+F)
-- Dark / light **theme** toggle
+- **View → Themes** — Trellis (default), Light, or Terminal Green
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a localhost, key-gated HTTP API with full parity to the app:
   add/query/edit/remove nodes and cards, move/recolor/resize, convert a card's

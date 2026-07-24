@@ -92,6 +92,7 @@ const SNAP_DIST: f32 = 8.0;
 pub fn ui(
     ui: &mut egui::Ui,
     node: &Node,
+    node_path: &str,
     view: &mut TSTransform,
     zoom_enabled: bool,
     can_paste: bool,
@@ -106,9 +107,14 @@ pub fn ui(
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
     ui.set_clip_rect(canvas_rect);
 
-    // Background + grid.
+    // Background + grid. A per-node basket color overrides the theme default
+    // (the black grid canvas); the grid is still drawn on top of it.
     let painter = ui.painter_at(canvas_rect);
-    painter.rect_filled(canvas_rect, 0.0, ui.visuals().extreme_bg_color);
+    let bg = node
+        .bg
+        .map(|c| egui::Color32::from_rgb(c[0], c[1], c[2]))
+        .unwrap_or_else(|| ui.visuals().extreme_bg_color);
+    painter.rect_filled(canvas_rect, 0.0, bg);
     draw_grid(&painter, canvas_rect, *view, ui.visuals().weak_text_color());
 
     // Pan by dragging empty canvas (screen-space delta).
@@ -383,6 +389,7 @@ pub fn ui(
         card_ui(
             ui,
             card,
+            node_path,
             to_screen,
             canvas_rect,
             env,
@@ -522,6 +529,7 @@ fn scale_fonts(ui: &mut egui::Ui, zoom: f32) {
 fn card_ui(
     ui: &mut egui::Ui,
     card: &Card,
+    node_path: &str,
     to_screen: TSTransform,
     clip: egui::Rect,
     env: &mut Env,
@@ -617,7 +625,7 @@ fn card_ui(
     if handle.double_clicked() && supports_edit(&card.kind) {
         actions.push(CanvasAction::SetEditing(card.id, !card.editing));
     }
-    handle.context_menu(|ui| card_menu(ui, card, actions));
+    handle.context_menu(|ui| card_menu(ui, card, node_path, actions));
 
     // Title label.
     let title_text = if card.title.is_empty() {
@@ -1262,7 +1270,22 @@ pub(crate) fn swatch_grid(ui: &mut egui::Ui) -> Option<[u8; 3]> {
     picked
 }
 
-fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
+/// Breadcrumb identifying a card: its node's path plus the card's title
+/// (or `card #id` when it has no title), e.g. `HOUSE › ATTIC › Shopping list`.
+fn card_path(card: &Card, node_path: &str) -> String {
+    let label = if card.title.trim().is_empty() {
+        format!("card #{}", card.id)
+    } else {
+        card.title.clone()
+    };
+    if node_path.is_empty() {
+        label
+    } else {
+        format!("{node_path} › {label}")
+    }
+}
+
+fn card_menu(ui: &mut egui::Ui, card: &Card, node_path: &str, actions: &mut Vec<CanvasAction>) {
     if supports_edit(&card.kind) {
         let label = if card.editing { "Preview" } else { "Edit" };
         if ui.button(label).clicked() {
@@ -1278,6 +1301,18 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, actions: &mut Vec<CanvasAction>) {
         actions.push(CanvasAction::CopyCard(card.id));
         ui.close_menu();
     }
+    // Copy the card's id or its breadcrumb path so you can point an agent at
+    // this exact card (`/api/nodes/{node}/cards/{id}`).
+    ui.menu_button("Copy", |ui| {
+        if ui.button("Card id").clicked() {
+            copy_both(ui, &card.id.to_string());
+            ui.close_menu();
+        }
+        if ui.button("Card path").clicked() {
+            copy_both(ui, &card_path(card, node_path));
+            ui.close_menu();
+        }
+    });
     ui.menu_button("Color", |ui| {
         if let Some(col) = swatch_grid(ui) {
             actions.push(CanvasAction::SetColor(card.id, col));
@@ -2099,6 +2134,19 @@ mod tests {
             extra: vec![],
         });
         assert_eq!(copyable_text(&img), None);
+    }
+
+    #[test]
+    fn card_path_uses_title_or_id_and_prepends_node_path() {
+        let mut card = Card::new(7, egui::pos2(0.0, 0.0), CardKind::Text);
+        card.title = "Shopping list".into();
+        assert_eq!(card_path(&card, "HOUSE › KITCHEN"), "HOUSE › KITCHEN › Shopping list");
+        // No title falls back to the card id.
+        card.title = "   ".into();
+        assert_eq!(card_path(&card, "HOUSE"), "HOUSE › card #7");
+        // Empty node path yields just the label.
+        card.title = "Notes".into();
+        assert_eq!(card_path(&card, ""), "Notes");
     }
 
     #[test]

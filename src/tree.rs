@@ -3,7 +3,7 @@
 use crate::model::{Document, NodeId};
 
 /// Root-to-node breadcrumb of titles, e.g. `HOUSE › ATTIC › VELUX WINDOW`.
-fn node_path(doc: &Document, id: NodeId) -> String {
+pub(crate) fn node_path(doc: &Document, id: NodeId) -> String {
     let mut parts = Vec::new();
     let mut cur = Some(id);
     while let Some(nid) = cur {
@@ -36,6 +36,8 @@ pub enum TreeAction {
     Indent(NodeId),
     Outdent(NodeId),
     SetColor(NodeId, Option<[u8; 3]>),
+    /// Set (or clear, with `None`) a node's basket background color.
+    SetBg(NodeId, Option<[u8; 3]>),
     /// Drag & drop: put `moved` before/after `target` (adopting its parent).
     Reorder { moved: NodeId, target: NodeId, before: bool },
     /// Toggle reorder mode (nodes draggable) on/off.
@@ -251,6 +253,16 @@ fn node_ui(
                     }
                     if let Some(col) = crate::canvas::swatch_grid(ui) {
                         actions.push(TreeAction::SetColor(id, Some(col)));
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Basket color", |ui| {
+                    if ui.button("Default").clicked() {
+                        actions.push(TreeAction::SetBg(id, None));
+                        ui.close_menu();
+                    }
+                    if let Some(col) = crate::canvas::swatch_grid(ui) {
+                        actions.push(TreeAction::SetBg(id, Some(col)));
                         ui.close_menu();
                     }
                 });

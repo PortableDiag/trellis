@@ -65,18 +65,21 @@ const DOCK_MODE_KEY: &str = "dock_mode";
 const SNAP_MODE_KEY: &str = "snap_mode";
 const THEME_KEY: &str = "theme";
 
-/// Selectable color schemes. Dark/Light are egui's built-ins; add new variants
-/// here (and to `ALL`) to grow the list.
+/// Selectable themes, listed under **View → Themes**. `Trellis` is the default
+/// signature look (dark chrome + black grid); Light/Terminal Green are alternate
+/// color schemes. To add a richer theme (e.g. StickyNotes, Futuristic) that
+/// styles windows and colors differently, add a variant here, to `ALL`, and to
+/// `from_key`/`key`/`visuals`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Theme {
-    Dark,
+    Trellis,
     Light,
     TerminalGreen,
 }
 
 impl Theme {
     const ALL: [(Theme, &'static str); 3] = [
-        (Theme::Dark, "Dark"),
+        (Theme::Trellis, "Trellis"),
         (Theme::Light, "Light"),
         (Theme::TerminalGreen, "Terminal Green"),
     ];
@@ -85,13 +88,15 @@ impl Theme {
         match s {
             "Light" => Theme::Light,
             "TerminalGreen" => Theme::TerminalGreen,
-            _ => Theme::Dark,
+            // "Dark" is the pre-rename key for the default look; keep it mapping
+            // to Trellis so existing settings load unchanged.
+            _ => Theme::Trellis,
         }
     }
 
     fn key(self) -> &'static str {
         match self {
-            Theme::Dark => "Dark",
+            Theme::Trellis => "Trellis",
             Theme::Light => "Light",
             Theme::TerminalGreen => "TerminalGreen",
         }
@@ -100,7 +105,7 @@ impl Theme {
     fn visuals(self) -> egui::Visuals {
         match self {
             Theme::Light => egui::Visuals::light(),
-            Theme::Dark => egui::Visuals::dark(),
+            Theme::Trellis => egui::Visuals::dark(),
             Theme::TerminalGreen => terminal_green_visuals(),
         }
     }
@@ -310,7 +315,7 @@ impl TrellisApp {
             .storage
             .and_then(|s| s.get_string(THEME_KEY))
             .map(|s| Theme::from_key(&s))
-            .unwrap_or(Theme::Dark);
+            .unwrap_or(Theme::Trellis);
 
         // Agent API: load config, then start the localhost server. It binds
         // regardless of key so toggling the key in Settings works live; requests
@@ -752,6 +757,11 @@ impl TrellisApp {
                 TreeAction::SetColor(id, col) => {
                     if let Some(n) = self.doc.nodes.get_mut(&id) {
                         n.color = col;
+                    }
+                }
+                TreeAction::SetBg(id, bg) => {
+                    if let Some(n) = self.doc.nodes.get_mut(&id) {
+                        n.bg = bg;
                     }
                 }
             }
@@ -1400,7 +1410,7 @@ impl TrellisApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    ui.menu_button("Theme", |ui| {
+                    ui.menu_button("Themes", |ui| {
                         for (t, label) in Theme::ALL {
                             if ui.selectable_label(self.theme == t, label).clicked() {
                                 self.theme = t;
@@ -1700,15 +1710,17 @@ impl eframe::App for TrellisApp {
                         self.card_sel_node = Some(sel);
                     }
                     let mut view = self.views.get(&sel).copied().unwrap_or_default();
-                    let node = self.doc.nodes.get(&sel).unwrap();
                     let mut env = Env {
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
                     };
                     let can_paste = self.card_clipboard.is_some();
+                    let node_path = crate::tree::node_path(&self.doc, sel);
+                    let node = self.doc.nodes.get(&sel).unwrap();
                     let actions = canvas::ui(
                         ui,
                         node,
+                        &node_path,
                         &mut view,
                         self.zoom_enabled,
                         can_paste,

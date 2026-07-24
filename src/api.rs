@@ -31,7 +31,7 @@ pub enum ApiRequest {
     GetNode(NodeId),
     ListCards(NodeId),
     CreateNode { parent: Option<NodeId>, title: String },
-    UpdateNode { id: NodeId, title: Option<String>, color: Option<[u8; 3]> },
+    UpdateNode { id: NodeId, title: Option<String>, color: Option<[u8; 3]>, bg: Option<[u8; 3]> },
     DeleteNode(NodeId),
     AddCard { node: NodeId, input: AddCardInput },
     UpdateCard { node: NodeId, card: u64, patch: UpdateCardInput },
@@ -95,6 +95,9 @@ struct UpdateNodeInput {
     title: Option<String>,
     #[serde(default, deserialize_with = "de_color_opt")]
     color: Option<[u8; 3]>,
+    /// Basket background color. A color sets it; `null`/absent leaves it unchanged.
+    #[serde(default, deserialize_with = "de_color_opt")]
+    bg: Option<[u8; 3]>,
 }
 
 #[derive(Deserialize)]
@@ -349,7 +352,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "nodes", id]) => Ok(ApiRequest::GetNode(pid(id)?)),
         (Method::Patch, ["api", "nodes", id]) => {
             let i: UpdateNodeInput = parse(body)?;
-            Ok(ApiRequest::UpdateNode { id: pid(id)?, title: i.title, color: i.color })
+            Ok(ApiRequest::UpdateNode { id: pid(id)?, title: i.title, color: i.color, bg: i.bg })
         }
         (Method::Delete, ["api", "nodes", id]) => Ok(ApiRequest::DeleteNode(pid(id)?)),
         (Method::Get, ["api", "nodes", id, "cards"]) => Ok(ApiRequest::ListCards(pid(id)?)),
@@ -590,13 +593,16 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let id = doc.add_node(parent, title);
             (true, ApiResponse::created(json!({ "id": id })))
         }
-        ApiRequest::UpdateNode { id, title, color } => match doc.nodes.get_mut(&id) {
+        ApiRequest::UpdateNode { id, title, color, bg } => match doc.nodes.get_mut(&id) {
             Some(n) => {
                 if let Some(t) = title {
                     n.title = t;
                 }
                 if let Some(c) = color {
                     n.color = Some(c);
+                }
+                if let Some(c) = bg {
+                    n.bg = Some(c);
                 }
                 (true, ApiResponse::ok(json!({ "id": id })))
             }
@@ -935,6 +941,7 @@ fn node_json(n: &crate::model::Node) -> Value {
         "parent": n.parent,
         "children": n.children,
         "color": n.color,
+        "bg": n.bg,
         "groups": groups_json(n),
         "cards": n.cards.iter().map(card_json).collect::<Vec<_>>(),
     })
@@ -1082,7 +1089,7 @@ mod tests {
 
         let (_, up) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: Some("Renamed".into()), color: None },
+            ApiRequest::UpdateNode { id, title: Some("Renamed".into()), color: None, bg: None },
         );
         assert_eq!(up.status, 200);
         assert_eq!(doc.nodes[&id].title, "Renamed");
@@ -1090,6 +1097,25 @@ mod tests {
         let (_, del) = process(&mut doc, ApiRequest::DeleteNode(id));
         assert_eq!(del.status, 200);
         assert!(!doc.nodes.contains_key(&id));
+    }
+
+    #[test]
+    fn node_patch_sets_basket_bg_and_json_reports_it() {
+        let mut doc = Document::empty();
+        let id = doc.add_node(None, "n".into());
+        // Flexible color input ("red") is accepted for bg, like other colors.
+        let i: UpdateNodeInput = serde_json::from_str(r#"{"bg":"red"}"#).unwrap();
+        let (dirty, resp) = process(
+            &mut doc,
+            ApiRequest::UpdateNode { id, title: None, color: None, bg: i.bg },
+        );
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        assert_eq!(doc.nodes[&id].bg, Some([0xef, 0x44, 0x44]));
+
+        let (_, got) = process(&mut doc, ApiRequest::GetNode(id));
+        let v: Value = serde_json::from_str(&got.body).unwrap();
+        assert_eq!(v["bg"], json!([239, 68, 68]));
     }
 
     #[test]

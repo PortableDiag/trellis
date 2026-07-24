@@ -95,7 +95,8 @@ GET /api/nodes
   → 200 {"nodes":[ {id,title,parent,children:[ids],cards:<count>} ]}
 
 GET /api/nodes/{id}
-  → 200 {id,title,parent,children:[ids],color,groups:[<group>…],cards:[<card>…]}   | 404
+  → 200 {id,title,parent,children:[ids],color,bg,groups:[<group>…],cards:[<card>…]}   | 404
+        bg: basket background color ([r,g,b] or null)
 
 GET /api/nodes/{id}/cards
   → 200 {"cards":[<card>…]}                                      | 404
@@ -124,9 +125,10 @@ bytes; the `title` becomes its name).
 
 ### Update
 ```
-PATCH /api/nodes/{id}              {title?, color?}
+PATCH /api/nodes/{id}              {title?, color?, bg?}
   → 200 {"id":<id>}    | 404
-        color: setting only (can't clear via API)
+        color: tag color; bg: basket background color — both setting only
+        (can't clear via API; use the app's Default to reset)
 
 PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, lang?, pos?, size?, items?, rows?, header?}
   → 200 {<updated card>}   | 404

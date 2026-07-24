@@ -4,6 +4,22 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.27.0]
+
+### Added
+- **Per-basket background color** — right-click a tree node → **Basket color** to
+  tint that node's canvas; the grid still draws on top. **Default** restores the
+  standard black-grid look (which stays the default for every node). On the agent
+  API: `bg` on node JSON and settable via `PATCH /api/nodes/{id}` (`bg` accepts the
+  same flexible color input as other colors).
+- **View → Themes** submenu — the theme picker is now a named **Themes** menu. The
+  current signature look is the **Trellis** theme (the default; unchanged), with
+  **Light** and **Terminal Green** alongside. Scaffolding for richer themes
+  (e.g. StickyNotes, Futuristic) to follow.
+- **Copy card id / path** — right-click a card → **Copy** → **Card id** or **Card
+  path** (its node breadcrumb › card title), so you can point an agent at that
+  exact card (`/api/nodes/{node}/cards/{id}`). Mirrors the tree's node id/path copy.
+
 ## [0.26.0]
 
 ### Added

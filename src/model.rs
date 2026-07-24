@@ -339,6 +339,10 @@ pub struct Node {
     /// Optional per-node tag color shown as a dot in the tree.
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// Optional per-basket background color. `None` = the theme default
+    /// (the black grid canvas).
+    #[serde(default)]
+    pub bg: Option<[u8; 3]>,
 }
 
 fn default_true() -> bool {
@@ -687,6 +691,7 @@ impl Document {
                 groups: Vec::new(),
                 expanded: true,
                 color: None,
+                bg: None,
             },
         );
         match parent {
@@ -716,6 +721,7 @@ impl Document {
                 groups: Vec::new(),
                 expanded: true,
                 color: None,
+                bg: None,
             },
         );
         if let Some(list) = self.sibling_list_mut(id) {
@@ -1802,6 +1808,25 @@ mod tests {
         assert!(!doc.remove_image(n, c, 5));
         assert!(doc.remove_image(n, c, 0));
         assert!(doc.card_mut(n, c).unwrap().kind.images().is_empty());
+    }
+
+    #[test]
+    fn node_bg_roundtrips_and_legacy_ron_defaults_to_none() {
+        // A pre-bg node (no `bg` field in the RON) still loads, defaulting to None.
+        let legacy = r#"(
+            id: 1, title: "n", parent: None, children: [], cards: [],
+        )"#;
+        let node: Node = ron::from_str(legacy).expect("legacy node RON loads");
+        assert_eq!(node.bg, None);
+
+        // A basket color set on a node survives a RON round-trip.
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        assert_eq!(doc.nodes[&n].bg, None);
+        doc.nodes.get_mut(&n).unwrap().bg = Some([0x22, 0x33, 0x44]);
+        let ron = ron::to_string(&doc).expect("serialize");
+        let back: Document = ron::from_str(&ron).expect("deserialize");
+        assert_eq!(back.nodes[&n].bg, Some([0x22, 0x33, 0x44]));
     }
 
     #[test]
