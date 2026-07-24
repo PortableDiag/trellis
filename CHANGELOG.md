@@ -4,6 +4,17 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.26.0]
+
+### Added
+- **Sketch / draw card** — a freehand drawing surface. Pick a brush **color** and
+  **size**, draw with the mouse/pen, **undo the last stroke** or **clear**. Edit
+  vs view toggle like other cards. Strokes are vector: they scale with zoom, are
+  stored in card-local coordinates, and **export to HTML as inline SVG** (Markdown/
+  PDF note a stroke count). On the agent API: create with `kind:"sketch"`, read a
+  card's `strokes`, and draw via `POST …/cards/{cid}/sketch` (`add_stroke` /
+  `undo` / `clear`). `API.md` updated.
+
 ## [0.25.1]
 
 ### Fixed

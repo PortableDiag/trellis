@@ -34,6 +34,9 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   rows and columns (right-click the row/column handles), per-cell **background
   and font colors**, an optional header row, and **CSV/XLSX import & export**
   (XLSX export keeps your colors). The copy button copies the table as CSV.
+- **Sketch** — a freehand draw surface: pick a **brush color and size**, draw
+  with the mouse/pen, **undo the last stroke** or **clear**. Strokes are vector
+  (they scale with zoom and export to HTML as inline SVG).
 - **Image** — hold **any number of images** (bytes embedded), laid out in a
   grid; give the card a **title** to tell a few apart. **Double-click an image**
   to open it in a full-screen viewer — scroll or `+`/`-` to zoom, drag to pan,

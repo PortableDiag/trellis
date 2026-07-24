@@ -48,6 +48,8 @@ pub enum ApiRequest {
     SetCardGroup { node: NodeId, card: u64, group: Option<GroupId> },
     // Fine-grained table editing (cell colors, header, widths, row/col ops).
     TableOp { node: NodeId, card: u64, op: TableOpInput },
+    // Sketch editing (add stroke / undo / clear).
+    SketchOp { node: NodeId, card: u64, op: SketchOpInput },
     // Image bytes.
     AddImage { node: NodeId, card: u64, name: String, bytes: Vec<u8> },
     RemoveImage { node: NodeId, card: u64, index: usize },
@@ -232,6 +234,20 @@ pub struct TableOpInput {
     color: Value,
 }
 
+/// One edit to a Sketch card. `op` is `add_stroke` | `undo` | `clear`.
+#[derive(Deserialize)]
+pub struct SketchOpInput {
+    op: String,
+    /// Stroke color for `add_stroke` (array/hex/name); defaults to black.
+    #[serde(default)]
+    color: Value,
+    #[serde(default)]
+    width: Option<f32>,
+    /// Stroke points `[[x,y], …]` in the card's local coordinates.
+    #[serde(default)]
+    points: Option<Vec<[f32; 2]>>,
+}
+
 // --- server thread ----------------------------------------------------------
 
 /// Bind the server (reporting bind errors synchronously) and spawn its accept
@@ -365,6 +381,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "nodes", nid, "cards", cid, "table"]) => {
             let op: TableOpInput = parse(body)?;
             Ok(ApiRequest::TableOp { node: pid(nid)?, card: pid(cid)?, op })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "sketch"]) => {
+            let op: SketchOpInput = parse(body)?;
+            Ok(ApiRequest::SketchOp { node: pid(nid)?, card: pid(cid)?, op })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "images"]) => {
             let i: AddImageInput = parse(body)?;
@@ -610,6 +630,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     name: input.title.clone(),
                     extra: Vec::new(),
                 },
+                "sketch" => CardKind::Sketch { strokes: Vec::new() },
                 _ => CardKind::Text,
             };
             let pos = input
@@ -676,6 +697,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                             name: c.title.clone(),
                             extra: Vec::new(),
                         }),
+                        "sketch" => Some(CardKind::Sketch { strokes: Vec::new() }),
                         _ => None,
                     };
                     if let Some(nk) = new {
@@ -832,6 +854,30 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 (false, ApiResponse::err(400, "table op failed (not a table, or index out of range)"))
             }
         }
+        ApiRequest::SketchOp { node, card, op } => {
+            let ok = match op.op.as_str() {
+                "add_stroke" => {
+                    let color = color_from_value(&op.color).unwrap_or(None).unwrap_or([0, 0, 0]);
+                    let stroke = crate::model::Stroke {
+                        color,
+                        width: op.width.unwrap_or(3.0),
+                        points: op.points.unwrap_or_default(),
+                    };
+                    doc.sketch_add_stroke(node, card, stroke)
+                }
+                "undo" => doc.sketch_undo(node, card),
+                "clear" => doc.sketch_clear(node, card),
+                other => {
+                    return (false, ApiResponse::err(400, &format!("unknown sketch op: {other}")));
+                }
+            };
+            if ok {
+                let c = doc.card_mut(node, card).unwrap();
+                (true, ApiResponse::ok(card_json(c)))
+            } else {
+                (false, ApiResponse::err(400, "sketch op failed (not a sketch, or nothing to change)"))
+            }
+        }
         ApiRequest::AddImage { node, card, name, bytes } => {
             if doc.add_image(node, card, bytes, name) {
                 let c = doc.card_mut(node, card).unwrap();
@@ -983,6 +1029,12 @@ fn card_json(c: &Card) -> Value {
             v["image_name"] = json!(images.first().map(|(_, n)| *n).unwrap_or(""));
             v["image_names"] = json!(images.iter().map(|(_, n)| *n).collect::<Vec<_>>());
             v["bytes"] = json!(images.iter().map(|(d, _)| d.len()).sum::<usize>());
+        }
+        CardKind::Sketch { strokes } => {
+            v["strokes"] = json!(strokes
+                .iter()
+                .map(|s| json!({ "color": s.color, "width": s.width, "points": s.points }))
+                .collect::<Vec<_>>());
         }
     }
     v
@@ -1209,6 +1261,33 @@ mod tests {
             process(&mut doc, ApiRequest::RemoveImage { node: nid, card: cid, index: 0 });
         assert_eq!(resp.status, 200);
         assert_eq!(doc.nodes[&nid].cards[0].kind.images().len(), 0);
+    }
+
+    #[test]
+    fn sketch_create_and_ops_via_api() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let input: AddCardInput = serde_json::from_str(r#"{"kind":"sketch"}"#).unwrap();
+        let (_d, resp) = process(&mut doc, ApiRequest::AddCard { node: nid, input });
+        assert_eq!(resp.status, 201);
+        let cid = body_id(&resp);
+        let op: SketchOpInput = serde_json::from_str(
+            r#"{"op":"add_stroke","color":"blue","width":2,"points":[[0,0],[10,10]]}"#,
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::SketchOp { node: nid, card: cid, op });
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["strokes"][0]["color"], json!([0x3b, 0x82, 0xf6]));
+        // clear
+        let op: SketchOpInput = serde_json::from_str(r#"{"op":"clear"}"#).unwrap();
+        let (_d, resp) = process(&mut doc, ApiRequest::SketchOp { node: nid, card: cid, op });
+        assert_eq!(resp.status, 200);
+        // undo on empty → 400
+        let op: SketchOpInput = serde_json::from_str(r#"{"op":"undo"}"#).unwrap();
+        let (_d, resp) = process(&mut doc, ApiRequest::SketchOp { node: nid, card: cid, op });
+        assert_eq!(resp.status, 400);
     }
 
     #[test]

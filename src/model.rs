@@ -203,6 +203,15 @@ pub struct ImageEntry {
     pub name: String,
 }
 
+/// A single freehand stroke on a Sketch card. `points` are in the card's local
+/// logical coordinates (top-left of the drawing area = origin, zoom-independent).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Stroke {
+    pub color: [u8; 3],
+    pub width: f32,
+    pub points: Vec<[f32; 2]>,
+}
+
 /// What a card holds. `Text`/`Code` use the card's `body` string; the others
 /// carry their own data.
 #[derive(Clone, Serialize, Deserialize)]
@@ -223,6 +232,11 @@ pub enum CardKind {
         #[serde(default)]
         extra: Vec<ImageEntry>,
     },
+    /// A freehand sketch: a list of drawn strokes.
+    Sketch {
+        #[serde(default)]
+        strokes: Vec<Stroke>,
+    },
 }
 
 impl CardKind {
@@ -233,6 +247,7 @@ impl CardKind {
             CardKind::Checklist { .. } => "Checklist",
             CardKind::Table { .. } => "Table",
             CardKind::Image { .. } => "Image",
+            CardKind::Sketch { .. } => "Sketch",
         }
     }
 
@@ -288,7 +303,10 @@ fn default_font_scale() -> f32 {
 impl Card {
     pub fn new(id: CardId, pos: egui::Pos2, kind: CardKind) -> Self {
         let editing =
-            matches!(kind, CardKind::Text | CardKind::Code { .. } | CardKind::Table { .. });
+            matches!(
+                kind,
+                CardKind::Text | CardKind::Code { .. } | CardKind::Table { .. } | CardKind::Sketch { .. }
+            );
         Self {
             id,
             pos,
@@ -946,6 +964,37 @@ impl Document {
         }
     }
 
+    fn sketch_mut(&mut self, node: NodeId, card: CardId) -> Option<&mut Vec<Stroke>> {
+        match self.card_mut(node, card).map(|c| &mut c.kind) {
+            Some(CardKind::Sketch { strokes }) => Some(strokes),
+            _ => None,
+        }
+    }
+
+    /// Append a freehand stroke to a Sketch card. Empty strokes are ignored.
+    pub fn sketch_add_stroke(&mut self, node: NodeId, card: CardId, stroke: Stroke) -> bool {
+        if stroke.points.is_empty() {
+            return false;
+        }
+        self.sketch_mut(node, card).map(|s| s.push(stroke)).is_some()
+    }
+
+    /// Remove the most recent stroke from a Sketch card.
+    pub fn sketch_undo(&mut self, node: NodeId, card: CardId) -> bool {
+        self.sketch_mut(node, card).map(|s| s.pop()).flatten().is_some()
+    }
+
+    /// Erase all strokes from a Sketch card.
+    pub fn sketch_clear(&mut self, node: NodeId, card: CardId) -> bool {
+        match self.sketch_mut(node, card) {
+            Some(s) if !s.is_empty() => {
+                s.clear();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Lay every card in a node out in a tidy, non-overlapping grid. Cards are
     /// clustered by group so a group stays contiguous; docking is cleared (a
     /// grid means nothing stacks). Returns false if the node is empty/missing.
@@ -1201,6 +1250,10 @@ impl Document {
                         ));
                     }
                 }
+                CardKind::Sketch { strokes } => {
+                    s.push_str(&sketch_svg(strokes, card.size.x, card.size.y));
+                    s.push('\n');
+                }
             }
             s.push_str("</article>\n");
         }
@@ -1283,6 +1336,12 @@ impl Document {
                     for (_, name) in k.images() {
                         out.push(ExportLine { text: format!("(image: {name})"), size: 10.5 });
                     }
+                }
+                CardKind::Sketch { strokes } => {
+                    out.push(ExportLine {
+                        text: format!("(sketch: {} strokes)", strokes.len()),
+                        size: 10.5,
+                    });
                 }
             }
             out.push(ExportLine { text: String::new(), size: 5.0 });
@@ -1414,6 +1473,9 @@ impl Document {
                         s.push_str(&format!("*(image: {name})*\n\n"));
                     }
                 }
+                CardKind::Sketch { strokes } => {
+                    s.push_str(&format!("*(sketch: {} strokes)*\n\n", strokes.len()));
+                }
             }
         }
         let children = node.children.clone();
@@ -1497,6 +1559,7 @@ fn searchable_body(card: &Card) -> String {
             .map(|(_, n)| *n)
             .collect::<Vec<_>>()
             .join(" "),
+        CardKind::Sketch { .. } => String::new(),
     }
 }
 
@@ -1561,6 +1624,32 @@ fn escape_html(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Render a Sketch card's strokes as a self-contained inline SVG for HTML export.
+fn sketch_svg(strokes: &[Stroke], w: f32, h: f32) -> String {
+    let w = w.max(1.0);
+    let h = h.max(1.0);
+    let mut s = format!(
+        "<svg viewBox=\"0 0 {w:.0} {h:.0}\" width=\"{w:.0}\" height=\"{h:.0}\" \
+         xmlns=\"http://www.w3.org/2000/svg\" style=\"max-width:100%;height:auto\">"
+    );
+    for st in strokes {
+        let [r, g, b] = st.color;
+        let pts = st
+            .points
+            .iter()
+            .map(|p| format!("{:.1},{:.1}", p[0], p[1]))
+            .collect::<Vec<_>>()
+            .join(" ");
+        s.push_str(&format!(
+            "<polyline points=\"{pts}\" fill=\"none\" stroke=\"#{r:02x}{g:02x}{b:02x}\" \
+             stroke-width=\"{:.1}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+            st.width
+        ));
+    }
+    s.push_str("</svg>");
+    s
 }
 
 fn mime_for(name: &str) -> &'static str {
@@ -1970,6 +2059,28 @@ mod tests {
         assert_eq!(items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(), ["c", "a", "b"]);
         // No-op move returns false.
         assert!(!doc.move_checklist_item(n, cid, 1, 1));
+    }
+
+    #[test]
+    fn sketch_strokes_add_undo_clear_and_export() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Sketch { strokes: Vec::new() }).unwrap();
+        let s = |pts: Vec<[f32; 2]>| Stroke { color: [255, 0, 0], width: 2.0, points: pts };
+        assert!(doc.sketch_add_stroke(n, cid, s(vec![[0.0, 0.0], [10.0, 10.0]])));
+        assert!(!doc.sketch_add_stroke(n, cid, s(vec![]))); // empty ignored
+        assert!(doc.sketch_add_stroke(n, cid, s(vec![[5.0, 5.0]])));
+        let CardKind::Sketch { strokes } = &doc.nodes[&n].cards[0].kind else { panic!() };
+        assert_eq!(strokes.len(), 2);
+        assert!(doc.sketch_undo(n, cid));
+        let CardKind::Sketch { strokes } = &doc.nodes[&n].cards[0].kind else { panic!() };
+        assert_eq!(strokes.len(), 1);
+        // SVG export contains a polyline with the stroke color.
+        let svg = sketch_svg(strokes, 100.0, 80.0);
+        assert!(svg.contains("<polyline"));
+        assert!(svg.contains("#ff0000"));
+        assert!(doc.sketch_clear(n, cid));
+        assert!(!doc.sketch_clear(n, cid)); // already empty
     }
 
     #[test]

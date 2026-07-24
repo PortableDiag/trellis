@@ -173,6 +173,9 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
         | A::ChecklistAdd(_)
         | A::ChecklistRemove(..)
         | A::ChecklistMove(..)
+        | A::SketchAddStroke(..)
+        | A::SketchUndo(_)
+        | A::SketchClear(_)
         | A::LoadImage(_)
         | A::RemoveImage(..)
         | A::GroupSelected
@@ -952,6 +955,15 @@ impl TrellisApp {
                 }
                 CanvasAction::ChecklistMove(cid, from, to) => {
                     self.doc.move_checklist_item(node, cid, from, to);
+                }
+                CanvasAction::SketchAddStroke(cid, stroke) => {
+                    self.doc.sketch_add_stroke(node, cid, stroke);
+                }
+                CanvasAction::SketchUndo(cid) => {
+                    self.doc.sketch_undo(node, cid);
+                }
+                CanvasAction::SketchClear(cid) => {
+                    self.doc.sketch_clear(node, cid);
                 }
                 CanvasAction::LoadImage(cid) => self.load_image_into(node, cid),
                 CanvasAction::TableSetCell(cid, r, c, text) => {

@@ -43,6 +43,10 @@ pub enum CanvasAction {
     ChecklistRemove(CardId, usize),
     /// Reorder a checklist item from index `from` to before index `to`.
     ChecklistMove(CardId, usize, usize),
+    // Sketch (freehand draw) cards.
+    SketchAddStroke(CardId, crate::model::Stroke),
+    SketchUndo(CardId),
+    SketchClear(CardId),
     LoadImage(CardId),
     RemoveImage(CardId, usize),
     // Table (spreadsheet) cards.
@@ -226,6 +230,10 @@ pub fn ui(
                 CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new() },
                 cp,
             ));
+            ui.close_menu();
+        }
+        if ui.button("Sketch").clicked() {
+            actions.push(CanvasAction::AddCard(CardKind::Sketch { strokes: Vec::new() }, cp));
             ui.close_menu();
         }
         ui.separator();
@@ -682,7 +690,7 @@ fn card_ui(
             .id_salt(("card_body", card.id))
             .auto_shrink([false, false])
             .show(&mut child, |ui| {
-                body_ui(ui, card, env, actions);
+                body_ui(ui, card, env, zoom, actions);
             });
     }
 
@@ -710,7 +718,7 @@ fn card_ui(
     }
 }
 
-fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<CanvasAction>) {
+fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &mut Vec<CanvasAction>) {
     ui.set_width(ui.available_width());
     match &card.kind {
         CardKind::Text => {
@@ -1090,6 +1098,101 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                 });
             }
         }
+        CardKind::Sketch { strokes } => {
+            sketch_ui(ui, card, strokes, zoom, actions);
+        }
+    }
+}
+
+/// Freehand draw surface. Edit mode: a toolbar (color, brush size, undo, clear)
+/// plus a canvas that captures drag gestures into strokes. View mode: the same
+/// strokes, read-only. Points are stored in the card's local logical space
+/// (zoom-independent); we map to/from screen with the drawing area origin + zoom.
+fn sketch_ui(
+    ui: &mut egui::Ui,
+    card: &Card,
+    strokes: &[crate::model::Stroke],
+    zoom: f32,
+    actions: &mut Vec<CanvasAction>,
+) {
+    let color_key = egui::Id::new(("sketch_color", card.id));
+    let width_key = egui::Id::new(("sketch_width", card.id));
+    let mut rgb = ui.data(|d| d.get_temp::<[u8; 3]>(color_key)).unwrap_or([0xef, 0x44, 0x44]);
+    let mut width = ui.data(|d| d.get_temp::<f32>(width_key)).unwrap_or(3.0);
+
+    if card.editing {
+        ui.horizontal_wrapped(|ui| {
+            if ui.color_edit_button_srgb(&mut rgb).on_hover_text("Brush color").changed() {
+                ui.data_mut(|d| d.insert_temp(color_key, rgb));
+            }
+            ui.add(egui::Slider::new(&mut width, 1.0..=24.0).show_value(false))
+                .on_hover_text("Brush size");
+            ui.data_mut(|d| d.insert_temp(width_key, width));
+            if ui.button("Undo stroke").clicked() {
+                actions.push(CanvasAction::SketchUndo(card.id));
+            }
+            if ui.button("Clear").clicked() {
+                actions.push(CanvasAction::SketchClear(card.id));
+            }
+        });
+    }
+
+    // Drawing surface fills the remaining space.
+    let size = egui::vec2(ui.available_width(), ui.available_height().max(40.0));
+    let sense = if card.editing { egui::Sense::drag() } else { egui::Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0 * zoom, ui.visuals().extreme_bg_color);
+    let origin = rect.min;
+    let to_screen = |p: &[f32; 2]| origin + egui::vec2(p[0] * zoom, p[1] * zoom);
+    let paint_stroke = |painter: &egui::Painter, color: [u8; 3], w: f32, pts: &[egui::Pos2]| {
+        let col = egui::Color32::from_rgb(color[0], color[1], color[2]);
+        match pts {
+            [] => {}
+            [p] => {
+                painter.circle_filled(*p, (w * zoom * 0.5).max(0.5), col);
+            }
+            _ => {
+                painter.add(egui::Shape::line(pts.to_vec(), egui::Stroke::new(w * zoom, col)));
+            }
+        }
+    };
+
+    // Committed strokes.
+    for st in strokes {
+        let pts: Vec<egui::Pos2> = st.points.iter().map(&to_screen).collect();
+        paint_stroke(&painter, st.color, st.width, &pts);
+    }
+
+    // In-progress stroke (edit mode): accumulate local points across the drag.
+    if card.editing {
+        let buf_key = egui::Id::new(("sketch_buf", card.id));
+        let mut buf: Vec<[f32; 2]> = ui.data(|d| d.get_temp(buf_key)).unwrap_or_default();
+        if let Some(p) = resp.interact_pointer_pos() {
+            if resp.dragged() || resp.drag_started() {
+                let local = [(p.x - origin.x) / zoom, (p.y - origin.y) / zoom];
+                // Skip near-duplicate points to keep strokes compact.
+                if buf.last().map_or(true, |l| {
+                    (l[0] - local[0]).abs() > 0.5 || (l[1] - local[1]).abs() > 0.5
+                }) {
+                    buf.push(local);
+                }
+            }
+        }
+        // Live preview of the current stroke.
+        let preview: Vec<egui::Pos2> = buf.iter().map(&to_screen).collect();
+        paint_stroke(&painter, rgb, width, &preview);
+        if resp.drag_stopped() {
+            if !buf.is_empty() {
+                actions.push(CanvasAction::SketchAddStroke(
+                    card.id,
+                    crate::model::Stroke { color: rgb, width, points: std::mem::take(&mut buf) },
+                ));
+            }
+            ui.data_mut(|d| d.remove::<Vec<[f32; 2]>>(buf_key));
+        } else {
+            ui.data_mut(|d| d.insert_temp(buf_key, buf));
+        }
     }
 }
 
@@ -1253,6 +1356,7 @@ fn supports_edit(kind: &CardKind) -> bool {
             | CardKind::Image { .. }
             | CardKind::Table { .. }
             | CardKind::Checklist { .. }
+            | CardKind::Sketch { .. }
     )
 }
 
@@ -1486,7 +1590,7 @@ fn copyable_text(card: &Card) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-        CardKind::Image { .. } => None,
+        CardKind::Image { .. } | CardKind::Sketch { .. } => None,
     }
 }
 

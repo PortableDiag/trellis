@@ -45,7 +45,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `color` | `[r,g,b]` or null | 0–255 each; tag dot in the tree |
 | `groups` | array | card containers in this basket (see [Groups](#groups)) |
 
-**Card** — `kind` is one of `text`, `code`, `checklist`, `table`, `image`.
+**Card** — `kind` is one of `text`, `code`, `checklist`, `table`, `image`, `sketch`.
 | field | applies to | notes |
 |---|---|---|
 | `id` | all | |
@@ -62,6 +62,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `items` | checklist | `[{ "done": bool, "text": string }]` |
 | `image_name`, `image_names`, `bytes` | image | first/all image names + total byte count (read); set image bytes via the images sub-resource (below) |
 | `rows`, `header` | table | `rows` set: `[["a","b"],…]` bulk-replaces cell text (colors reset); get: cells as `{text,bg,fg}`. `header` (bool) toggles the header row. Fine-grained edits (cell colors, widths, row/col ops) use the table sub-resource (below) |
+| `strokes` | sketch | read: `[{color:[r,g,b], width, points:[[x,y],…]}, …]`. Edit via the sketch sub-resource (below) |
 
 **Group** — a labeled container that a set of cards belong to; drawn as a box you
 can drag by its header. Membership lives on each card's `group` field.
@@ -114,7 +115,7 @@ POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, co
   → 201 {"id":<new>}   | 404 if node doesn't exist
 ```
 `kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
-`table` (starts as an empty 3×3), or `image`. `pos` is `[x,y]` canvas coordinates
+`table` (starts as an empty 3×3), `image`, or `sketch` (an empty draw surface). `pos` is `[x,y]` canvas coordinates
 (default `[40,40]`); pass distinct positions to avoid stacking cards on top of
 each other. `size` is `[w,h]`. `color` sets the title-bar accent at creation (see
 the accepted formats below). `items` is used only for `checklist`; `lang` only
@@ -207,6 +208,18 @@ POST /api/nodes/{id}/cards/{cid}/table  {op, …}
 | `remove_col` | `at` | delete column `at` (never below 1 col) |
 | `set_col_width` | `col`, `width` | set a column's pixel width |
 | `set_header` | `header` | set the header-row flag (bool) |
+
+### Sketch editing
+Draw on a `sketch` card programmatically. One operation per request.
+```
+POST /api/nodes/{id}/cards/{cid}/sketch  {op, …}
+  → 200 {<updated card>}   | 400 (unknown op / not a sketch / nothing to change)  | 404
+```
+| `op` | args | effect |
+|---|---|---|
+| `add_stroke` | `points` `[[x,y],…]`, `color` (array/hex/name), `width` | append a freehand stroke (points are in the card's local coordinates) |
+| `undo` | — | remove the last stroke |
+| `clear` | — | remove all strokes |
 
 ### Images
 Attach or remove image bytes on an `image` card (grid layout; first image is the
@@ -320,6 +333,11 @@ curl -s -H "X-API-Key: $KEY" -d '{"group":1}' $API/nodes/$NID/cards/3/group
 
 # Tidy the basket: arrange all its cards into a non-overlapping grid
 curl -s -H "X-API-Key: $KEY" -X POST $API/nodes/$NID/autosort
+
+# Draw a stroke on a sketch card (card 1)
+curl -s -H "X-API-Key: $KEY" \
+  -d '{"op":"add_stroke","color":"blue","width":3,"points":[[10,10],[40,60],[80,20]]}' \
+  $API/nodes/$NID/cards/1/sketch
 
 # Reorder a checklist (card 1): just send items in the new order
 curl -s -X PATCH -H "X-API-Key: $KEY" \
