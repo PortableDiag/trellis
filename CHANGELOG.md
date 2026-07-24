@@ -4,6 +4,12 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.27.1]
+
+### Changed
+- **About dialog** now carries the tagline *"The tree and the weave."*
+- **README** shows a screenshot of the default welcome workspace.
+
 ## [0.27.0]
 
 ### Added

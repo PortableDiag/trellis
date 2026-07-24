@@ -11,6 +11,8 @@ Two proven ideas, woven together:
 Structure lives in the tree; spatial thinking lives in the basket. A trellis is
 a lattice that supports branching growth — the tree *and* the weave in one.
 
+![Trellis — the tree on the left, a basket of cards on the right](assets/trellis-welcome.png)
+
 ## Features
 
 **Tree**
