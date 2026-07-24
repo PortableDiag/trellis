@@ -234,6 +234,9 @@ primary). Bytes are png/jpeg/gif/bmp/webp.
 POST   /api/nodes/{id}/cards/{cid}/images        {data_base64, name?}
   → 201 {<updated card>}   | 400 (bad base64)  | 404 (not an image card)
 
+GET    /api/nodes/{id}/cards/{cid}/images/{idx}  → 200 {index, name, base64}   | 404
+  (the image's raw bytes, base64-encoded — index 0 is the primary image)
+
 DELETE /api/nodes/{id}/cards/{cid}/images/{idx}  → 200 {<updated card>}   | 404
 ```
 

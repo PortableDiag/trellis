@@ -4,6 +4,19 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.29.0]
+
+### Added
+- **API: read image bytes** — `GET /api/nodes/{id}/cards/{cid}/images/{idx}` returns
+  `{index, name, base64}` for an image card's image, so the mobile viewer (and
+  agents) can fetch the actual picture, not just its name. `API.md` updated.
+
+### Fixed
+- **Checklist controls are edit-only** — the drag-to-reorder grip, the × delete
+  button, and "+ item" now appear only when the checklist card is in **edit** mode.
+  In view mode you get just the checkboxes (still tickable) and read-only item text,
+  so you can't accidentally move or delete items while using the list.
+
 ## [0.28.0]
 
 ### Added

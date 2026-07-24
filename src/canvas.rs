@@ -959,36 +959,43 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
             }
         }
         CardKind::Checklist { items } => {
-            if card.editing {
+            let editing = card.editing;
+            if editing {
                 title_field(ui, card, actions);
             }
             for (i, item) in items.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    // Drag grip: reorder items by dragging this handle onto another
-                    // row. Payload is (card, index) so drags stay within one card.
-                    let egui::InnerResponse { response: drag, .. } = ui.dnd_drag_source(
-                        ui.make_persistent_id(("cl_drag", card.id, i)),
-                        (card.id, i),
-                        |ui| {
-                            ui.add(egui::Label::new("\u{2807}").sense(egui::Sense::drag()))
-                                .on_hover_text("Drag to reorder")
-                        },
-                    );
-                    if let Some(payload) = drag.dnd_hover_payload::<(CardId, usize)>() {
-                        if payload.0 == card.id {
-                            let rect = drag.rect;
-                            let before = ui
-                                .input(|inp| inp.pointer.hover_pos())
-                                .map_or(true, |p| p.y < rect.center().y);
-                            let y = if before { rect.top() } else { rect.bottom() };
-                            ui.painter().hline(
-                                rect.x_range(),
-                                y,
-                                egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
-                            );
-                            if let Some(p) = drag.dnd_release_payload::<(CardId, usize)>() {
-                                let to = if before { i } else { i + 1 };
-                                actions.push(CanvasAction::ChecklistMove(card.id, p.1, to));
+                    // Reorder (drag grip) and delete (×) are structural edits, so
+                    // they only appear in edit mode — otherwise a stray drag or
+                    // click in view mode could move or delete an item.
+                    if editing {
+                        // Drag grip: reorder items by dragging this handle onto
+                        // another row. Payload is (card, index) so drags stay
+                        // within one card.
+                        let egui::InnerResponse { response: drag, .. } = ui.dnd_drag_source(
+                            ui.make_persistent_id(("cl_drag", card.id, i)),
+                            (card.id, i),
+                            |ui| {
+                                ui.add(egui::Label::new("\u{2807}").sense(egui::Sense::drag()))
+                                    .on_hover_text("Drag to reorder")
+                            },
+                        );
+                        if let Some(payload) = drag.dnd_hover_payload::<(CardId, usize)>() {
+                            if payload.0 == card.id {
+                                let rect = drag.rect;
+                                let before = ui
+                                    .input(|inp| inp.pointer.hover_pos())
+                                    .map_or(true, |p| p.y < rect.center().y);
+                                let y = if before { rect.top() } else { rect.bottom() };
+                                ui.painter().hline(
+                                    rect.x_range(),
+                                    y,
+                                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                                );
+                                if let Some(p) = drag.dnd_release_payload::<(CardId, usize)>() {
+                                    let to = if before { i } else { i + 1 };
+                                    actions.push(CanvasAction::ChecklistMove(card.id, p.1, to));
+                                }
                             }
                         }
                     }
@@ -996,27 +1003,33 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                     if ui.checkbox(&mut done, "").changed() {
                         actions.push(CanvasAction::ChecklistToggle(card.id, i));
                     }
-                    let item_id = ui.make_persistent_id(("card_check_edit", card.id, i));
-                    // Leave room for the × delete button; an infinite-width field
-                    // would push it outside the card and make it unclickable.
-                    let text_w = (ui.available_width() - 26.0).max(24.0);
-                    let (text, changed, _) =
-                        singleline_primary(ui, item_id, &item.text, |te| {
-                            te.desired_width(text_w).hint_text("item")
-                        });
-                    if changed {
-                        actions.push(CanvasAction::ChecklistSetText(card.id, i, text));
-                    }
-                    if ui
-                        .add(egui::Button::new("\u{00d7}").frame(false).small())
-                        .on_hover_text("Delete item")
-                        .clicked()
-                    {
-                        actions.push(CanvasAction::ChecklistRemove(card.id, i));
+                    if editing {
+                        let item_id = ui.make_persistent_id(("card_check_edit", card.id, i));
+                        // Leave room for the × delete button; an infinite-width
+                        // field would push it outside the card and make it
+                        // unclickable.
+                        let text_w = (ui.available_width() - 26.0).max(24.0);
+                        let (text, changed, _) =
+                            singleline_primary(ui, item_id, &item.text, |te| {
+                                te.desired_width(text_w).hint_text("item")
+                            });
+                        if changed {
+                            actions.push(CanvasAction::ChecklistSetText(card.id, i, text));
+                        }
+                        if ui
+                            .add(egui::Button::new("\u{00d7}").frame(false).small())
+                            .on_hover_text("Delete item")
+                            .clicked()
+                        {
+                            actions.push(CanvasAction::ChecklistRemove(card.id, i));
+                        }
+                    } else {
+                        // View mode: read-only item text (wraps within the card).
+                        ui.label(&item.text);
                     }
                 });
             }
-            if ui.button("+ item").clicked() {
+            if editing && ui.button("+ item").clicked() {
                 actions.push(CanvasAction::ChecklistAdd(card.id));
             }
         }

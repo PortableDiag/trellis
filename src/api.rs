@@ -55,6 +55,7 @@ pub enum ApiRequest {
     // Image bytes.
     AddImage { node: NodeId, card: u64, name: String, bytes: Vec<u8> },
     RemoveImage { node: NodeId, card: u64, index: usize },
+    GetImage { node: NodeId, card: u64, index: usize },
     // Arrange a node's cards into a tidy non-overlapping grid.
     Autosort(NodeId),
     // Whole-document export.
@@ -405,6 +406,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Delete, ["api", "nodes", nid, "cards", cid, "images", idx]) => {
             let index = idx.parse::<usize>().map_err(|_| (400, format!("bad index: {idx}")))?;
             Ok(ApiRequest::RemoveImage { node: pid(nid)?, card: pid(cid)?, index })
+        }
+        (Method::Get, ["api", "nodes", nid, "cards", cid, "images", idx]) => {
+            let index = idx.parse::<usize>().map_err(|_| (400, format!("bad index: {idx}")))?;
+            Ok(ApiRequest::GetImage { node: pid(nid)?, card: pid(cid)?, index })
         }
         (Method::Get, ["api", "nodes", id, "groups"]) => Ok(ApiRequest::ListGroups(pid(id)?)),
         (Method::Post, ["api", "nodes", id, "groups"]) => {
@@ -906,6 +911,25 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 (false, ApiResponse::err(404, "card/image not found or not an image card"))
             }
         }
+        ApiRequest::GetImage { node, card, index } => {
+            let img = doc
+                .nodes
+                .get(&node)
+                .and_then(|n| n.cards.iter().find(|c| c.id == card))
+                .map(|c| c.kind.images())
+                .and_then(|imgs| imgs.get(index).map(|(d, n)| (d.to_vec(), n.to_string())));
+            match img {
+                Some((bytes, name)) => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    (false, ApiResponse::ok(json!({
+                        "index": index,
+                        "name": name,
+                        "base64": b64,
+                    })))
+                }
+                None => (false, ApiResponse::err(404, "card/image not found or not an image card")),
+            }
+        }
         ApiRequest::Autosort(node) => {
             if doc.autosort(node) {
                 (true, ApiResponse::ok(json!({ "sorted": node })))
@@ -1289,6 +1313,22 @@ mod tests {
         assert!(dirty);
         assert_eq!(resp.status, 201);
         assert_eq!(doc.nodes[&nid].cards[0].kind.images().len(), 1);
+
+        // GET the image back as base64 (what the mobile viewer uses).
+        let (_d, got) =
+            process(&mut doc, ApiRequest::GetImage { node: nid, card: cid, index: 0 });
+        assert_eq!(got.status, 200);
+        let v: Value = serde_json::from_str(&got.body).unwrap();
+        assert_eq!(v["name"], "pic");
+        assert_eq!(
+            v["base64"],
+            base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4])
+        );
+        // Out-of-range index is a 404.
+        let (_d, miss) =
+            process(&mut doc, ApiRequest::GetImage { node: nid, card: cid, index: 9 });
+        assert_eq!(miss.status, 404);
+
         let (_d, resp) =
             process(&mut doc, ApiRequest::RemoveImage { node: nid, card: cid, index: 0 });
         assert_eq!(resp.status, 200);
