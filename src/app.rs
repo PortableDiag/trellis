@@ -10,7 +10,8 @@ use egui_commonmark::CommonMarkCache;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
-use std::sync::mpsc::Receiver;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 /// Parent-window handles for rfd dialogs. Without a parent, X11/portal file
@@ -245,10 +246,15 @@ pub struct TrellisApp {
     api_rx: Option<Receiver<ApiCommand>>,
     /// Shared with the server thread so key edits take effect without a restart.
     api_shared_key: Arc<Mutex<String>>,
+    /// Sender cloned for the server thread; kept so we can restart the server live.
+    api_tx: Sender<ApiCommand>,
+    /// Live server handle, kept so we can `unblock()` it to rebind on a LAN toggle.
+    api_server: Option<Arc<tiny_http::Server>>,
+    /// Document-change counter shared with the API's `/api/wait` long-poll.
+    doc_revision: Arc<AtomicU64>,
     api_key: String,
     api_port: u16,
     /// When true the API binds all interfaces (LAN access), not just localhost.
-    /// Applied at startup; changing it takes effect on the next launch.
     api_lan: bool,
     api_status: String,
     show_settings: bool,
@@ -340,19 +346,17 @@ impl TrellisApp {
             .unwrap_or(false);
         let api_shared_key = Arc::new(Mutex::new(api_key.clone()));
         let (api_tx, api_rx) = std::sync::mpsc::channel::<ApiCommand>();
-        let api_status = match api::serve(
+        let doc_revision = Arc::new(AtomicU64::new(0));
+        let (api_server, api_status) = match api::serve(
             api_port,
             api_lan,
             cc.egui_ctx.clone(),
-            api_tx,
+            api_tx.clone(),
             Arc::clone(&api_shared_key),
+            Arc::clone(&doc_revision),
         ) {
-            Ok(()) if api_lan => {
-                let host = local_ip().unwrap_or_else(|| "0.0.0.0".to_string());
-                format!("Listening on http://{host}:{api_port}/api (LAN)")
-            }
-            Ok(()) => format!("Listening on http://127.0.0.1:{api_port}/api"),
-            Err(e) => format!("Failed to start on port {api_port}: {e}"),
+            Ok(server) => (Some(server), api_status_line(api_lan, api_port)),
+            Err(e) => (None, format!("Failed to start on port {api_port}: {e}")),
         };
 
         Self {
@@ -381,6 +385,9 @@ impl TrellisApp {
             card_sel_node: None,
             api_rx: Some(api_rx),
             api_shared_key,
+            api_tx,
+            api_server,
+            doc_revision,
             api_key,
             api_port,
             api_lan,
@@ -421,7 +428,7 @@ impl TrellisApp {
                 self.redo.push((nid, cur.clone()));
                 self.doc.nodes.insert(nid, node);
                 self.selected = Some(nid);
-                self.dirty = true;
+                self.mark_dirty();
                 self.undo_coalesce = None;
                 self.status = "Undo".to_string();
                 return;
@@ -436,7 +443,7 @@ impl TrellisApp {
                 self.undo.push((nid, cur.clone()));
                 self.doc.nodes.insert(nid, node);
                 self.selected = Some(nid);
-                self.dirty = true;
+                self.mark_dirty();
                 self.undo_coalesce = None;
                 self.status = "Redo".to_string();
                 return;
@@ -462,6 +469,53 @@ impl TrellisApp {
     }
 
     /// Drain and apply any pending API commands from the server thread.
+    /// Mark the document changed: flags it dirty for save and bumps the shared
+    /// revision so the API's `/api/wait` long-poll wakes live clients.
+    fn mark_dirty(&mut self) {
+        self.mark_dirty();
+        self.doc_revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Stop and rebind the API server on the current port/LAN setting, so a LAN
+    /// toggle takes effect immediately without relaunching the app. The accept
+    /// thread only blocks in `incoming_requests()`, so `unblock()` frees the
+    /// socket promptly; we retry the bind briefly while it releases.
+    fn restart_api(&mut self, ctx: &egui::Context) {
+        if let Some(old) = self.api_server.take() {
+            old.unblock();
+        }
+        let mut result = Err("bind timed out".to_string());
+        for _ in 0..40 {
+            match api::serve(
+                self.api_port,
+                self.api_lan,
+                ctx.clone(),
+                self.api_tx.clone(),
+                Arc::clone(&self.api_shared_key),
+                Arc::clone(&self.doc_revision),
+            ) {
+                Ok(server) => {
+                    result = Ok(server);
+                    break;
+                }
+                Err(e) => {
+                    result = Err(e);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+        match result {
+            Ok(server) => {
+                self.api_server = Some(server);
+                self.api_status = api_status_line(self.api_lan, self.api_port);
+            }
+            Err(e) => {
+                self.api_server = None;
+                self.api_status = format!("Failed to restart on port {}: {e}", self.api_port);
+            }
+        }
+    }
+
     fn pump_api(&mut self) {
         let mut cmds = Vec::new();
         if let Some(rx) = &self.api_rx {
@@ -472,7 +526,7 @@ impl TrellisApp {
         for cmd in cmds {
             let (changed, resp) = api::process(&mut self.doc, cmd.req);
             if changed {
-                self.dirty = true;
+                self.mark_dirty();
                 // A deleted node may have been the selection.
                 if let Some(sel) = self.selected {
                     if !self.doc.nodes.contains_key(&sel) {
@@ -608,7 +662,7 @@ impl TrellisApp {
                         .unwrap_or_else(|| "Imported".to_string());
                     let id = self.doc.import_as_node(title, &content, html);
                     self.selected = Some(id);
-                    self.dirty = true;
+                    self.mark_dirty();
                     self.status = format!("Imported {} as a node", label);
                 }
                 Err(e) => self.status = format!("Read error: {e}"),
@@ -703,7 +757,7 @@ impl TrellisApp {
                     self.views.clear();
                     self.reset_history();
                     self.doc_path = None;
-                    self.dirty = true;
+                    self.mark_dirty();
                     self.status = format!("Imported {}", path.display());
                 }
                 Ok(Err(e)) => self.status = format!("JSON parse error: {e}"),
@@ -720,7 +774,7 @@ impl TrellisApp {
             .iter()
             .any(|a| !matches!(a, TreeAction::Select(_) | TreeAction::ToggleReorder))
         {
-            self.dirty = true;
+            self.mark_dirty();
         }
         for a in actions {
             match a {
@@ -828,7 +882,7 @@ impl TrellisApp {
             }
         }
         if n > 0 {
-            self.dirty = true;
+            self.mark_dirty();
             self.status = format!("Added {n} card{} from dropped files", if n == 1 { "" } else { "s" });
         }
     }
@@ -846,7 +900,7 @@ impl TrellisApp {
                     | CanvasAction::ToggleSnapMode
             )
         }) {
-            self.dirty = true;
+            self.mark_dirty();
         }
         // Undo: snapshot the node *before* mutating it. A discrete edit is its
         // own step; a held drag (same coalesce tag while the button is down)
@@ -993,47 +1047,47 @@ impl TrellisApp {
                 CanvasAction::LoadImage(cid) => self.load_image_into(node, cid),
                 CanvasAction::TableSetCell(cid, r, c, text) => {
                     if self.doc.table_set_cell(node, cid, r, c, text) {
-                        self.dirty = true;
+                        self.mark_dirty();
                     }
                 }
                 CanvasAction::TableSetBg(cid, r, c, bg) => {
                     if self.doc.table_set_bg(node, cid, r, c, bg) {
-                        self.dirty = true;
+                        self.mark_dirty();
                     }
                 }
                 CanvasAction::TableSetFg(cid, r, c, fg) => {
                     if self.doc.table_set_fg(node, cid, r, c, fg) {
-                        self.dirty = true;
+                        self.mark_dirty();
                     }
                 }
                 CanvasAction::TableInsertRow(cid, at) => {
                     if self.doc.table_insert_row(node, cid, at) {
-                        self.dirty = true;
+                        self.mark_dirty();
                     }
                 }
                 CanvasAction::TableRemoveRow(cid, at) => {
                     if self.doc.table_remove_row(node, cid, at) {
-                        self.dirty = true;
+                        self.mark_dirty();
                     }
                 }
                 CanvasAction::TableInsertCol(cid, at) => {
                     if self.doc.table_insert_col(node, cid, at) {
-                        self.dirty = true;
+                        self.mark_dirty();
                     }
                 }
                 CanvasAction::TableRemoveCol(cid, at) => {
                     if self.doc.table_remove_col(node, cid, at) {
-                        self.dirty = true;
+                        self.mark_dirty();
                     }
                 }
                 CanvasAction::TableSetColWidth(cid, c, w) => {
                     if self.doc.table_set_col_width(node, cid, c, w) {
-                        self.dirty = true;
+                        self.mark_dirty();
                     }
                 }
                 CanvasAction::TableToggleHeader(cid) => {
                     if self.doc.table_toggle_header(node, cid) {
-                        self.dirty = true;
+                        self.mark_dirty();
                     }
                 }
                 CanvasAction::TableImport(cid) => self.table_import(node, cid),
@@ -1042,7 +1096,7 @@ impl TrellisApp {
                 CanvasAction::RemoveImage(cid, idx) => {
                     if self.doc.remove_image(node, cid, idx) {
                         self.tex_cache.forget(cid);
-                        self.dirty = true;
+                        self.mark_dirty();
                     }
                 }
                 CanvasAction::OpenLightbox(cid, idx) => {
@@ -1107,7 +1161,7 @@ impl TrellisApp {
         match values {
             Ok(v) => {
                 if self.doc.table_replace(node, card, v) {
-                    self.dirty = true;
+                    self.mark_dirty();
                     self.status = format!("Imported {}", path.display());
                 }
             }
@@ -1156,7 +1210,7 @@ impl TrellisApp {
                         .unwrap_or_default();
                     if self.doc.add_image(node, card, bytes, name) {
                         self.tex_cache.forget(card);
-                        self.dirty = true;
+                        self.mark_dirty();
                         self.status = "Loaded image".to_string();
                     }
                 }
@@ -1461,7 +1515,7 @@ impl TrellisApp {
                         if let Some(sel) = self.selected {
                             self.push_undo(sel);
                             if self.doc.autosort(sel) {
-                                self.dirty = true;
+                                self.mark_dirty();
                                 self.status = "Autosorted cards into a grid".to_string();
                             } else {
                                 self.undo.pop(); // nothing changed; drop the snapshot
@@ -1533,16 +1587,18 @@ impl TrellisApp {
                     ui.end_row();
 
                     ui.label("LAN access");
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.api_lan, "Allow other devices on my network")
-                            .on_hover_text(
-                                "Binds the API to all network interfaces (0.0.0.0) so the \
-                                 mobile app and other devices can reach it. Still requires \
-                                 the API key. Only enable on trusted networks — never expose \
-                                 to the internet without a TLS proxy. Restart to apply.",
-                            );
-                        ui.weak("(restart to apply)");
-                    });
+                    if ui
+                        .checkbox(&mut self.api_lan, "Allow other devices on my network")
+                        .on_hover_text(
+                            "Binds the API to all network interfaces (0.0.0.0) so the \
+                             mobile app and other devices can reach it. Still requires \
+                             the API key. Only enable on trusted networks — never expose \
+                             to the internet without a TLS proxy. Takes effect immediately.",
+                        )
+                        .changed()
+                    {
+                        self.restart_api(ctx);
+                    }
                     ui.end_row();
                 });
 
@@ -1854,6 +1910,16 @@ fn setup_fonts(ctx: &egui::Context) {
 
 /// A random API key (48 hex chars from the OS RNG, falling back to a weak
 /// time/pid mix if `/dev/urandom` is unavailable).
+/// The Settings status line describing where the API is listening.
+fn api_status_line(lan: bool, port: u16) -> String {
+    if lan {
+        let host = local_ip().unwrap_or_else(|| "0.0.0.0".to_string());
+        format!("Listening on http://{host}:{port}/api (LAN)")
+    } else {
+        format!("Listening on http://127.0.0.1:{port}/api")
+    }
+}
+
 /// Best-effort local LAN IP, for showing the reachable API URL. Opens a UDP
 /// socket "connected" to a public address (no packets are sent) and reads back
 /// the local address the OS would route through. Returns `None` if unavailable.

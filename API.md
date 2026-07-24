@@ -258,6 +258,19 @@ GET /api/export?format=<fmt>
 `format` defaults to `markdown`. `pdf` is a paginated A4 document; `png`/`gif`
 are a single rendered image of the document text. Decode `base64` to get the file.
 
+### Live updates (long-poll)
+Be woken the instant the document changes, instead of polling on a timer.
+```
+GET /api/wait?rev=<n>
+  → 200 {"rev":<current>,"changed":true}    (as soon as the revision differs from n)
+  → 200 {"rev":<current>,"changed":false}   (after ~25s with no change; just re-request)
+```
+The server holds the request open until the document's change counter differs from
+`rev` (any add/edit/move/remove, from the app or another agent), or ~25 s elapse.
+Loop it, passing back the `rev` you last received, to react immediately. Start with
+`rev=0` to get the current revision on the first call. Requests are handled
+concurrently, so an open `/wait` never blocks your other calls.
+
 ## Errors
 
 All errors return `{"error":"<message>"}` with the status code:

@@ -4,6 +4,20 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.30.0]
+
+### Added
+- **Live updates for API clients** — `GET /api/wait?rev=<n>` long-polls: it blocks
+  until the document changes (or ~25 s), then returns the new revision. Clients loop
+  on it to be woken the instant anything changes, instead of polling on a timer. The
+  Trellis mobile app uses this for near-instant updates. Each API request is now
+  handled on its own thread, so a long-poll never blocks other requests.
+
+### Changed
+- **LAN access applies immediately** — toggling **Tools → Settings → LAN access** now
+  rebinds the API server on the spot (no relaunch needed). The status line updates to
+  show the reachable URL.
+
 ## [0.29.0]
 
 ### Added

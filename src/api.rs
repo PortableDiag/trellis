@@ -15,8 +15,9 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::mpsc::{Sender, SyncSender};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tiny_http::Method;
 
 /// A request routed to the UI thread, plus the channel to answer on.
@@ -257,34 +258,51 @@ pub struct SketchOpInput {
 // --- server thread ----------------------------------------------------------
 
 /// Bind the server (reporting bind errors synchronously) and spawn its accept
-/// loop. Returns `Err` if the port can't be bound.
+/// loop. Returns the `Server` handle so the caller can `unblock()` it to restart
+/// on a different bind address (e.g. toggling LAN access). `revision` is a shared
+/// document-change counter used by the `/api/wait` long-poll for live updates.
+///
+/// Each request is handled on its own thread, so a long-poll (or any slow
+/// request) never blocks the others — and the accept thread only ever blocks in
+/// `incoming_requests()`, so `unblock()` stops it promptly.
 pub fn serve(
     port: u16,
     lan: bool,
     ctx: egui::Context,
     tx: Sender<ApiCommand>,
     key: Arc<Mutex<String>>,
-) -> Result<(), String> {
+    revision: Arc<AtomicU64>,
+) -> Result<Arc<tiny_http::Server>, String> {
     // `lan` binds all interfaces so other devices on the network can reach the
     // API (still key-gated); otherwise localhost-only.
     let host = if lan { "0.0.0.0" } else { "127.0.0.1" };
-    let server = tiny_http::Server::http((host, port)).map_err(|e| e.to_string())?;
+    let server = Arc::new(tiny_http::Server::http((host, port)).map_err(|e| e.to_string())?);
+    let accept = Arc::clone(&server);
     std::thread::Builder::new()
         .name("trellis-api".into())
         .spawn(move || {
-            for mut request in server.incoming_requests() {
-                let resp = handle(&mut request, &ctx, &tx, &key);
-                let header =
-                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                        .unwrap();
-                let http = tiny_http::Response::from_string(resp.body)
-                    .with_status_code(resp.status)
-                    .with_header(header);
-                let _ = request.respond(http);
+            for request in accept.incoming_requests() {
+                let ctx = ctx.clone();
+                let tx = tx.clone();
+                let key = Arc::clone(&key);
+                let revision = Arc::clone(&revision);
+                std::thread::spawn(move || {
+                    let mut request = request;
+                    let resp = handle(&mut request, &ctx, &tx, &key, &revision);
+                    let header = tiny_http::Header::from_bytes(
+                        &b"Content-Type"[..],
+                        &b"application/json"[..],
+                    )
+                    .unwrap();
+                    let http = tiny_http::Response::from_string(resp.body)
+                        .with_status_code(resp.status)
+                        .with_header(header);
+                    let _ = request.respond(http);
+                });
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(server)
 }
 
 fn handle(
@@ -292,6 +310,7 @@ fn handle(
     ctx: &egui::Context,
     tx: &Sender<ApiCommand>,
     key: &Arc<Mutex<String>>,
+    revision: &Arc<AtomicU64>,
 ) -> ApiResponse {
     let method = request.method().clone();
     let raw_url = request.url().to_string();
@@ -309,6 +328,27 @@ fn handle(
         }
         if request_key(request).as_deref() != Some(configured.as_str()) {
             return ApiResponse::err(401, "missing or invalid API key");
+        }
+    }
+
+    // Long-poll for live updates: block until the document's revision differs
+    // from `rev` (or ~25s elapse), then return the current revision. Clients loop
+    // on this — passing back the `rev` they got — to be woken the moment anything
+    // changes, instead of polling on a timer. Runs on its own thread (see serve),
+    // so it never blocks other requests, and reads the counter without touching
+    // the document, so no UI-thread round-trip.
+    if method == Method::Get && path == "/api/wait" {
+        let since = query_get(&query, "rev").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let start = Instant::now();
+        loop {
+            let cur = revision.load(Ordering::Relaxed);
+            if cur != since {
+                return ApiResponse::ok(json!({ "rev": cur, "changed": true }));
+            }
+            if start.elapsed() > Duration::from_secs(25) {
+                return ApiResponse::ok(json!({ "rev": cur, "changed": false }));
+            }
+            std::thread::sleep(Duration::from_millis(200));
         }
     }
 
