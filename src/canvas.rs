@@ -981,14 +981,21 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, actions: &mut Vec<Canv
                         actions.push(CanvasAction::ChecklistToggle(card.id, i));
                     }
                     let item_id = ui.make_persistent_id(("card_check_edit", card.id, i));
+                    // Leave room for the × delete button; an infinite-width field
+                    // would push it outside the card and make it unclickable.
+                    let text_w = (ui.available_width() - 26.0).max(24.0);
                     let (text, changed, _) =
                         singleline_primary(ui, item_id, &item.text, |te| {
-                            te.desired_width(f32::INFINITY).hint_text("item")
+                            te.desired_width(text_w).hint_text("item")
                         });
                     if changed {
                         actions.push(CanvasAction::ChecklistSetText(card.id, i, text));
                     }
-                    if ui.add(egui::Button::new("×").frame(false).small()).clicked() {
+                    if ui
+                        .add(egui::Button::new("\u{00d7}").frame(false).small())
+                        .on_hover_text("Delete item")
+                        .clicked()
+                    {
                         actions.push(CanvasAction::ChecklistRemove(card.id, i));
                     }
                 });

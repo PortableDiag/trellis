@@ -4,6 +4,14 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.25.1]
+
+### Fixed
+- **Checklist item delete** — the `×` delete button was pushed outside the card
+  by the full-width item field, so it couldn't be clicked (you could only clear
+  the text). The row now reserves space for `×`, so deleting an item removes the
+  whole line and checkbox.
+
 ## [0.25.0]
 
 ### Added
