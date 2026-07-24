@@ -59,6 +59,7 @@ struct Lightbox {
 const LAST_DOC_KEY: &str = "last_doc_path";
 const API_KEY_KEY: &str = "api_key";
 const API_PORT_KEY: &str = "api_port";
+const API_LAN_KEY: &str = "api_lan";
 const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
@@ -246,6 +247,9 @@ pub struct TrellisApp {
     api_shared_key: Arc<Mutex<String>>,
     api_key: String,
     api_port: u16,
+    /// When true the API binds all interfaces (LAN access), not just localhost.
+    /// Applied at startup; changing it takes effect on the next launch.
+    api_lan: bool,
     api_status: String,
     show_settings: bool,
 
@@ -329,14 +333,24 @@ impl TrellisApp {
             .and_then(|s| s.get_string(API_PORT_KEY))
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_API_PORT);
+        let api_lan = cc
+            .storage
+            .and_then(|s| s.get_string(API_LAN_KEY))
+            .map(|s| s == "true")
+            .unwrap_or(false);
         let api_shared_key = Arc::new(Mutex::new(api_key.clone()));
         let (api_tx, api_rx) = std::sync::mpsc::channel::<ApiCommand>();
         let api_status = match api::serve(
             api_port,
+            api_lan,
             cc.egui_ctx.clone(),
             api_tx,
             Arc::clone(&api_shared_key),
         ) {
+            Ok(()) if api_lan => {
+                let host = local_ip().unwrap_or_else(|| "0.0.0.0".to_string());
+                format!("Listening on http://{host}:{api_port}/api (LAN)")
+            }
             Ok(()) => format!("Listening on http://127.0.0.1:{api_port}/api"),
             Err(e) => format!("Failed to start on port {api_port}: {e}"),
         };
@@ -369,6 +383,7 @@ impl TrellisApp {
             api_shared_key,
             api_key,
             api_port,
+            api_lan,
             api_status,
             show_settings: false,
             undo: Vec::new(),
@@ -1479,8 +1494,9 @@ impl TrellisApp {
             .show(ctx, |ui| {
                 ui.heading("Agent API");
                 ui.label(
-                    "A localhost HTTP API for agents to add, query, edit and remove \
-                     nodes and cards. Bound to 127.0.0.1 only.",
+                    "An HTTP API for agents (and the Trellis mobile app) to add, query, \
+                     edit and remove nodes and cards. Localhost-only by default; enable \
+                     LAN access below to reach it from other devices on your network.",
                 );
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(&self.api_status).weak());
@@ -1515,6 +1531,19 @@ impl TrellisApp {
                         ui.weak("(restart to apply a port change)");
                     });
                     ui.end_row();
+
+                    ui.label("LAN access");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.api_lan, "Allow other devices on my network")
+                            .on_hover_text(
+                                "Binds the API to all network interfaces (0.0.0.0) so the \
+                                 mobile app and other devices can reach it. Still requires \
+                                 the API key. Only enable on trusted networks — never expose \
+                                 to the internet without a TLS proxy. Restart to apply.",
+                            );
+                        ui.weak("(restart to apply)");
+                    });
+                    ui.end_row();
                 });
 
                 ui.add_space(10.0);
@@ -1537,9 +1566,15 @@ impl TrellisApp {
                 ui.label("Authenticate with a header, then call the endpoints:");
                 ui.add_space(4.0);
                 let port = self.api_port;
+                let host = if self.api_lan {
+                    local_ip().unwrap_or_else(|| "127.0.0.1".to_string())
+                } else {
+                    "127.0.0.1".to_string()
+                };
                 ui.code(format!(
-                    "curl -H 'X-API-Key: {}' \\\n     http://127.0.0.1:{}/api/tree",
+                    "curl -H 'X-API-Key: {}' \\\n     http://{}:{}/api/tree",
                     if self.api_key.is_empty() { "<key>" } else { &self.api_key },
+                    host,
                     port
                 ));
                 ui.add_space(4.0);
@@ -1776,6 +1811,7 @@ impl eframe::App for TrellisApp {
         }
         storage.set_string(API_KEY_KEY, self.api_key.clone());
         storage.set_string(API_PORT_KEY, self.api_port.to_string());
+        storage.set_string(API_LAN_KEY, self.api_lan.to_string());
         storage.set_string(ZOOM_ENABLED_KEY, self.zoom_enabled.to_string());
         storage.set_string(DOCK_MODE_KEY, self.dock_mode.to_string());
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
@@ -1818,6 +1854,15 @@ fn setup_fonts(ctx: &egui::Context) {
 
 /// A random API key (48 hex chars from the OS RNG, falling back to a weak
 /// time/pid mix if `/dev/urandom` is unavailable).
+/// Best-effort local LAN IP, for showing the reachable API URL. Opens a UDP
+/// socket "connected" to a public address (no packets are sent) and reads back
+/// the local address the OS would route through. Returns `None` if unavailable.
+fn local_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    Some(sock.local_addr().ok()?.ip().to_string())
+}
+
 fn generate_key() -> String {
     let mut buf = [0u8; 24];
     let ok = std::fs::File::open("/dev/urandom")

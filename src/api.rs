@@ -1,6 +1,8 @@
 //! Local HTTP API so external agents can read and edit the document.
 //!
-//! A background thread runs a tiny blocking HTTP server bound to `127.0.0.1`.
+//! A background thread runs a tiny blocking HTTP server bound to `127.0.0.1` by
+//! default, or `0.0.0.0` (all interfaces, for LAN access) when LAN access is
+//! enabled in Settings.
 //! Each request is authenticated against the key set in Settings, then handed to
 //! the UI thread over a channel; the UI thread applies it to the live `Document`
 //! and sends a response back. This keeps all document access single-threaded.
@@ -257,11 +259,15 @@ pub struct SketchOpInput {
 /// loop. Returns `Err` if the port can't be bound.
 pub fn serve(
     port: u16,
+    lan: bool,
     ctx: egui::Context,
     tx: Sender<ApiCommand>,
     key: Arc<Mutex<String>>,
 ) -> Result<(), String> {
-    let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    // `lan` binds all interfaces so other devices on the network can reach the
+    // API (still key-gated); otherwise localhost-only.
+    let host = if lan { "0.0.0.0" } else { "127.0.0.1" };
+    let server = tiny_http::Server::http((host, port)).map_err(|e| e.to_string())?;
     std::thread::Builder::new()
         .name("trellis-api".into())
         .spawn(move || {

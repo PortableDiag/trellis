@@ -4,6 +4,16 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.28.0]
+
+### Added
+- **LAN access for the agent API** — a **Tools → Settings → LAN access** toggle
+  binds the API to all interfaces (`0.0.0.0`) instead of localhost, so other
+  devices on your network (e.g. a phone, or the forthcoming Trellis mobile
+  viewer) can reach it. Still key-gated; the status line and curl example show
+  the reachable LAN URL. Off by default; applies on restart. Only enable on
+  trusted networks — never expose to the internet without a TLS proxy.
+
 ## [0.27.1]
 
 ### Changed

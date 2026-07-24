@@ -78,7 +78,8 @@ and zooms (Ctrl+scroll); each node remembers its view.
 - Full-text **search** across every node title and card (Ctrl+F)
 - **View → Themes** — Trellis (default), Light, or Terminal Green
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
-- **Agent API** — a localhost, key-gated HTTP API with full parity to the app:
+- **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN
+  access** in Settings for phones/other devices) with full parity to the app:
   add/query/edit/remove nodes and cards, move/recolor/resize, convert a card's
   kind, edit tables cell-by-cell (colors, headers, rows/cols), upload images,
   build groups, join/leave and dock cards, and export the document (incl.

@@ -6,7 +6,11 @@ edits made through the API appear live in the window and are saved with the
 document.
 
 - **Base URL:** `http://127.0.0.1:<port>/api` — default port **7373**.
-- **Bind address:** `127.0.0.1` only. Not reachable from other machines.
+- **Bind address:** `127.0.0.1` only by default. Enable **Tools → Settings → LAN
+  access** to bind all interfaces (`0.0.0.0`) so other devices on your network can
+  reach it at `http://<this-machine-lan-ip>:<port>/api` (still key-gated; applies on
+  restart). Only enable on trusted networks — never expose to the internet without a
+  TLS proxy.
 - **Format:** JSON request and response bodies; `Content-Type: application/json`.
 - **State:** operates on the document currently open in the app. There is no
   multi-document addressing — whatever the user has open is what you edit.
