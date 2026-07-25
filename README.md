@@ -105,7 +105,8 @@ cargo run --release
 
 Requires a recent stable Rust toolchain. Tests: `cargo test` (binary crate — use
 `cargo test --bin trellis` to test a single target). Middle-click paste and the
-X11 PRIMARY-selection features need `xclip` or `xsel` installed.
+X11 PRIMARY-selection features need `xclip` or `xsel` installed. **OCR** (right-click
+an image card → Extract text) needs the `tesseract` CLI (`tesseract-ocr`) installed.
 
 The markdown renderer (`egui_commonmark`) is vendored under `vendor/` and patched
 to render inline text-color spans; edit it there, not the crates.io copy.

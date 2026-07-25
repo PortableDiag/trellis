@@ -4,6 +4,16 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.33.0]
+
+### Added
+- **OCR image cards** — right-click an image card → **Extract text (OCR)** reads the
+  text out of the image(s) with tesseract and stores it (hidden) on the card, so
+  screenshots, scans and photos of documents become **full-text searchable**. Runs
+  in the background (never freezes the UI). Requires the `tesseract` CLI installed
+  (`tesseract-ocr`); the extracted text is also reported as `ocr` in the card's API
+  JSON.
+
 ## [0.32.0]
 
 ### Changed

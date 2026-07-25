@@ -49,6 +49,8 @@ pub enum CanvasAction {
     SketchClear(CardId),
     LoadImage(CardId),
     RemoveImage(CardId, usize),
+    /// Run OCR over an image card's images and store the extracted text.
+    OcrCard(CardId),
     // Table (spreadsheet) cards.
     TableSetCell(CardId, usize, usize, String),
     TableSetBg(CardId, usize, usize, Option<[u8; 3]>),
@@ -233,7 +235,7 @@ pub fn ui(
         }
         if ui.button("Image").clicked() {
             actions.push(CanvasAction::AddCard(
-                CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new() },
+                CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new(), ocr: String::new() },
                 cp,
             ));
             ui.close_menu();
@@ -1314,6 +1316,16 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, node_path: &str, actions: &mut Vec<
         actions.push(CanvasAction::CopyCard(card.id));
         ui.close_menu();
     }
+    if matches!(card.kind, CardKind::Image { .. }) {
+        if ui
+            .button("Extract text (OCR)")
+            .on_hover_text("Read text from the image(s) with OCR so this card is searchable")
+            .clicked()
+        {
+            actions.push(CanvasAction::OcrCard(card.id));
+            ui.close_menu();
+        }
+    }
     // Copy the card's id or its breadcrumb path so you can point an agent at
     // this exact card (`/api/nodes/{node}/cards/{id}`).
     ui.menu_button("Copy", |ui| {
@@ -2145,6 +2157,7 @@ mod tests {
             data: vec![],
             name: "pic".into(),
             extra: vec![],
+            ocr: String::new(),
         });
         assert_eq!(copyable_text(&img), None);
     }

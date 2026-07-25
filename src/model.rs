@@ -231,6 +231,10 @@ pub enum CardKind {
         name: String,
         #[serde(default)]
         extra: Vec<ImageEntry>,
+        /// Text extracted from the image(s) by OCR. Hidden in the card, but
+        /// included in full-text search so screenshots/scans are findable.
+        #[serde(default)]
+        ocr: String,
     },
     /// A freehand sketch: a list of drawn strokes.
     Sketch {
@@ -255,7 +259,7 @@ impl CardKind {
     /// pair (when loaded), then `extra`. Empty for other kinds.
     pub fn images(&self) -> Vec<(&[u8], &str)> {
         match self {
-            CardKind::Image { data, name, extra } => {
+            CardKind::Image { data, name, extra, .. } => {
                 let mut v: Vec<(&[u8], &str)> = Vec::new();
                 if !data.is_empty() {
                     v.push((data.as_slice(), name.as_str()));
@@ -515,6 +519,17 @@ impl Document {
             .find(|c| c.id == card)
     }
 
+    /// Store OCR-extracted text on an image card. Returns false if not an image card.
+    pub fn set_card_ocr(&mut self, node: NodeId, card: CardId, text: String) -> bool {
+        match self.card_mut(node, card).map(|c| &mut c.kind) {
+            Some(CardKind::Image { ocr, .. }) => {
+                *ocr = text;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn table_mut(&mut self, node: NodeId, card: CardId) -> Option<&mut TableData> {
         match self.card_mut(node, card).map(|c| &mut c.kind) {
             Some(CardKind::Table { table }) => Some(table),
@@ -622,7 +637,7 @@ impl Document {
     /// slot). Returns false if the card isn't an Image card.
     pub fn add_image(&mut self, node: NodeId, card: CardId, bytes: Vec<u8>, img_name: String) -> bool {
         match self.card_mut(node, card).map(|c| &mut c.kind) {
-            Some(CardKind::Image { data, name, extra }) => {
+            Some(CardKind::Image { data, name, extra, .. }) => {
                 if data.is_empty() && extra.is_empty() {
                     *data = bytes;
                     *name = img_name;
@@ -639,7 +654,7 @@ impl Document {
     /// the primary image promotes the next `extra` entry into its place.
     pub fn remove_image(&mut self, node: NodeId, card: CardId, idx: usize) -> bool {
         match self.card_mut(node, card).map(|c| &mut c.kind) {
-            Some(CardKind::Image { data, name, extra }) => {
+            Some(CardKind::Image { data, name, extra, .. }) => {
                 if idx == 0 && !data.is_empty() {
                     if extra.is_empty() {
                         data.clear();
@@ -1559,12 +1574,10 @@ fn searchable_body(card: &Card) -> String {
             .flat_map(|r| r.iter().map(|c| c.text.as_str()))
             .collect::<Vec<_>>()
             .join(" "),
-        k @ CardKind::Image { .. } => k
-            .images()
-            .iter()
-            .map(|(_, n)| *n)
-            .collect::<Vec<_>>()
-            .join(" "),
+        k @ CardKind::Image { ocr, .. } => {
+            let names = k.images().iter().map(|(_, n)| *n).collect::<Vec<_>>().join(" ");
+            if ocr.is_empty() { names } else { format!("{names} {ocr}") }
+        }
         CardKind::Sketch { .. } => String::new(),
     }
 }
@@ -1787,7 +1800,7 @@ mod tests {
             .add_card(
                 n,
                 egui::pos2(0.0, 0.0),
-                CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new() },
+                CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new(), ocr: String::new() },
             )
             .unwrap();
 
@@ -2066,6 +2079,19 @@ mod tests {
         assert_eq!(doc.search("grocer").len(), 1);
         assert_eq!(doc.search("avocado").len(), 1);
         assert_eq!(doc.search("zzz").len(), 0);
+
+        // An image card becomes searchable once OCR text is stored on it.
+        let img = doc
+            .add_card(n, egui::pos2(0.0, 0.0), CardKind::Image {
+                data: Vec::new(),
+                name: String::new(),
+                extra: Vec::new(),
+                ocr: String::new(),
+            })
+            .unwrap();
+        assert_eq!(doc.search("invoice").len(), 0);
+        assert!(doc.set_card_ocr(n, img, "Electric bill invoice total 42.00".into()));
+        assert_eq!(doc.search("invoice").len(), 1);
     }
 
     #[test]

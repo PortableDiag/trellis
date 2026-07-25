@@ -3,7 +3,7 @@
 
 use crate::canvas::{self, CanvasAction, Env};
 use crate::images::TextureCache;
-use crate::model::{CardKind, ChecklistItem, Document, NodeId};
+use crate::model::{CardId, CardKind, ChecklistItem, Document, NodeId};
 use crate::tree::{self, TreeAction};
 use crate::api::{self, ApiCommand};
 use egui_commonmark::CommonMarkCache;
@@ -261,6 +261,11 @@ pub struct TrellisApp {
     api_server: Option<Arc<tiny_http::Server>>,
     /// Document-change counter shared with the API's `/api/wait` long-poll.
     doc_revision: Arc<AtomicU64>,
+    /// OCR results from background tesseract threads: (node, card, text-or-error).
+    ocr_tx: Sender<(NodeId, CardId, Result<String, String>)>,
+    ocr_rx: Receiver<(NodeId, CardId, Result<String, String>)>,
+    /// Cloned egui context, so background threads (OCR) can wake the UI when done.
+    egui_ctx: egui::Context,
     api_key: String,
     api_port: u16,
     /// When true the API binds all interfaces (LAN access), not just localhost.
@@ -355,6 +360,7 @@ impl TrellisApp {
         let api_shared_key = Arc::new(Mutex::new(api_key.clone()));
         let (api_tx, api_rx) = std::sync::mpsc::channel::<ApiCommand>();
         let doc_revision = Arc::new(AtomicU64::new(0));
+        let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
         let (api_server, api_status) = match api::serve(
             api_port,
             api_lan,
@@ -398,6 +404,9 @@ impl TrellisApp {
             api_tx,
             api_server,
             doc_revision,
+            ocr_tx,
+            ocr_rx,
+            egui_ctx: cc.egui_ctx.clone(),
             api_key,
             api_port,
             api_lan,
@@ -522,6 +531,23 @@ impl TrellisApp {
             Err(e) => {
                 self.api_server = None;
                 self.api_status = format!("Failed to restart on port {}: {e}", self.api_port);
+            }
+        }
+    }
+
+    /// Apply finished OCR results from background threads to the document.
+    fn pump_ocr(&mut self) {
+        let results: Vec<_> = std::iter::from_fn(|| self.ocr_rx.try_recv().ok()).collect();
+        for (node, card, res) in results {
+            match res {
+                Ok(text) => {
+                    let words = text.split_whitespace().count();
+                    if self.doc.set_card_ocr(node, card, text) {
+                        self.mark_dirty();
+                        self.status = format!("OCR done — {words} words, now searchable");
+                    }
+                }
+                Err(e) => self.status = format!("OCR failed: {e}"),
             }
         }
     }
@@ -899,7 +925,7 @@ impl TrellisApp {
                 .unwrap_or_default();
             let at = pos + egui::vec2(24.0, 24.0) * n as f32;
             if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp") {
-                let kind = CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new() };
+                let kind = CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new(), ocr: String::new() };
                 if let Some(cid) = self.doc.add_card(node, at, kind) {
                     self.doc.add_image(node, cid, bytes, name);
                     n += 1;
@@ -1131,6 +1157,27 @@ impl TrellisApp {
                     if self.doc.remove_image(node, cid, idx) {
                         self.tex_cache.forget(cid);
                         self.mark_dirty();
+                    }
+                }
+                CanvasAction::OcrCard(cid) => {
+                    let images: Vec<Vec<u8>> = self
+                        .doc
+                        .nodes
+                        .get(&node)
+                        .and_then(|n| n.cards.iter().find(|c| c.id == cid))
+                        .map(|c| c.kind.images().iter().map(|(d, _)| d.to_vec()).collect())
+                        .unwrap_or_default();
+                    if images.is_empty() {
+                        self.status = "Nothing to OCR (no image loaded)".into();
+                    } else {
+                        self.status = "OCR running…".into();
+                        let tx = self.ocr_tx.clone();
+                        let ctx = self.egui_ctx.clone();
+                        std::thread::spawn(move || {
+                            let res = ocr_images(&images);
+                            let _ = tx.send((node, cid, res));
+                            ctx.request_repaint();
+                        });
                     }
                 }
                 CanvasAction::OpenLightbox(cid, idx) => {
@@ -1762,6 +1809,8 @@ impl eframe::App for TrellisApp {
 
         // Apply any API requests from the server thread first.
         self.pump_api();
+        // Apply any finished background OCR results.
+        self.pump_ocr();
 
         // Autosave: once the document has been idle for AUTOSAVE_IDLE (no further
         // changes), write it to disk. Debounced so continuous edits — dragging a
@@ -1968,6 +2017,31 @@ fn setup_fonts(ctx: &egui::Context) {
 
 /// A random API key (48 hex chars from the OS RNG, falling back to a weak
 /// time/pid mix if `/dev/urandom` is unavailable).
+/// Run tesseract OCR over each image's bytes and return the combined text.
+/// Writes each image to a temp file and shells out to the `tesseract` CLI
+/// (a runtime dependency). Called on a background thread.
+fn ocr_images(images: &[Vec<u8>]) -> Result<String, String> {
+    let mut out = String::new();
+    for (i, bytes) in images.iter().enumerate() {
+        let path = std::env::temp_dir().join(format!("trellis-ocr-{}-{i}.img", std::process::id()));
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        let result = std::process::Command::new("tesseract")
+            .arg(&path)
+            .arg("stdout")
+            .output();
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Ok(o) if o.status.success() => {
+                out.push_str(String::from_utf8_lossy(&o.stdout).trim());
+                out.push('\n');
+            }
+            Ok(o) => return Err(format!("tesseract error: {}", String::from_utf8_lossy(&o.stderr).trim())),
+            Err(e) => return Err(format!("tesseract not found ({e}); install tesseract-ocr")),
+        }
+    }
+    Ok(out.trim().to_string())
+}
+
 /// Read a Trellis document from disk, transparently handling both current
 /// **gzip-compressed** saves and older **plain-text RON** files (magic-byte sniff).
 fn read_document(path: &std::path::Path) -> Result<Document, String> {

@@ -686,6 +686,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     data: Vec::new(),
                     name: input.title.clone(),
                     extra: Vec::new(),
+                    ocr: String::new(),
                 },
                 "sketch" => CardKind::Sketch { strokes: Vec::new() },
                 _ => CardKind::Text,
@@ -753,6 +754,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                             data: Vec::new(),
                             name: c.title.clone(),
                             extra: Vec::new(),
+                            ocr: String::new(),
                         }),
                         "sketch" => Some(CardKind::Sketch { strokes: Vec::new() }),
                         _ => None,
@@ -1101,11 +1103,12 @@ fn card_json(c: &Card) -> Value {
                     .collect::<Vec<_>>())
                 .collect::<Vec<_>>());
         }
-        k @ CardKind::Image { .. } => {
+        k @ CardKind::Image { ocr, .. } => {
             let images = k.images();
             v["image_name"] = json!(images.first().map(|(_, n)| *n).unwrap_or(""));
             v["image_names"] = json!(images.iter().map(|(_, n)| *n).collect::<Vec<_>>());
             v["bytes"] = json!(images.iter().map(|(d, _)| d.len()).sum::<usize>());
+            v["ocr"] = json!(ocr);
         }
         CardKind::Sketch { strokes } => {
             v["strokes"] = json!(strokes
@@ -1344,6 +1347,7 @@ mod tests {
                 data: Vec::new(),
                 name: String::new(),
                 extra: Vec::new(),
+                ocr: String::new(),
             })
             .unwrap();
         let (dirty, resp) = process(
