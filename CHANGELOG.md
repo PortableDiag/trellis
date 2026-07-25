@@ -4,6 +4,18 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.31.0]
+
+### Added
+- **Autosave** (Tools → Settings → Document, **on by default**) — changes are written
+  to disk a couple of seconds after you stop editing, like Google Docs. Debounced so
+  a drag or a burst of typing never saves mid-gesture, and written **atomically**
+  (temp file + rename) so a crash or kill can't corrupt the document. Turn it off to
+  save manually with Ctrl+S (changes are still saved on exit either way).
+
+### Changed
+- Manual saves are now atomic too (temp file + rename).
+
 ## [0.30.2]
 
 ### Fixed

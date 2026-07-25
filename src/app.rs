@@ -13,6 +13,7 @@ use raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Parent-window handles for rfd dialogs. Without a parent, X11/portal file
 /// dialogs get no transient-for hint and can open *behind* the app window.
@@ -66,6 +67,10 @@ const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
 const SNAP_MODE_KEY: &str = "snap_mode";
 const THEME_KEY: &str = "theme";
+const AUTOSAVE_KEY: &str = "autosave";
+/// How long the document must be idle (no further changes) before an autosave
+/// fires — so continuous editing (e.g. dragging a card) never saves mid-gesture.
+const AUTOSAVE_IDLE: Duration = Duration::from_secs(2);
 
 /// Selectable themes, listed under **View → Themes**. `Trellis` is the default
 /// signature look (dark chrome + black grid); Light/Terminal Green are alternate
@@ -219,6 +224,10 @@ pub struct TrellisApp {
     /// Full-screen image viewer, opened by double-clicking an image card image.
     lightbox: Option<Lightbox>,
     dirty: bool,
+    /// Autosave: when on, changes are written to disk shortly after you pause.
+    autosave: bool,
+    /// When the document last changed, for the autosave idle-debounce.
+    last_change: Option<Instant>,
     status: String,
 
     search_open: bool,
@@ -311,6 +320,12 @@ impl TrellisApp {
             .and_then(|s| s.get_string(ZOOM_ENABLED_KEY))
             .map(|s| s != "false")
             .unwrap_or(true);
+        // Autosave defaults ON — a notes app should keep your changes safe.
+        let autosave = cc
+            .storage
+            .and_then(|s| s.get_string(AUTOSAVE_KEY))
+            .map(|s| s != "false")
+            .unwrap_or(true);
         let dock_mode = cc
             .storage
             .and_then(|s| s.get_string(DOCK_MODE_KEY))
@@ -371,6 +386,8 @@ impl TrellisApp {
             dialog_parent: None,
             lightbox: None,
             dirty: false,
+            autosave,
+            last_change: None,
             status: "Ready".to_string(),
             search_open: false,
             search_query: String::new(),
@@ -472,6 +489,7 @@ impl TrellisApp {
     /// revision so the API's `/api/wait` long-poll wakes live clients.
     fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.last_change = Some(Instant::now());
         self.doc_revision.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -567,12 +585,24 @@ impl TrellisApp {
                 if let Some(dir) = path.parent() {
                     let _ = std::fs::create_dir_all(dir);
                 }
-                match std::fs::write(&path, s) {
+                // Atomic write: serialize to a temp file, then rename over the
+                // target, so a crash or kill mid-write can't corrupt the document.
+                let mut tmp = path.clone();
+                tmp.set_file_name(format!(
+                    "{}.tmp",
+                    path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                ));
+                let result = std::fs::write(&tmp, s).and_then(|_| std::fs::rename(&tmp, &path));
+                match result {
                     Ok(_) => {
                         self.dirty = false;
+                        self.last_change = None;
                         self.status = format!("Saved → {}", path.display());
                     }
-                    Err(e) => self.status = format!("Save failed: {e}"),
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        self.status = format!("Save failed: {e}");
+                    }
                 }
             }
             Err(e) => self.status = format!("Serialize failed: {e}"),
@@ -1602,6 +1632,15 @@ impl TrellisApp {
                 });
 
                 ui.add_space(10.0);
+                ui.heading("Document");
+                ui.checkbox(&mut self.autosave, "Autosave changes")
+                    .on_hover_text(
+                        "Save changes to disk automatically a couple of seconds after \
+                         you stop editing (like Google Docs). Written atomically. When \
+                         off, save manually with Ctrl+S; changes are still saved on exit.",
+                    );
+
+                ui.add_space(10.0);
                 ui.heading("Canvas");
                 ui.checkbox(
                     &mut self.zoom_enabled,
@@ -1718,6 +1757,18 @@ impl eframe::App for TrellisApp {
 
         // Apply any API requests from the server thread first.
         self.pump_api();
+
+        // Autosave: once the document has been idle for AUTOSAVE_IDLE (no further
+        // changes), write it to disk. Debounced so continuous edits — dragging a
+        // card, typing — never save mid-gesture. request_repaint_after wakes the
+        // loop at the deadline even when the UI is otherwise idle.
+        if self.autosave && self.dirty {
+            match self.last_change {
+                Some(t) if t.elapsed() >= AUTOSAVE_IDLE => self.save(),
+                Some(t) => ctx.request_repaint_after(AUTOSAVE_IDLE.saturating_sub(t.elapsed())),
+                None => self.last_change = Some(Instant::now()),
+            }
+        }
 
         // Zoom is per-canvas now, so keep the whole-UI zoom factor pinned at 1.0.
         // egui persists zoom_factor across runs, so an earlier build that scaled
@@ -1873,6 +1924,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(DOCK_MODE_KEY, self.dock_mode.to_string());
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
         storage.set_string(THEME_KEY, self.theme.key().to_string());
+        storage.set_string(AUTOSAVE_KEY, self.autosave.to_string());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
