@@ -4,6 +4,14 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.33.1]
+
+### Fixed
+- **UI freeze during autosave on large documents** — saving serialized + gzipped +
+  wrote the whole document on the UI thread, which froze rendering for seconds on a
+  big (image-heavy) file. Saves now run on a background thread; the UI only pays a
+  quick document clone. `dirty` clears only if nothing changed while the save ran.
+
 ## [0.33.0]
 
 ### Added

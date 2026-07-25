@@ -454,7 +454,7 @@ fn prune_groups(n: &mut Node) {
 }
 
 /// The whole document: an arena of nodes plus ordered roots and id counters.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Document {
     pub nodes: HashMap<NodeId, Node>,
     pub roots: Vec<NodeId>,

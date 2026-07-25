@@ -228,6 +228,11 @@ pub struct TrellisApp {
     autosave: bool,
     /// When the document last changed, for the autosave idle-debounce.
     last_change: Option<Instant>,
+    /// A background save is in flight (guards against overlapping saves).
+    saving: bool,
+    /// Background-save completion channel: (path, result, revision-at-save-start).
+    save_tx: Sender<(PathBuf, Result<(), String>, u64)>,
+    save_rx: Receiver<(PathBuf, Result<(), String>, u64)>,
     status: String,
 
     search_open: bool,
@@ -361,6 +366,7 @@ impl TrellisApp {
         let (api_tx, api_rx) = std::sync::mpsc::channel::<ApiCommand>();
         let doc_revision = Arc::new(AtomicU64::new(0));
         let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
+        let (save_tx, save_rx) = std::sync::mpsc::channel();
         let (api_server, api_status) = match api::serve(
             api_port,
             api_lan,
@@ -387,6 +393,9 @@ impl TrellisApp {
             dirty: false,
             autosave,
             last_change: None,
+            saving: false,
+            save_tx,
+            save_rx,
             status: "Ready".to_string(),
             search_open: false,
             search_query: String::new(),
@@ -598,52 +607,62 @@ impl TrellisApp {
         self.doc_path.clone().unwrap_or_else(|| self.autosave_path.clone())
     }
 
+    /// Synchronous save — only for `on_exit`, where a background thread would be
+    /// killed before it finished. Interactive/auto saves use `spawn_save` so the
+    /// serialize + gzip + write never blocks the UI thread (they can take seconds
+    /// on a large document).
     fn write_to(&mut self, path: PathBuf) {
-        // Compact RON (not pretty) keeps the pre-compression text small, then gzip.
-        // Embedded image bytes serialize as decimal arrays, which pretty-printing
-        // bloated ~32× and gzip crushes back to near the raw image size. Old
-        // plain-text files still load (read_document sniffs the gzip magic).
-        let bytes = match ron::to_string(&self.doc)
-            .map_err(|e| e.to_string())
-            .and_then(|s| {
-                use std::io::Write;
-                let mut enc =
-                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-                enc.write_all(s.as_bytes()).map_err(|e| e.to_string())?;
-                enc.finish().map_err(|e| e.to_string())
-            }) {
-            Ok(b) => b,
-            Err(e) => {
-                self.status = format!("Save failed: {e}");
-                return;
-            }
-        };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        // Atomic write: to a temp file, then rename over the target, so a crash
-        // or kill mid-write can't corrupt the document.
-        let mut tmp = path.clone();
-        tmp.set_file_name(format!(
-            "{}.tmp",
-            path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
-        ));
-        match std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &path)) {
+        match serialize_and_write(&self.doc, &path) {
             Ok(_) => {
                 self.dirty = false;
                 self.last_change = None;
                 self.status = format!("Saved → {}", path.display());
             }
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                self.status = format!("Save failed: {e}");
+            Err(e) => self.status = format!("Save failed: {e}"),
+        }
+    }
+
+    /// Save off the UI thread: clone the document (cheap — raw image bytes), then
+    /// serialize + gzip + write it on a worker. The result is applied in
+    /// `pump_save`. `dirty` clears only if nothing changed while we were saving.
+    fn spawn_save(&mut self, path: PathBuf) {
+        if self.saving {
+            return; // one save at a time; a later change re-triggers autosave
+        }
+        self.saving = true;
+        let snapshot = self.doc_revision.load(Ordering::Relaxed);
+        let doc = self.doc.clone();
+        let tx = self.save_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let res = serialize_and_write(&doc, &path);
+            let _ = tx.send((path, res, snapshot));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Apply finished background saves.
+    fn pump_save(&mut self) {
+        let done: Vec<_> = std::iter::from_fn(|| self.save_rx.try_recv().ok()).collect();
+        for (path, res, snapshot) in done {
+            self.saving = false;
+            match res {
+                Ok(_) => {
+                    // Clear dirty only if the document didn't change mid-save.
+                    if self.doc_revision.load(Ordering::Relaxed) == snapshot {
+                        self.dirty = false;
+                        self.last_change = None;
+                    }
+                    self.status = format!("Saved → {}", path.display());
+                }
+                Err(e) => self.status = format!("Save failed: {e}"),
             }
         }
     }
 
     fn save(&mut self) {
         let path = self.target_path();
-        self.write_to(path);
+        self.spawn_save(path);
     }
 
     fn save_as(&mut self) {
@@ -653,7 +672,7 @@ impl TrellisApp {
             .save_file()
         {
             self.doc_path = Some(path.clone());
-            self.write_to(path);
+            self.spawn_save(path);
         }
     }
 
@@ -1812,13 +1831,20 @@ impl eframe::App for TrellisApp {
         // Apply any finished background OCR results.
         self.pump_ocr();
 
+        // Apply finished background saves.
+        self.pump_save();
+
         // Autosave: once the document has been idle for AUTOSAVE_IDLE (no further
-        // changes), write it to disk. Debounced so continuous edits — dragging a
-        // card, typing — never save mid-gesture. request_repaint_after wakes the
-        // loop at the deadline even when the UI is otherwise idle.
-        if self.autosave && self.dirty {
+        // changes), write it to disk on a worker thread (never blocks the UI).
+        // Debounced so continuous edits — dragging a card, typing — never save
+        // mid-gesture. request_repaint_after wakes the loop at the deadline even
+        // when the UI is otherwise idle.
+        if self.autosave && self.dirty && !self.saving {
             match self.last_change {
-                Some(t) if t.elapsed() >= AUTOSAVE_IDLE => self.save(),
+                Some(t) if t.elapsed() >= AUTOSAVE_IDLE => {
+                    let path = self.target_path();
+                    self.spawn_save(path);
+                }
                 Some(t) => ctx.request_repaint_after(AUTOSAVE_IDLE.saturating_sub(t.elapsed())),
                 None => self.last_change = Some(Instant::now()),
             }
@@ -2040,6 +2066,33 @@ fn ocr_images(images: &[Vec<u8>]) -> Result<String, String> {
         }
     }
     Ok(out.trim().to_string())
+}
+
+/// Serialize the document to compact RON, gzip it, and write it atomically
+/// (temp file + rename). Compact RON keeps the pre-compression text small;
+/// embedded image bytes serialize as decimal arrays that pretty-printing bloated
+/// ~32×, which gzip crushes back to near the raw image size. Pure and `Send`, so
+/// it runs on a worker thread (see `spawn_save`).
+fn serialize_and_write(doc: &Document, path: &std::path::Path) -> Result<(), String> {
+    use std::io::Write;
+    let s = ron::to_string(doc).map_err(|e| e.to_string())?;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(s.as_bytes()).map_err(|e| e.to_string())?;
+    let bytes = enc.finish().map_err(|e| e.to_string())?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut tmp = path.to_path_buf();
+    tmp.set_file_name(format!(
+        "{}.tmp",
+        path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+    ));
+    std::fs::write(&tmp, &bytes)
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e.to_string()
+        })
 }
 
 /// Read a Trellis document from disk, transparently handling both current
