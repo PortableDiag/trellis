@@ -4,6 +4,12 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.30.1]
+
+### Added
+- **About shows the version** — the Help → About Trellis dialog now lists the running
+  version.
+
 ## [0.30.0]
 
 ### Added

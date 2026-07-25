@@ -1842,6 +1842,8 @@ impl eframe::App for TrellisApp {
                     ui.heading("Trellis");
                     ui.label(egui::RichText::new("The tree and the weave.").italics());
                     ui.add_space(4.0);
+                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                    ui.add_space(4.0);
                     ui.label("A hierarchical, spatial note-taking app.");
                     ui.add_space(4.0);
                     ui.label("A tree of nodes, where every node is a free-form basket of cards.");
