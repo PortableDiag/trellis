@@ -3301,7 +3301,7 @@ dependencies = [
 
 [[package]]
 name = "trellis"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
@@ -3313,6 +3313,7 @@ dependencies = [
  "egui_commonmark",
  "egui_extras",
  "emath",
+ "flate2",
  "html2md",
  "image",
  "printpdf",

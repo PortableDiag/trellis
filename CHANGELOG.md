@@ -4,6 +4,17 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.32.0]
+
+### Changed
+- **Documents are saved gzip-compressed** — embedded images were serialized as
+  decimal byte arrays, which the old pretty-printed RON bloated ~32×. Saves now use
+  compact RON + gzip, which shrinks that back to near the raw image size (measured
+  ~27× smaller). A large image-heavy document that was ~170 MB becomes single-digit
+  MB — and every save/autosave writes that much less to disk. **Older plain-text
+  `.ron` files still open** (the loader detects the format); the next save rewrites
+  them compressed. File extension is unchanged.
+
 ## [0.31.0]
 
 ### Added

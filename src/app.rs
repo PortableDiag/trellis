@@ -291,20 +291,13 @@ impl TrellisApp {
         let mut doc_path: Option<PathBuf> = None;
         let mut doc: Option<Document> = None;
         if let Some(p) = &last_path {
-            if let Ok(d) = std::fs::read_to_string(p)
-                .map_err(|_| ())
-                .and_then(|s| ron::from_str::<Document>(&s).map_err(|_| ()))
-            {
+            if let Ok(d) = read_document(p) {
                 doc = Some(d);
                 doc_path = Some(p.clone());
             }
         }
         let doc = doc
-            .or_else(|| {
-                std::fs::read_to_string(&autosave_path)
-                    .ok()
-                    .and_then(|s| ron::from_str::<Document>(&s).ok())
-            })
+            .or_else(|| read_document(&autosave_path).ok())
             .unwrap_or_default();
         let selected = doc.roots.first().copied();
 
@@ -580,32 +573,45 @@ impl TrellisApp {
     }
 
     fn write_to(&mut self, path: PathBuf) {
-        match ron::ser::to_string_pretty(&self.doc, ron::ser::PrettyConfig::default()) {
-            Ok(s) => {
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
-                }
-                // Atomic write: serialize to a temp file, then rename over the
-                // target, so a crash or kill mid-write can't corrupt the document.
-                let mut tmp = path.clone();
-                tmp.set_file_name(format!(
-                    "{}.tmp",
-                    path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
-                ));
-                let result = std::fs::write(&tmp, s).and_then(|_| std::fs::rename(&tmp, &path));
-                match result {
-                    Ok(_) => {
-                        self.dirty = false;
-                        self.last_change = None;
-                        self.status = format!("Saved → {}", path.display());
-                    }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&tmp);
-                        self.status = format!("Save failed: {e}");
-                    }
-                }
+        // Compact RON (not pretty) keeps the pre-compression text small, then gzip.
+        // Embedded image bytes serialize as decimal arrays, which pretty-printing
+        // bloated ~32× and gzip crushes back to near the raw image size. Old
+        // plain-text files still load (read_document sniffs the gzip magic).
+        let bytes = match ron::to_string(&self.doc)
+            .map_err(|e| e.to_string())
+            .and_then(|s| {
+                use std::io::Write;
+                let mut enc =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                enc.write_all(s.as_bytes()).map_err(|e| e.to_string())?;
+                enc.finish().map_err(|e| e.to_string())
+            }) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Save failed: {e}");
+                return;
             }
-            Err(e) => self.status = format!("Serialize failed: {e}"),
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Atomic write: to a temp file, then rename over the target, so a crash
+        // or kill mid-write can't corrupt the document.
+        let mut tmp = path.clone();
+        tmp.set_file_name(format!(
+            "{}.tmp",
+            path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+        ));
+        match std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &path)) {
+            Ok(_) => {
+                self.dirty = false;
+                self.last_change = None;
+                self.status = format!("Saved → {}", path.display());
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                self.status = format!("Save failed: {e}");
+            }
         }
     }
 
@@ -660,8 +666,8 @@ impl TrellisApp {
             .add_filter("Trellis document", &["ron"])
             .pick_file()
         {
-            match std::fs::read_to_string(&path).map(|s| ron::from_str::<Document>(&s)) {
-                Ok(Ok(doc)) => {
+            match read_document(&path) {
+                Ok(doc) => {
                     self.doc = doc;
                     self.selected = self.doc.roots.first().copied();
                     self.views.clear();
@@ -670,8 +676,7 @@ impl TrellisApp {
                     self.dirty = false;
                     self.status = format!("Opened {}", path.display());
                 }
-                Ok(Err(e)) => self.status = format!("Parse error: {e}"),
-                Err(e) => self.status = format!("Read error: {e}"),
+                Err(e) => self.status = format!("Open failed: {e}"),
             }
         }
     }
@@ -1963,6 +1968,23 @@ fn setup_fonts(ctx: &egui::Context) {
 
 /// A random API key (48 hex chars from the OS RNG, falling back to a weak
 /// time/pid mix if `/dev/urandom` is unavailable).
+/// Read a Trellis document from disk, transparently handling both current
+/// **gzip-compressed** saves and older **plain-text RON** files (magic-byte sniff).
+fn read_document(path: &std::path::Path) -> Result<Document, String> {
+    use std::io::Read;
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let text = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut s = String::new();
+        flate2::read::GzDecoder::new(&bytes[..])
+            .read_to_string(&mut s)
+            .map_err(|e| e.to_string())?;
+        s
+    } else {
+        String::from_utf8(bytes).map_err(|e| e.to_string())?
+    };
+    ron::from_str::<Document>(&text).map_err(|e| e.to_string())
+}
+
 /// The Settings status line describing where the API is listening.
 fn api_status_line(lan: bool, port: u16) -> String {
     if lan {
