@@ -23,7 +23,7 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 - Right-click → **Copy** a node's **id** (for the agent API, `/api/nodes/{id}`)
   or its **path** breadcrumb, so you can point an agent at the exact node
 
-**Basket canvas** — four real card types:
+**Basket canvas** — six real card types:
 - **Text** — CommonMark markdown, rendered live, with edit/preview toggle. Fenced
   code blocks are syntax-highlighted. The editor has a formatting toolbar (bold,
   italic, headings, lists, quotes, code, links, rules), a **text color** picker
@@ -44,7 +44,9 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   grid; give the card a **title** to tell a few apart. **Double-click an image**
   to open it in a full-screen viewer — scroll or `+`/`-` to zoom, drag to pan,
   `←`/`→` (keys or buttons) to flip through the card's images, Esc to close.
-  Right-click an image to remove it.
+  Right-click an image to remove it. **Right-click the card → Extract text (OCR)**
+  reads the text out of the image(s) with tesseract so the card becomes
+  full-text searchable.
 
 Cards drag by the title bar, resize from the corner, raise to front on click,
 duplicate, recolor, copy/paste into another basket, and delete. A 🗐 button on
@@ -69,7 +71,12 @@ and zooms (Ctrl+scroll); each node remembers its view.
 **Documents & interop**
 - **Drag & drop** text/Markdown or image files onto a basket to create the
   matching card at the drop point
-- Native New / Open / Save / Save As (RON format), plus autosave on exit
+- Native New / Open / Save / Save As. **Autosave** (Tools → Settings → Document,
+  on by default) writes changes a couple of seconds after you pause, like Google
+  Docs — debounced, atomic (temp file + rename), and run on a background thread so
+  it never freezes the UI. Files are **gzip-compressed** (RON format, `.ron`;
+  image-heavy documents shrink dramatically) and older plain-text `.ron` files
+  still open.
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
@@ -83,8 +90,13 @@ and zooms (Ctrl+scroll); each node remembers its view.
   add/query/edit/remove nodes and cards, move/recolor/resize, convert a card's
   kind, edit tables cell-by-cell (colors, headers, rows/cols), upload images,
   build groups, join/leave and dock cards, and export the document (incl.
-  PDF/PNG) — so agents can collaborate on the same notes. Enable it in **Tools →
-  Settings**; see [API.md](API.md).
+  PDF/PNG) — so agents can collaborate on the same notes. **Live updates:**
+  `GET /api/wait` long-polls so clients react the instant anything changes. Enable
+  it in **Tools → Settings**; see [API.md](API.md).
+- **Companion mobile app** — a native Android viewer/capture app talks to the
+  agent API over the LAN: browse the tree and baskets, full-text search, zoom
+  images, and capture a note or photo into a node, all updating live. Separate
+  repo: [trellis-android](https://github.com/PortableDiag/trellis-android).
 
 ## Keyboard
 
@@ -115,7 +127,6 @@ to render inline text-color spans; edit it there, not the crates.io copy.
 
 - [API.md](API.md) — the localhost agent HTTP API.
 - [CHANGELOG.md](CHANGELOG.md) — version history.
-- [docs/](docs/) — development session reports (context for future work).
 
 ## License
 

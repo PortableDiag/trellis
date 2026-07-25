@@ -2,3 +2,6 @@
 
 # Trellis documents may contain private notes/credentials — never commit them.
 *.ron
+
+# Dev session reports are private — never commit them to this public repo.
+docs/SESSION-*.md
