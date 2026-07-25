@@ -468,11 +468,10 @@ impl TrellisApp {
             * 100.0
     }
 
-    /// Drain and apply any pending API commands from the server thread.
     /// Mark the document changed: flags it dirty for save and bumps the shared
     /// revision so the API's `/api/wait` long-poll wakes live clients.
     fn mark_dirty(&mut self) {
-        self.mark_dirty();
+        self.dirty = true;
         self.doc_revision.fetch_add(1, Ordering::Relaxed);
     }
 

@@ -4,6 +4,14 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.30.2]
+
+### Fixed
+- **Crash on any edit (regression in 0.30.0/0.30.1)** — `mark_dirty` recursed into
+  itself instead of setting the dirty flag, so the first change of any kind (moving a
+  card, typing, adding a node, or an API write) overflowed the stack and aborted.
+  **Upgrade from 0.30.0/0.30.1.**
+
 ## [0.30.1]
 
 ### Added
