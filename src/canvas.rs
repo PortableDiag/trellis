@@ -55,6 +55,13 @@ pub enum CanvasAction {
     SaveImage(CardId, usize),
     /// Save all of an image card's images into a chosen folder.
     SaveAllImages(CardId),
+    /// Export a single card to a shareable file (one variant per format).
+    ExportCardPng(CardId),
+    ExportCardMarkdown(CardId),
+    ExportCardPdf(CardId),
+    ExportCardHtml(CardId),
+    ExportCardText(CardId),
+    ExportCardSvg(CardId),
     // Table (spreadsheet) cards.
     TableSetCell(CardId, usize, usize, String),
     TableSetBg(CardId, usize, usize, Option<[u8; 3]>),
@@ -1373,6 +1380,51 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, node_path: &str, actions: &mut Vec<
         if ui.button("Card path").clicked() {
             copy_both(ui, &card_path(card, node_path));
             ui.close_menu();
+        }
+    });
+    // Export just this card to a shareable file — no need to export the whole
+    // workspace and crop. Common formats for every kind, plus kind-specific ones.
+    ui.menu_button("Export Card", |ui| {
+        if ui.button("PNG image").clicked() {
+            actions.push(CanvasAction::ExportCardPng(card.id));
+            ui.close_menu();
+        }
+        if ui.button("Markdown (.md)").clicked() {
+            actions.push(CanvasAction::ExportCardMarkdown(card.id));
+            ui.close_menu();
+        }
+        if ui.button("PDF").clicked() {
+            actions.push(CanvasAction::ExportCardPdf(card.id));
+            ui.close_menu();
+        }
+        if ui.button("HTML").clicked() {
+            actions.push(CanvasAction::ExportCardHtml(card.id));
+            ui.close_menu();
+        }
+        if ui.button("Plain text (.txt)").clicked() {
+            actions.push(CanvasAction::ExportCardText(card.id));
+            ui.close_menu();
+        }
+        match &card.kind {
+            CardKind::Table { .. } => {
+                ui.separator();
+                if ui.button("CSV").clicked() {
+                    actions.push(CanvasAction::TableExportCsv(card.id));
+                    ui.close_menu();
+                }
+                if ui.button("Excel (.xlsx)").clicked() {
+                    actions.push(CanvasAction::TableExportXlsx(card.id));
+                    ui.close_menu();
+                }
+            }
+            CardKind::Sketch { .. } => {
+                ui.separator();
+                if ui.button("SVG (vector)").clicked() {
+                    actions.push(CanvasAction::ExportCardSvg(card.id));
+                    ui.close_menu();
+                }
+            }
+            _ => {}
         }
     });
     ui.menu_button("Color", |ui| {

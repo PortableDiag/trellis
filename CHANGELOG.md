@@ -4,6 +4,22 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.35.0]
+
+### Added
+- **Export a single card** — right-click a card → **Export Card** → pick a format,
+  so you can share one card without exporting the whole workspace and cropping.
+  Available for every card: **PNG** (image render), **Markdown (.md)**, **PDF**,
+  **HTML** (formatted), and **Plain text (.txt)**. Kind-specific extras: **CSV** and
+  **Excel (.xlsx)** for tables, **SVG** for sketches. Image cards export the image
+  itself (re-encoded PNG); sketches rasterize their strokes (PNG) or export vector
+  **SVG**; text/code/checklist/table cards render their content. The save dialog
+  pre-fills the card's title as the filename.
+
+### Internal
+- The whole-document HTML / Markdown / PDF / image exporters were refactored onto
+  shared per-card primitives (same output; now reused for single-card export).
+
 ## [0.34.0]
 
 ### Added

@@ -218,6 +218,12 @@ fn download_image_name(stored: &str, index: usize) -> String {
     }
 }
 
+/// Error string when a card lookup fails during export (it was deleted between
+/// opening the menu and the action running).
+fn card_gone() -> String {
+    "card not found".to_string()
+}
+
 pub struct TrellisApp {
     doc: Document,
     selected: Option<NodeId>,
@@ -986,6 +992,14 @@ impl TrellisApp {
                     | CanvasAction::CopyCard(_)
                     | CanvasAction::SaveImage(..)
                     | CanvasAction::SaveAllImages(_)
+                    | CanvasAction::ExportCardPng(_)
+                    | CanvasAction::ExportCardMarkdown(_)
+                    | CanvasAction::ExportCardPdf(_)
+                    | CanvasAction::ExportCardHtml(_)
+                    | CanvasAction::ExportCardText(_)
+                    | CanvasAction::ExportCardSvg(_)
+                    | CanvasAction::TableExportCsv(_)
+                    | CanvasAction::TableExportXlsx(_)
                     | CanvasAction::ToggleSelect(_)
                     | CanvasAction::ClearSelection
                     | CanvasAction::ToggleDockMode
@@ -1214,6 +1228,30 @@ impl TrellisApp {
                 }
                 CanvasAction::SaveImage(cid, idx) => self.save_card_image(node, cid, idx),
                 CanvasAction::SaveAllImages(cid) => self.save_all_card_images(node, cid),
+                CanvasAction::ExportCardPng(cid) => {
+                    let d = self.doc.export_card_png(node, cid);
+                    self.save_card_export(node, cid, "png", "PNG", d);
+                }
+                CanvasAction::ExportCardMarkdown(cid) => {
+                    let d = self.doc.export_card_markdown(node, cid).map(|s| s.into_bytes());
+                    self.save_card_export(node, cid, "md", "Markdown", d.ok_or_else(card_gone));
+                }
+                CanvasAction::ExportCardPdf(cid) => {
+                    let d = self.doc.export_card_pdf(node, cid);
+                    self.save_card_export(node, cid, "pdf", "PDF", d);
+                }
+                CanvasAction::ExportCardHtml(cid) => {
+                    let d = self.doc.export_card_html(node, cid).map(|s| s.into_bytes());
+                    self.save_card_export(node, cid, "html", "HTML", d.ok_or_else(card_gone));
+                }
+                CanvasAction::ExportCardText(cid) => {
+                    let d = self.doc.export_card_text(node, cid).map(|s| s.into_bytes());
+                    self.save_card_export(node, cid, "txt", "Text", d.ok_or_else(card_gone));
+                }
+                CanvasAction::ExportCardSvg(cid) => {
+                    let d = self.doc.export_card_svg(node, cid).map(|s| s.into_bytes());
+                    self.save_card_export(node, cid, "svg", "SVG", d.ok_or_else(card_gone));
+                }
                 CanvasAction::OpenLightbox(cid, idx) => {
                     self.lightbox = Some(Lightbox {
                         node,
@@ -1387,6 +1425,54 @@ impl TrellisApp {
             Some(e) => format!("Saved {saved} image(s), then failed: {e}"),
             None => format!("Saved {saved} image(s) → {}", dir.display()),
         };
+    }
+
+    /// A default filename (no extension) for exporting a card: its title,
+    /// sanitized to filesystem-safe characters, or `card` when it has no title.
+    fn card_export_basename(&self, node: NodeId, card: crate::model::CardId) -> String {
+        let raw = self
+            .doc
+            .card(node, card)
+            .map(|c| c.title.trim().to_string())
+            .unwrap_or_default();
+        let cleaned: String = raw
+            .chars()
+            .map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.') { c } else { '_' })
+            .collect();
+        let cleaned = cleaned.trim().trim_matches('.').trim();
+        if cleaned.is_empty() { "card".to_string() } else { cleaned.to_string() }
+    }
+
+    /// Shared tail for the per-card exporters: if the render succeeded, ask for a
+    /// destination (pre-filled `<card title>.<ext>`) and write the bytes.
+    fn save_card_export(
+        &mut self,
+        node: NodeId,
+        card: crate::model::CardId,
+        ext: &str,
+        label: &str,
+        data: Result<Vec<u8>, String>,
+    ) {
+        let bytes = match data {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Export failed: {e}");
+                return;
+            }
+        };
+        let base = self.card_export_basename(node, card);
+        let Some(path) = self
+            .file_dialog()
+            .add_filter(label, &[ext])
+            .set_file_name(format!("{base}.{ext}"))
+            .save_file()
+        else {
+            return;
+        };
+        match std::fs::write(&path, &bytes) {
+            Ok(_) => self.status = format!("Exported card → {}", path.display()),
+            Err(e) => self.status = format!("Export failed: {e}"),
+        }
     }
 
     fn load_image_into(&mut self, node: NodeId, card: crate::model::CardId) {

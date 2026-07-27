@@ -519,6 +519,10 @@ impl Document {
             .find(|c| c.id == card)
     }
 
+    pub fn card(&self, node: NodeId, card: CardId) -> Option<&Card> {
+        self.nodes.get(&node)?.cards.iter().find(|c| c.id == card)
+    }
+
     /// Store OCR-extracted text on an image card. Returns false if not an image card.
     pub fn set_card_ocr(&mut self, node: NodeId, card: CardId, text: String) -> bool {
         match self.card_mut(node, card).map(|c| &mut c.kind) {
@@ -1217,65 +1221,7 @@ impl Document {
             if !card.title.is_empty() {
                 s.push_str(&format!("<h4>{}</h4>\n", escape_html(&card.title)));
             }
-            match &card.kind {
-                CardKind::Text => s.push_str(&md_to_html(&card.body)),
-                CardKind::Code { lang } => {
-                    let fenced = format!("```{lang}\n{}\n```", card.body);
-                    s.push_str(&md_to_html(&fenced));
-                }
-                CardKind::Checklist { items } => {
-                    s.push_str("<ul class=\"checklist\">\n");
-                    for it in items {
-                        let mark = if it.done { "checked" } else { "" };
-                        s.push_str(&format!(
-                            "<li><input type=\"checkbox\" disabled {mark}> {}</li>\n",
-                            escape_html(&it.text)
-                        ));
-                    }
-                    s.push_str("</ul>\n");
-                }
-                CardKind::Table { table } => {
-                    s.push_str("<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">\n");
-                    for (r, row) in table.rows.iter().enumerate() {
-                        s.push_str("<tr>");
-                        for cell in row {
-                            let tag = if table.header && r == 0 { "th" } else { "td" };
-                            let mut style = String::new();
-                            if let Some([rr, gg, bb]) = cell.bg {
-                                style.push_str(&format!("background:#{rr:02x}{gg:02x}{bb:02x};"));
-                            }
-                            if let Some([rr, gg, bb]) = cell.fg {
-                                style.push_str(&format!("color:#{rr:02x}{gg:02x}{bb:02x};"));
-                            }
-                            let style_attr = if style.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" style=\"{style}\"")
-                            };
-                            s.push_str(&format!(
-                                "<{tag}{style_attr}>{}</{tag}>",
-                                escape_html(&cell.text)
-                            ));
-                        }
-                        s.push_str("</tr>\n");
-                    }
-                    s.push_str("</table>\n");
-                }
-                k @ CardKind::Image { .. } => {
-                    for (data, name) in k.images() {
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(data);
-                        let mime = mime_for(name);
-                        s.push_str(&format!(
-                            "<img alt=\"{}\" src=\"data:{mime};base64,{b64}\">\n",
-                            escape_html(name)
-                        ));
-                    }
-                }
-                CardKind::Sketch { strokes } => {
-                    s.push_str(&sketch_svg(strokes, card.size.x, card.size.y));
-                    s.push('\n');
-                }
-            }
+            s.push_str(&card_body_html(card));
             s.push_str("</article>\n");
         }
         let children = node.children.clone();
@@ -1322,50 +1268,7 @@ impl Document {
         out.push(ExportLine { text: node.title.clone(), size: hsize });
         out.push(ExportLine { text: String::new(), size: 6.0 });
         for card in &node.cards {
-            if !card.title.is_empty() {
-                out.push(ExportLine { text: card.title.clone(), size: 12.0 });
-            }
-            match &card.kind {
-                CardKind::Text => {
-                    let body = card.body.trim_end();
-                    if !body.is_empty() {
-                        out.push(ExportLine { text: body.to_string(), size: 10.5 });
-                    }
-                }
-                CardKind::Code { .. } => {
-                    for line in card.body.trim_end().split('\n') {
-                        out.push(ExportLine { text: line.to_string(), size: 10.0 });
-                    }
-                }
-                CardKind::Checklist { items } => {
-                    for it in items {
-                        let mark = if it.done { "[x]" } else { "[ ]" };
-                        out.push(ExportLine { text: format!("{mark} {}", it.text), size: 10.5 });
-                    }
-                }
-                CardKind::Table { table } => {
-                    for row in &table.rows {
-                        let line = row
-                            .iter()
-                            .map(|c| c.text.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" | ");
-                        out.push(ExportLine { text: line, size: 10.5 });
-                    }
-                }
-                k @ CardKind::Image { .. } => {
-                    for (_, name) in k.images() {
-                        out.push(ExportLine { text: format!("(image: {name})"), size: 10.5 });
-                    }
-                }
-                CardKind::Sketch { strokes } => {
-                    out.push(ExportLine {
-                        text: format!("(sketch: {} strokes)", strokes.len()),
-                        size: 10.5,
-                    });
-                }
-            }
-            out.push(ExportLine { text: String::new(), size: 5.0 });
+            out.extend(card_lines(card));
         }
         for c in node.children.clone() {
             self.export_node_lines(c, depth + 1, out);
@@ -1374,78 +1277,89 @@ impl Document {
 
     /// Render the whole document to a PDF (A4, paginated). Returns the file bytes.
     pub fn export_pdf(&self) -> Result<Vec<u8>, String> {
-        use printpdf::{Mm, PdfDocument};
-        let font_ab = ab_glyph::FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?;
-        let (w_mm, h_mm, margin) = (210.0_f32, 297.0_f32, 20.0_f32);
-        const MM_TO_PT: f32 = 2.834_646;
-        let content_w_pt = (w_mm - margin * 2.0) * MM_TO_PT;
-        let (doc, page1, layer1) =
-            PdfDocument::new("Trellis export", Mm(w_mm), Mm(h_mm), "Layer 1");
-        let font = doc
-            .add_external_font(std::io::Cursor::new(EXPORT_FONT))
-            .map_err(|e| e.to_string())?;
-        let mut layer = doc.get_page(page1).get_layer(layer1);
-        let mut y = h_mm - margin;
-        for l in self.export_lines() {
-            let leading = (l.size * 1.4) / MM_TO_PT;
-            let wrapped = if l.text.is_empty() {
-                vec![String::new()]
-            } else {
-                wrap_text(&font_ab, l.size, &l.text, content_w_pt)
-            };
-            for line in wrapped {
-                if y < margin {
-                    let (p, lay) = doc.add_page(Mm(w_mm), Mm(h_mm), "Layer");
-                    layer = doc.get_page(p).get_layer(lay);
-                    y = h_mm - margin;
-                }
-                if !line.is_empty() {
-                    layer.use_text(&line, l.size, Mm(margin), Mm(y), &font);
-                }
-                y -= leading;
-            }
-        }
-        doc.save_to_bytes().map_err(|e| e.to_string())
+        lines_to_pdf(&self.export_lines())
     }
 
     /// Render the whole document to a raster image (PNG, or GIF if `gif`).
     /// Returns the encoded file bytes. One tall page, black text on white.
     pub fn export_image(&self, gif: bool) -> Result<Vec<u8>, String> {
-        use ab_glyph::FontRef;
-        use image::{Rgba, RgbaImage};
-        let font = FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?;
-        let scale = 2.0_f32; // px per point
-        let margin = 40.0_f32;
-        let content_w = 760.0_f32;
-        let width = (content_w + margin * 2.0) as u32;
+        lines_to_image(&self.export_lines(), gif)
+    }
 
-        // Pre-wrap every line, remembering its pixel size, to size the canvas.
-        let mut rows: Vec<(String, f32)> = Vec::new();
-        for l in self.export_lines() {
-            let px = l.size * scale;
-            if l.text.is_empty() {
-                rows.push((String::new(), px));
-            } else {
-                for w in wrap_text(&font, px, &l.text, content_w) {
-                    rows.push((w, px));
-                }
-            }
+    /// Render a single card to Markdown. `None` if the card no longer exists.
+    pub fn export_card_markdown(&self, node: NodeId, card: CardId) -> Option<String> {
+        let c = self.card(node, card)?;
+        let mut s = String::new();
+        if !c.title.is_empty() {
+            s.push_str(&format!("# {}\n\n", c.title));
         }
-        let total_h: f32 = margin * 2.0 + rows.iter().map(|(_, s)| s * 1.5).sum::<f32>();
-        let height = (total_h as u32).max(1);
-        let mut img = RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255]));
+        s.push_str(&card_body_md(c));
+        Some(s)
+    }
 
-        let mut y = margin;
-        for (text, px) in &rows {
-            if !text.is_empty() {
-                draw_text(&mut img, &font, *px, margin, y + *px, text);
-            }
-            y += px * 1.5;
+    /// Render a single card to a standalone, styled HTML document.
+    pub fn export_card_html(&self, node: NodeId, card: CardId) -> Option<String> {
+        let c = self.card(node, card)?;
+        let mut s = String::from(
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+             <title>Trellis card</title>\n<style>\n",
+        );
+        s.push_str(EXPORT_CSS);
+        s.push_str("</style>\n</head>\n<body>\n<main>\n<article class=\"card\">\n");
+        if !c.title.is_empty() {
+            s.push_str(&format!("<h4>{}</h4>\n", escape_html(&c.title)));
         }
-        let mut buf = Vec::new();
-        let fmt = if gif { image::ImageFormat::Gif } else { image::ImageFormat::Png };
-        img.write_to(&mut std::io::Cursor::new(&mut buf), fmt).map_err(|e| e.to_string())?;
-        Ok(buf)
+        s.push_str(&card_body_html(c));
+        s.push_str("</article>\n</main>\n</body>\n</html>\n");
+        Some(s)
+    }
+
+    /// Render a single card to plain text (title + flattened body lines).
+    pub fn export_card_text(&self, node: NodeId, card: CardId) -> Option<String> {
+        let c = self.card(node, card)?;
+        let mut s = String::new();
+        for l in card_lines(c) {
+            s.push_str(&l.text);
+            s.push('\n');
+        }
+        Some(format!("{}\n", s.trim_end()))
+    }
+
+    /// Render a single card to a one-card PDF.
+    pub fn export_card_pdf(&self, node: NodeId, card: CardId) -> Result<Vec<u8>, String> {
+        let c = self.card(node, card).ok_or("card not found")?;
+        lines_to_pdf(&card_lines(c))
+    }
+
+    /// Render a single card to a PNG. Image cards export the image itself
+    /// (primary, re-encoded as PNG); sketches rasterize their strokes; every
+    /// other kind renders its text content (title + body) as black-on-white.
+    pub fn export_card_png(&self, node: NodeId, card: CardId) -> Result<Vec<u8>, String> {
+        let c = self.card(node, card).ok_or("card not found")?;
+        match &c.kind {
+            CardKind::Image { .. } => {
+                let imgs = c.kind.images();
+                let (data, _) = imgs.first().ok_or("image card has no image")?;
+                let dyn_img = image::load_from_memory(data).map_err(|e| e.to_string())?;
+                let mut buf = Vec::new();
+                dyn_img
+                    .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?;
+                Ok(buf)
+            }
+            CardKind::Sketch { strokes } => sketch_to_png(strokes, c.size.x, c.size.y),
+            _ => lines_to_image(&card_lines(c), false),
+        }
+    }
+
+    /// Render a sketch card to SVG. `None` for non-sketch cards.
+    pub fn export_card_svg(&self, node: NodeId, card: CardId) -> Option<String> {
+        let c = self.card(node, card)?;
+        match &c.kind {
+            CardKind::Sketch { strokes } => Some(sketch_svg(strokes, c.size.x, c.size.y)),
+            _ => None,
+        }
     }
 
     fn export_node_md(&self, id: NodeId, depth: usize, s: &mut String) {
@@ -1455,49 +1369,7 @@ impl Document {
             if !card.title.is_empty() {
                 s.push_str(&format!("**{}**\n\n", card.title));
             }
-            match &card.kind {
-                CardKind::Text => {
-                    s.push_str(card.body.trim_end());
-                    s.push_str("\n\n");
-                }
-                CardKind::Code { lang } => {
-                    s.push_str(&format!("```{lang}\n{}\n```\n\n", card.body));
-                }
-                CardKind::Checklist { items } => {
-                    for it in items {
-                        let mark = if it.done { "x" } else { " " };
-                        s.push_str(&format!("- [{mark}] {}\n", it.text));
-                    }
-                    s.push('\n');
-                }
-                CardKind::Table { table } => {
-                    let md_row = |row: &Vec<TableCell>| {
-                        format!(
-                            "| {} |\n",
-                            row.iter()
-                                .map(|c| c.text.replace('|', "\\|"))
-                                .collect::<Vec<_>>()
-                                .join(" | ")
-                        )
-                    };
-                    let cols = table.n_cols();
-                    for (r, row) in table.rows.iter().enumerate() {
-                        s.push_str(&md_row(row));
-                        if r == 0 && table.header && cols > 0 {
-                            s.push_str(&format!("|{}\n", " --- |".repeat(cols)));
-                        }
-                    }
-                    s.push('\n');
-                }
-                k @ CardKind::Image { .. } => {
-                    for (_, name) in k.images() {
-                        s.push_str(&format!("*(image: {name})*\n\n"));
-                    }
-                }
-                CardKind::Sketch { strokes } => {
-                    s.push_str(&format!("*(sketch: {} strokes)*\n\n", strokes.len()));
-                }
-            }
+            s.push_str(&card_body_md(card));
         }
         let children = node.children.clone();
         for c in children {
@@ -1646,6 +1518,293 @@ fn escape_html(s: &str) -> String {
 }
 
 /// Render a Sketch card's strokes as a self-contained inline SVG for HTML export.
+/// The inner HTML for one card's body (no `<article>` wrapper or title). Shared
+/// by the whole-document and single-card HTML exporters.
+fn card_body_html(card: &Card) -> String {
+    let mut s = String::new();
+    match &card.kind {
+        CardKind::Text => s.push_str(&md_to_html(&card.body)),
+        CardKind::Code { lang } => {
+            let fenced = format!("```{lang}\n{}\n```", card.body);
+            s.push_str(&md_to_html(&fenced));
+        }
+        CardKind::Checklist { items } => {
+            s.push_str("<ul class=\"checklist\">\n");
+            for it in items {
+                let mark = if it.done { "checked" } else { "" };
+                s.push_str(&format!(
+                    "<li><input type=\"checkbox\" disabled {mark}> {}</li>\n",
+                    escape_html(&it.text)
+                ));
+            }
+            s.push_str("</ul>\n");
+        }
+        CardKind::Table { table } => {
+            s.push_str("<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">\n");
+            for (r, row) in table.rows.iter().enumerate() {
+                s.push_str("<tr>");
+                for cell in row {
+                    let tag = if table.header && r == 0 { "th" } else { "td" };
+                    let mut style = String::new();
+                    if let Some([rr, gg, bb]) = cell.bg {
+                        style.push_str(&format!("background:#{rr:02x}{gg:02x}{bb:02x};"));
+                    }
+                    if let Some([rr, gg, bb]) = cell.fg {
+                        style.push_str(&format!("color:#{rr:02x}{gg:02x}{bb:02x};"));
+                    }
+                    let style_attr = if style.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" style=\"{style}\"")
+                    };
+                    s.push_str(&format!("<{tag}{style_attr}>{}</{tag}>", escape_html(&cell.text)));
+                }
+                s.push_str("</tr>\n");
+            }
+            s.push_str("</table>\n");
+        }
+        k @ CardKind::Image { .. } => {
+            for (data, name) in k.images() {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+                let mime = mime_for(name);
+                s.push_str(&format!(
+                    "<img alt=\"{}\" src=\"data:{mime};base64,{b64}\">\n",
+                    escape_html(name)
+                ));
+            }
+        }
+        CardKind::Sketch { strokes } => {
+            s.push_str(&sketch_svg(strokes, card.size.x, card.size.y));
+            s.push('\n');
+        }
+    }
+    s
+}
+
+/// The Markdown for one card's body (no title). Shared by the whole-document and
+/// single-card Markdown exporters.
+fn card_body_md(card: &Card) -> String {
+    let mut s = String::new();
+    match &card.kind {
+        CardKind::Text => {
+            s.push_str(card.body.trim_end());
+            s.push_str("\n\n");
+        }
+        CardKind::Code { lang } => {
+            s.push_str(&format!("```{lang}\n{}\n```\n\n", card.body));
+        }
+        CardKind::Checklist { items } => {
+            for it in items {
+                let mark = if it.done { "x" } else { " " };
+                s.push_str(&format!("- [{mark}] {}\n", it.text));
+            }
+            s.push('\n');
+        }
+        CardKind::Table { table } => {
+            let md_row = |row: &Vec<TableCell>| {
+                format!(
+                    "| {} |\n",
+                    row.iter()
+                        .map(|c| c.text.replace('|', "\\|"))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                )
+            };
+            let cols = table.n_cols();
+            for (r, row) in table.rows.iter().enumerate() {
+                s.push_str(&md_row(row));
+                if r == 0 && table.header && cols > 0 {
+                    s.push_str(&format!("|{}\n", " --- |".repeat(cols)));
+                }
+            }
+            s.push('\n');
+        }
+        k @ CardKind::Image { .. } => {
+            for (_, name) in k.images() {
+                s.push_str(&format!("*(image: {name})*\n\n"));
+            }
+        }
+        CardKind::Sketch { strokes } => {
+            s.push_str(&format!("*(sketch: {} strokes)*\n\n", strokes.len()));
+        }
+    }
+    s
+}
+
+/// The laid-out lines for one card (title line, then body). Shared by the PDF
+/// and image exporters (whole-document and single-card). Ends with a spacer.
+fn card_lines(card: &Card) -> Vec<ExportLine> {
+    let mut out = Vec::new();
+    if !card.title.is_empty() {
+        out.push(ExportLine { text: card.title.clone(), size: 12.0 });
+    }
+    match &card.kind {
+        CardKind::Text => {
+            let body = card.body.trim_end();
+            if !body.is_empty() {
+                out.push(ExportLine { text: body.to_string(), size: 10.5 });
+            }
+        }
+        CardKind::Code { .. } => {
+            for line in card.body.trim_end().split('\n') {
+                out.push(ExportLine { text: line.to_string(), size: 10.0 });
+            }
+        }
+        CardKind::Checklist { items } => {
+            for it in items {
+                let mark = if it.done { "[x]" } else { "[ ]" };
+                out.push(ExportLine { text: format!("{mark} {}", it.text), size: 10.5 });
+            }
+        }
+        CardKind::Table { table } => {
+            for row in &table.rows {
+                let line = row.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join(" | ");
+                out.push(ExportLine { text: line, size: 10.5 });
+            }
+        }
+        k @ CardKind::Image { .. } => {
+            for (_, name) in k.images() {
+                out.push(ExportLine { text: format!("(image: {name})"), size: 10.5 });
+            }
+        }
+        CardKind::Sketch { strokes } => {
+            out.push(ExportLine {
+                text: format!("(sketch: {} strokes)", strokes.len()),
+                size: 10.5,
+            });
+        }
+    }
+    out.push(ExportLine { text: String::new(), size: 5.0 });
+    out
+}
+
+/// Render a flat list of laid-out lines to a paginated A4 PDF. Shared by the
+/// whole-document and single-card PDF exporters.
+fn lines_to_pdf(lines: &[ExportLine]) -> Result<Vec<u8>, String> {
+    use printpdf::{Mm, PdfDocument};
+    let font_ab = ab_glyph::FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?;
+    let (w_mm, h_mm, margin) = (210.0_f32, 297.0_f32, 20.0_f32);
+    const MM_TO_PT: f32 = 2.834_646;
+    let content_w_pt = (w_mm - margin * 2.0) * MM_TO_PT;
+    let (doc, page1, layer1) = PdfDocument::new("Trellis export", Mm(w_mm), Mm(h_mm), "Layer 1");
+    let font = doc
+        .add_external_font(std::io::Cursor::new(EXPORT_FONT))
+        .map_err(|e| e.to_string())?;
+    let mut layer = doc.get_page(page1).get_layer(layer1);
+    let mut y = h_mm - margin;
+    for l in lines {
+        let leading = (l.size * 1.4) / MM_TO_PT;
+        let wrapped = if l.text.is_empty() {
+            vec![String::new()]
+        } else {
+            wrap_text(&font_ab, l.size, &l.text, content_w_pt)
+        };
+        for line in wrapped {
+            if y < margin {
+                let (p, lay) = doc.add_page(Mm(w_mm), Mm(h_mm), "Layer");
+                layer = doc.get_page(p).get_layer(lay);
+                y = h_mm - margin;
+            }
+            if !line.is_empty() {
+                layer.use_text(&line, l.size, Mm(margin), Mm(y), &font);
+            }
+            y -= leading;
+        }
+    }
+    doc.save_to_bytes().map_err(|e| e.to_string())
+}
+
+/// Render a flat list of laid-out lines to a raster image (PNG, or GIF if
+/// `gif`). One tall page, black text on white. Shared by the whole-document and
+/// single-card image exporters.
+fn lines_to_image(lines: &[ExportLine], gif: bool) -> Result<Vec<u8>, String> {
+    use ab_glyph::FontRef;
+    use image::{Rgba, RgbaImage};
+    let font = FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?;
+    let scale = 2.0_f32; // px per point
+    let margin = 40.0_f32;
+    let content_w = 760.0_f32;
+    let width = (content_w + margin * 2.0) as u32;
+
+    // Pre-wrap every line, remembering its pixel size, to size the canvas.
+    let mut rows: Vec<(String, f32)> = Vec::new();
+    for l in lines {
+        let px = l.size * scale;
+        if l.text.is_empty() {
+            rows.push((String::new(), px));
+        } else {
+            for w in wrap_text(&font, px, &l.text, content_w) {
+                rows.push((w, px));
+            }
+        }
+    }
+    let total_h: f32 = margin * 2.0 + rows.iter().map(|(_, s)| s * 1.5).sum::<f32>();
+    let height = (total_h as u32).max(1);
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255]));
+
+    let mut y = margin;
+    for (text, px) in &rows {
+        if !text.is_empty() {
+            draw_text(&mut img, &font, *px, margin, y + *px, text);
+        }
+        y += px * 1.5;
+    }
+    let mut buf = Vec::new();
+    let fmt = if gif { image::ImageFormat::Gif } else { image::ImageFormat::Png };
+    img.write_to(&mut std::io::Cursor::new(&mut buf), fmt).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// Rasterize a sketch card's strokes to a PNG (2× the card's on-screen size,
+/// black-on-white background), stamping round brush dabs along each stroke.
+fn sketch_to_png(strokes: &[Stroke], w: f32, h: f32) -> Result<Vec<u8>, String> {
+    use image::{Rgba, RgbaImage};
+    let scale = 2.0_f32;
+    let width = ((w.max(1.0) * scale).ceil() as u32).max(1);
+    let height = ((h.max(1.0) * scale).ceil() as u32).max(1);
+    let mut img = RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255]));
+    for st in strokes {
+        let [r, g, b] = st.color;
+        let col = Rgba([r, g, b, 255]);
+        let rad = (st.width * scale / 2.0).max(0.5);
+        if st.points.len() == 1 {
+            let p = st.points[0];
+            stamp_disc(&mut img, p[0] * scale, p[1] * scale, rad, col);
+            continue;
+        }
+        for seg in st.points.windows(2) {
+            let (x0, y0) = (seg[0][0] * scale, seg[0][1] * scale);
+            let (x1, y1) = (seg[1][0] * scale, seg[1][1] * scale);
+            let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+            let steps = (dist.ceil() as i32).max(1);
+            for i in 0..=steps {
+                let t = i as f32 / steps as f32;
+                stamp_disc(&mut img, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, rad, col);
+            }
+        }
+    }
+    let mut buf = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// Paint a filled disc of radius `rad` centered at (`cx`, `cy`) onto `img`.
+fn stamp_disc(img: &mut image::RgbaImage, cx: f32, cy: f32, rad: f32, col: image::Rgba<u8>) {
+    let r = rad.ceil() as i32;
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if (dx * dx + dy * dy) as f32 <= rad * rad {
+                let (x, y) = (cx as i32 + dx, cy as i32 + dy);
+                if x >= 0 && y >= 0 && x < w && y < h {
+                    img.put_pixel(x as u32, y as u32, col);
+                }
+            }
+        }
+    }
+}
+
 fn sketch_svg(strokes: &[Stroke], w: f32, h: f32) -> String {
     let w = w.max(1.0);
     let h = h.max(1.0);
@@ -2062,6 +2221,71 @@ mod tests {
         let md = doc.export_markdown();
         assert!(md.contains("# Title"));
         assert!(md.contains("**bold** body"));
+    }
+
+    #[test]
+    fn export_single_card_in_each_format() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Node".into());
+        let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        {
+            let c = doc.card_mut(n, cid).unwrap();
+            c.title = "My Card".into();
+            c.body = "**bold** body".into();
+        }
+
+        let md = doc.export_card_markdown(n, cid).unwrap();
+        assert!(md.contains("# My Card"));
+        assert!(md.contains("**bold** body"));
+
+        let html = doc.export_card_html(n, cid).unwrap();
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(html.contains("<h4>My Card</h4>"));
+
+        let txt = doc.export_card_text(n, cid).unwrap();
+        assert!(txt.contains("My Card"));
+        assert!(txt.contains("**bold** body"));
+
+        assert!(doc.export_card_pdf(n, cid).unwrap().starts_with(b"%PDF"));
+        assert!(doc.export_card_png(n, cid).unwrap().starts_with(b"\x89PNG"));
+
+        // A non-existent card yields None / Err rather than panicking.
+        let missing: CardId = 999_999;
+        assert!(doc.export_card_markdown(n, missing).is_none());
+        assert!(doc.export_card_pdf(n, missing).is_err());
+        // SVG is sketch-only.
+        assert!(doc.export_card_svg(n, cid).is_none());
+    }
+
+    #[test]
+    fn export_image_card_png_is_the_image_and_sketch_svg_has_strokes() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+
+        // Image card: PNG export re-encodes the embedded image.
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let img = doc
+            .add_card(n, egui::pos2(0.0, 0.0), CardKind::Image {
+                data: png,
+                name: "pic.png".into(),
+                extra: Vec::new(),
+                ocr: String::new(),
+            })
+            .unwrap();
+        let out = doc.export_card_png(n, img).unwrap();
+        assert!(out.starts_with(b"\x89PNG"));
+
+        // Sketch card: SVG lists the stroke, PNG rasterizes it.
+        let sk = doc
+            .add_card(n, egui::pos2(0.0, 0.0), CardKind::Sketch {
+                strokes: vec![Stroke { color: [255, 0, 0], width: 3.0, points: vec![[1.0, 1.0], [8.0, 8.0]] }],
+            })
+            .unwrap();
+        assert!(doc.export_card_svg(n, sk).unwrap().contains("<polyline"));
+        assert!(doc.export_card_png(n, sk).unwrap().starts_with(b"\x89PNG"));
     }
 
     #[test]
