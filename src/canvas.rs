@@ -62,6 +62,9 @@ pub enum CanvasAction {
     ExportCardHtml(CardId),
     ExportCardText(CardId),
     ExportCardSvg(CardId),
+    ExportCardJson(CardId),
+    /// Import a card from a JSON file (opens a picker), placed at the world pos.
+    ImportCard(egui::Pos2),
     // Table (spreadsheet) cards.
     TableSetCell(CardId, usize, usize, String),
     TableSetBg(CardId, usize, usize, Option<[u8; 3]>),
@@ -256,6 +259,14 @@ pub fn ui(
             ui.close_menu();
         }
         ui.separator();
+        if ui
+            .button("Import card…")
+            .on_hover_text("Add a card from a Trellis JSON card file")
+            .clicked()
+        {
+            actions.push(CanvasAction::ImportCard(cp));
+            ui.close_menu();
+        }
         if ui
             .add_enabled(can_paste, egui::Button::new("Paste card"))
             .clicked()
@@ -1403,6 +1414,14 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, node_path: &str, actions: &mut Vec<
         }
         if ui.button("Plain text (.txt)").clicked() {
             actions.push(CanvasAction::ExportCardText(card.id));
+            ui.close_menu();
+        }
+        if ui
+            .button("JSON (card file)")
+            .on_hover_text("A portable card file — import it into any Trellis workspace")
+            .clicked()
+        {
+            actions.push(CanvasAction::ExportCardJson(card.id));
             ui.close_menu();
         }
         match &card.kind {

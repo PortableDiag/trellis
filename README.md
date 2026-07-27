@@ -52,8 +52,10 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 Cards drag by the title bar, resize from the corner, raise to front on click,
 duplicate, recolor, copy/paste into another basket, and delete. Right-click →
 **Export Card** saves just that card to share — **PNG**, **Markdown**, **PDF**,
-**HTML**, or **plain text** for any card, plus **CSV/XLSX** for tables and
-**SVG** for sketches (image cards export the image itself). A 🗐 button on
+**HTML**, **plain text**, or a portable **JSON card file** for any card, plus
+**CSV/XLSX** for tables and **SVG** for sketches (image cards export the image
+itself). Bring a card in with right-click canvas → **Import card…** or by
+**dragging a JSON card file** onto the canvas. A 🗐 button on
 the title bar copies the card's text (checklists as Markdown task lines) to
 both the clipboard and the X11 primary selection. Right-click → **Copy** →
 **Card id** / **Card path** copies the card's identifier or breadcrumb, so you

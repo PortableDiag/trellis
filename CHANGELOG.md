@@ -4,6 +4,18 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.36.0]
+
+### Added
+- **Export / import a card as JSON** — a portable, self-contained card file for
+  handing one card to someone else (or moving it between workspaces). Right-click a
+  card → **Export Card** → **JSON (card file)** writes it (image bytes embed inline;
+  markdown/code body included). To bring one in: right-click the canvas → **Import
+  card…** (just above *Paste card*) to pick a `.json` file, **or drag the `.json`
+  onto the canvas**. Imported cards get a fresh id and land at the click/drop spot;
+  a `.json` that isn't a valid Trellis card falls back to a plain text card, and the
+  file is validated by a `"format": "trellis-card"` marker.
+
 ## [0.35.0]
 
 ### Added

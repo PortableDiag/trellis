@@ -176,6 +176,7 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
         A::TableSetColWidth(..) => UndoKind::Continuous("colwidth"),
         A::AddCard(..)
         | A::PasteCard(_)
+        | A::ImportCard(_)
         | A::DropFiles(..)
         | A::Remove(_)
         | A::Duplicate(_)
@@ -222,6 +223,18 @@ fn download_image_name(stored: &str, index: usize) -> String {
 /// opening the menu and the action running).
 fn card_gone() -> String {
     "card not found".to_string()
+}
+
+/// A short human label for a card kind, used in status messages.
+fn card_kind_label(kind: &CardKind) -> &'static str {
+    match kind {
+        CardKind::Text => "text",
+        CardKind::Code { .. } => "code",
+        CardKind::Checklist { .. } => "checklist",
+        CardKind::Table { .. } => "table",
+        CardKind::Image { .. } => "image",
+        CardKind::Sketch { .. } => "sketch",
+    }
 }
 
 pub struct TrellisApp {
@@ -967,7 +980,15 @@ impl TrellisApp {
                     n += 1;
                 }
             } else if let Ok(text) = String::from_utf8(bytes) {
-                if let Some(cid) = self.doc.add_card(node, at, CardKind::Text) {
+                // A dropped Trellis JSON card file becomes that exact card; any
+                // other `.json` (or text) falls back to a text card.
+                let imported = ext == "json"
+                    && crate::model::parse_card_export(&text)
+                        .and_then(|exp| self.doc.add_card_from_export(node, at, exp))
+                        .is_some();
+                if imported {
+                    n += 1;
+                } else if let Some(cid) = self.doc.add_card(node, at, CardKind::Text) {
                     if let Some(c) = self.doc.card_mut(node, cid) {
                         c.title = name;
                         c.body = text;
@@ -998,6 +1019,7 @@ impl TrellisApp {
                     | CanvasAction::ExportCardHtml(_)
                     | CanvasAction::ExportCardText(_)
                     | CanvasAction::ExportCardSvg(_)
+                    | CanvasAction::ExportCardJson(_)
                     | CanvasAction::TableExportCsv(_)
                     | CanvasAction::TableExportXlsx(_)
                     | CanvasAction::ToggleSelect(_)
@@ -1252,6 +1274,11 @@ impl TrellisApp {
                     let d = self.doc.export_card_svg(node, cid).map(|s| s.into_bytes());
                     self.save_card_export(node, cid, "svg", "SVG", d.ok_or_else(card_gone));
                 }
+                CanvasAction::ExportCardJson(cid) => {
+                    let d = self.doc.export_card_json(node, cid).map(|s| s.into_bytes());
+                    self.save_card_export(node, cid, "json", "Trellis card (JSON)", d.ok_or_else(card_gone));
+                }
+                CanvasAction::ImportCard(pos) => self.import_card(node, pos),
                 CanvasAction::OpenLightbox(cid, idx) => {
                     self.lightbox = Some(Lightbox {
                         node,
@@ -1472,6 +1499,32 @@ impl TrellisApp {
         match std::fs::write(&path, &bytes) {
             Ok(_) => self.status = format!("Exported card → {}", path.display()),
             Err(e) => self.status = format!("Export failed: {e}"),
+        }
+    }
+
+    /// Import a card from a JSON card file the user picks, placing it at `pos`.
+    fn import_card(&mut self, node: NodeId, pos: egui::Pos2) {
+        let Some(path) = self
+            .file_dialog()
+            .add_filter("Trellis card (JSON)", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match crate::model::parse_card_export(&text) {
+                Some(exp) => {
+                    let kind = card_kind_label(&exp.kind);
+                    if self.doc.add_card_from_export(node, pos, exp).is_some() {
+                        self.mark_dirty();
+                        self.status = format!("Imported {kind} card");
+                    } else {
+                        self.status = "Import failed: could not create the card".to_string();
+                    }
+                }
+                None => self.status = "Not a Trellis card file (wrong or missing format marker)".to_string(),
+            },
+            Err(e) => self.status = format!("Read error: {e}"),
         }
     }
 

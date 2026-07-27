@@ -1362,6 +1362,42 @@ impl Document {
         }
     }
 
+    /// Serialize a single card to a portable JSON document (see [`CardExport`]).
+    pub fn export_card_json(&self, node: NodeId, card: CardId) -> Option<String> {
+        let c = self.card(node, card)?;
+        let exp = CardExport {
+            format: CARD_EXPORT_FORMAT.to_string(),
+            version: 1,
+            title: c.title.clone(),
+            body: c.body.clone(),
+            color: c.color,
+            size: [c.size.x, c.size.y],
+            font_scale: c.font_scale,
+            kind: c.kind.clone(),
+        };
+        serde_json::to_string_pretty(&exp).ok()
+    }
+
+    /// Create a new card in `node` at `pos` from a parsed [`CardExport`]. The card
+    /// gets a fresh id and is placed as a free-floating, view-mode card.
+    pub fn add_card_from_export(
+        &mut self,
+        node: NodeId,
+        pos: egui::Pos2,
+        exp: CardExport,
+    ) -> Option<CardId> {
+        let cid = self.add_card(node, pos, exp.kind)?;
+        if let Some(c) = self.card_mut(node, cid) {
+            c.title = exp.title;
+            c.body = exp.body;
+            c.color = exp.color;
+            c.size = egui::vec2(exp.size[0].max(40.0), exp.size[1].max(30.0));
+            c.font_scale = if exp.font_scale > 0.0 { exp.font_scale } else { 1.0 };
+            c.editing = false;
+        }
+        Some(cid)
+    }
+
     fn export_node_md(&self, id: NodeId, depth: usize, s: &mut String) {
         let Some(node) = self.nodes.get(&id) else { return };
         s.push_str(&format!("{} {}\n\n", "#".repeat(depth.min(6)), node.title));
@@ -1430,6 +1466,37 @@ pub struct SearchHit {
     pub node: NodeId,
     pub node_title: String,
     pub snippet: String,
+}
+
+/// Format marker written into a single-card JSON export, checked on import so a
+/// random `.json` file isn't mistaken for a card.
+pub const CARD_EXPORT_FORMAT: &str = "trellis-card";
+
+/// A portable, self-contained single card (its image bytes embed inline). This
+/// is what `Export Card → JSON` writes and `Import Card` / a dropped `.json`
+/// reads. Position, id, grouping and dock state are intentionally omitted — they
+/// only make sense inside the workspace the card came from.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CardExport {
+    pub format: String,
+    pub version: u32,
+    pub title: String,
+    /// Markdown / code text (text & code cards store their content here, not in
+    /// `kind`). Empty for image/checklist/table/sketch cards.
+    #[serde(default)]
+    pub body: String,
+    pub color: [u8; 3],
+    pub size: [f32; 2],
+    #[serde(default = "default_font_scale")]
+    pub font_scale: f32,
+    pub kind: CardKind,
+}
+
+/// Parse a single-card JSON export, returning `None` unless it's well-formed and
+/// carries the [`CARD_EXPORT_FORMAT`] marker.
+pub fn parse_card_export(json: &str) -> Option<CardExport> {
+    let exp: CardExport = serde_json::from_str(json).ok()?;
+    (exp.format == CARD_EXPORT_FORMAT).then_some(exp)
 }
 
 fn searchable_body(card: &Card) -> String {
@@ -2286,6 +2353,47 @@ mod tests {
             .unwrap();
         assert!(doc.export_card_svg(n, sk).unwrap().contains("<polyline"));
         assert!(doc.export_card_png(n, sk).unwrap().starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn card_json_export_import_round_trips() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let cid = doc
+            .add_card(n, egui::pos2(5.0, 5.0), CardKind::Checklist {
+                items: vec![
+                    ChecklistItem { done: true, text: "a".into() },
+                    ChecklistItem { done: false, text: "b".into() },
+                ],
+            })
+            .unwrap();
+        {
+            let c = doc.card_mut(n, cid).unwrap();
+            c.title = "Todo".into();
+            c.body = "a note in the body field".into();
+            c.color = [10, 20, 30];
+            c.size = egui::vec2(300.0, 200.0);
+        }
+
+        let json = doc.export_card_json(n, cid).unwrap();
+        let exp = parse_card_export(&json).expect("valid card file");
+
+        // Import into a different node; it gets a fresh id but preserves content.
+        let m = doc.add_node(None, "m".into());
+        let new = doc.add_card_from_export(m, egui::pos2(0.0, 0.0), exp).unwrap();
+        assert_ne!(new, cid);
+        let c = doc.card(m, new).unwrap();
+        assert_eq!(c.title, "Todo");
+        assert_eq!(c.body, "a note in the body field");
+        assert_eq!(c.color, [10, 20, 30]);
+        assert_eq!(c.size, egui::vec2(300.0, 200.0));
+        let CardKind::Checklist { items } = &c.kind else { panic!("kind not preserved") };
+        assert_eq!(items.len(), 2);
+        assert!(items[0].done && !items[1].done);
+
+        // Wrong / missing format marker and non-JSON are rejected.
+        assert!(parse_card_export("{\"format\":\"nope\",\"version\":1}").is_none());
+        assert!(parse_card_export("not json at all").is_none());
     }
 
     #[test]
