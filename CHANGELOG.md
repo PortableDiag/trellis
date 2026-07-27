@@ -4,6 +4,17 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.34.0]
+
+### Added
+- **Download images from a card** — right-click an image card → **Download image…**
+  (single image) or a **Download** submenu (multi-image cards: pick one by name, or
+  **All N images…** to save the whole set into a chosen folder). Files keep their
+  original name/extension; nameless images save as `image-N.png`, and a folder save
+  de-duplicates names so nothing is silently overwritten. Makes it easy to pull an
+  image back out of your notes to share or reuse. (Agents can already fetch image
+  bytes via `GET /api/nodes/{id}/cards/{cid}/images/{idx}`.)
+
 ## [0.33.1]
 
 ### Fixed

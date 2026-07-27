@@ -46,7 +46,8 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   `←`/`→` (keys or buttons) to flip through the card's images, Esc to close.
   Right-click an image to remove it. **Right-click the card → Extract text (OCR)**
   reads the text out of the image(s) with tesseract so the card becomes
-  full-text searchable.
+  full-text searchable. **Right-click → Download** saves an image back out to a
+  file (or **All N images…** into a folder) to share or reuse.
 
 Cards drag by the title bar, resize from the corner, raise to front on click,
 duplicate, recolor, copy/paste into another basket, and delete. A 🗐 button on

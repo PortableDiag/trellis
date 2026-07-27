@@ -51,6 +51,10 @@ pub enum CanvasAction {
     RemoveImage(CardId, usize),
     /// Run OCR over an image card's images and store the extracted text.
     OcrCard(CardId),
+    /// Save one of an image card's images to a file (index into `kind.images()`).
+    SaveImage(CardId, usize),
+    /// Save all of an image card's images into a chosen folder.
+    SaveAllImages(CardId),
     // Table (spreadsheet) cards.
     TableSetCell(CardId, usize, usize, String),
     TableSetBg(CardId, usize, usize, Option<[u8; 3]>),
@@ -1324,6 +1328,39 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, node_path: &str, actions: &mut Vec<
         {
             actions.push(CanvasAction::OcrCard(card.id));
             ui.close_menu();
+        }
+    }
+    // Download the image(s) to disk so they can be shared/re-used outside Trellis.
+    if matches!(card.kind, CardKind::Image { .. }) {
+        let imgs = card.kind.images();
+        match imgs.len() {
+            0 => {}
+            1 => {
+                if ui.button("Download image…").clicked() {
+                    actions.push(CanvasAction::SaveImage(card.id, 0));
+                    ui.close_menu();
+                }
+            }
+            n => {
+                ui.menu_button("Download", |ui| {
+                    for (idx, (_, name)) in imgs.iter().enumerate() {
+                        let label = if name.is_empty() {
+                            format!("{}. image", idx + 1)
+                        } else {
+                            format!("{}. {}", idx + 1, name)
+                        };
+                        if ui.button(label).clicked() {
+                            actions.push(CanvasAction::SaveImage(card.id, idx));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button(format!("All {n} images…")).clicked() {
+                        actions.push(CanvasAction::SaveAllImages(card.id));
+                        ui.close_menu();
+                    }
+                });
+            }
         }
     }
     // Copy the card's id or its breadcrumb path so you can point an agent at

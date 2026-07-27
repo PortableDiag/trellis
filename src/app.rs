@@ -207,6 +207,17 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
     }
 }
 
+/// Filename to pre-fill when downloading an image from a card: the image's
+/// stored name, or a synthesized `image-N.png` (1-based) when it has none, so a
+/// nameless image still saves with a sensible name and extension.
+fn download_image_name(stored: &str, index: usize) -> String {
+    if stored.trim().is_empty() {
+        format!("image-{}.png", index + 1)
+    } else {
+        stored.to_string()
+    }
+}
+
 pub struct TrellisApp {
     doc: Document,
     selected: Option<NodeId>,
@@ -973,6 +984,8 @@ impl TrellisApp {
                 a,
                 CanvasAction::ResetView
                     | CanvasAction::CopyCard(_)
+                    | CanvasAction::SaveImage(..)
+                    | CanvasAction::SaveAllImages(_)
                     | CanvasAction::ToggleSelect(_)
                     | CanvasAction::ClearSelection
                     | CanvasAction::ToggleDockMode
@@ -1199,6 +1212,8 @@ impl TrellisApp {
                         });
                     }
                 }
+                CanvasAction::SaveImage(cid, idx) => self.save_card_image(node, cid, idx),
+                CanvasAction::SaveAllImages(cid) => self.save_all_card_images(node, cid),
                 CanvasAction::OpenLightbox(cid, idx) => {
                     self.lightbox = Some(Lightbox {
                         node,
@@ -1295,6 +1310,83 @@ impl TrellisApp {
             Ok(_) => self.status = format!("Exported → {}", path.display()),
             Err(e) => self.status = format!("Export failed: {e}"),
         }
+    }
+
+    /// Save a single image from an image card to a file the user picks. The
+    /// dialog pre-fills the image's stored name so its original extension is kept.
+    ///
+    /// See [`download_image_name`] for the filename fallback.
+    fn save_card_image(&mut self, node: NodeId, card: crate::model::CardId, idx: usize) {
+        let Some(c) = self.doc.card_mut(node, card) else { return };
+        let imgs = c.kind.images();
+        let Some((bytes, name)) = imgs.get(idx) else { return };
+        let bytes = bytes.to_vec();
+        let name = download_image_name(name, idx);
+        let ext = std::path::Path::new(&name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_string();
+        let Some(path) = self
+            .file_dialog()
+            .add_filter("Image", &[ext.as_str()])
+            .set_file_name(&name)
+            .save_file()
+        else {
+            return;
+        };
+        match std::fs::write(&path, &bytes) {
+            Ok(_) => self.status = format!("Saved image → {}", path.display()),
+            Err(e) => self.status = format!("Save failed: {e}"),
+        }
+    }
+
+    /// Save every image of an image card into a folder the user picks, each under
+    /// its stored name (de-duplicated so nothing is silently overwritten).
+    fn save_all_card_images(&mut self, node: NodeId, card: crate::model::CardId) {
+        let Some(c) = self.doc.card_mut(node, card) else { return };
+        let files: Vec<(String, Vec<u8>)> = c
+            .kind
+            .images()
+            .iter()
+            .enumerate()
+            .map(|(i, (bytes, name))| (download_image_name(name, i), bytes.to_vec()))
+            .collect();
+        if files.is_empty() {
+            return;
+        }
+        let Some(dir) = self.file_dialog().pick_folder() else { return };
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut saved = 0usize;
+        let mut err = None;
+        for (name, bytes) in files {
+            let mut target = dir.join(&name);
+            let mut n = 1;
+            while used.contains(&target.to_string_lossy().to_string()) || target.exists() {
+                let stem = std::path::Path::new(&name)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| name.clone());
+                let ext = std::path::Path::new(&name)
+                    .extension()
+                    .map(|e| format!(".{}", e.to_string_lossy()))
+                    .unwrap_or_default();
+                target = dir.join(format!("{stem}-{n}{ext}"));
+                n += 1;
+            }
+            used.insert(target.to_string_lossy().to_string());
+            match std::fs::write(&target, &bytes) {
+                Ok(_) => saved += 1,
+                Err(e) => {
+                    err = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        self.status = match err {
+            Some(e) => format!("Saved {saved} image(s), then failed: {e}"),
+            None => format!("Saved {saved} image(s) → {}", dir.display()),
+        };
     }
 
     fn load_image_into(&mut self, node: NodeId, card: crate::model::CardId) {
@@ -2151,4 +2243,21 @@ fn default_autosave_path() -> PathBuf {
     directories::ProjectDirs::from("dev", "Trellis", "Trellis")
         .map(|d| d.data_dir().join("autosave.ron"))
         .unwrap_or_else(|| PathBuf::from("trellis-autosave.ron"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_name_keeps_stored_name_and_extension() {
+        assert_eq!(download_image_name("photo.jpg", 0), "photo.jpg");
+        assert_eq!(download_image_name("scan.PNG", 3), "scan.PNG");
+    }
+
+    #[test]
+    fn download_name_falls_back_for_nameless_images() {
+        assert_eq!(download_image_name("", 0), "image-1.png");
+        assert_eq!(download_image_name("   ", 4), "image-5.png");
+    }
 }
