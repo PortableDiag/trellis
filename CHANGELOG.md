@@ -4,6 +4,16 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.37.0]
+
+### Changed
+- **Export Card → PNG and PDF are now WYSIWYG** — they capture the card exactly as
+  it looks on screen (formatted markdown, colors, syntax highlighting, checkboxes,
+  table cell colors, images, sketches) instead of a plain-text rendering. Done by
+  briefly framing the card, screenshotting the framebuffer, and cropping to the
+  card; the PDF wraps that image on a page sized to the card. Markdown / HTML /
+  plain-text / JSON / CSV / XLSX / SVG exports are unchanged.
+
 ## [0.36.0]
 
 ### Added

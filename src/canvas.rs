@@ -16,6 +16,9 @@ pub const MAX_ZOOM: f32 = 3.0;
 pub struct Env<'a> {
     pub md: &'a mut CommonMarkCache,
     pub tex: &'a mut TextureCache,
+    /// Filled each frame with every drawn card's on-screen rect (points), so the
+    /// app can crop a framebuffer screenshot to a single card for WYSIWYG export.
+    pub card_rects: &'a mut HashMap<CardId, egui::Rect>,
 }
 
 /// Actions requested by the canvas, applied by the app afterwards.
@@ -409,7 +412,9 @@ pub fn ui(
 
     // Cards are drawn directly at their zoomed screen rects (see card_ui), which
     // keeps text selection/editing working (transformed layers broke it).
+    env.card_rects.clear();
     for card in &node.cards {
+        env.card_rects.insert(card.id, screen_rect(card));
         card_ui(
             ui,
             card,

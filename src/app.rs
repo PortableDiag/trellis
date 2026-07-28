@@ -225,6 +225,50 @@ fn card_gone() -> String {
     "card not found".to_string()
 }
 
+/// A pending single-card WYSIWYG screenshot export, advanced across frames in
+/// `update`: reframe the view onto the card, screenshot the framebuffer, crop to
+/// the card, then save as PNG or PDF.
+struct CardShot {
+    node: NodeId,
+    card: crate::model::CardId,
+    /// `true` = export as PDF (embed the rendered image), `false` = PNG.
+    pdf: bool,
+    /// The node's view before we reframed onto the card; restored afterwards.
+    saved_view: TSTransform,
+    phase: ShotPhase,
+}
+
+enum ShotPhase {
+    /// Reframe the view to fit the card, render one frame, then request a shot.
+    Framing,
+    /// Screenshot requested; waiting for the framebuffer event next frame.
+    Requested,
+}
+
+/// Encode a raw RGBA buffer as PNG bytes.
+fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
+    let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())
+        .ok_or_else(|| "bad image buffer".to_string())?;
+    let mut buf = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// A view transform that fits a card (with margin) centered in `canvas_rect` at
+/// ≤100% zoom, so a screenshot captures the whole card unclipped.
+fn framed_view(canvas_rect: egui::Rect, card_pos: egui::Pos2, card_size: egui::Vec2) -> TSTransform {
+    let margin = 24.0_f32;
+    let avail = (canvas_rect.size() - egui::Vec2::splat(margin * 2.0)).max(egui::Vec2::splat(1.0));
+    let s = (avail.x / card_size.x.max(1.0))
+        .min(avail.y / card_size.y.max(1.0))
+        .min(1.0)
+        .max(0.05);
+    let scaled = card_size * s;
+    let offset = (canvas_rect.size() - scaled) * 0.5;
+    TSTransform { scaling: s, translation: offset - card_pos.to_vec2() * s }
+}
+
 /// A short human label for a card kind, used in status messages.
 fn card_kind_label(kind: &CardKind) -> &'static str {
     match kind {
@@ -285,6 +329,11 @@ pub struct TrellisApp {
     card_sel: std::collections::HashSet<crate::model::CardId>,
     /// Which node `card_sel` belongs to, so it resets when the basket changes.
     card_sel_node: Option<NodeId>,
+    /// Every drawn card's on-screen rect (points), refreshed each frame by the
+    /// canvas. Used to crop a framebuffer screenshot to one card (WYSIWYG export).
+    card_rects: HashMap<crate::model::CardId, egui::Rect>,
+    /// In-flight "screenshot a single card" export, driven across a few frames.
+    card_shot: Option<CardShot>,
 
     // Agent HTTP API.
     api_rx: Option<Receiver<ApiCommand>>,
@@ -436,6 +485,8 @@ impl TrellisApp {
             dock_mode,
             snap_mode,
             card_clipboard: None,
+            card_rects: HashMap::new(),
+            card_shot: None,
             card_sel: std::collections::HashSet::new(),
             card_sel_node: None,
             api_rx: Some(api_rx),
@@ -1250,18 +1301,12 @@ impl TrellisApp {
                 }
                 CanvasAction::SaveImage(cid, idx) => self.save_card_image(node, cid, idx),
                 CanvasAction::SaveAllImages(cid) => self.save_all_card_images(node, cid),
-                CanvasAction::ExportCardPng(cid) => {
-                    let d = self.doc.export_card_png(node, cid);
-                    self.save_card_export(node, cid, "png", "PNG", d);
-                }
+                CanvasAction::ExportCardPng(cid) => self.begin_card_shot(node, cid, false),
                 CanvasAction::ExportCardMarkdown(cid) => {
                     let d = self.doc.export_card_markdown(node, cid).map(|s| s.into_bytes());
                     self.save_card_export(node, cid, "md", "Markdown", d.ok_or_else(card_gone));
                 }
-                CanvasAction::ExportCardPdf(cid) => {
-                    let d = self.doc.export_card_pdf(node, cid);
-                    self.save_card_export(node, cid, "pdf", "PDF", d);
-                }
+                CanvasAction::ExportCardPdf(cid) => self.begin_card_shot(node, cid, true),
                 CanvasAction::ExportCardHtml(cid) => {
                     let d = self.doc.export_card_html(node, cid).map(|s| s.into_bytes());
                     self.save_card_export(node, cid, "html", "HTML", d.ok_or_else(card_gone));
@@ -1500,6 +1545,51 @@ impl TrellisApp {
             Ok(_) => self.status = format!("Exported card → {}", path.display()),
             Err(e) => self.status = format!("Export failed: {e}"),
         }
+    }
+
+    /// Start a WYSIWYG single-card export: show the card's node and kick off the
+    /// framing → screenshot state machine (driven in `update`). `pdf` picks PDF
+    /// vs PNG.
+    fn begin_card_shot(&mut self, node: NodeId, card: crate::model::CardId, pdf: bool) {
+        self.selected = Some(node);
+        let saved_view = self.views.get(&node).copied().unwrap_or_default();
+        self.card_shot = Some(CardShot { node, card, pdf, saved_view, phase: ShotPhase::Framing });
+        self.status = "Rendering card…".to_string();
+    }
+
+    /// Finish a single-card screenshot: restore the view, crop the framebuffer to
+    /// the card's on-screen rect, and save it as PNG or (image-backed) PDF.
+    fn finish_card_shot(&mut self, ctx: &egui::Context, image: &egui::ColorImage) {
+        let Some(shot) = self.card_shot.take() else { return };
+        self.views.insert(shot.node, shot.saved_view); // undo the temporary reframe
+        let Some(rect) = self.card_rects.get(&shot.card).copied() else {
+            self.status = "Export failed: card is not on screen".to_string();
+            return;
+        };
+        let ppp = ctx.pixels_per_point();
+        let [iw, ih] = image.size;
+        let cx = |v: f32| (v.round() as i64).clamp(0, iw as i64) as usize;
+        let cy = |v: f32| (v.round() as i64).clamp(0, ih as i64) as usize;
+        let (x0, y0) = (cx(rect.min.x * ppp), cy(rect.min.y * ppp));
+        let (x1, y1) = (cx(rect.max.x * ppp), cy(rect.max.y * ppp));
+        if x1 <= x0 || y1 <= y0 {
+            self.status = "Export failed: empty card region".to_string();
+            return;
+        }
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        let mut rgba = Vec::with_capacity(cw * ch * 4);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let px = image.pixels[y * iw + x];
+                rgba.extend_from_slice(&[px.r(), px.g(), px.b(), px.a()]);
+            }
+        }
+        let (ext, label, data) = if shot.pdf {
+            ("pdf", "PDF", crate::model::image_rgba_to_pdf(&rgba, cw as u32, ch as u32))
+        } else {
+            ("png", "PNG", encode_png(&rgba, cw as u32, ch as u32))
+        };
+        self.save_card_export(shot.node, shot.card, ext, label, data);
     }
 
     /// Import a card from a JSON card file the user picks, placing it at `pos`.
@@ -2065,6 +2155,20 @@ impl eframe::App for TrellisApp {
         // Apply finished background saves.
         self.pump_save();
 
+        // A requested single-card screenshot arrives as an input event one frame
+        // after we ask for it; crop it to the card and save as PNG/PDF.
+        if matches!(self.card_shot.as_ref().map(|s| &s.phase), Some(ShotPhase::Requested)) {
+            let shot_img = ctx.input(|i| {
+                i.events.iter().rev().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(img) = shot_img {
+                self.finish_card_shot(ctx, &img);
+            }
+        }
+
         // Autosave: once the document has been idle for AUTOSAVE_IDLE (no further
         // changes), write it to disk on a worker thread (never blocks the UI).
         // Debounced so continuous edits — dragging a card, typing — never save
@@ -2162,9 +2266,24 @@ impl eframe::App for TrellisApp {
                         self.card_sel_node = Some(sel);
                     }
                     let mut view = self.views.get(&sel).copied().unwrap_or_default();
+                    // If a WYSIWYG card screenshot is in its Framing phase for this
+                    // node, reframe the view to fit that card so the whole card is
+                    // captured unclipped. The reframe is temporary (not persisted).
+                    let framing_card = match &self.card_shot {
+                        Some(s) if s.node == sel && matches!(s.phase, ShotPhase::Framing) => {
+                            Some(s.card)
+                        }
+                        _ => None,
+                    };
+                    if let Some(cid) = framing_card {
+                        if let Some(c) = self.doc.card(sel, cid) {
+                            view = framed_view(ui.available_rect_before_wrap(), c.pos, c.size);
+                        }
+                    }
                     let mut env = Env {
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
+                        card_rects: &mut self.card_rects,
                     };
                     let can_paste = self.card_clipboard.is_some();
                     let node_path = crate::tree::node_path(&self.doc, sel);
@@ -2181,7 +2300,10 @@ impl eframe::App for TrellisApp {
                         &mut env,
                         &self.card_sel,
                     );
-                    self.views.insert(sel, view);
+                    // Never let the temporary export reframe overwrite the real view.
+                    if framing_card.is_none() {
+                        self.views.insert(sel, view);
+                    }
                     let pointer_down = ui.input(|i| i.pointer.any_down());
                     self.apply_canvas(sel, actions, pointer_down);
                 } else {
@@ -2193,6 +2315,17 @@ impl eframe::App for TrellisApp {
                 });
             }
         });
+
+        // Drive the single-card screenshot export. The canvas has just rendered
+        // (framed onto the card, if Framing); request the framebuffer now — the
+        // backend reads it at the end of this frame and delivers it next frame.
+        if let Some(shot) = self.card_shot.as_mut() {
+            if matches!(shot.phase, ShotPhase::Framing) {
+                shot.phase = ShotPhase::Requested;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+            }
+            ctx.request_repaint();
+        }
 
         if self.show_about {
             egui::Window::new("About Trellis")

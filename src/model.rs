@@ -1326,33 +1326,6 @@ impl Document {
         Some(format!("{}\n", s.trim_end()))
     }
 
-    /// Render a single card to a one-card PDF.
-    pub fn export_card_pdf(&self, node: NodeId, card: CardId) -> Result<Vec<u8>, String> {
-        let c = self.card(node, card).ok_or("card not found")?;
-        lines_to_pdf(&card_lines(c))
-    }
-
-    /// Render a single card to a PNG. Image cards export the image itself
-    /// (primary, re-encoded as PNG); sketches rasterize their strokes; every
-    /// other kind renders its text content (title + body) as black-on-white.
-    pub fn export_card_png(&self, node: NodeId, card: CardId) -> Result<Vec<u8>, String> {
-        let c = self.card(node, card).ok_or("card not found")?;
-        match &c.kind {
-            CardKind::Image { .. } => {
-                let imgs = c.kind.images();
-                let (data, _) = imgs.first().ok_or("image card has no image")?;
-                let dyn_img = image::load_from_memory(data).map_err(|e| e.to_string())?;
-                let mut buf = Vec::new();
-                dyn_img
-                    .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-                    .map_err(|e| e.to_string())?;
-                Ok(buf)
-            }
-            CardKind::Sketch { strokes } => sketch_to_png(strokes, c.size.x, c.size.y),
-            _ => lines_to_image(&card_lines(c), false),
-        }
-    }
-
     /// Render a sketch card to SVG. `None` for non-sketch cards.
     pub fn export_card_svg(&self, node: NodeId, card: CardId) -> Option<String> {
         let c = self.card(node, card)?;
@@ -1822,54 +1795,41 @@ fn lines_to_image(lines: &[ExportLine], gif: bool) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// Rasterize a sketch card's strokes to a PNG (2× the card's on-screen size,
-/// black-on-white background), stamping round brush dabs along each stroke.
-fn sketch_to_png(strokes: &[Stroke], w: f32, h: f32) -> Result<Vec<u8>, String> {
-    use image::{Rgba, RgbaImage};
-    let scale = 2.0_f32;
-    let width = ((w.max(1.0) * scale).ceil() as u32).max(1);
-    let height = ((h.max(1.0) * scale).ceil() as u32).max(1);
-    let mut img = RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255]));
-    for st in strokes {
-        let [r, g, b] = st.color;
-        let col = Rgba([r, g, b, 255]);
-        let rad = (st.width * scale / 2.0).max(0.5);
-        if st.points.len() == 1 {
-            let p = st.points[0];
-            stamp_disc(&mut img, p[0] * scale, p[1] * scale, rad, col);
-            continue;
-        }
-        for seg in st.points.windows(2) {
-            let (x0, y0) = (seg[0][0] * scale, seg[0][1] * scale);
-            let (x1, y1) = (seg[1][0] * scale, seg[1][1] * scale);
-            let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-            let steps = (dist.ceil() as i32).max(1);
-            for i in 0..=steps {
-                let t = i as f32 / steps as f32;
-                stamp_disc(&mut img, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, rad, col);
-            }
-        }
+/// Wrap a raw RGBA image (the WYSIWYG card screenshot) in a single-page PDF sized
+/// to the image at 150 DPI. Used by the per-card PDF export.
+pub fn image_rgba_to_pdf(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    use printpdf::{ColorBits, ColorSpace, Image, ImageTransform, ImageXObject, Mm, PdfDocument, Px};
+    if width == 0 || height == 0 || rgba.len() < (width * height * 4) as usize {
+        return Err("empty or malformed image".to_string());
     }
-    let mut buf = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    Ok(buf)
-}
-
-/// Paint a filled disc of radius `rad` centered at (`cx`, `cy`) onto `img`.
-fn stamp_disc(img: &mut image::RgbaImage, cx: f32, cy: f32, rad: f32, col: image::Rgba<u8>) {
-    let r = rad.ceil() as i32;
-    let (w, h) = (img.width() as i32, img.height() as i32);
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if (dx * dx + dy * dy) as f32 <= rad * rad {
-                let (x, y) = (cx as i32 + dx, cy as i32 + dy);
-                if x >= 0 && y >= 0 && x < w && y < h {
-                    img.put_pixel(x as u32, y as u32, col);
-                }
-            }
-        }
+    // Drop alpha, compositing over white (cards are opaque, so this is exact).
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for px in rgba.chunks_exact(4) {
+        let a = px[3] as u32;
+        let over = |c: u8| ((c as u32 * a + 255 * (255 - a)) / 255) as u8;
+        rgb.extend_from_slice(&[over(px[0]), over(px[1]), over(px[2])]);
     }
+    let dpi = 150.0_f32;
+    const MM_PER_PT: f32 = 25.4 / 72.0;
+    let w_mm = width as f32 / dpi * 72.0 * MM_PER_PT;
+    let h_mm = height as f32 / dpi * 72.0 * MM_PER_PT;
+    let (doc, page, layer) = PdfDocument::new("Trellis card", Mm(w_mm), Mm(h_mm), "Layer 1");
+    let xobj = ImageXObject {
+        width: Px(width as usize),
+        height: Px(height as usize),
+        color_space: ColorSpace::Rgb,
+        bits_per_component: ColorBits::Bit8,
+        interpolate: false,
+        image_data: rgb,
+        image_filter: None,
+        smask: None,
+        clipping_bbox: None,
+    };
+    Image::from(xobj).add_to_layer(
+        doc.get_page(page).get_layer(layer),
+        ImageTransform { dpi: Some(dpi), ..Default::default() },
+    );
+    doc.save_to_bytes().map_err(|e| e.to_string())
 }
 
 fn sketch_svg(strokes: &[Stroke], w: f32, h: f32) -> String {
@@ -2313,46 +2273,39 @@ mod tests {
         assert!(txt.contains("My Card"));
         assert!(txt.contains("**bold** body"));
 
-        assert!(doc.export_card_pdf(n, cid).unwrap().starts_with(b"%PDF"));
-        assert!(doc.export_card_png(n, cid).unwrap().starts_with(b"\x89PNG"));
+        // JSON export carries the format marker and round-trips the body.
+        let json = doc.export_card_json(n, cid).unwrap();
+        assert_eq!(parse_card_export(&json).unwrap().body, "**bold** body");
 
-        // A non-existent card yields None / Err rather than panicking.
+        // A non-existent card yields None rather than panicking.
         let missing: CardId = 999_999;
         assert!(doc.export_card_markdown(n, missing).is_none());
-        assert!(doc.export_card_pdf(n, missing).is_err());
-        // SVG is sketch-only.
+        assert!(doc.export_card_json(n, missing).is_none());
+        // SVG is sketch-only. (PNG/PDF are produced by the live app via screenshot.)
         assert!(doc.export_card_svg(n, cid).is_none());
     }
 
     #[test]
-    fn export_image_card_png_is_the_image_and_sketch_svg_has_strokes() {
+    fn sketch_svg_export_lists_strokes_and_image_pdf_wraps_a_raster() {
         let mut doc = Document::empty();
         let n = doc.add_node(None, "n".into());
 
-        // Image card: PNG export re-encodes the embedded image.
-        let mut png = Vec::new();
-        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .unwrap();
-        let img = doc
-            .add_card(n, egui::pos2(0.0, 0.0), CardKind::Image {
-                data: png,
-                name: "pic.png".into(),
-                extra: Vec::new(),
-                ocr: String::new(),
-            })
-            .unwrap();
-        let out = doc.export_card_png(n, img).unwrap();
-        assert!(out.starts_with(b"\x89PNG"));
-
-        // Sketch card: SVG lists the stroke, PNG rasterizes it.
+        // Sketch card: SVG export lists the stroke as a polyline.
         let sk = doc
             .add_card(n, egui::pos2(0.0, 0.0), CardKind::Sketch {
                 strokes: vec![Stroke { color: [255, 0, 0], width: 3.0, points: vec![[1.0, 1.0], [8.0, 8.0]] }],
             })
             .unwrap();
         assert!(doc.export_card_svg(n, sk).unwrap().contains("<polyline"));
-        assert!(doc.export_card_png(n, sk).unwrap().starts_with(b"\x89PNG"));
+        // Non-sketch cards have no SVG.
+        let t = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        assert!(doc.export_card_svg(n, t).is_none());
+
+        // A raw RGBA card screenshot wraps into a valid one-page PDF.
+        let rgba = vec![200u8; 4 * 4 * 4]; // 4×4 opaque image
+        let pdf = image_rgba_to_pdf(&rgba, 4, 4).unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+        assert!(image_rgba_to_pdf(&[], 0, 0).is_err());
     }
 
     #[test]
