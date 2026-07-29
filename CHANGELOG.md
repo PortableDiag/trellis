@@ -4,6 +4,23 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.38.0]
+
+### Added
+- **Fit a card to its content** — right-click a card → **Fit to content** resizes it
+  so its text/items/table are fully readable, instead of leaving an unreadable little
+  square. On the agent API, pass `"fit": true` on card **create** (`POST …/cards`) or
+  **update** (`PATCH …/cards/{cid}`); it's applied after all other fields and overrides
+  `size`. Works for text, code, checklist, table and sketch cards (image cards keep the
+  size their pictures dictate). This makes API/agent-created cards come out readable by
+  default.
+
+### Changed
+- **Autosort now auto-sizes too** — **Tools → Autosort cards** (and `POST …/autosort`)
+  first fits every card to its content, then packs them into a tighter grid whose
+  columns/rows follow the actual card sizes (no more one-size-fits-largest cells). The
+  result is both tidy *and* readable.
+
 ## [0.37.0]
 
 ### Changed

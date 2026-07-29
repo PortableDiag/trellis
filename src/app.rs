@@ -180,6 +180,7 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
         | A::DropFiles(..)
         | A::Remove(_)
         | A::Duplicate(_)
+        | A::FitCard(_)
         | A::SetColor(..)
         | A::SetFontScale(..)
         | A::ChecklistToggle(..)
@@ -1118,6 +1119,13 @@ impl TrellisApp {
                 CanvasAction::ResizeCard(cid, delta) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {
                         c.size = (c.size + delta).max(MIN_CARD);
+                    }
+                }
+                CanvasAction::FitCard(cid) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        if let Some(sz) = c.fit_size() {
+                            c.size = sz.max(MIN_CARD);
+                        }
                     }
                 }
                 CanvasAction::RaiseCard(cid) => self.doc.raise_card(node, cid),

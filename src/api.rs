@@ -130,6 +130,10 @@ pub struct AddCardInput {
     /// Body font-size multiplier (1.0 = default), for text/code cards.
     #[serde(default)]
     font_scale: Option<f32>,
+    /// Size the card to fit its content (overrides `size`), so API/agent-created
+    /// cards aren't unreadable little squares. No effect on image cards.
+    #[serde(default)]
+    fit: bool,
 }
 
 fn default_kind() -> String {
@@ -178,6 +182,10 @@ pub struct UpdateCardInput {
     /// Body font-size multiplier (1.0 = default), for text/code cards.
     #[serde(default)]
     font_scale: Option<f32>,
+    /// Resize the card to fit its content (applied after all other fields).
+    /// No effect on image cards.
+    #[serde(default)]
+    fit: bool,
 }
 
 #[derive(Deserialize)]
@@ -695,6 +703,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .pos
                 .map(|[x, y]| egui::pos2(x, y))
                 .unwrap_or_else(|| egui::pos2(40.0, 40.0));
+            let fit = input.fit;
             let img_name = input.title.clone();
             match doc.add_card(node, pos, kind) {
                 Some(cid) => {
@@ -718,6 +727,14 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                             base64::engine::general_purpose::STANDARD.decode(b64.trim())
                         {
                             doc.add_image(node, cid, bytes, img_name);
+                        }
+                    }
+                    // Fit to content last, once body/items/images are all set.
+                    if fit {
+                        if let Some(c) = doc.card_mut(node, cid) {
+                            if let Some(sz) = c.fit_size() {
+                                c.size = sz;
+                            }
                         }
                     }
                     (true, ApiResponse::created(json!({ "id": cid })))
@@ -792,6 +809,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                             .into_iter()
                             .map(|i| ChecklistItem { done: i.done, text: i.text })
                             .collect();
+                    }
+                }
+                // Fit to content last, once every other field has been applied.
+                if patch.fit {
+                    if let Some(sz) = c.fit_size() {
+                        c.size = sz;
                     }
                 }
                 (true, ApiResponse::ok(card_json(c)))
@@ -1244,6 +1267,35 @@ mod tests {
         assert_eq!(c.color, [1, 2, 3]);
         assert_eq!(c.pos, egui::pos2(40.0, 50.0));
         assert_eq!(c.size, egui::vec2(300.0, 200.0));
+    }
+
+    #[test]
+    fn create_and_patch_with_fit_sizes_card_to_content() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+
+        // Create a checklist with a long item and fit:true — it should come out
+        // wider than the default 240px square so the text is readable.
+        let input: AddCardInput = serde_json::from_str(
+            r#"{"kind":"checklist","title":"Groceries",
+                 "items":[{"done":false,"text":"buy oat milk, eggs, bread, coffee and a card for mum"}],
+                 "fit":true}"#,
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::AddCard { node: nid, input });
+        assert!(dirty);
+        let cid = serde_json::from_str::<Value>(&resp.body).unwrap()["id"].as_u64().unwrap();
+        assert!(doc.card_mut(nid, cid).unwrap().size.x > 240.0, "create fit should widen");
+
+        // Shrink it back to a square, then PATCH fit:true to re-fit.
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"size":[200,120]}"#).unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        assert!(doc.card_mut(nid, cid).unwrap().size.x <= 200.0);
+
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"fit":true}"#).unwrap();
+        let (_, resp) = process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        assert_eq!(resp.status, 200);
+        assert!(doc.card_mut(nid, cid).unwrap().size.x > 240.0, "patch fit should widen");
     }
 
     #[test]

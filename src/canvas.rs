@@ -26,6 +26,8 @@ pub enum CanvasAction {
     AddCard(CardKind, egui::Pos2),
     MoveCard(CardId, egui::Vec2),
     ResizeCard(CardId, egui::Vec2),
+    /// Resize a card to fit its content (right-click → Fit to content).
+    FitCard(CardId),
     RaiseCard(CardId),
     SetTitle(CardId, String),
     SetBody(CardId, String),
@@ -1337,6 +1339,15 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, node_path: &str, actions: &mut Vec<
     }
     if ui.button("Duplicate").clicked() {
         actions.push(CanvasAction::Duplicate(card.id));
+        ui.close_menu();
+    }
+    if !matches!(card.kind, CardKind::Image { .. })
+        && ui
+            .button("Fit to content")
+            .on_hover_text("Resize this card so its content is fully readable")
+            .clicked()
+    {
+        actions.push(CanvasAction::FitCard(card.id));
         ui.close_menu();
     }
     if ui.button("Copy card").clicked() {

@@ -116,7 +116,7 @@ returns the **full card objects**.
 POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
-POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, color?, font_scale?, image_base64?}
+POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, color?, font_scale?, fit?, image_base64?}
   → 201 {"id":<new>}   | 404 if node doesn't exist
 ```
 `kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
@@ -125,7 +125,9 @@ POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, co
 each other. `size` is `[w,h]`. `color` sets the title-bar accent at creation (see
 the accepted formats below). `items` is used only for `checklist`; `lang` only
 for `code`. `image_base64` gives an `image` card its first image (base64 file
-bytes; the `title` becomes its name).
+bytes; the `title` becomes its name). **`fit: true`** sizes the card to fit its
+content (overrides `size`), so a card comes out readable instead of a tiny square —
+recommended for agent-created cards. No effect on image cards.
 
 ### Update
 ```
@@ -134,11 +136,12 @@ PATCH /api/nodes/{id}              {title?, color?, bg?}
         color: tag color; bg: basket background color — both setting only
         (can't clear via API; use the app's Default to reset)
 
-PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, lang?, pos?, size?, items?, rows?, header?}
+PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, fit?, lang?, pos?, size?, items?, rows?, header?}
   → 200 {<updated card>}   | 404
 ```
 Every field is optional; only those present are changed. `pos`/`size` are
-`[x,y]`/`[w,h]`; `font_scale` sizes text/code body font (1.0 = default);
+`[x,y]`/`[w,h]`; **`fit: true`** resizes the card to fit its content (applied after
+every other field; overrides `size`); `font_scale` sizes text/code body font (1.0 = default);
 `lang` applies to code cards, `items` replaces a checklist's items (send them in
 the desired order to **reorder** a checklist), `rows` bulk-replaces a table's cell
 text, `header` toggles a table's header row. **`kind` converts the card to

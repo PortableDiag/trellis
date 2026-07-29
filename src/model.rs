@@ -325,6 +325,91 @@ impl Card {
             editing,
         }
     }
+
+    /// A readable size derived from the card's own content, so cards created
+    /// via the API/agents aren't unreadable little squares. Returns `None` for
+    /// kinds we don't auto-size (`image`). Heuristic: it errs slightly large so
+    /// text is never clipped, and clamps to sane bounds. Mirrors the canvas
+    /// rendering constants (`TITLE_H`, padding, `TABLE_ROW_H`).
+    pub fn fit_size(&self) -> Option<egui::Vec2> {
+        const TITLE_H: f32 = 24.0;
+        const PAD: f32 = 6.0;
+        const MIN_W: f32 = 140.0;
+        const MIN_H: f32 = 90.0;
+        const MAX_W: f32 = 900.0;
+        const MAX_H: f32 = 1400.0;
+        const TEXT_WRAP_W: f32 = 560.0; // cap text width; longer paragraphs wrap
+
+        let fs = if self.font_scale > 0.0 { self.font_scale } else { 1.0 };
+        let font_px = 14.0 * fs;
+        let line_h = font_px * 1.5;
+        let char_w = font_px * 0.6; // generous average width for proportional text
+
+        // Keep the title readable in the title bar: title text plus room for the
+        // edit/copy buttons.
+        let title_w = self.title.chars().count() as f32 * 8.0 + 96.0;
+
+        let (content_w, content_h) = match &self.kind {
+            CardKind::Image { .. } => return None,
+            CardKind::Text => wrapped_extent(&self.body, char_w, line_h, TEXT_WRAP_W),
+            CardKind::Code { .. } => {
+                // Monospace, no wrap: fit the longest line and every line.
+                let cw = font_px * 0.62;
+                let longest =
+                    self.body.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
+                let lines = self.body.lines().count().max(1) as f32;
+                (longest * cw, lines * line_h)
+            }
+            CardKind::Checklist { items } => {
+                let longest =
+                    items.iter().map(|i| i.text.chars().count()).max().unwrap_or(0) as f32;
+                // checkbox + text + delete/grip controls
+                let w = 26.0 + longest * char_w + 44.0;
+                let rows = items.len().max(1) as f32;
+                // one row per item (a touch taller than a text line) plus the
+                // "+ item" control's row
+                (w, rows * (line_h + 6.0) + 28.0)
+            }
+            CardKind::Table { table } => {
+                let cols = table.rows.first().map(|r| r.len()).unwrap_or(0);
+                let cols_w: f32 = (0..cols).map(|c| table.col_width(c)).sum();
+                let rows = table.rows.len() as f32;
+                // + row-number handle; + column-letter strip
+                (20.0 + cols_w, 24.0 + rows * 24.0)
+            }
+            CardKind::Sketch { strokes } => {
+                let mut maxx = 0.0f32;
+                let mut maxy = 0.0f32;
+                for s in strokes {
+                    for p in &s.points {
+                        maxx = maxx.max(p[0] + s.width);
+                        maxy = maxy.max(p[1] + s.width);
+                    }
+                }
+                (maxx, maxy)
+            }
+        };
+
+        let w = (content_w + PAD * 2.0).max(title_w);
+        let h = TITLE_H + PAD * 2.0 + content_h;
+        Some(egui::vec2(w.clamp(MIN_W, MAX_W), h.clamp(MIN_H, MAX_H)))
+    }
+}
+
+/// Estimate the `(width, height)` a block of text needs: width is the longest
+/// line (capped at `max_w`); height accounts for wrapping at that width. Used by
+/// [`Card::fit_size`].
+fn wrapped_extent(text: &str, char_w: f32, line_h: f32, max_w: f32) -> (f32, f32) {
+    let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
+    let natural_w = (longest * char_w).max(char_w * 8.0); // never absurdly thin
+    let content_w = natural_w.min(max_w);
+    let cols = (content_w / char_w).max(1.0);
+    let mut lines = 0.0f32;
+    for line in text.lines() {
+        let n = line.chars().count() as f32;
+        lines += (n / cols).ceil().max(1.0);
+    }
+    (content_w, lines.max(1.0) * line_h)
 }
 
 /// A node in the tree. Its `cards` form the basket shown when it is selected.
@@ -1029,18 +1114,37 @@ impl Document {
         if count == 0 {
             return false;
         }
-        // Uniform cells sized to the largest card keep everything clear.
         const GAP: f32 = 24.0;
-        let cell_w = n.cards.iter().map(|c| c.size.x).fold(0.0, f32::max) + GAP;
-        let cell_h = n.cards.iter().map(|c| c.size.y).fold(0.0, f32::max) + GAP;
+        // Auto-size every card to its content first, so the tidy grid is also
+        // readable (image cards keep their own size — `fit_size` returns `None`).
+        for c in n.cards.iter_mut() {
+            if let Some(sz) = c.fit_size() {
+                c.size = sz;
+            }
+        }
         let cols = (count as f32).sqrt().ceil().max(1.0) as usize;
+        let rows = count.div_ceil(cols);
         // Placement order: cluster grouped cards together, else keep card order.
         let mut order: Vec<usize> = (0..count).collect();
         order.sort_by_key(|&i| (n.cards[i].group.map(|g| g as i128).unwrap_or(i128::MAX), i));
-        let origin = egui::pos2(40.0, 40.0);
+        // Per-column width / per-row height = the largest card in that column /
+        // row, so varied card sizes pack tightly instead of into uniform cells.
+        let mut col_w = vec![0.0f32; cols];
+        let mut row_h = vec![0.0f32; rows];
         for (slot, &i) in order.iter().enumerate() {
-            let (r, c) = (slot / cols, slot % cols);
-            n.cards[i].pos = egui::pos2(origin.x + c as f32 * cell_w, origin.y + r as f32 * cell_h);
+            col_w[slot % cols] = col_w[slot % cols].max(n.cards[i].size.x);
+            row_h[slot / cols] = row_h[slot / cols].max(n.cards[i].size.y);
+        }
+        let mut col_x = vec![40.0f32; cols];
+        for c in 1..cols {
+            col_x[c] = col_x[c - 1] + col_w[c - 1] + GAP;
+        }
+        let mut row_y = vec![40.0f32; rows];
+        for r in 1..rows {
+            row_y[r] = row_y[r - 1] + row_h[r - 1] + GAP;
+        }
+        for (slot, &i) in order.iter().enumerate() {
+            n.cards[i].pos = egui::pos2(col_x[slot % cols], row_y[slot / cols]);
             n.cards[i].docked_to = None;
         }
         true
@@ -1915,6 +2019,44 @@ mod tests {
     }
 
     #[test]
+    fn fit_size_grows_to_fit_content_and_skips_images() {
+        let default = egui::vec2(240.0, 160.0);
+
+        // A checklist with a long item gets much wider than the default square,
+        // and wide enough that the text isn't clipped.
+        let long = "buy oat milk, eggs, bread, coffee, and a birthday card for mum";
+        let mut cl = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Checklist {
+            items: vec![ChecklistItem { done: false, text: long.into() }],
+        });
+        cl.title = "Groceries".into();
+        let sz = cl.fit_size().expect("checklist fits");
+        assert!(sz.x > default.x, "checklist should widen: {sz:?}");
+        // roughly checkbox + text-at-~8.4px/char + controls
+        assert!(sz.x >= long.chars().count() as f32 * 8.0, "wide enough for text: {sz:?}");
+
+        // A multi-line text card grows taller than the default.
+        let mut txt = Card::new(2, egui::pos2(0.0, 0.0), CardKind::Text);
+        txt.body = (0..12).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let sz = txt.fit_size().expect("text fits");
+        assert!(sz.y > default.y, "12 lines should grow taller: {sz:?}");
+
+        // Everything stays within the sane clamp bounds.
+        let mut huge = Card::new(3, egui::pos2(0.0, 0.0), CardKind::Text);
+        huge.body = "x".repeat(5000);
+        let sz = huge.fit_size().unwrap();
+        assert!(sz.x <= 900.0 && sz.y <= 1400.0, "clamped: {sz:?}");
+
+        // Image cards opt out (their size is driven by the pictures, not text).
+        let img = Card::new(4, egui::pos2(0.0, 0.0), CardKind::Image {
+            data: vec![],
+            name: String::new(),
+            extra: vec![],
+            ocr: String::new(),
+        });
+        assert!(img.fit_size().is_none());
+    }
+
+    #[test]
     fn table_ops_keep_grid_rectangular_and_roundtrip_csv_xlsx() {
         let mut doc = Document::empty();
         let n = doc.add_node(None, "n".into());
@@ -2426,8 +2568,17 @@ mod tests {
         let ids: Vec<_> = (0..5)
             .map(|_| doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap())
             .collect();
+        // A checklist with a long item: autosort should auto-size it wide.
+        let wide = doc
+            .add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist {
+                items: vec![ChecklistItem {
+                    done: false,
+                    text: "a genuinely long checklist item that needs a wide card".into(),
+                }],
+            })
+            .unwrap();
         assert!(doc.autosort(n));
-        // No two cards share a position, and none stayed stacked at the origin.
+        // No two cards overlap even with varied sizes, and none stayed stacked.
         let rects: Vec<egui::Rect> = doc.nodes[&n]
             .cards
             .iter()
@@ -2438,6 +2589,9 @@ mod tests {
                 assert!(!rects[i].intersects(rects[j]), "cards {i} and {j} overlap");
             }
         }
+        // The wide checklist was auto-sized past the default 240px square.
+        let wide_card = doc.nodes[&n].cards.iter().find(|c| c.id == wide).unwrap();
+        assert!(wide_card.size.x > 240.0, "autosort should auto-size: {:?}", wide_card.size);
         assert_eq!(ids.len(), 5);
     }
 

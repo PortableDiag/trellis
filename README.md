@@ -71,8 +71,11 @@ and zooms (Ctrl+scroll); each node remembers its view.
   together; drag a docked card off to detach.
 - **Snap** (toggle) — a dragged card's edges snap to nearby cards' edges, with a
   guide line.
-- **Autosort** — **Tools → Autosort cards** lays the whole basket out in a tidy,
-  non-overlapping grid.
+- **Autosort** — **Tools → Autosort cards** first **auto-sizes** every card to fit
+  its content, then lays the whole basket out in a tidy, non-overlapping grid.
+- **Fit to content** — right-click a card → **Fit to content** resizes just that card
+  so its text/items/table are fully readable (no more unreadable little squares). Agents
+  get the same via `"fit": true` on card create/update.
 
 **Documents & interop**
 - **Drag & drop** text/Markdown or image files onto a basket to create the
