@@ -1490,6 +1490,117 @@ impl Document {
         }
     }
 
+    // --- basket (single-node) export/import --------------------------------
+
+    /// Export one basket (node) to Markdown. `with_subnodes` includes the whole
+    /// subtree (child nodes become deeper headings); otherwise just this node's
+    /// own cards. `None` if the node no longer exists.
+    pub fn export_node_markdown(&self, node: NodeId, with_subnodes: bool) -> Option<String> {
+        let n = self.nodes.get(&node)?;
+        let mut s = String::new();
+        if with_subnodes {
+            self.export_node_md(node, 1, &mut s);
+        } else {
+            s.push_str(&format!("# {}\n\n", n.title));
+            for card in &n.cards {
+                if !card.title.is_empty() {
+                    s.push_str(&format!("**{}**\n\n", card.title));
+                }
+                s.push_str(&card_body_md(card));
+            }
+        }
+        Some(s)
+    }
+
+    /// Export one basket (node) to a standalone HTML document. `with_subnodes`
+    /// includes the whole subtree. `None` if the node no longer exists.
+    pub fn export_node_html_doc(&self, node: NodeId, with_subnodes: bool) -> Option<String> {
+        let n = self.nodes.get(&node)?;
+        let mut s = String::new();
+        s.push_str(
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+             <title>Trellis basket</title>\n<style>\n",
+        );
+        s.push_str(EXPORT_CSS);
+        s.push_str("</style>\n</head>\n<body>\n<main>\n");
+        if with_subnodes {
+            self.export_node_html(node, 1, &mut s);
+        } else {
+            s.push_str(&format!("<section class=\"node\">\n<h1>{}</h1>\n", escape_html(&n.title)));
+            for card in &n.cards {
+                s.push_str("<article class=\"card\">\n");
+                if !card.title.is_empty() {
+                    s.push_str(&format!("<h4>{}</h4>\n", escape_html(&card.title)));
+                }
+                s.push_str(&card_body_html(card));
+                s.push_str("</article>\n");
+            }
+            s.push_str("</section>\n");
+        }
+        s.push_str("</main>\n</body>\n</html>\n");
+        Some(s)
+    }
+
+    /// Export one basket (node) to a portable JSON bundle (see [`NodeExport`]),
+    /// self-contained — image bytes embed inline. `with_subnodes` includes the
+    /// whole subtree. `None` if the node no longer exists.
+    pub fn export_node_json(&self, node: NodeId, with_subnodes: bool) -> Option<String> {
+        let exp = self.node_export(node, with_subnodes)?;
+        serde_json::to_string_pretty(&exp).ok()
+    }
+
+    fn node_export(&self, id: NodeId, recurse: bool) -> Option<NodeExport> {
+        let n = self.nodes.get(&id)?;
+        // Cards keep their layout (pos/size/color/content) but shed workspace-only
+        // grouping/dock links, which don't survive being lifted out of the doc.
+        let cards = n
+            .cards
+            .iter()
+            .map(|c| {
+                let mut c = c.clone();
+                c.group = None;
+                c.docked_to = None;
+                c.editing = false;
+                c
+            })
+            .collect();
+        let children = if recurse {
+            n.children.iter().filter_map(|&c| self.node_export(c, true)).collect()
+        } else {
+            Vec::new()
+        };
+        Some(NodeExport {
+            format: NODE_EXPORT_FORMAT.to_string(),
+            version: 1,
+            title: n.title.clone(),
+            bg: n.bg,
+            cards,
+            children,
+        })
+    }
+
+    /// Import a basket bundle as a new node under `parent` (or a new root when
+    /// `None`). Every node and card gets a fresh id; returns the new node's id.
+    pub fn add_node_from_export(&mut self, parent: Option<NodeId>, exp: NodeExport) -> NodeId {
+        let id = self.add_node(parent, exp.title);
+        if let Some(n) = self.nodes.get_mut(&id) {
+            n.bg = exp.bg;
+        }
+        for card in &exp.cards {
+            if let Some(cid) = self.add_card_from(id, card, card.pos) {
+                if let Some(c) = self.card_mut(id, cid) {
+                    c.group = None;
+                    c.docked_to = None;
+                }
+            }
+        }
+        for child in exp.children {
+            self.add_node_from_export(Some(id), child);
+        }
+        id
+    }
+
     /// Create a new root node from imported text, splitting nothing — the whole
     /// document becomes a single markdown card. `html` chooses conversion.
     pub fn import_as_node(&mut self, title: String, content: &str, html: bool) -> NodeId {
@@ -1574,6 +1685,32 @@ pub struct CardExport {
 pub fn parse_card_export(json: &str) -> Option<CardExport> {
     let exp: CardExport = serde_json::from_str(json).ok()?;
     (exp.format == CARD_EXPORT_FORMAT).then_some(exp)
+}
+
+/// Format marker written into a basket (node) JSON export.
+pub const NODE_EXPORT_FORMAT: &str = "trellis-node";
+
+/// A portable basket: one node's cards (positions/colors preserved; image bytes
+/// inline) and, optionally, its whole subtree. This is what **Export basket → JSON**
+/// writes and **Import basket** reads. Ids are reassigned on import; workspace-only
+/// grouping/dock links are dropped.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NodeExport {
+    pub format: String,
+    pub version: u32,
+    pub title: String,
+    #[serde(default)]
+    pub bg: Option<[u8; 3]>,
+    pub cards: Vec<Card>,
+    #[serde(default)]
+    pub children: Vec<NodeExport>,
+}
+
+/// Parse a basket JSON export, returning `None` unless it's well-formed and
+/// carries the [`NODE_EXPORT_FORMAT`] marker.
+pub fn parse_node_export(json: &str) -> Option<NodeExport> {
+    let exp: NodeExport = serde_json::from_str(json).ok()?;
+    (exp.format == NODE_EXPORT_FORMAT).then_some(exp)
 }
 
 fn searchable_body(card: &Card) -> String {
@@ -2016,6 +2153,45 @@ mod tests {
     fn hard_wrap_renders_as_line_breaks_in_html() {
         // The whole point: two lines become two visual lines (<br>), not one.
         assert!(md_to_html("line one\nline two").contains("<br"));
+    }
+
+    #[test]
+    fn basket_export_import_round_trips_node_and_subtree() {
+        let mut doc = Document::empty();
+        let day = doc.add_node(None, "Wednesday".into());
+        let c1 = doc.add_card(day, egui::pos2(60.0, 60.0), CardKind::Text).unwrap();
+        doc.card_mut(day, c1).unwrap().body = "morning notes".into();
+        doc.card_mut(day, c1).unwrap().title = "Journal".into();
+        let sub = doc.add_node(Some(day), "Meeting".into());
+        doc.add_card(sub, egui::pos2(20.0, 20.0), CardKind::Checklist {
+            items: vec![ChecklistItem { done: true, text: "ship it".into() }],
+        })
+        .unwrap();
+
+        // Markdown / HTML reflect the content; +subnodes pulls in the child.
+        let md = doc.export_node_markdown(day, false).unwrap();
+        assert!(md.contains("morning notes") && !md.contains("Meeting"));
+        let md_sub = doc.export_node_markdown(day, true).unwrap();
+        assert!(md_sub.contains("Meeting") && md_sub.contains("ship it"));
+        assert!(doc.export_node_html_doc(day, true).unwrap().contains("morning notes"));
+
+        // JSON round-trips: import rebuilds the node + subtree with fresh ids and
+        // the card content/position preserved.
+        let json = doc.export_node_json(day, true).unwrap();
+        let exp = parse_node_export(&json).expect("valid basket file");
+        let n_nodes = doc.nodes.len();
+        let new = doc.add_node_from_export(None, exp);
+        assert_eq!(doc.nodes.len(), n_nodes + 2, "node + its child were imported");
+        let nn = &doc.nodes[&new];
+        assert_eq!(nn.title, "Wednesday");
+        let jcard = nn.cards.iter().find(|c| c.title == "Journal").unwrap();
+        assert_eq!(jcard.body, "morning notes");
+        assert_eq!(jcard.pos, egui::pos2(60.0, 60.0), "position preserved");
+        assert_ne!(jcard.id, c1, "imported card got a fresh id");
+        // The imported child node came along.
+        assert!(doc.nodes.values().filter(|n| n.title == "Meeting").count() >= 2);
+        // A non-basket JSON is rejected.
+        assert!(parse_node_export("{\"format\":\"trellis-card\",\"version\":1}").is_none());
     }
 
     #[test]

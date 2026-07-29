@@ -89,6 +89,10 @@ and zooms (Ctrl+scroll); each node remembers its view.
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
+- **Export / import a single basket** — right-click a tree node → **Export basket** (its
+  cards) or **Export basket + subnodes** (the whole subtree) as **Markdown / HTML / JSON**,
+  and **Import basket…** to bring a JSON basket file back in as a child node. Share one
+  day's notes without handing over the whole archive.
 
 **App**
 - Full-text **search** across every node title and card (Ctrl+F)

@@ -931,10 +931,15 @@ impl TrellisApp {
 
     fn apply_tree(&mut self, actions: Vec<TreeAction>) {
         // Selection and the reorder-mode toggle aren't document edits.
-        if actions
-            .iter()
-            .any(|a| !matches!(a, TreeAction::Select(_) | TreeAction::ToggleReorder))
-        {
+        if actions.iter().any(|a| {
+            !matches!(
+                a,
+                TreeAction::Select(_)
+                    | TreeAction::ToggleReorder
+                    | TreeAction::ExportBasket(..)
+                    | TreeAction::ImportBasket(_)
+            )
+        }) {
             self.mark_dirty();
         }
         for a in actions {
@@ -994,7 +999,79 @@ impl TrellisApp {
                         n.bg = bg;
                     }
                 }
+                TreeAction::ExportBasket(id, fmt, subs) => self.export_basket(id, fmt, subs),
+                TreeAction::ImportBasket(id) => self.import_basket(id),
             }
+        }
+    }
+
+    /// A filesystem-safe base filename from a node's title.
+    fn basket_basename(&self, node: NodeId) -> String {
+        let raw = self.doc.nodes.get(&node).map(|n| n.title.trim().to_string()).unwrap_or_default();
+        let cleaned: String = raw
+            .chars()
+            .map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.') { c } else { '_' })
+            .collect();
+        let cleaned = cleaned.trim().trim_matches('.').trim();
+        if cleaned.is_empty() { "basket".to_string() } else { cleaned.to_string() }
+    }
+
+    /// Export one basket (node) to a text/data file (Markdown/HTML/JSON), with a
+    /// save dialog pre-filled from the node title.
+    fn export_basket(&mut self, node: NodeId, fmt: crate::tree::BasketFormat, subs: bool) {
+        use crate::tree::BasketFormat;
+        let base = self.basket_basename(node);
+        let (ext, filter, label) = match fmt {
+            BasketFormat::Markdown => ("md", "Markdown", "Markdown"),
+            BasketFormat::Html => ("html", "HTML", "HTML"),
+            BasketFormat::Json => ("json", "JSON", "JSON"),
+        };
+        let suffix = if subs { "-with-subnodes" } else { "" };
+        let Some(path) = self
+            .file_dialog()
+            .add_filter(filter, &[ext])
+            .set_file_name(format!("{base}{suffix}.{ext}"))
+            .save_file()
+        else {
+            return;
+        };
+        let content = match fmt {
+            BasketFormat::Markdown => self.doc.export_node_markdown(node, subs),
+            BasketFormat::Html => self.doc.export_node_html_doc(node, subs),
+            BasketFormat::Json => self.doc.export_node_json(node, subs),
+        };
+        match content {
+            Some(s) => match std::fs::write(&path, s) {
+                Ok(_) => self.status = format!("Exported basket {label} → {}", path.display()),
+                Err(e) => self.status = format!("Export failed: {e}"),
+            },
+            None => self.status = "Export failed: node not found".to_string(),
+        }
+    }
+
+    /// Import a basket JSON file as a child of `parent`, rebuilding its cards
+    /// (and any subtree) with fresh ids.
+    fn import_basket(&mut self, parent: NodeId) {
+        let Some(path) =
+            self.file_dialog().add_filter("Trellis basket (JSON)", &["json"]).pick_file()
+        else {
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match crate::model::parse_node_export(&text) {
+                Some(exp) => {
+                    let title = exp.title.clone();
+                    let new = self.doc.add_node_from_export(Some(parent), exp);
+                    if let Some(n) = self.doc.nodes.get_mut(&parent) {
+                        n.expanded = true;
+                    }
+                    self.selected = Some(new);
+                    self.mark_dirty();
+                    self.status = format!("Imported basket \"{title}\"");
+                }
+                None => self.status = "Import failed: not a Trellis basket file".to_string(),
+            },
+            Err(e) => self.status = format!("Import failed: {e}"),
         }
     }
 

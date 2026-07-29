@@ -4,6 +4,17 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.39.0]
+
+### Added
+- **Export / import a single basket** — right-click a tree node → **Export basket** (just
+  that node's cards) or **Export basket + subnodes** (the whole subtree), in **Markdown**,
+  **HTML**, or **JSON**. The JSON is a portable, self-contained basket file (image bytes
+  embed inline; card positions/colors preserved) — hand someone a single day's notes
+  without exporting your whole archive or going card-by-card. Bring one in with right-click
+  a node → **Import basket…**, which adds it as a child (fresh ids; workspace-only
+  grouping/dock links are dropped). *(Visual PNG + WYSIWYG PDF of a basket land next.)*
+
 ## [0.38.0]
 
 ### Added

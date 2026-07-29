@@ -21,8 +21,21 @@ pub(crate) fn node_path(doc: &Document, id: NodeId) -> String {
 
 /// Actions the tree UI requests; applied by the app after the immutable walk so
 /// we never mutate the arena while iterating it.
+/// Text/data formats a single basket can be exported to (the visual PDF/PNG are
+/// handled separately by the canvas screenshot path).
+#[derive(Clone, Copy)]
+pub enum BasketFormat {
+    Markdown,
+    Html,
+    Json,
+}
+
 pub enum TreeAction {
     Select(NodeId),
+    /// Export one basket (node) to a text/data file. `bool` = include subnodes.
+    ExportBasket(NodeId, BasketFormat, bool),
+    /// Import a basket JSON file as a child of this node.
+    ImportBasket(NodeId),
     AddRoot,
     AddChild(NodeId),
     AddSibling(NodeId),
@@ -266,6 +279,35 @@ fn node_ui(
                         ui.close_menu();
                     }
                 });
+                ui.separator();
+                let export_menu = |ui: &mut egui::Ui, actions: &mut Vec<TreeAction>, subs: bool| {
+                    if ui.button("Markdown (.md)").clicked() {
+                        actions.push(TreeAction::ExportBasket(id, BasketFormat::Markdown, subs));
+                        ui.close_menu();
+                    }
+                    if ui.button("HTML (.html)").clicked() {
+                        actions.push(TreeAction::ExportBasket(id, BasketFormat::Html, subs));
+                        ui.close_menu();
+                    }
+                    if ui.button("JSON (basket file)").clicked() {
+                        actions.push(TreeAction::ExportBasket(id, BasketFormat::Json, subs));
+                        ui.close_menu();
+                    }
+                };
+                ui.menu_button("Export basket", |ui| export_menu(ui, actions, false))
+                    .response
+                    .on_hover_text("Share just this basket's cards");
+                ui.menu_button("Export basket + subnodes", |ui| export_menu(ui, actions, true))
+                    .response
+                    .on_hover_text("Share this basket and everything nested under it");
+                if ui
+                    .button("Import basket…")
+                    .on_hover_text("Add a basket JSON file as a child of this node")
+                    .clicked()
+                {
+                    actions.push(TreeAction::ImportBasket(id));
+                    ui.close_menu();
+                }
                 ui.separator();
                 if ui.button("Delete subtree").clicked() {
                     actions.push(TreeAction::Remove(id));
