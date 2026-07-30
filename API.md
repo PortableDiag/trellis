@@ -318,6 +318,18 @@ GET /api/tags            → 200 {"tags":[{"tag":"todo","count":3}, …]}   (all
 GET /api/tags?name=todo  → 200 {"tag":"todo","hits":[{node,node_title,snippet}, …]}
 ```
 
+### Properties
+Inline `key:: value` fields (Dataview-style) written in a card are parsed as
+metadata — e.g. `due:: 2026-08-15`, `priority:: high`, `status:: open`. The `::`
+must be followed by a space (so `std::fmt` and URLs aren't matched). Works as a
+whole line or bracketed inline (`[due:: 2026-08-15]`). Keys are lowercased. A
+card's parsed properties are included in its JSON as `properties:[{key,value}]`.
+```
+GET /api/properties                    → 200 {"properties":[{"key":"due","count":4}, …]}
+GET /api/properties?key=due            → 200 {"key":"due","value":null,"hits":[{node,node_title,snippet}, …]}
+GET /api/properties?key=status&value=open → 200 hits where status == open
+```
+
 ### Backup
 Trigger a full-document backup, or read the backup status. Destinations,
 schedule, and encryption are configured in the app (**Tools → Backup…**); this

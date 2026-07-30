@@ -71,6 +71,9 @@ pub enum ApiRequest {
     // #tags: list all with counts, or (with ?name=) the cards carrying one.
     Tags,
     TagCards(String),
+    // key:: value properties: list keys, or (with ?key=[&value=]) matching cards.
+    PropertyKeys,
+    PropertyCards { key: String, value: Option<String> },
     // Backup control — handled by the app loop (needs backup config + doc file),
     // not by `process`, since `process` only sees the `Document`.
     BackupStatus,
@@ -564,6 +567,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "tags"]) => match query_get(query, "name") {
             Some(name) => Ok(ApiRequest::TagCards(name)),
             None => Ok(ApiRequest::Tags),
+        },
+        (Method::Get, ["api", "properties"]) => match query_get(query, "key") {
+            Some(key) => Ok(ApiRequest::PropertyCards { key, value: query_get(query, "value") }),
+            None => Ok(ApiRequest::PropertyKeys),
         },
         (Method::Get, ["api", "backup"]) => Ok(ApiRequest::BackupStatus),
         (Method::Post, ["api", "backup", "run"]) => Ok(ApiRequest::BackupRun),
@@ -1262,6 +1269,22 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .collect();
             (false, ApiResponse::ok(json!({ "tag": tag.trim_start_matches('#'), "hits": hits })))
         }
+        ApiRequest::PropertyKeys => {
+            let keys: Vec<Value> = doc
+                .property_keys()
+                .into_iter()
+                .map(|(key, count)| json!({ "key": key, "count": count }))
+                .collect();
+            (false, ApiResponse::ok(json!({ "properties": keys })))
+        }
+        ApiRequest::PropertyCards { key, value } => {
+            let hits: Vec<Value> = doc
+                .cards_with_property(&key, value.as_deref())
+                .into_iter()
+                .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
+                .collect();
+            (false, ApiResponse::ok(json!({ "key": key, "value": value, "hits": hits })))
+        }
         // Backup requests are intercepted and answered by the app loop (they need
         // the backup config + document file). This is only reached if that
         // interception is ever missed — report it rather than silently no-op.
@@ -1359,6 +1382,13 @@ fn card_json(c: &Card) -> Value {
         "docked_to": c.docked_to,
         "font_scale": c.font_scale,
     });
+    let props = c.properties();
+    if !props.is_empty() {
+        v["properties"] = json!(props
+            .iter()
+            .map(|(k, val)| json!({ "key": k, "value": val }))
+            .collect::<Vec<_>>());
+    }
     match &c.kind {
         CardKind::Text => {
             v["body"] = json!(c.body);

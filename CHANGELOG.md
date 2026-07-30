@@ -4,6 +4,16 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.49.0]
+
+### Added
+- **Card properties** — inline `key:: value` fields (Dataview-style) written in any card are
+  parsed as metadata, e.g. `due:: 2026-08-15`, `priority:: high`, `status:: open`. The `::`
+  must be followed by a space, so code like `std::fmt` and URLs aren't matched; a whole line
+  or a bracketed `[due:: 2026-08-15]` both work. A card's JSON now includes
+  `properties:[{key,value}]`, and the API can list/filter by them: `GET /api/properties`,
+  `?key=<k>`, `?key=<k>&value=<v>`. This is the foundation for due dates + the task agenda.
+
 ## [0.48.0]
 
 ### Added

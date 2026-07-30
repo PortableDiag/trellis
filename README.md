@@ -119,6 +119,9 @@ and zooms (Ctrl+scroll); each node remembers its view.
 - **#tags** (View → Tags) — write `#tags` in any card and browse them
   document-wide: the Tags panel lists every tag with a count; click one to see
   (and jump to) the cards that use it. Nested tags like `#work/urgent` work.
+- **Properties** — inline `key:: value` fields in a card (e.g. `due:: 2026-08-15`,
+  `status:: open`) are parsed as metadata you can query across the tree (via the
+  API today; the query card / task agenda build on this).
 - **View → Themes** — Trellis (default), Light, or Terminal Green
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN

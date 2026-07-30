@@ -311,6 +311,11 @@ fn default_font_scale() -> f32 {
 }
 
 impl Card {
+    /// This card's inline `key:: value` properties (parsed from title + body).
+    pub fn properties(&self) -> Vec<(String, String)> {
+        extract_properties(&format!("{}\n{}", self.title, searchable_body(self)))
+    }
+
     pub fn new(id: CardId, pos: egui::Pos2, kind: CardKind) -> Self {
         let editing =
             matches!(
@@ -1893,6 +1898,123 @@ impl Document {
         }
         hits
     }
+
+    /// The `key:: value` properties on one card (parsed from its title + body).
+    pub fn card_properties(&self, node: NodeId, card: CardId) -> Vec<(String, String)> {
+        match self.card(node, card) {
+            Some(c) => {
+                let hay = format!("{}\n{}", c.title, searchable_body(c));
+                extract_properties(&hay)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Value of property `key` on a card (last one wins), or `None`.
+    pub fn card_property(&self, node: NodeId, card: CardId, key: &str) -> Option<String> {
+        let key = key.to_lowercase();
+        self.card_properties(node, card)
+            .into_iter()
+            .filter(|(k, _)| *k == key)
+            .next_back()
+            .map(|(_, v)| v)
+    }
+
+    /// Every property key used across the document with how many cards use it.
+    pub fn property_keys(&self) -> Vec<(String, usize)> {
+        let mut m: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for node in self.nodes.values() {
+            for card in &node.cards {
+                let hay = format!("{}\n{}", card.title, searchable_body(card));
+                let mut seen = std::collections::BTreeSet::new();
+                for (k, _) in extract_properties(&hay) {
+                    if seen.insert(k.clone()) {
+                        *m.entry(k).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        m.into_iter().collect()
+    }
+
+    /// Cards that have property `key` (optionally `= value`, case-insensitive),
+    /// each as a search hit whose snippet is `key: value`.
+    pub fn cards_with_property(&self, key: &str, value: Option<&str>) -> Vec<SearchHit> {
+        let key = key.to_lowercase();
+        let want_val = value.map(|v| v.to_lowercase());
+        let mut hits = Vec::new();
+        for node in self.nodes.values() {
+            for card in &node.cards {
+                let hay = format!("{}\n{}", card.title, searchable_body(card));
+                let props = extract_properties(&hay);
+                if let Some((_, v)) = props.iter().find(|(k, v)| {
+                    *k == key && want_val.as_ref().map_or(true, |w| v.to_lowercase() == *w)
+                }) {
+                    hits.push(SearchHit {
+                        node: node.id,
+                        node_title: node.title.clone(),
+                        snippet: format!("{key}: {v}"),
+                    });
+                }
+            }
+        }
+        hits
+    }
+}
+
+/// Extract inline `key:: value` properties from `text` (Dataview-style). The
+/// `::` must be followed by a space, which keeps code like `std::fmt` and URLs
+/// from being mistaken for properties. Two forms are recognized:
+/// a whole line `due:: 2026-08-15`, and a bracketed inline `[due:: 2026-08-15]`
+/// (or with parens) so a property can sit inside other text. Keys are lowercased;
+/// values are trimmed. Order is preserved; a later value for a key wins in
+/// [`Document::card_property`].
+pub(crate) fn extract_properties(text: &str) -> Vec<(String, String)> {
+    let b = text.as_bytes();
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut i = 0;
+    while i + 2 < b.len() {
+        // A property marker is `::` followed by a space/tab.
+        if b[i] == b':' && b[i + 1] == b':' && (b[i + 2] == b' ' || b[i + 2] == b'\t') {
+            // Walk back over the key (word chars) to its start.
+            let mut ks = i;
+            while ks > 0 {
+                let c = b[ks - 1];
+                if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
+                    ks -= 1;
+                } else {
+                    break;
+                }
+            }
+            if ks < i {
+                let opener = if ks > 0 { b[ks - 1] } else { 0 };
+                let key = text[ks..i].to_lowercase();
+                let mut vs = i + 2;
+                while vs < b.len() && (b[vs] == b' ' || b[vs] == b'\t') {
+                    vs += 1;
+                }
+                let mut ve = vs;
+                while ve < b.len() {
+                    let c = b[ve];
+                    if c == b'\n'
+                        || (opener == b'[' && c == b']')
+                        || (opener == b'(' && c == b')')
+                    {
+                        break;
+                    }
+                    ve += 1;
+                }
+                let value = text[vs..ve].trim().to_string();
+                if !value.is_empty() {
+                    out.push((key, value));
+                }
+                i = ve;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Extract `#tag` tokens from `text`, lowercased and de-duplicated. A tag starts
@@ -2683,6 +2805,34 @@ mod tests {
             .write_to(&mut buf, image::ImageFormat::Png)
             .unwrap();
         buf.into_inner()
+    }
+
+    #[test]
+    fn extract_properties_parses_fields_not_code() {
+        let p = extract_properties("due:: 2026-08-15\npriority:: high\nsee std::fmt for [status:: done] end");
+        assert!(p.contains(&("due".to_string(), "2026-08-15".to_string())));
+        assert!(p.contains(&("priority".to_string(), "high".to_string())));
+        // bracketed inline works and stops at ']'
+        assert!(p.contains(&("status".to_string(), "done".to_string())));
+        // `std::fmt` (no space after ::) is NOT a property
+        assert!(!p.iter().any(|(k, _)| k == "std"));
+    }
+
+    #[test]
+    fn document_property_queries() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c1 = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c1).unwrap().body = "ship it\ndue:: 2026-08-15\nstatus:: open".into();
+        let c2 = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c2).unwrap().body = "later\ndue:: 2026-09-01".into();
+        assert_eq!(doc.card_property(n, c1, "due").as_deref(), Some("2026-08-15"));
+        let keys: std::collections::HashMap<_, _> = doc.property_keys().into_iter().collect();
+        assert_eq!(keys.get("due"), Some(&2));
+        assert_eq!(keys.get("status"), Some(&1));
+        assert_eq!(doc.cards_with_property("due", None).len(), 2);
+        assert_eq!(doc.cards_with_property("status", Some("open")).len(), 1);
+        assert_eq!(doc.cards_with_property("status", Some("closed")).len(), 0);
     }
 
     #[test]
