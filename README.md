@@ -18,8 +18,10 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 **Tree**
 - Add root / child / sibling nodes; inline rename (double-click); delete subtrees
 - Reorder siblings (move up/down), indent / outdent to reshape the hierarchy
-- Expand / collapse, per-node color tags, and a per-node **basket background
-  color** (right-click → **Basket color**; the black grid stays the default)
+- Expand / collapse; right-click → **Expand all** / **Collapse all** to open or
+  fold a whole branch at once for working with big node sets
+- Per-node color tags and a per-node **basket background color** (right-click →
+  **Basket color**; the black grid stays the default)
 - Right-click → **Copy** a node's **id** (for the agent API, `/api/nodes/{id}`)
   or its **path** breadcrumb, so you can point an agent at the exact node
 
@@ -29,7 +31,9 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   italic, headings, lists, quotes, code, links, rules), a **text color** picker
   whose color shows live in the rendered card, a **font-size** selector
   (75%–200%, per card), and **auto-continuing lists** (Enter adds the next
-  `-`/`1.`/`- [ ]` marker; empty item ends the list).
+  `-`/`1.`/`- [ ]` marker; empty item ends the list). **Drag an image onto a
+  text card** (or right-click in edit mode) to embed it **inline** in the body;
+  it exports as a data URI in HTML/Markdown and shows on the card's PDF page.
 - **Code** — dedicated code editor with a language selector and highlighting.
 - **Checklist** — real checkboxes with add/remove/edit per item; drag the grip
   to reorder items.
@@ -89,6 +93,14 @@ and zooms (Ctrl+scroll); each node remembers its view.
   it never freezes the UI. Files are **gzip-compressed** (RON format, `.ron`;
   image-heavy documents shrink dramatically) and older plain-text `.ron` files
   still open.
+- **Backup** (**Tools → Backup…**) — scheduled, full-document backups to
+  external locations (this is backup, *not* version history: each run writes a
+  complete, self-contained copy). Destinations: **Disk** (a local/mounted
+  folder), **Network (SFTP)** via `scp`, and **Cloud** via `rclone` (S3, Google
+  Drive, Dropbox, B2, …). Optional **encryption** with `gpg` symmetric AES-256.
+  Set an interval and a per-disk retention count; it runs on a background thread
+  so a slow target never freezes the app. Restore with
+  `gpg -d file.ron.gz.gpg > file.ron.gz` (if encrypted), then open the `.ron.gz`.
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
@@ -106,11 +118,14 @@ and zooms (Ctrl+scroll); each node remembers its view.
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN
   access** in Settings for phones/other devices) with full parity to the app:
   add/query/edit/remove nodes and cards, move/recolor/resize, convert a card's
-  kind, edit tables cell-by-cell (colors, headers, rows/cols), upload images,
-  build groups, join/leave and dock cards, and export the document (incl.
-  PDF/PNG) — so agents can collaborate on the same notes. **Live updates:**
-  `GET /api/wait` long-polls so clients react the instant anything changes. Enable
-  it in **Tools → Settings**; see [API.md](API.md).
+  kind, edit tables cell-by-cell (colors, headers, rows/cols), upload images
+  (incl. inline images in text cards), build groups, join/leave and dock cards,
+  **reorder and reparent nodes** (`/nodes/{id}/move`), **reorder cards** within a
+  basket (`/cards/{cid}/move`), **expand/collapse** subtrees, trigger a
+  **backup**, and export the document (incl. PDF/PNG) — so agents can collaborate
+  on the same notes. **Live updates:** `GET /api/wait` long-polls so clients react
+  the instant anything changes. Enable it in **Tools → Settings**; see
+  [API.md](API.md).
 - **Companion mobile app** — a native Android viewer/capture app talks to the
   agent API over the LAN: browse the tree and baskets, full-text search, zoom
   images, and capture a note or photo into a node, all updating live. Separate
@@ -137,6 +152,12 @@ Requires a recent stable Rust toolchain. Tests: `cargo test` (binary crate — u
 `cargo test --bin trellis` to test a single target). Middle-click paste and the
 X11 PRIMARY-selection features need `xclip` or `xsel` installed. **OCR** (right-click
 an image card → Extract text) needs the `tesseract` CLI (`tesseract-ocr`) installed.
+
+**Backup** external tools (only for the features you use): **Network (SFTP)**
+destinations need `scp` (usually preinstalled), **Cloud** destinations need
+`rclone` (`rclone config` a remote first), and **encryption** needs `gpg`. Disk
+destinations need nothing extra. A missing tool is reported as a backup error —
+it never crashes the app.
 
 The markdown renderer (`egui_commonmark`) is vendored under `vendor/` and patched
 to render inline text-color spans; edit it there, not the crates.io copy.
