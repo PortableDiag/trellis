@@ -364,6 +364,12 @@ pub struct TrellisApp {
 
     search_open: bool,
     search_query: String,
+    /// Quick switcher (Ctrl+O): jump to any node by fuzzy-matching its title/path.
+    switcher_open: bool,
+    switcher_query: String,
+    switcher_index: usize,
+    /// A node the tree should scroll into view next frame (set by the switcher).
+    scroll_to: Option<NodeId>,
     show_about: bool,
     theme: Theme,
     /// Whether Ctrl+scroll / Ctrl +/- zoom the canvas (Settings; on by default).
@@ -555,6 +561,10 @@ impl TrellisApp {
             backup_rx,
             search_open: false,
             search_query: String::new(),
+            switcher_open: false,
+            switcher_query: String::new(),
+            switcher_index: 0,
+            scroll_to: None,
             show_about: false,
             theme,
             zoom_enabled,
@@ -2499,6 +2509,25 @@ impl TrellisApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    if ui
+                        .button("Go to node…")
+                        .on_hover_text("Ctrl+O — fuzzy-jump to any node by title or path")
+                        .clicked()
+                    {
+                        self.switcher_open = true;
+                        self.switcher_query.clear();
+                        self.switcher_index = 0;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("Search…")
+                        .on_hover_text("Ctrl+F — full-text search across titles and cards")
+                        .clicked()
+                    {
+                        self.search_open = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     ui.menu_button("Themes", |ui| {
                         for (t, label) in Theme::ALL {
                             if ui.selectable_label(self.theme == t, label).clicked() {
@@ -2884,6 +2913,110 @@ impl TrellisApp {
                 });
             });
     }
+
+    /// Ctrl+O: a centered palette to fuzzy-jump to any node by title or path.
+    fn quick_switcher(&mut self, ctx: &egui::Context) {
+        let q = self.switcher_query.to_lowercase();
+        // (id, title, path, score) for every node that matches; best score first.
+        let mut matches: Vec<(NodeId, String, String, i32)> = Vec::new();
+        for (&id, n) in &self.doc.nodes {
+            let path = crate::tree::node_path(&self.doc, id);
+            let title_lc = n.title.to_lowercase();
+            let hay = format!("{}\n{}", title_lc, path.to_lowercase());
+            if let Some(score) = fuzzy_score(&q, &title_lc, &hay) {
+                matches.push((id, n.title.clone(), path, score));
+            }
+        }
+        matches.sort_by(|a, b| a.3.cmp(&b.3).then(a.2.len().cmp(&b.2.len())).then(a.1.cmp(&b.1)));
+        matches.truncate(50);
+        if matches.is_empty() {
+            self.switcher_index = 0;
+        } else if self.switcher_index >= matches.len() {
+            self.switcher_index = matches.len() - 1;
+        }
+
+        // Read nav keys before the text field swallows them.
+        let (down, up, enter, esc) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if esc {
+            self.switcher_open = false;
+            return;
+        }
+        if down && !matches.is_empty() {
+            self.switcher_index = (self.switcher_index + 1).min(matches.len() - 1);
+        }
+        if up {
+            self.switcher_index = self.switcher_index.saturating_sub(1);
+        }
+        let mut jump: Option<NodeId> = None;
+        if enter {
+            if let Some(m) = matches.get(self.switcher_index) {
+                jump = Some(m.0);
+            }
+        }
+
+        let idx = self.switcher_index;
+        egui::Window::new("Go to node")
+            .title_bar(false)
+            .resizable(false)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+            .fixed_size(egui::vec2(480.0, 0.0))
+            .show(ctx, |ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.switcher_query)
+                        .hint_text("Jump to a node…  ↑↓ move · Enter open · Esc close")
+                        .desired_width(f32::INFINITY),
+                );
+                resp.request_focus();
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, false]).show(ui, |ui| {
+                    for (i, (id, title, path, _)) in matches.iter().enumerate() {
+                        let sel = i == idx;
+                        let shown = if title.trim().is_empty() { "(untitled)".to_string() } else { title.clone() };
+                        let r = ui.add(egui::SelectableLabel::new(sel, egui::RichText::new(shown).strong()));
+                        ui.small(egui::RichText::new(path).weak());
+                        if r.clicked() {
+                            jump = Some(*id);
+                        }
+                        if sel {
+                            r.scroll_to_me(Some(egui::Align::Center));
+                        }
+                    }
+                    if matches.is_empty() && !self.switcher_query.is_empty() {
+                        ui.weak("No matching nodes.");
+                    }
+                });
+            });
+
+        if let Some(id) = jump {
+            self.jump_to_node(id);
+        }
+    }
+
+    /// Select a node, open its ancestors so it's visible, and scroll to it.
+    fn jump_to_node(&mut self, id: NodeId) {
+        let mut cur = self.doc.nodes.get(&id).and_then(|n| n.parent);
+        while let Some(pid) = cur {
+            match self.doc.nodes.get_mut(&pid) {
+                Some(p) => {
+                    p.expanded = true;
+                    cur = p.parent;
+                }
+                None => break,
+            }
+        }
+        self.selected = Some(id);
+        self.scroll_to = Some(id);
+        self.switcher_open = false;
+        self.mark_dirty(); // expanded flags are persisted
+    }
 }
 
 impl eframe::App for TrellisApp {
@@ -2972,6 +3105,11 @@ impl eframe::App for TrellisApp {
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::F)) {
             self.search_open = !self.search_open;
         }
+        if cmd && ctx.input(|i| i.key_pressed(egui::Key::O)) {
+            self.switcher_open = true;
+            self.switcher_query.clear();
+            self.switcher_index = 0;
+        }
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::N)) {
             self.new_document();
         }
@@ -3016,13 +3154,23 @@ impl eframe::App for TrellisApp {
         if self.search_open {
             self.search_panel(ctx);
         }
+        if self.switcher_open {
+            self.quick_switcher(ctx);
+        }
 
         egui::SidePanel::left("tree")
             .resizable(true)
             .default_width(240.0)
             .show(ctx, |ui| {
-                let actions =
-                    tree::ui(ui, &self.doc, self.selected, &mut self.renaming, self.reorder_mode);
+                let scroll_to = self.scroll_to.take();
+                let actions = tree::ui(
+                    ui,
+                    &self.doc,
+                    self.selected,
+                    &mut self.renaming,
+                    self.reorder_mode,
+                    scroll_to,
+                );
                 self.apply_tree(actions);
             });
 
@@ -3239,6 +3387,53 @@ fn ocr_images(images: &[Vec<u8>]) -> Result<String, String> {
 /// embedded image bytes serialize as decimal arrays that pretty-printing bloated
 /// ~32×, which gzip crushes back to near the raw image size. Pure and `Send`, so
 /// it runs on a worker thread (see `spawn_save`).
+/// Rank how well `query` (already lowercased) matches a node, lower = better.
+/// Prefers a title substring, then a title subsequence, then a path hit. Empty
+/// query matches everything (so Ctrl+O with no text lists nodes). `title` and
+/// `hay` (title + "\n" + path) are lowercased by the caller.
+fn fuzzy_score(query: &str, title: &str, hay: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(1000);
+    }
+    if let Some(pos) = title.find(query) {
+        return Some(pos as i32); // earliest title substring wins
+    }
+    if let Some(s) = subseq_score(query, title) {
+        return Some(100 + s);
+    }
+    if hay.contains(query) {
+        return Some(400);
+    }
+    if let Some(s) = subseq_score(query, hay) {
+        return Some(500 + s);
+    }
+    None
+}
+
+/// If every char of `q` appears in `text` in order, score by how early and how
+/// tightly they matched (lower = better); else `None`.
+fn subseq_score(q: &str, text: &str) -> Option<i32> {
+    let mut chars = q.chars();
+    let mut want = chars.next();
+    let mut first: Option<usize> = None;
+    let mut last = 0usize;
+    for (i, c) in text.chars().enumerate() {
+        if let Some(w) = want {
+            if c == w {
+                first.get_or_insert(i);
+                last = i;
+                want = chars.next();
+            }
+        }
+    }
+    if want.is_none() {
+        let start = first.unwrap_or(0);
+        Some(start as i32 + (last - start) as i32)
+    } else {
+        None
+    }
+}
+
 fn serialize_doc(doc: &Document) -> Result<Vec<u8>, String> {
     use std::io::Write;
     let s = ron::to_string(doc).map_err(|e| e.to_string())?;
@@ -3331,6 +3526,32 @@ mod tests {
     fn download_name_keeps_stored_name_and_extension() {
         assert_eq!(download_image_name("photo.jpg", 0), "photo.jpg");
         assert_eq!(download_image_name("scan.PNG", 3), "scan.PNG");
+    }
+
+    #[test]
+    fn fuzzy_ranks_title_substring_over_subsequence_over_path() {
+        // Empty query matches anything.
+        assert!(fuzzy_score("", "anything", "anything\npath").is_some());
+        // A title substring beats a subsequence match.
+        let sub = fuzzy_score("mon", "monday 7/20", "monday 7/20\n2026 › july").unwrap();
+        let seq = fuzzy_score("mnd", "monday 7/20", "monday 7/20\n2026 › july").unwrap();
+        assert!(sub < seq, "substring {sub} should rank better than subsequence {seq}");
+        // An earlier substring ranks better than a later one.
+        let early = fuzzy_score("july", "july", "july\n2026").unwrap();
+        let late = fuzzy_score("july", "week of july", "week of july\n2026").unwrap();
+        assert!(early < late);
+        // Matching only via the path still scores, but worse than a title hit.
+        let path_only = fuzzy_score("2026", "monday", "monday\n2026 › july").unwrap();
+        assert!(path_only > seq);
+        // A query whose chars aren't all present doesn't match.
+        assert!(fuzzy_score("xyz", "monday", "monday\njuly").is_none());
+    }
+
+    #[test]
+    fn subseq_requires_in_order_chars() {
+        assert!(subseq_score("abc", "aXbXc").is_some());
+        assert!(subseq_score("cba", "aXbXc").is_none()); // wrong order
+        assert!(subseq_score("abcd", "abc").is_none()); // 'd' missing
     }
 
     #[test]

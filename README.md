@@ -113,6 +113,9 @@ and zooms (Ctrl+scroll); each node remembers its view.
 
 **App**
 - Full-text **search** across every node title and card (Ctrl+F)
+- **Quick switcher** (Ctrl+O) — fuzzy-jump to any node by title or path; Enter
+  opens it, expanding its ancestors and scrolling it into view. Fast navigation
+  for a deep tree.
 - **View → Themes** — Trellis (default), Light, or Terminal Green
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN
@@ -138,6 +141,7 @@ and zooms (Ctrl+scroll); each node remembers its view.
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo canvas edits (moves, autosort, …) |
 | Ctrl+S | Save |
 | Ctrl+F | Toggle search |
+| Ctrl+O | Go to node (fuzzy quick switcher) |
 | Ctrl+N | New document |
 | Ctrl+`+` / `-` / `0` | Zoom in / out / reset |
 | Ctrl+scroll | Zoom (toggle in Settings; on by default) |

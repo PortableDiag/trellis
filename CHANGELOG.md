@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.47.0]
+
+### Added
+- **Quick switcher** (Ctrl+O, or **View → Go to node…**) — a centered palette that
+  fuzzy-matches any node by title or full path. ↑/↓ to move, Enter (or click) to jump:
+  it selects the node, expands its ancestors, and scrolls it into view. Fast navigation
+  for a deep tree without hand-scrolling the sidebar. Ranking prefers a title substring,
+  then a title subsequence, then a path match.
+
 ## [0.46.0]
 
 ### Added

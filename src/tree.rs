@@ -70,6 +70,7 @@ pub fn ui(
     selected: Option<NodeId>,
     renaming: &mut Option<(NodeId, String)>,
     reorder_mode: bool,
+    scroll_to: Option<NodeId>,
 ) -> Vec<TreeAction> {
     let mut actions = Vec::new();
 
@@ -95,7 +96,7 @@ pub fn ui(
         .show(ui, |ui| {
             let roots = doc.roots.clone();
             for root in roots {
-                node_ui(ui, doc, root, selected, renaming, reorder_mode, 0, &mut actions);
+                node_ui(ui, doc, root, selected, renaming, reorder_mode, scroll_to, 0, &mut actions);
             }
             ui.add_space(8.0);
         });
@@ -111,6 +112,7 @@ fn node_ui(
     selected: Option<NodeId>,
     renaming: &mut Option<(NodeId, String)>,
     reorder_mode: bool,
+    scroll_to: Option<NodeId>,
     depth: usize,
     actions: &mut Vec<TreeAction>,
 ) {
@@ -201,6 +203,9 @@ fn node_ui(
             } else {
                 ui.add(egui::SelectableLabel::new(is_sel, &node.title))
             };
+            if scroll_to == Some(id) {
+                resp.scroll_to_me(Some(egui::Align::Center));
+            }
             if resp.clicked() {
                 actions.push(TreeAction::Select(id));
             }
@@ -356,7 +361,7 @@ fn node_ui(
     if node.expanded {
         let children = node.children.clone();
         for child in children {
-            node_ui(ui, doc, child, selected, renaming, reorder_mode, depth + 1, actions);
+            node_ui(ui, doc, child, selected, renaming, reorder_mode, scroll_to, depth + 1, actions);
         }
     }
 }
