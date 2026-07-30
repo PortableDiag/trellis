@@ -308,6 +308,19 @@ GET /api/export?format=<fmt>
 `format` defaults to `markdown`. `pdf` is a paginated A4 document; `png`/`gif`
 are a single rendered image of the document text. Decode `base64` to get the file.
 
+### Backup
+Trigger a full-document backup, or read the backup status. Destinations,
+schedule, and encryption are configured in the app (**Tools → Backup…**); this
+endpoint runs the same job on demand.
+```
+GET  /api/backup       → 200 {enabled, interval_mins, encrypt, running,
+                               last_backup_secs_ago, last_result, destinations:[…]}
+POST /api/backup/run   → 200 {"started":true}
+                       | 400 no enabled destinations   | 409 a backup is already running
+```
+The run happens on a worker thread; poll `GET /api/backup` (`running`,
+`last_result`) for the outcome.
+
 ### Live updates (long-poll)
 Be woken the instant the document changes, instead of polling on a timer.
 ```

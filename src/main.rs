@@ -7,6 +7,7 @@
 
 mod api;
 mod app;
+mod backup;
 mod canvas;
 mod images;
 mod model;

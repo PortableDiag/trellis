@@ -68,6 +68,10 @@ pub enum ApiRequest {
     // Whole-document export.
     Export(String),
     Search(String),
+    // Backup control — handled by the app loop (needs backup config + doc file),
+    // not by `process`, since `process` only sees the `Document`.
+    BackupStatus,
+    BackupRun,
 }
 
 pub struct ApiResponse {
@@ -79,13 +83,13 @@ impl ApiResponse {
     fn json(status: u16, v: Value) -> Self {
         Self { status, body: serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()) }
     }
-    fn ok(v: Value) -> Self {
+    pub fn ok(v: Value) -> Self {
         Self::json(200, v)
     }
     fn created(v: Value) -> Self {
         Self::json(201, v)
     }
-    fn err(status: u16, msg: &str) -> Self {
+    pub fn err(status: u16, msg: &str) -> Self {
         Self::json(status, json!({ "error": msg }))
     }
 }
@@ -554,6 +558,8 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "search"]) => {
             Ok(ApiRequest::Search(query_get(query, "q").unwrap_or_default()))
         }
+        (Method::Get, ["api", "backup"]) => Ok(ApiRequest::BackupStatus),
+        (Method::Post, ["api", "backup", "run"]) => Ok(ApiRequest::BackupRun),
         _ => Err((404, format!("no route for {:?} {}", method, path))),
     }
 }
@@ -1232,6 +1238,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
                 .collect();
             (false, ApiResponse::ok(json!({ "hits": hits })))
+        }
+        // Backup requests are intercepted and answered by the app loop (they need
+        // the backup config + document file). This is only reached if that
+        // interception is ever missed — report it rather than silently no-op.
+        ApiRequest::BackupStatus | ApiRequest::BackupRun => {
+            (false, ApiResponse::err(500, "backup request not handled by the app"))
         }
     }
 }

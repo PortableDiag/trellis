@@ -4,6 +4,20 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.46.0]
+
+### Added
+- **Backup module** (**Tools → Backup…**) — scheduled, full-document backups to external
+  destinations. This is backup, *not* version control: each run writes a complete,
+  self-contained copy (the same compressed format Trellis saves). Destinations:
+  **Disk** (a local/mounted folder), **Network (SFTP)** via `scp`, and **Cloud** via
+  `rclone` (S3, Drive, Dropbox, B2, …). Optional **encryption** with `gpg` symmetric
+  AES-256 (passphrase fed to gpg off-argv; plaintext streamed, never written to disk).
+  Configurable interval and per-disk retention (keep newest N). Runs on a worker thread so
+  a slow target never freezes the canvas. Also over the API: `GET /api/backup` (status) and
+  `POST /api/backup/run` (back up now). Restore a backup with
+  `gpg -d file.ron.gz.gpg > file.ron.gz` (if encrypted), then open the `.ron.gz` in Trellis.
+
 ## [0.45.0]
 
 ### Added

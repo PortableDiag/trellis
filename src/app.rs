@@ -69,6 +69,7 @@ const DOCK_MODE_KEY: &str = "dock_mode";
 const SNAP_MODE_KEY: &str = "snap_mode";
 const THEME_KEY: &str = "theme";
 const AUTOSAVE_KEY: &str = "autosave";
+const BACKUP_KEY: &str = "backup";
 /// How long the document must be idle (no further changes) before an autosave
 /// fires — so continuous editing (e.g. dragging a card) never saves mid-gesture.
 const AUTOSAVE_IDLE: Duration = Duration::from_secs(2);
@@ -348,6 +349,19 @@ pub struct TrellisApp {
     save_rx: Receiver<(PathBuf, Result<(), String>, u64)>,
     status: String,
 
+    /// Backup settings (destinations, schedule, encryption); persisted as JSON.
+    backup_cfg: crate::backup::BackupConfig,
+    show_backup: bool,
+    /// A backup is running on a worker thread (one at a time).
+    backing_up: bool,
+    /// When the last scheduled/manual backup started, for the interval timer.
+    last_backup: Option<Instant>,
+    /// Last backup's human-readable result, shown in the Backup window.
+    backup_status: String,
+    /// Background-backup completion channel: per-destination outcomes.
+    backup_tx: Sender<Vec<crate::backup::DestOutcome>>,
+    backup_rx: Receiver<Vec<crate::backup::DestOutcome>>,
+
     search_open: bool,
     search_query: String,
     show_about: bool,
@@ -473,6 +487,11 @@ impl TrellisApp {
             .and_then(|s| s.get_string(THEME_KEY))
             .map(|s| Theme::from_key(&s))
             .unwrap_or(Theme::Trellis);
+        let backup_cfg = cc
+            .storage
+            .and_then(|s| s.get_string(BACKUP_KEY))
+            .map(|s| crate::backup::BackupConfig::parse(&s))
+            .unwrap_or_default();
 
         // Agent API: load config, then start the localhost server. It binds
         // regardless of key so toggling the key in Settings works live; requests
@@ -496,6 +515,7 @@ impl TrellisApp {
         let doc_revision = Arc::new(AtomicU64::new(0));
         let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
         let (save_tx, save_rx) = std::sync::mpsc::channel();
+        let (backup_tx, backup_rx) = std::sync::mpsc::channel();
         let (api_server, api_status) = match api::serve(
             api_port,
             api_lan,
@@ -526,6 +546,13 @@ impl TrellisApp {
             save_tx,
             save_rx,
             status: "Ready".to_string(),
+            backup_cfg,
+            show_backup: false,
+            backing_up: false,
+            last_backup: None,
+            backup_status: String::new(),
+            backup_tx,
+            backup_rx,
             search_open: false,
             search_query: String::new(),
             show_about: false,
@@ -708,6 +735,12 @@ impl TrellisApp {
             }
         }
         for cmd in cmds {
+            // Backup endpoints need app state (config + doc file), so answer them
+            // here instead of in api::process (which only sees the Document).
+            if let Some(resp) = self.handle_api_backup(&cmd.req) {
+                let _ = cmd.resp.send(resp);
+                continue;
+            }
             let (changed, resp) = api::process(&mut self.doc, cmd.req);
             if changed {
                 self.mark_dirty();
@@ -719,6 +752,45 @@ impl TrellisApp {
                 }
             }
             let _ = cmd.resp.send(resp);
+        }
+    }
+
+    /// Answer the backup API endpoints from app state. Returns `None` for any
+    /// other request so the normal `api::process` path handles it.
+    fn handle_api_backup(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
+        match req {
+            api::ApiRequest::BackupStatus => {
+                let dests: Vec<_> = self
+                    .backup_cfg
+                    .destinations
+                    .iter()
+                    .map(|d| {
+                        serde_json::json!({
+                            "kind": d.kind.label(), "name": d.name, "target": d.target, "enabled": d.enabled
+                        })
+                    })
+                    .collect();
+                Some(api::ApiResponse::ok(serde_json::json!({
+                    "enabled": self.backup_cfg.enabled,
+                    "interval_mins": self.backup_cfg.interval_mins,
+                    "encrypt": self.backup_cfg.encrypt,
+                    "running": self.backing_up,
+                    "last_backup_secs_ago": self.last_backup.map(|t| t.elapsed().as_secs()),
+                    "last_result": self.backup_status,
+                    "destinations": dests,
+                })))
+            }
+            api::ApiRequest::BackupRun => {
+                if self.backup_cfg.destinations.iter().all(|d| !d.enabled) {
+                    return Some(api::ApiResponse::err(400, "no enabled backup destinations configured"));
+                }
+                if self.backing_up {
+                    return Some(api::ApiResponse::err(409, "a backup is already running"));
+                }
+                self.start_backup(true);
+                Some(api::ApiResponse::ok(serde_json::json!({ "started": true })))
+            }
+            _ => None,
         }
     }
 
@@ -802,6 +874,67 @@ impl TrellisApp {
     fn save(&mut self) {
         let path = self.target_path();
         self.spawn_save(path);
+    }
+
+    /// Fire scheduled backups and drain finished ones. Called each frame.
+    fn pump_backup(&mut self) {
+        // Apply finished backups (worker sends per-destination outcomes).
+        let done: Vec<_> = std::iter::from_fn(|| self.backup_rx.try_recv().ok()).collect();
+        for outcomes in done {
+            self.backing_up = false;
+            let failed: Vec<&crate::backup::DestOutcome> = outcomes.iter().filter(|o| !o.ok).collect();
+            self.backup_status = if failed.is_empty() {
+                format!("Backed up to {} destination(s) OK", outcomes.len())
+            } else {
+                let first = failed[0];
+                format!("Backup: {}/{} failed — {}: {}", failed.len(), outcomes.len(), first.dest, first.detail)
+            };
+            self.status = self.backup_status.clone();
+        }
+
+        // Scheduled trigger: enabled, an interval set, and enough time elapsed.
+        if self.backup_cfg.enabled && self.backup_cfg.interval_mins > 0 && !self.backing_up {
+            let due = self
+                .last_backup
+                .map(|t| t.elapsed().as_secs() >= self.backup_cfg.interval_mins * 60)
+                .unwrap_or(true);
+            if due {
+                self.start_backup(false);
+            }
+        }
+    }
+
+    /// Serialize the document and hand it to a worker thread that encrypts (if
+    /// configured) and delivers it to every enabled destination. Off the UI
+    /// thread — a large document plus a slow network target must not freeze the
+    /// canvas. `manual` only affects the status wording.
+    fn start_backup(&mut self, manual: bool) {
+        if self.backing_up {
+            self.status = "A backup is already running".to_string();
+            return;
+        }
+        // Mark the attempt now so the interval timer doesn't re-fire while a slow
+        // or failing backup is in flight.
+        self.last_backup = Some(Instant::now());
+        let bytes = match serialize_doc(&self.doc) {
+            Ok(b) => b,
+            Err(e) => {
+                self.backup_status = format!("Backup failed: could not serialize document: {e}");
+                self.status = self.backup_status.clone();
+                return;
+            }
+        };
+        self.backing_up = true;
+        self.status = if manual { "Backing up now…".into() } else { "Running scheduled backup…".into() };
+        let cfg = self.backup_cfg.clone();
+        let tx = self.backup_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        let stamp = crate::backup::stamp(std::time::SystemTime::now());
+        std::thread::spawn(move || {
+            let outcomes = crate::backup::run(&bytes, &stamp, &cfg);
+            let _ = tx.send(outcomes);
+            ctx.request_repaint();
+        });
     }
 
     fn save_as(&mut self) {
@@ -2410,6 +2543,10 @@ impl TrellisApp {
                         }
                         ui.close_menu();
                     }
+                    if ui.button("Backup…").clicked() {
+                        self.show_backup = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Settings…").clicked() {
                         self.show_settings = true;
                         ui.close_menu();
@@ -2532,24 +2669,168 @@ impl TrellisApp {
                 ui.add_space(4.0);
                 ui.collapsing("Endpoints", |ui| {
                     for line in [
-                        "GET    /api/health                     (no auth)",
+                        "GET    /api/health                        (no auth)",
                         "GET    /api/tree",
                         "GET    /api/nodes",
-                        "POST   /api/nodes            {parent?, title}",
+                        "POST   /api/nodes               {parent?, title}",
                         "GET    /api/nodes/{id}",
-                        "PATCH  /api/nodes/{id}       {title?, color?}",
+                        "PATCH  /api/nodes/{id}          {title?, color?, bg?}",
                         "DELETE /api/nodes/{id}",
+                        "POST   /api/nodes/{id}/move     {before|after|index|to, parent?}",
+                        "POST   /api/nodes/{id}/expand   {expanded, recursive?}",
                         "GET    /api/nodes/{id}/cards",
-                        "POST   /api/nodes/{id}/cards {kind, title?, body?, lang?, items?, pos?}",
-                        "PATCH  /api/nodes/{id}/cards/{cid}  {title?, body?}",
+                        "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, pos?, inline_images?}",
+                        "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, …}",
+                        "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to}",
                         "DELETE /api/nodes/{id}/cards/{cid}",
+                        "POST   /api/nodes/{id}/autosort",
+                        "GET    /api/export?format=markdown|html|json|pdf|png|gif",
                         "GET    /api/search?q=...",
+                        "GET    /api/wait?rev=<n>                  (long-poll for changes)",
+                        "GET    /api/backup                        (status)",
+                        "POST   /api/backup/run                    (back up now)",
+                        "",
+                        "Full reference: API.md in the source repo.",
                     ] {
                         ui.monospace(line);
                     }
                 });
             });
         self.show_settings = open;
+    }
+
+    fn backup_window(&mut self, ctx: &egui::Context) {
+        use crate::backup::{BackupDest, DestKind};
+        let mut open = self.show_backup;
+        let mut do_backup = false;
+        egui::Window::new("Backup")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    "Full copies of your document to external locations — this is backup, \
+                     not version history. Each run writes a complete, self-contained file \
+                     (the same compressed format Trellis saves), optionally encrypted.",
+                );
+                ui.add_space(8.0);
+
+                let cfg = &mut self.backup_cfg;
+                ui.checkbox(&mut cfg.enabled, "Run scheduled backups automatically");
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        cfg.enabled,
+                        egui::DragValue::new(&mut cfg.interval_mins).range(0..=100_000).suffix(" min"),
+                    );
+                    ui.label("between backups (0 = manual only)");
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut cfg.retention).range(0..=10_000));
+                    ui.label("keep newest N per disk destination (0 = keep all)");
+                });
+
+                ui.add_space(6.0);
+                ui.checkbox(&mut cfg.encrypt, "Encrypt backups (gpg symmetric, AES-256)");
+                if cfg.encrypt {
+                    ui.horizontal(|ui| {
+                        ui.label("Passphrase");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut cfg.passphrase)
+                                .password(true)
+                                .desired_width(260.0)
+                                .hint_text("required to encrypt / restore"),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "Restore with:  gpg -d file.ron.gz.gpg > file.ron.gz  — keep this passphrase safe; \
+                             without it the backup can't be read.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.heading("Destinations");
+                    ui.menu_button("＋ Add", |ui| {
+                        for kind in [DestKind::Disk, DestKind::Sftp, DestKind::Rclone] {
+                            if ui.button(kind.label()).clicked() {
+                                cfg.destinations.push(BackupDest::new(kind));
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                });
+
+                let mut remove: Option<usize> = None;
+                for (i, d) in cfg.destinations.iter_mut().enumerate() {
+                    ui.push_id(i, |ui| {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut d.enabled, "");
+                                ui.strong(d.kind.label());
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut d.name)
+                                        .desired_width(120.0)
+                                        .hint_text("label (optional)"),
+                                );
+                                if ui.button("✖").on_hover_text("Remove this destination").clicked() {
+                                    remove = Some(i);
+                                }
+                            });
+                            let (label, hint) = match d.kind {
+                                DestKind::Disk => ("Directory", "/mnt/usb/trellis-backups  (a local or mounted folder)"),
+                                DestKind::Sftp => ("SSH target", "user@host:/backups/trellis  (uses your SSH keys via scp)"),
+                                DestKind::Rclone => ("Rclone remote", "gdrive:trellis-backups  (configure the remote with `rclone config`)"),
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(label);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut d.target)
+                                        .desired_width(340.0)
+                                        .hint_text(hint),
+                                );
+                            });
+                        });
+                    });
+                }
+                if let Some(i) = remove {
+                    cfg.destinations.remove(i);
+                }
+                if cfg.destinations.is_empty() {
+                    ui.weak("No destinations yet — add a Disk, Network (SFTP), or Cloud (rclone) target.");
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!self.backing_up, egui::Button::new("Back up now"))
+                        .clicked()
+                    {
+                        do_backup = true;
+                    }
+                    if self.backing_up {
+                        ui.spinner();
+                        ui.label("Backing up…");
+                    }
+                });
+                if let Some(t) = self.last_backup {
+                    ui.weak(format!("Last run: {}s ago", t.elapsed().as_secs()));
+                }
+                if !self.backup_status.is_empty() {
+                    ui.label(&self.backup_status);
+                }
+            });
+        self.show_backup = open;
+        if do_backup {
+            self.start_backup(true);
+        }
     }
 
     fn sync_api_key(&mut self) {
@@ -2621,6 +2902,9 @@ impl eframe::App for TrellisApp {
         // Apply finished background saves.
         self.pump_save();
 
+        // Fire scheduled backups and apply finished ones.
+        self.pump_backup();
+
         // A requested single-card screenshot arrives as an input event one frame
         // after we ask for it; crop it to the card and save as PNG/PDF.
         if matches!(self.card_shot.as_ref().map(|s| &s.phase), Some(ShotPhase::Requested)) {
@@ -2662,6 +2946,12 @@ impl eframe::App for TrellisApp {
                 Some(t) => ctx.request_repaint_after(AUTOSAVE_IDLE.saturating_sub(t.elapsed())),
                 None => self.last_change = Some(Instant::now()),
             }
+        }
+
+        // Keep the loop waking (~once a minute) so scheduled backups fire while
+        // the UI is idle. Backup intervals are in minutes, so this is cheap.
+        if self.backup_cfg.enabled && self.backup_cfg.interval_mins > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_secs(60));
         }
 
         // Zoom is per-canvas now, so keep the whole-UI zoom factor pinned at 1.0.
@@ -2856,6 +3146,9 @@ impl eframe::App for TrellisApp {
         if self.show_settings {
             self.settings_window(ctx);
         }
+        if self.show_backup {
+            self.backup_window(ctx);
+        }
 
         self.lightbox_ui(ctx);
     }
@@ -2874,6 +3167,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
         storage.set_string(THEME_KEY, self.theme.key().to_string());
         storage.set_string(AUTOSAVE_KEY, self.autosave.to_string());
+        storage.set_string(BACKUP_KEY, self.backup_cfg.to_json());
         if let Ok(s) = serde_json::to_string(&self.templates) {
             storage.set_string(TEMPLATES_KEY, s);
         }
@@ -2945,12 +3239,16 @@ fn ocr_images(images: &[Vec<u8>]) -> Result<String, String> {
 /// embedded image bytes serialize as decimal arrays that pretty-printing bloated
 /// ~32×, which gzip crushes back to near the raw image size. Pure and `Send`, so
 /// it runs on a worker thread (see `spawn_save`).
-fn serialize_and_write(doc: &Document, path: &std::path::Path) -> Result<(), String> {
+fn serialize_doc(doc: &Document) -> Result<Vec<u8>, String> {
     use std::io::Write;
     let s = ron::to_string(doc).map_err(|e| e.to_string())?;
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     enc.write_all(s.as_bytes()).map_err(|e| e.to_string())?;
-    let bytes = enc.finish().map_err(|e| e.to_string())?;
+    enc.finish().map_err(|e| e.to_string())
+}
+
+fn serialize_and_write(doc: &Document, path: &std::path::Path) -> Result<(), String> {
+    let bytes = serialize_doc(doc)?;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
