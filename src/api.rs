@@ -68,6 +68,9 @@ pub enum ApiRequest {
     // Whole-document export.
     Export(String),
     Search(String),
+    // #tags: list all with counts, or (with ?name=) the cards carrying one.
+    Tags,
+    TagCards(String),
     // Backup control — handled by the app loop (needs backup config + doc file),
     // not by `process`, since `process` only sees the `Document`.
     BackupStatus,
@@ -558,6 +561,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "search"]) => {
             Ok(ApiRequest::Search(query_get(query, "q").unwrap_or_default()))
         }
+        (Method::Get, ["api", "tags"]) => match query_get(query, "name") {
+            Some(name) => Ok(ApiRequest::TagCards(name)),
+            None => Ok(ApiRequest::Tags),
+        },
         (Method::Get, ["api", "backup"]) => Ok(ApiRequest::BackupStatus),
         (Method::Post, ["api", "backup", "run"]) => Ok(ApiRequest::BackupRun),
         _ => Err((404, format!("no route for {:?} {}", method, path))),
@@ -1238,6 +1245,22 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
                 .collect();
             (false, ApiResponse::ok(json!({ "hits": hits })))
+        }
+        ApiRequest::Tags => {
+            let tags: Vec<Value> = doc
+                .tag_counts()
+                .into_iter()
+                .map(|(tag, count)| json!({ "tag": tag, "count": count }))
+                .collect();
+            (false, ApiResponse::ok(json!({ "tags": tags })))
+        }
+        ApiRequest::TagCards(tag) => {
+            let hits: Vec<Value> = doc
+                .cards_with_tag(&tag)
+                .into_iter()
+                .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
+                .collect();
+            (false, ApiResponse::ok(json!({ "tag": tag.trim_start_matches('#'), "hits": hits })))
         }
         // Backup requests are intercepted and answered by the app loop (they need
         // the backup config + document file). This is only reached if that

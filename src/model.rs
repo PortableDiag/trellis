@@ -1849,6 +1849,89 @@ impl Document {
         }
         hits
     }
+
+    /// Every `#tag` used across the document with how many cards use it, sorted
+    /// by tag name. Tags are lowercased so `#Todo` and `#todo` are one tag.
+    pub fn tag_counts(&self) -> Vec<(String, usize)> {
+        let mut m: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for node in self.nodes.values() {
+            for card in &node.cards {
+                let hay = format!("{} {}", card.title, searchable_body(card));
+                for t in extract_tags(&hay) {
+                    *m.entry(t).or_insert(0) += 1;
+                }
+            }
+        }
+        m.into_iter().collect()
+    }
+
+    /// Cards carrying `tag` (with or without a leading `#`, case-insensitive),
+    /// as search hits with a snippet around the tag.
+    pub fn cards_with_tag(&self, tag: &str) -> Vec<SearchHit> {
+        let want = tag.trim_start_matches('#').to_lowercase();
+        let mut hits = Vec::new();
+        if want.is_empty() {
+            return hits;
+        }
+        for node in self.nodes.values() {
+            for card in &node.cards {
+                let hay = format!("{} {}", card.title, searchable_body(card));
+                if extract_tags(&hay).iter().any(|t| *t == want) {
+                    let needle = format!("#{want}");
+                    let snippet = hay
+                        .to_lowercase()
+                        .find(&needle)
+                        .map(|pos| snippet_around(&hay, pos, needle.len()))
+                        .unwrap_or_else(|| snippet_around(&hay, 0, 0));
+                    hits.push(SearchHit {
+                        node: node.id,
+                        node_title: node.title.clone(),
+                        snippet,
+                    });
+                }
+            }
+        }
+        hits
+    }
+}
+
+/// Extract `#tag` tokens from `text`, lowercased and de-duplicated. A tag starts
+/// at a `#` on a word boundary (not mid-word, so URL fragments like `page#frag`
+/// are ignored) whose first character is a letter (so a Markdown `# Heading` and
+/// a bare `#123` are not tags). It runs over letters, digits, `-`, `_`, and `/`
+/// (the last allows nested tags like `#work/urgent`).
+pub(crate) fn extract_tags(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let boundary = i == 0 || {
+                let p = bytes[i - 1];
+                !(p.is_ascii_alphanumeric() || p == b'#')
+            };
+            let start = i + 1;
+            if boundary && start < bytes.len() && bytes[start].is_ascii_alphabetic() {
+                let mut j = start;
+                while j < bytes.len() {
+                    let c = bytes[j];
+                    if c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'/' {
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let tag = text[start..j].to_lowercase();
+                if !out.contains(&tag) {
+                    out.push(tag);
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 pub struct SearchHit {
@@ -2600,6 +2683,34 @@ mod tests {
             .write_to(&mut buf, image::ImageFormat::Png)
             .unwrap();
         buf.into_inner()
+    }
+
+    #[test]
+    fn extract_tags_finds_real_tags_only() {
+        let t = extract_tags("meeting notes #Work #work/urgent see http://x/page#frag and # Heading (#todo) end #123");
+        // #Work and #work are the same tag (lowercased, deduped); nested kept.
+        assert_eq!(t, vec!["work".to_string(), "work/urgent".to_string(), "todo".to_string()]);
+        // URL fragment (page#frag), Markdown heading (# Heading), and #123 excluded.
+        assert!(!t.contains(&"frag".to_string()));
+        assert!(!t.iter().any(|x| x == "heading"));
+        assert!(!t.iter().any(|x| x == "123"));
+    }
+
+    #[test]
+    fn tag_counts_and_cards_with_tag_span_the_tree() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "A".into());
+        let b = doc.add_node(None, "B".into());
+        let c1 = doc.add_card(a, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(a, c1).unwrap().body = "fix the #bug today".into();
+        let c2 = doc.add_card(b, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(b, c2).unwrap().body = "another #bug and a #idea".into();
+        let counts: std::collections::HashMap<_, _> = doc.tag_counts().into_iter().collect();
+        assert_eq!(counts.get("bug"), Some(&2));
+        assert_eq!(counts.get("idea"), Some(&1));
+        // cards_with_tag gathers across baskets (with or without the #).
+        assert_eq!(doc.cards_with_tag("#bug").len(), 2);
+        assert_eq!(doc.cards_with_tag("idea").len(), 1);
     }
 
     #[test]

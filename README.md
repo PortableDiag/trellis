@@ -116,6 +116,9 @@ and zooms (Ctrl+scroll); each node remembers its view.
 - **Quick switcher** (Ctrl+O) — fuzzy-jump to any node by title or path; Enter
   opens it, expanding its ancestors and scrolling it into view. Fast navigation
   for a deep tree.
+- **#tags** (View → Tags) — write `#tags` in any card and browse them
+  document-wide: the Tags panel lists every tag with a count; click one to see
+  (and jump to) the cards that use it. Nested tags like `#work/urgent` work.
 - **View → Themes** — Trellis (default), Light, or Terminal Green
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN

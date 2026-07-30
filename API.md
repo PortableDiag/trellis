@@ -308,6 +308,16 @@ GET /api/export?format=<fmt>
 `format` defaults to `markdown`. `pdf` is a paginated A4 document; `png`/`gif`
 are a single rendered image of the document text. Decode `base64` to get the file.
 
+### Tags
+`#tags` written anywhere in a card (body, title, checklist items, table cells)
+are indexed across the whole document. A tag starts at a `#` on a word boundary
+whose first char is a letter — so `# Heading`, `page#frag`, and `#123` are not
+tags; `#work/urgent` (nested) is. Tags are lowercased.
+```
+GET /api/tags            → 200 {"tags":[{"tag":"todo","count":3}, …]}   (all tags, by name)
+GET /api/tags?name=todo  → 200 {"tag":"todo","hits":[{node,node_title,snippet}, …]}
+```
+
 ### Backup
 Trigger a full-document backup, or read the backup status. Destinations,
 schedule, and encryption are configured in the app (**Tools → Backup…**); this

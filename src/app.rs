@@ -370,6 +370,9 @@ pub struct TrellisApp {
     switcher_index: usize,
     /// A node the tree should scroll into view next frame (set by the switcher).
     scroll_to: Option<NodeId>,
+    /// Tags panel: browse #tags and the cards that carry them.
+    tags_open: bool,
+    tag_selected: Option<String>,
     show_about: bool,
     theme: Theme,
     /// Whether Ctrl+scroll / Ctrl +/- zoom the canvas (Settings; on by default).
@@ -565,6 +568,8 @@ impl TrellisApp {
             switcher_query: String::new(),
             switcher_index: 0,
             scroll_to: None,
+            tags_open: false,
+            tag_selected: None,
             show_about: false,
             theme,
             zoom_enabled,
@@ -2527,6 +2532,14 @@ impl TrellisApp {
                         self.search_open = true;
                         ui.close_menu();
                     }
+                    if ui
+                        .button("Tags…")
+                        .on_hover_text("Browse #tags and the cards that use them")
+                        .clicked()
+                    {
+                        self.tags_open = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     ui.menu_button("Themes", |ui| {
                         for (t, label) in Theme::ALL {
@@ -3000,6 +3013,67 @@ impl TrellisApp {
         }
     }
 
+    /// Right-side panel: browse every #tag, then the cards carrying one.
+    fn tags_panel(&mut self, ctx: &egui::Context) {
+        let mut jump: Option<NodeId> = None;
+        egui::SidePanel::right("tags").resizable(true).default_width(260.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Tags");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("×").clicked() {
+                        self.tags_open = false;
+                    }
+                });
+            });
+            ui.separator();
+            match self.tag_selected.clone() {
+                None => {
+                    let tags = self.doc.tag_counts();
+                    if tags.is_empty() {
+                        ui.weak("No #tags yet. Write #tags in any card to group them across baskets.");
+                    } else {
+                        ui.weak(format!("{} tag(s)", tags.len()));
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                            for (tag, count) in tags {
+                                if ui
+                                    .add(egui::Label::new(format!("#{tag}  ({count})")).sense(egui::Sense::click()))
+                                    .clicked()
+                                {
+                                    self.tag_selected = Some(tag);
+                                }
+                            }
+                        });
+                    }
+                }
+                Some(tag) => {
+                    if ui.button("‹ all tags").clicked() {
+                        self.tag_selected = None;
+                    }
+                    ui.label(egui::RichText::new(format!("#{tag}")).strong());
+                    let hits = self.doc.cards_with_tag(&tag);
+                    ui.weak(format!("{} card(s)", hits.len()));
+                    ui.separator();
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        for hit in hits {
+                            if ui
+                                .add(egui::Label::new(egui::RichText::new(&hit.node_title).strong())
+                                    .sense(egui::Sense::click()))
+                                .clicked()
+                            {
+                                jump = Some(hit.node);
+                            }
+                            ui.small(hit.snippet);
+                            ui.separator();
+                        }
+                    });
+                }
+            }
+        });
+        if let Some(id) = jump {
+            self.jump_to_node(id);
+        }
+    }
+
     /// Select a node, open its ancestors so it's visible, and scroll to it.
     fn jump_to_node(&mut self, id: NodeId) {
         let mut cur = self.doc.nodes.get(&id).and_then(|n| n.parent);
@@ -3156,6 +3230,9 @@ impl eframe::App for TrellisApp {
         }
         if self.switcher_open {
             self.quick_switcher(ctx);
+        }
+        if self.tags_open {
+            self.tags_panel(ctx);
         }
 
         egui::SidePanel::left("tree")

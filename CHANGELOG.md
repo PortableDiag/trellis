@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.48.0]
+
+### Added
+- **#tags across baskets** (**View → Tags…**). Write `#tags` in any card and they're indexed
+  document-wide; the Tags panel lists every tag with a count, and clicking one shows the cards
+  that carry it (click a result to jump to its basket). Tags are lowercased and support nesting
+  (`#work/urgent`); a Markdown `# Heading`, a URL `page#frag`, and a bare `#123` are not tags.
+  Also over the API: `GET /api/tags` and `GET /api/tags?name=<tag>`.
+
 ## [0.47.0]
 
 ### Added
