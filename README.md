@@ -76,6 +76,9 @@ and zooms (Ctrl+scroll); each node remembers its view.
 - **Fit to content** — right-click a card → **Fit to content** resizes just that card
   so its text/items/table are fully readable (no more unreadable little squares). Agents
   get the same via `"fit": true` on card create/update.
+- **Templates** — right-click a card → **Save as template** to reuse a card you make often
+  (e.g. a *Today's Todos* checklist); right-click the canvas → **Insert template** to drop a
+  fresh copy at the click point. Templates persist across restarts.
 
 **Documents & interop**
 - **Drag & drop** text/Markdown or image files onto a basket to create the

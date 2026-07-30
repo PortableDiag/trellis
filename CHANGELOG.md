@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.41.0]
+
+### Added
+- **Card templates** — reuse a card you make often (a "Today's Todos" checklist, a standard
+  table, a heading block). Right-click a card → **Save as template**, then anywhere,
+  right-click the canvas → **Insert template ▸** to drop a fresh copy at the click point.
+  Templates are saved in app config (they persist across restarts) and carry the card's full
+  content, colors, size and font. Delete one from the same submenu (✕ next to its name).
+
 ## [0.40.0]
 
 ### Added

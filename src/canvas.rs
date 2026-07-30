@@ -19,6 +19,8 @@ pub struct Env<'a> {
     /// Filled each frame with every drawn card's on-screen rect (points), so the
     /// app can crop a framebuffer screenshot to a single card for WYSIWYG export.
     pub card_rects: &'a mut HashMap<CardId, egui::Rect>,
+    /// Names of the user's saved card templates, for the "Insert template" menu.
+    pub templates: &'a [String],
 }
 
 /// Actions requested by the canvas, applied by the app afterwards.
@@ -70,6 +72,12 @@ pub enum CanvasAction {
     ExportCardJson(CardId),
     /// Import a card from a JSON file (opens a picker), placed at the world pos.
     ImportCard(egui::Pos2),
+    /// Save a card as a reusable template (stored in app config).
+    SaveAsTemplate(CardId),
+    /// Insert the template at this index as a new card at the world pos.
+    InsertTemplate(usize, egui::Pos2),
+    /// Delete the saved template at this index.
+    DeleteTemplate(usize),
     // Table (spreadsheet) cards.
     TableSetCell(CardId, usize, usize, String),
     TableSetBg(CardId, usize, usize, Option<[u8; 3]>),
@@ -279,6 +287,25 @@ pub fn ui(
             actions.push(CanvasAction::PasteCard(cp));
             ui.close_menu();
         }
+        ui.menu_button("Insert template", |ui| {
+            if env.templates.is_empty() {
+                ui.add_enabled(false, egui::Button::new("No templates yet"));
+                ui.label("Right-click a card → Save as template");
+            }
+            for (i, name) in env.templates.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let label = if name.trim().is_empty() { "(untitled)" } else { name.as_str() };
+                    if ui.button(label).clicked() {
+                        actions.push(CanvasAction::InsertTemplate(i, cp));
+                        ui.close_menu();
+                    }
+                    if ui.small_button("✕").on_hover_text("Delete this template").clicked() {
+                        actions.push(CanvasAction::DeleteTemplate(i));
+                        ui.close_menu();
+                    }
+                });
+            }
+        });
     });
 
     let zoom = to_screen.scaling;
@@ -1348,6 +1375,14 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, node_path: &str, actions: &mut Vec<
             .clicked()
     {
         actions.push(CanvasAction::FitCard(card.id));
+        ui.close_menu();
+    }
+    if ui
+        .button("Save as template")
+        .on_hover_text("Reuse this card later via right-click canvas → Insert template")
+        .clicked()
+    {
+        actions.push(CanvasAction::SaveAsTemplate(card.id));
         ui.close_menu();
     }
     if ui.button("Copy card").clicked() {

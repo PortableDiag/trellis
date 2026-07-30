@@ -62,6 +62,7 @@ const LAST_DOC_KEY: &str = "last_doc_path";
 const API_KEY_KEY: &str = "api_key";
 const API_PORT_KEY: &str = "api_port";
 const API_LAN_KEY: &str = "api_lan";
+const TEMPLATES_KEY: &str = "card_templates";
 const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
@@ -181,6 +182,7 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
         | A::Remove(_)
         | A::Duplicate(_)
         | A::FitCard(_)
+        | A::InsertTemplate(..)
         | A::SetColor(..)
         | A::SetFontScale(..)
         | A::ChecklistToggle(..)
@@ -368,6 +370,8 @@ pub struct TrellisApp {
     card_shot: Option<CardShot>,
     /// A pending multi-shot basket (overview + per-card) visual export.
     basket_shot: Option<BasketShot>,
+    /// Saved reusable card templates (persist in app config).
+    templates: Vec<crate::model::CardExport>,
 
     // Agent HTTP API.
     api_rx: Option<Receiver<ApiCommand>>,
@@ -522,6 +526,11 @@ impl TrellisApp {
             card_rects: HashMap::new(),
             card_shot: None,
             basket_shot: None,
+            templates: cc
+                .storage
+                .and_then(|s| s.get_string(TEMPLATES_KEY))
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
             card_sel: std::collections::HashSet::new(),
             card_sel_node: None,
             api_rx: Some(api_rx),
@@ -1193,6 +1202,8 @@ impl TrellisApp {
                     | CanvasAction::ClearSelection
                     | CanvasAction::ToggleDockMode
                     | CanvasAction::ToggleSnapMode
+                    | CanvasAction::SaveAsTemplate(_)
+                    | CanvasAction::DeleteTemplate(_)
             )
         }) {
             self.mark_dirty();
@@ -1241,6 +1252,33 @@ impl TrellisApp {
                         if let Some(sz) = c.fit_size() {
                             c.size = sz.max(MIN_CARD);
                         }
+                    }
+                }
+                CanvasAction::SaveAsTemplate(cid) => {
+                    if let Some(json) = self.doc.export_card_json(node, cid) {
+                        if let Some(exp) = crate::model::parse_card_export(&json) {
+                            let name = if exp.title.trim().is_empty() {
+                                exp.kind.label().to_string()
+                            } else {
+                                exp.title.clone()
+                            };
+                            self.templates.push(exp);
+                            self.status = format!("Saved template \"{name}\"");
+                        }
+                    }
+                }
+                CanvasAction::InsertTemplate(idx, pos) => {
+                    if let Some(exp) = self.templates.get(idx).cloned() {
+                        let name = exp.title.clone();
+                        if self.doc.add_card_from_export(node, pos, exp).is_some() {
+                            self.status = format!("Inserted template \"{name}\"");
+                        }
+                    }
+                }
+                CanvasAction::DeleteTemplate(idx) => {
+                    if idx < self.templates.len() {
+                        let t = self.templates.remove(idx);
+                        self.status = format!("Deleted template \"{}\"", t.title);
                     }
                 }
                 CanvasAction::RaiseCard(cid) => self.doc.raise_card(node, cid),
@@ -2614,10 +2652,13 @@ impl eframe::App for TrellisApp {
                     if let Some((pos, size)) = basket_target {
                         view = framed_view(ui.available_rect_before_wrap(), pos, size);
                     }
+                    let template_names: Vec<String> =
+                        self.templates.iter().map(|t| t.title.clone()).collect();
                     let mut env = Env {
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
                         card_rects: &mut self.card_rects,
+                        templates: &template_names,
                     };
                     let can_paste = self.card_clipboard.is_some();
                     let node_path = crate::tree::node_path(&self.doc, sel);
@@ -2711,6 +2752,9 @@ impl eframe::App for TrellisApp {
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
         storage.set_string(THEME_KEY, self.theme.key().to_string());
         storage.set_string(AUTOSAVE_KEY, self.autosave.to_string());
+        if let Ok(s) = serde_json::to_string(&self.templates) {
+            storage.set_string(TEMPLATES_KEY, s);
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
