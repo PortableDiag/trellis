@@ -2073,6 +2073,123 @@ pub fn image_rgba_to_pdf(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>
     doc.save_to_bytes().map_err(|e| e.to_string())
 }
 
+/// One page of a basket's visual PDF export: a screenshot (RGBA) plus optional
+/// selectable text (a card's content). Assembled by [`basket_pdf`].
+pub struct ShotPage {
+    pub rgba: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+    pub title: String,
+    pub text: String,
+}
+
+/// Build a basket PDF: each [`ShotPage`] becomes an A4 page with its screenshot
+/// at the top (a real visual of the basket / card) and the card's text below it
+/// as a genuine, selectable/searchable text layer — overflowing text flows onto
+/// further pages. The first page is normally the whole-basket overview.
+pub fn basket_pdf(pages: &[ShotPage]) -> Result<Vec<u8>, String> {
+    use printpdf::{ColorBits, ColorSpace, Image, ImageTransform, ImageXObject, Mm, PdfDocument, Px};
+    if pages.is_empty() {
+        return Err("nothing to export".to_string());
+    }
+    let font_ab = ab_glyph::FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?;
+    let (w_mm, h_mm, margin) = (210.0_f32, 297.0_f32, 16.0_f32);
+    const MM_TO_PT: f32 = 2.834_646;
+    let content_w_mm = w_mm - margin * 2.0;
+    let content_w_pt = content_w_mm * MM_TO_PT;
+
+    let (doc, mut cur_page, mut cur_layer) =
+        PdfDocument::new("Trellis basket", Mm(w_mm), Mm(h_mm), "Layer 1");
+    let font =
+        doc.add_external_font(std::io::Cursor::new(EXPORT_FONT)).map_err(|e| e.to_string())?;
+
+    for (pi, page) in pages.iter().enumerate() {
+        if pi > 0 {
+            let (p, l) = doc.add_page(Mm(w_mm), Mm(h_mm), "Layer");
+            cur_page = p;
+            cur_layer = l;
+        }
+        let mut y = h_mm - margin;
+
+        // Heading (selectable).
+        if !page.title.is_empty() {
+            let layer = doc.get_page(cur_page).get_layer(cur_layer);
+            layer.use_text(&page.title, 15.0, Mm(margin), Mm(y - 5.0), &font);
+            y -= 9.0;
+        }
+
+        // Screenshot: fit content width, cap height, placed just under the heading.
+        if page.w > 0 && page.h > 0 && page.rgba.len() >= (page.w * page.h * 4) as usize {
+            let mut rgb = Vec::with_capacity((page.w * page.h * 3) as usize);
+            for px in page.rgba.chunks_exact(4) {
+                let a = px[3] as u32;
+                let over = |c: u8| ((c as u32 * a + 255 * (255 - a)) / 255) as u8;
+                rgb.extend_from_slice(&[over(px[0]), over(px[1]), over(px[2])]);
+            }
+            let aspect = page.h as f32 / page.w as f32;
+            let mut draw_w = content_w_mm;
+            let mut draw_h = draw_w * aspect;
+            // Leave the lower part of the page for the text layer.
+            let max_h = (y - margin) * if page.text.is_empty() { 1.0 } else { 0.66 };
+            if max_h > 0.0 && draw_h > max_h {
+                draw_h = max_h;
+                draw_w = draw_h / aspect;
+            }
+            let dpi = page.w as f32 / (draw_w / 25.4);
+            let img_bottom = (y - draw_h).max(margin);
+            let xobj = ImageXObject {
+                width: Px(page.w as usize),
+                height: Px(page.h as usize),
+                color_space: ColorSpace::Rgb,
+                bits_per_component: ColorBits::Bit8,
+                interpolate: false,
+                image_data: rgb,
+                image_filter: None,
+                smask: None,
+                clipping_bbox: None,
+            };
+            Image::from(xobj).add_to_layer(
+                doc.get_page(cur_page).get_layer(cur_layer),
+                ImageTransform {
+                    translate_x: Some(Mm(margin)),
+                    translate_y: Some(Mm(img_bottom)),
+                    dpi: Some(dpi),
+                    ..Default::default()
+                },
+            );
+            y = img_bottom - 7.0;
+        }
+
+        // Selectable body text below the image; paginates when it overflows.
+        if !page.text.is_empty() {
+            let size = 11.0;
+            let leading = (size * 1.4) / MM_TO_PT;
+            let mut tl = doc.get_page(cur_page).get_layer(cur_layer);
+            for raw in page.text.lines() {
+                let wrapped = if raw.is_empty() {
+                    vec![String::new()]
+                } else {
+                    wrap_text(&font_ab, size, raw, content_w_pt)
+                };
+                for line in wrapped {
+                    if y < margin {
+                        let (p, l) = doc.add_page(Mm(w_mm), Mm(h_mm), "Layer");
+                        cur_page = p;
+                        cur_layer = l;
+                        tl = doc.get_page(cur_page).get_layer(cur_layer);
+                        y = h_mm - margin;
+                    }
+                    if !line.is_empty() {
+                        tl.use_text(&line, size, Mm(margin), Mm(y), &font);
+                    }
+                    y -= leading;
+                }
+            }
+        }
+    }
+    doc.save_to_bytes().map_err(|e| e.to_string())
+}
+
 fn sketch_svg(strokes: &[Stroke], w: f32, h: f32) -> String {
     let w = w.max(1.0);
     let h = h.max(1.0);
@@ -2192,6 +2309,26 @@ mod tests {
         assert!(doc.nodes.values().filter(|n| n.title == "Meeting").count() >= 2);
         // A non-basket JSON is rejected.
         assert!(parse_node_export("{\"format\":\"trellis-card\",\"version\":1}").is_none());
+    }
+
+    #[test]
+    fn basket_pdf_embeds_image_and_text() {
+        // A tiny white screenshot + selectable text → a valid, multi-page PDF.
+        let rgba = vec![255u8; 4 * 4 * 4];
+        let pages = vec![
+            ShotPage { rgba: rgba.clone(), w: 4, h: 4, title: "Overview".into(), text: String::new() },
+            ShotPage {
+                rgba,
+                w: 4,
+                h: 4,
+                title: "Card A".into(),
+                text: "hello searchable world".into(),
+            },
+        ];
+        let bytes = basket_pdf(&pages).unwrap();
+        assert!(bytes.starts_with(b"%PDF"), "produces a PDF");
+        assert!(bytes.len() > 200);
+        assert!(basket_pdf(&[]).is_err(), "empty export is an error");
     }
 
     #[test]

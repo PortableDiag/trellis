@@ -246,6 +246,37 @@ enum ShotPhase {
     Requested,
 }
 
+/// Which visual file a basket screenshot export is producing.
+#[derive(Clone, Copy)]
+enum BasketFmt {
+    /// A single overview image of the whole basket.
+    Png,
+    /// Overview page + one readable page per card (with selectable text).
+    Pdf,
+}
+
+/// One target in a basket export's screenshot queue.
+#[derive(Clone, Copy)]
+enum ShotKind {
+    /// The whole basket, fit in view — the overview page.
+    Overview,
+    /// A single card, fit in view — a readable per-card page.
+    Card(crate::model::CardId),
+}
+
+/// A pending multi-shot basket export (overview + per-card pages), advanced one
+/// screenshot per frame like [`CardShot`], collecting images until the queue is
+/// drained, then assembling a PNG or WYSIWYG PDF.
+struct BasketShot {
+    node: NodeId,
+    fmt: BasketFmt,
+    saved_view: TSTransform,
+    queue: Vec<ShotKind>,
+    idx: usize,
+    captured: Vec<crate::model::ShotPage>,
+    phase: ShotPhase,
+}
+
 /// Encode a raw RGBA buffer as PNG bytes.
 fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())
@@ -335,6 +366,8 @@ pub struct TrellisApp {
     card_rects: HashMap<crate::model::CardId, egui::Rect>,
     /// In-flight "screenshot a single card" export, driven across a few frames.
     card_shot: Option<CardShot>,
+    /// A pending multi-shot basket (overview + per-card) visual export.
+    basket_shot: Option<BasketShot>,
 
     // Agent HTTP API.
     api_rx: Option<Receiver<ApiCommand>>,
@@ -488,6 +521,7 @@ impl TrellisApp {
             card_clipboard: None,
             card_rects: HashMap::new(),
             card_shot: None,
+            basket_shot: None,
             card_sel: std::collections::HashSet::new(),
             card_sel_node: None,
             api_rx: Some(api_rx),
@@ -937,6 +971,8 @@ impl TrellisApp {
                 TreeAction::Select(_)
                     | TreeAction::ToggleReorder
                     | TreeAction::ExportBasket(..)
+                    | TreeAction::ExportBasketPdf(_)
+                    | TreeAction::ExportBasketPng(_)
                     | TreeAction::ImportBasket(_)
             )
         }) {
@@ -1000,6 +1036,8 @@ impl TrellisApp {
                     }
                 }
                 TreeAction::ExportBasket(id, fmt, subs) => self.export_basket(id, fmt, subs),
+                TreeAction::ExportBasketPdf(id) => self.begin_basket_shot(id, BasketFmt::Pdf),
+                TreeAction::ExportBasketPng(id) => self.begin_basket_shot(id, BasketFmt::Png),
                 TreeAction::ImportBasket(id) => self.import_basket(id),
             }
         }
@@ -1677,6 +1715,198 @@ impl TrellisApp {
         self.save_card_export(shot.node, shot.card, ext, label, data);
     }
 
+    /// Crop a full-window framebuffer to a card's on-screen rect (points) → RGBA.
+    fn crop_shot(
+        image: &egui::ColorImage,
+        rect: egui::Rect,
+        ppp: f32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        let [iw, ih] = image.size;
+        let cx = |v: f32| (v.round() as i64).clamp(0, iw as i64) as usize;
+        let cy = |v: f32| (v.round() as i64).clamp(0, ih as i64) as usize;
+        let (x0, y0) = (cx(rect.min.x * ppp), cy(rect.min.y * ppp));
+        let (x1, y1) = (cx(rect.max.x * ppp), cy(rect.max.y * ppp));
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        let mut rgba = Vec::with_capacity(cw * ch * 4);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let px = image.pixels[y * iw + x];
+                rgba.extend_from_slice(&[px.r(), px.g(), px.b(), px.a()]);
+            }
+        }
+        Some((rgba, cw as u32, ch as u32))
+    }
+
+    /// The card `pos`/`size` (canvas units) the current basket shot should frame,
+    /// or `None` if no basket shot is framing this node.
+    fn basket_frame_target(&self, sel: NodeId) -> Option<(egui::Pos2, egui::Vec2)> {
+        let s = self.basket_shot.as_ref()?;
+        if s.node != sel || !matches!(s.phase, ShotPhase::Framing) {
+            return None;
+        }
+        match s.queue.get(s.idx)? {
+            ShotKind::Card(cid) => {
+                let c = self.doc.card(sel, *cid)?;
+                Some((c.pos, c.size))
+            }
+            ShotKind::Overview => self.basket_bbox(sel),
+        }
+    }
+
+    /// Bounding box (pos, size) of all cards in a node's basket, in canvas units.
+    fn basket_bbox(&self, node: NodeId) -> Option<(egui::Pos2, egui::Vec2)> {
+        let n = self.doc.nodes.get(&node)?;
+        if n.cards.is_empty() {
+            return None;
+        }
+        let mut min = egui::pos2(f32::MAX, f32::MAX);
+        let mut max = egui::pos2(f32::MIN, f32::MIN);
+        for c in &n.cards {
+            min.x = min.x.min(c.pos.x);
+            min.y = min.y.min(c.pos.y);
+            max.x = max.x.max(c.pos.x + c.size.x);
+            max.y = max.y.max(c.pos.y + c.size.y);
+        }
+        Some((min, max - min))
+    }
+
+    /// Start a WYSIWYG basket export: select the node, queue an overview shot
+    /// (plus a per-card shot for PDF), and let the screenshot loop drive it.
+    fn begin_basket_shot(&mut self, node: NodeId, fmt: BasketFmt) {
+        if self.card_shot.is_some() || self.basket_shot.is_some() {
+            return;
+        }
+        let Some(n) = self.doc.nodes.get(&node) else { return };
+        if n.cards.is_empty() {
+            self.status = "Nothing to export: this basket is empty".to_string();
+            return;
+        }
+        self.selected = Some(node);
+        let saved_view = self.views.get(&node).copied().unwrap_or_default();
+        let mut queue = vec![ShotKind::Overview];
+        if matches!(fmt, BasketFmt::Pdf) {
+            queue.extend(n.cards.iter().map(|c| ShotKind::Card(c.id)));
+        }
+        self.basket_shot =
+            Some(BasketShot { node, fmt, saved_view, queue, idx: 0, captured: Vec::new(), phase: ShotPhase::Framing });
+        self.status = "Rendering basket…".to_string();
+    }
+
+    /// Capture the current basket shot from the framebuffer, then advance the
+    /// queue (or finish and save when it's drained).
+    fn capture_basket_shot(&mut self, ctx: &egui::Context, image: &egui::ColorImage) {
+        let (node, kind, idx, qlen) = match self.basket_shot.as_ref() {
+            Some(s) => match s.queue.get(s.idx) {
+                Some(k) => (s.node, *k, s.idx, s.queue.len()),
+                None => return,
+            },
+            None => return,
+        };
+        let ppp = ctx.pixels_per_point();
+        // Crop rect: a card's rect, or the union of the basket's card rects.
+        let rect = match kind {
+            ShotKind::Card(cid) => self.card_rects.get(&cid).copied(),
+            ShotKind::Overview => {
+                let ids: Vec<_> = self
+                    .doc
+                    .nodes
+                    .get(&node)
+                    .map(|n| n.cards.iter().map(|c| c.id).collect())
+                    .unwrap_or_default();
+                let mut u: Option<egui::Rect> = None;
+                for id in ids {
+                    if let Some(r) = self.card_rects.get(&id) {
+                        u = Some(u.map_or(*r, |acc| acc.union(*r)));
+                    }
+                }
+                u
+            }
+        };
+        let (rgba, w, h) = match rect.and_then(|r| Self::crop_shot(image, r, ppp)) {
+            Some(v) => v,
+            None => (Vec::new(), 0, 0),
+        };
+        let (title, text) = match kind {
+            ShotKind::Overview => {
+                let t = self.doc.nodes.get(&node).map(|n| n.title.clone()).unwrap_or_default();
+                (format!("{t} — overview"), String::new())
+            }
+            ShotKind::Card(cid) => {
+                let c = self.doc.card(node, cid);
+                let title = c
+                    .map(|c| {
+                        if c.title.trim().is_empty() {
+                            format!("({})", card_kind_label(&c.kind))
+                        } else {
+                            c.title.clone()
+                        }
+                    })
+                    .unwrap_or_default();
+                let text = self.doc.export_card_text(node, cid).unwrap_or_default();
+                (title, text)
+            }
+        };
+        if let Some(bs) = self.basket_shot.as_mut() {
+            bs.captured.push(crate::model::ShotPage { rgba, w, h, title, text });
+            bs.idx += 1;
+            if bs.idx < bs.queue.len() {
+                bs.phase = ShotPhase::Framing;
+            }
+        }
+        if idx + 1 >= qlen {
+            self.finish_basket_shot();
+        }
+    }
+
+    /// Assemble the collected basket screenshots into a PNG or PDF and save it.
+    fn finish_basket_shot(&mut self) {
+        let Some(bs) = self.basket_shot.take() else { return };
+        self.views.insert(bs.node, bs.saved_view); // undo the temporary reframe
+        let base = self.basket_basename(bs.node);
+        // Drop any shots that failed to crop (e.g. a card off-screen).
+        let pages: Vec<_> = bs.captured.into_iter().filter(|p| p.w > 0 && p.h > 0).collect();
+        if pages.is_empty() {
+            self.status = "Export failed: nothing was captured".to_string();
+            return;
+        }
+        match bs.fmt {
+            BasketFmt::Png => {
+                let ov = &pages[0];
+                let data = encode_png(&ov.rgba, ov.w, ov.h);
+                self.save_basket_visual("png", "PNG", data, &base);
+            }
+            BasketFmt::Pdf => {
+                let data = crate::model::basket_pdf(&pages);
+                self.save_basket_visual("pdf", "PDF", data, &base);
+            }
+        }
+    }
+
+    /// Save assembled basket-visual bytes via a save dialog (filename pre-filled).
+    fn save_basket_visual(&mut self, ext: &str, label: &str, data: Result<Vec<u8>, String>, base: &str) {
+        match data {
+            Ok(bytes) => {
+                if let Some(path) = self
+                    .file_dialog()
+                    .add_filter(label, &[ext])
+                    .set_file_name(format!("{base}.{ext}"))
+                    .save_file()
+                {
+                    match std::fs::write(&path, &bytes) {
+                        Ok(_) => self.status = format!("Exported basket {label} → {}", path.display()),
+                        Err(e) => self.status = format!("Export failed: {e}"),
+                    }
+                } else {
+                    self.status = "Export cancelled".to_string();
+                }
+            }
+            Err(e) => self.status = format!("Export failed: {e}"),
+        }
+    }
+
     /// Import a card from a JSON card file the user picks, placing it at `pos`.
     fn import_card(&mut self, node: NodeId, pos: egui::Pos2) {
         let Some(path) = self
@@ -2254,6 +2484,19 @@ impl eframe::App for TrellisApp {
             }
         }
 
+        // The same, one shot per frame, for a multi-shot basket export.
+        if matches!(self.basket_shot.as_ref().map(|s| &s.phase), Some(ShotPhase::Requested)) {
+            let shot_img = ctx.input(|i| {
+                i.events.iter().rev().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(img) = shot_img {
+                self.capture_basket_shot(ctx, &img);
+            }
+        }
+
         // Autosave: once the document has been idle for AUTOSAVE_IDLE (no further
         // changes), write it to disk on a worker thread (never blocks the UI).
         // Debounced so continuous edits — dragging a card, typing — never save
@@ -2365,6 +2608,12 @@ impl eframe::App for TrellisApp {
                             view = framed_view(ui.available_rect_before_wrap(), c.pos, c.size);
                         }
                     }
+                    // Likewise for a basket export: frame the current shot's target
+                    // (the whole basket, or one card), temporarily and unpersisted.
+                    let basket_target = self.basket_frame_target(sel);
+                    if let Some((pos, size)) = basket_target {
+                        view = framed_view(ui.available_rect_before_wrap(), pos, size);
+                    }
                     let mut env = Env {
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
@@ -2385,8 +2634,8 @@ impl eframe::App for TrellisApp {
                         &mut env,
                         &self.card_sel,
                     );
-                    // Never let the temporary export reframe overwrite the real view.
-                    if framing_card.is_none() {
+                    // Never let a temporary export reframe overwrite the real view.
+                    if framing_card.is_none() && basket_target.is_none() {
                         self.views.insert(sel, view);
                     }
                     let pointer_down = ui.input(|i| i.pointer.any_down());
@@ -2407,6 +2656,14 @@ impl eframe::App for TrellisApp {
         if let Some(shot) = self.card_shot.as_mut() {
             if matches!(shot.phase, ShotPhase::Framing) {
                 shot.phase = ShotPhase::Requested;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+            }
+            ctx.request_repaint();
+        }
+        // Same driver for a basket export (one shot per frame across the queue).
+        if let Some(bs) = self.basket_shot.as_mut() {
+            if matches!(bs.phase, ShotPhase::Framing) {
+                bs.phase = ShotPhase::Requested;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
             }
             ctx.request_repaint();

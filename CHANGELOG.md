@@ -4,6 +4,21 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.40.0]
+
+### Added
+- **Visual basket export — PNG & WYSIWYG PDF.** Right-click a tree node → **Export basket**
+  → **PDF (visual)** or **PNG (overview)**.
+  - **PDF** leads with a whole-basket **overview page** (your spatial layout, captured as it
+    looks on screen), then a **readable page per card** — each the card rendered WYSIWYG
+    (formatting, colors, checkboxes, tables, images, sketches) **plus the card's text as a
+    real selectable/searchable layer**, so the file is both visual and copy/search-friendly.
+    Long card text flows onto further pages.
+  - **PNG** is a single image of the whole basket exactly as arranged.
+  - Built by briefly framing the basket (then each card) and screenshotting the framebuffer;
+    the view you were on is restored afterward. Complements the Markdown/HTML/JSON basket
+    export from 0.39.0.
+
 ## [0.39.0]
 
 ### Added

@@ -92,7 +92,9 @@ and zooms (Ctrl+scroll); each node remembers its view.
 - **Export / import a single basket** — right-click a tree node → **Export basket** (its
   cards) or **Export basket + subnodes** (the whole subtree) as **Markdown / HTML / JSON**,
   and **Import basket…** to bring a JSON basket file back in as a child node. Share one
-  day's notes without handing over the whole archive.
+  day's notes without handing over the whole archive. Also **PDF (visual)** — a whole-basket
+  overview page then a readable WYSIWYG page per card, each with selectable/searchable text —
+  and **PNG (overview)**, a single image of the basket as arranged.
 
 **App**
 - Full-text **search** across every node title and card (Ctrl+F)

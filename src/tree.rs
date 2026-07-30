@@ -34,6 +34,10 @@ pub enum TreeAction {
     Select(NodeId),
     /// Export one basket (node) to a text/data file. `bool` = include subnodes.
     ExportBasket(NodeId, BasketFormat, bool),
+    /// Export a basket as a WYSIWYG PDF (overview page + per-card readable pages).
+    ExportBasketPdf(NodeId),
+    /// Export a basket as a single overview PNG image.
+    ExportBasketPng(NodeId),
     /// Import a basket JSON file as a child of this node.
     ImportBasket(NodeId),
     AddRoot,
@@ -294,9 +298,28 @@ fn node_ui(
                         ui.close_menu();
                     }
                 };
-                ui.menu_button("Export basket", |ui| export_menu(ui, actions, false))
-                    .response
-                    .on_hover_text("Share just this basket's cards");
+                ui.menu_button("Export basket", |ui| {
+                    if ui
+                        .button("PDF (visual)")
+                        .on_hover_text("Overview page + a readable page per card, with searchable text")
+                        .clicked()
+                    {
+                        actions.push(TreeAction::ExportBasketPdf(id));
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("PNG (overview)")
+                        .on_hover_text("One image of the whole basket as arranged")
+                        .clicked()
+                    {
+                        actions.push(TreeAction::ExportBasketPng(id));
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    export_menu(ui, actions, false);
+                })
+                .response
+                .on_hover_text("Share just this basket's cards");
                 ui.menu_button("Export basket + subnodes", |ui| export_menu(ui, actions, true))
                     .response
                     .on_hover_text("Share this basket and everything nested under it");
