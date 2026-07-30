@@ -165,6 +165,31 @@ DELETE /api/nodes/{id}             → 200 {"deleted":<id>}    | 404   (removes 
 DELETE /api/nodes/{id}/cards/{cid} → 200 {"deleted":<cid>}   | 404
 ```
 
+### Move / reorder
+Reposition a node among its siblings or reparent it under another node. Sidebar
+order is the raw child order, so this is how an agent sets where a basket lands.
+Pick exactly one placement per call:
+```
+POST /api/nodes/{id}/move  {before:<nid>}            place {id} immediately before that sibling (adopts its parent)
+POST /api/nodes/{id}/move  {after:<nid>}             place {id} immediately after that sibling (adopts its parent)
+POST /api/nodes/{id}/move  {parent?, index:<n>}      put under parent at 0-based slot n (index past the end appends)
+POST /api/nodes/{id}/move  {parent?, to:"top"|"bottom"}   move to the top/bottom of parent
+    → 200 {"id":<id>, "parent":<pid|null>, "index":<n>}     new location
+    → 400   empty body, bad "to", unknown target, or a move that would nest a node in its own subtree
+    → 404   {id} not found
+```
+`parent`: omit to keep the current parent, `null` to move to the top level, or a
+node id to reparent. `before`/`after` ignore `parent`/`index`/`to` (they take the
+target's parent). Examples:
+```
+# put the 2022 year node right before 2023
+curl -sX POST $API/nodes/811/move -H "X-API-Key: $KEY" -d '{"before":612}'
+# send a day to the top of its month
+curl -sX POST $API/nodes/958/move -H "X-API-Key: $KEY" -d '{"to":"top"}'
+# reparent a stray card-basket under another node, at the end
+curl -sX POST $API/nodes/814/move -H "X-API-Key: $KEY" -d '{"parent":766}'
+```
+
 ### Groups
 Bundle 2+ cards into a labeled container that moves as one.
 ```

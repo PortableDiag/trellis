@@ -4,6 +4,28 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.44.0]
+
+### Added
+- **Reorder / reparent nodes over the API** — `POST /api/nodes/{id}/move`. Placement is
+  one of `{before|after:<nid>}` (drop next to a sibling, adopting its parent),
+  `{parent?, index:<n>}` (absolute slot; past-the-end appends), or
+  `{parent?, to:"top"|"bottom"}`. `parent` omitted keeps the current one, `null` promotes
+  to the top level, or an id reparents. Rejects (400) any move that would nest a node inside
+  its own subtree. Closes the gap where agents could create nodes but not order them — the
+  sidebar renders raw child order, so this lets an agent place a basket exactly where a user
+  would drag it. See `API.md`.
+
+## [0.43.0]
+
+### Added
+- **Inline images in Text cards.** Drag an image file onto a Text card to embed it in the
+  body (or right-click in edit mode to insert at the cursor), referenced by an
+  `![alt](trellis:N)` marker. Fit-to-content accounts for the image size; HTML/Markdown
+  exports embed it as a data URI; the PDF text layer and search use the alt text. API:
+  `inline_images` (base64 list) on card create/update, applied before `fit`; card JSON
+  reports `inline_image_names`. Card export/import (JSON) round-trips the images.
+
 ## [0.42.0]
 
 ### Fixed

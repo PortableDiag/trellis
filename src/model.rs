@@ -1304,15 +1304,16 @@ impl Document {
     }
 
     /// Reorder via drag & drop: place `moved` immediately before/after `target`,
-    /// adopting `target`'s parent (so this also reparents across lists). No-ops
-    /// if it would drop a node into its own subtree.
-    pub fn reorder(&mut self, moved: NodeId, target: NodeId, before: bool) {
+    /// adopting `target`'s parent (so this also reparents across lists). Returns
+    /// whether it moved; no-ops (returns `false`) if it would drop a node into
+    /// its own subtree.
+    pub fn reorder(&mut self, moved: NodeId, target: NodeId, before: bool) -> bool {
         if moved == target
             || !self.nodes.contains_key(&moved)
             || !self.nodes.contains_key(&target)
             || self.is_descendant(target, moved)
         {
-            return;
+            return false;
         }
         let new_parent = self.nodes.get(&target).and_then(|n| n.parent);
         if let Some(list) = self.sibling_list_mut(moved) {
@@ -1331,6 +1332,41 @@ impl Document {
                 .position(|x| *x == target)
                 .map_or(list.len(), |i| if before { i } else { i + 1 });
             list.insert(pos, moved);
+        }
+        true
+    }
+
+    /// Move `moved` under `parent` (`None` = top level) to `index`, clamped to
+    /// the destination list's length (so a huge `index` appends). Reparents as
+    /// needed. Returns whether it moved; no-ops (returns `false`) on an unknown
+    /// node or a move that would drop a node into its own subtree. `index` is the
+    /// slot in the *resulting* sibling list, so moving within one parent counts
+    /// positions after the node is lifted out.
+    pub fn move_node(&mut self, moved: NodeId, parent: Option<NodeId>, index: usize) -> bool {
+        if !self.nodes.contains_key(&moved) {
+            return false;
+        }
+        if let Some(p) = parent {
+            if p == moved || !self.nodes.contains_key(&p) || self.is_descendant(p, moved) {
+                return false;
+            }
+        }
+        if let Some(list) = self.sibling_list_mut(moved) {
+            list.retain(|x| *x != moved);
+        }
+        if let Some(n) = self.nodes.get_mut(&moved) {
+            n.parent = parent;
+        }
+        let list = match parent {
+            Some(p) => self.nodes.get_mut(&p).map(|n| &mut n.children),
+            None => Some(&mut self.roots),
+        };
+        if let Some(list) = list {
+            let pos = index.min(list.len());
+            list.insert(pos, moved);
+            true
+        } else {
+            false
         }
     }
 

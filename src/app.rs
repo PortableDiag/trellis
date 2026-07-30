@@ -1054,7 +1054,7 @@ impl TrellisApp {
                 TreeAction::MoveToTop(id) => self.doc.move_to_edge(id, true),
                 TreeAction::MoveToBottom(id) => self.doc.move_to_edge(id, false),
                 TreeAction::Reorder { moved, target, before } => {
-                    self.doc.reorder(moved, target, before)
+                    self.doc.reorder(moved, target, before);
                 }
                 TreeAction::ToggleReorder => self.reorder_mode = !self.reorder_mode,
                 TreeAction::Indent(id) => self.doc.indent(id),

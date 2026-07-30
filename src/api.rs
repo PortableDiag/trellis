@@ -36,6 +36,8 @@ pub enum ApiRequest {
     CreateNode { parent: Option<NodeId>, title: String },
     UpdateNode { id: NodeId, title: Option<String>, color: Option<[u8; 3]>, bg: Option<[u8; 3]> },
     DeleteNode(NodeId),
+    // Reorder / reparent a node in the tree.
+    MoveNode { id: NodeId, mv: MoveNodeInput },
     AddCard { node: NodeId, input: AddCardInput },
     UpdateCard { node: NodeId, card: u64, patch: UpdateCardInput },
     DeleteCard { node: NodeId, card: u64 },
@@ -91,6 +93,29 @@ struct CreateNodeInput {
     #[serde(default)]
     parent: Option<NodeId>,
     title: String,
+}
+
+/// Where to move a node. Pick ONE placement:
+/// - `before` / `after`: put this node immediately before/after that sibling,
+///   adopting its parent (this is how you reparent across baskets).
+/// - `parent` + `index`: put it under `parent` at a 0-based slot; `parent: null`
+///   means top level, omitting `parent` keeps the current one, and an `index`
+///   past the end appends.
+/// - `parent` + `to`: `"top"` or `"bottom"` of `parent` (or the current parent
+///   if `parent` is omitted).
+#[derive(Deserialize)]
+pub struct MoveNodeInput {
+    #[serde(default)]
+    before: Option<NodeId>,
+    #[serde(default)]
+    after: Option<NodeId>,
+    /// Absent = keep current parent; present `null` = top level; present id = that node.
+    #[serde(default, deserialize_with = "de_parent_field")]
+    parent: Option<Option<NodeId>>,
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    to: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -421,6 +446,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::UpdateNode { id: pid(id)?, title: i.title, color: i.color, bg: i.bg })
         }
         (Method::Delete, ["api", "nodes", id]) => Ok(ApiRequest::DeleteNode(pid(id)?)),
+        (Method::Post, ["api", "nodes", id, "move"]) => {
+            let mv: MoveNodeInput = parse(body)?;
+            Ok(ApiRequest::MoveNode { id: pid(id)?, mv })
+        }
         (Method::Get, ["api", "nodes", id, "cards"]) => Ok(ApiRequest::ListCards(pid(id)?)),
         (Method::Post, ["api", "nodes", id, "cards"]) => {
             let input: AddCardInput = parse(body)?;
@@ -507,6 +536,16 @@ where
 {
     let v = Value::deserialize(d)?;
     color_from_value(&v).map_err(serde::de::Error::custom)
+}
+
+/// Deserialize a present `parent` field into `Some(..)` so the handler can tell
+/// it apart from an omitted one (which `#[serde(default)]` leaves as `None`):
+/// `parent: null` → `Some(None)` (top level), `parent: 5` → `Some(Some(5))`.
+fn de_parent_field<'de, D>(d: D) -> Result<Option<Option<NodeId>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<NodeId>::deserialize(d)?))
 }
 
 fn color_from_value(v: &Value) -> Result<Option<[u8; 3]>, String> {
@@ -684,6 +723,69 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             }
             doc.remove_node(id);
             (true, ApiResponse::ok(json!({ "deleted": id })))
+        }
+        ApiRequest::MoveNode { id, mv } => {
+            if !doc.nodes.contains_key(&id) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            if mv.before.is_none()
+                && mv.after.is_none()
+                && mv.index.is_none()
+                && mv.to.is_none()
+                && mv.parent.is_none()
+            {
+                return (
+                    false,
+                    ApiResponse::err(
+                        400,
+                        "specify a placement: before, after, index (+parent), or to:top|bottom (+parent)",
+                    ),
+                );
+            }
+            let moved = if let Some(t) = mv.before.or(mv.after) {
+                if !doc.nodes.contains_key(&t) {
+                    return (false, ApiResponse::err(400, "target node not found"));
+                }
+                doc.reorder(id, t, mv.before.is_some())
+            } else {
+                let parent = match mv.parent {
+                    Some(p) => p, // present: Some(None)=top level, Some(Some(x))=that node
+                    None => doc.nodes.get(&id).and_then(|n| n.parent), // keep current
+                };
+                if let Some(p) = parent {
+                    if !doc.nodes.contains_key(&p) {
+                        return (false, ApiResponse::err(400, "parent node not found"));
+                    }
+                }
+                let index = if let Some(i) = mv.index {
+                    i
+                } else {
+                    match mv.to.as_deref() {
+                        Some("top") => 0,
+                        // Default (parent-only reparent, or to:bottom) appends.
+                        Some("bottom") | None => usize::MAX,
+                        Some(other) => {
+                            return (
+                                false,
+                                ApiResponse::err(400, &format!("bad 'to' value {other:?} (use \"top\" or \"bottom\")")),
+                            );
+                        }
+                    }
+                };
+                doc.move_node(id, parent, index)
+            };
+            if !moved {
+                return (
+                    false,
+                    ApiResponse::err(400, "move rejected (no-op, or would nest a node inside its own subtree)"),
+                );
+            }
+            let n = &doc.nodes[&id];
+            let index = match n.parent {
+                Some(p) => doc.nodes[&p].children.iter().position(|x| *x == id),
+                None => doc.roots.iter().position(|x| *x == id),
+            };
+            (true, ApiResponse::ok(json!({ "id": id, "parent": n.parent, "index": index })))
         }
         ApiRequest::AddCard { node, input } => {
             if !doc.nodes.contains_key(&node) {
@@ -1602,6 +1704,56 @@ mod tests {
         let (_, ex) = process(&mut doc, ApiRequest::Export("pdf".into()));
         assert_eq!(ex.status, 200);
         assert!(ex.body.contains("\"base64\""));
+    }
+
+    #[test]
+    fn move_node_reorders_reparents_and_guards_cycles() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "A".into());
+        let b = doc.add_node(None, "B".into());
+        let c = doc.add_node(None, "C".into());
+        assert_eq!(doc.roots, vec![a, b, c]);
+
+        // Helper: route a move body for `id`, then apply it.
+        let mv = |doc: &mut Document, id: NodeId, body: &str| {
+            let req = route(&Method::Post, &format!("/api/nodes/{id}/move"), "", body).unwrap();
+            process(doc, req)
+        };
+
+        // before: put C ahead of A -> [C, A, B].
+        let (dirty, r) = mv(&mut doc, c, &format!(r#"{{"before":{a}}}"#));
+        assert!(dirty && r.status == 200);
+        assert_eq!(doc.roots, vec![c, a, b]);
+
+        // to:bottom moves within the current parent -> [C, B, A].
+        let (_, r) = mv(&mut doc, a, r#"{"to":"bottom"}"#);
+        assert_eq!(r.status, 200);
+        assert_eq!(doc.roots, vec![c, b, a]);
+
+        // parent + to:top reparents B under C at the front.
+        let (_, r) = mv(&mut doc, b, &format!(r#"{{"parent":{c},"to":"top"}}"#));
+        assert_eq!(r.status, 200);
+        assert_eq!(doc.nodes[&c].children, vec![b]);
+        assert_eq!(doc.roots, vec![c, a]);
+        assert_eq!(doc.nodes[&b].parent, Some(c));
+
+        // parent:null promotes B back to the top level at index 0.
+        let (_, r) = mv(&mut doc, b, r#"{"parent":null,"index":0}"#);
+        assert_eq!(r.status, 200);
+        assert_eq!(doc.nodes[&b].parent, None);
+        assert_eq!(doc.roots, vec![b, c, a]);
+
+        // Cycle guard: C cannot move under its own (former) subtree. Re-nest a
+        // under c first, then try to move c under a.
+        let (_, _) = mv(&mut doc, a, &format!(r#"{{"parent":{c}}}"#));
+        assert_eq!(doc.nodes[&a].parent, Some(c));
+        let (dirty, r) = mv(&mut doc, c, &format!(r#"{{"parent":{a}}}"#));
+        assert!(!dirty && r.status == 400);
+        assert_eq!(doc.nodes[&c].parent, None); // unchanged
+
+        // Empty placement and unknown target are rejected.
+        assert_eq!(mv(&mut doc, c, "{}").1.status, 400);
+        assert_eq!(mv(&mut doc, c, r#"{"before":99999}"#).1.status, 400);
     }
 
     #[test]
