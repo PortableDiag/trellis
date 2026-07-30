@@ -295,6 +295,12 @@ pub struct Card {
     /// Body font-size multiplier (1.0 = default). Applies to text/code cards.
     #[serde(default = "default_font_scale")]
     pub font_scale: f32,
+    /// Images embedded inline in a Text card's body, referenced from the
+    /// markdown as `![alt](trellis:N)` where `N` indexes this vec. Kept on the
+    /// card so it stays self-contained through copy/export. Empty for cards with
+    /// no inline images (i.e. every card until one is added).
+    #[serde(default)]
+    pub inline_images: Vec<ImageEntry>,
     /// Runtime-only: whether the card is in edit mode. Never persisted.
     #[serde(skip)]
     pub editing: bool,
@@ -322,6 +328,7 @@ impl Card {
             group: None,
             docked_to: None,
             font_scale: 1.0,
+            inline_images: Vec::new(),
             editing,
         }
     }
@@ -351,7 +358,18 @@ impl Card {
 
         let (content_w, content_h) = match &self.kind {
             CardKind::Image { .. } => return None,
-            CardKind::Text => wrapped_extent(&self.body, char_w, line_h, TEXT_WRAP_W),
+            CardKind::Text => {
+                // Measure the text with image markers reduced to their alt text,
+                // then stack each referenced image's on-screen size underneath —
+                // so a card with a big picture auto-sizes tall enough to show it.
+                let stripped = strip_inline_markers(&self.body);
+                let (mut w, mut h) = wrapped_extent(&stripped, char_w, line_h, TEXT_WRAP_W);
+                for (iw, ih) in self.inline_image_sizes(TEXT_WRAP_W) {
+                    w = w.max(iw);
+                    h += ih + 6.0;
+                }
+                (w, h)
+            }
             CardKind::Code { .. } => {
                 // Monospace, no wrap: fit the longest line and every line.
                 let cw = font_px * 0.62;
@@ -394,6 +412,93 @@ impl Card {
         let h = TITLE_H + PAD * 2.0 + content_h;
         Some(egui::vec2(w.clamp(MIN_W, MAX_W), h.clamp(MIN_H, MAX_H)))
     }
+
+    /// Display `(width, height)` of each inline image actually referenced by the
+    /// body, in appearance order, scaled so its width fits `max_w`. Reads only
+    /// the image header (cheap; no full decode and no egui), so [`Card::fit_size`]
+    /// can call it off the UI thread.
+    fn inline_image_sizes(&self, max_w: f32) -> Vec<(f32, f32)> {
+        let mut out = Vec::new();
+        for idx in inline_refs(&self.body) {
+            if let Some(entry) = self.inline_images.get(idx) {
+                if let Some((iw, ih)) = image_dimensions(&entry.data) {
+                    let iw = iw.max(1.0);
+                    let scale = (max_w / iw).min(1.0);
+                    out.push((iw * scale, ih * scale));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Replace each `![alt](trellis:N)` inline-image marker in `body` with the
+/// result of `f(alt, n)`. Anything that isn't a well-formed marker passes
+/// through unchanged. One scanner shared by the live renderer (→ a `bytes://`
+/// image), the HTML/Markdown exporters (→ a `data:` URI image), and the
+/// plain-text / search paths (→ just the alt text).
+pub(crate) fn map_inline_images(body: &str, mut f: impl FnMut(&str, usize) -> String) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'!' && bytes.get(i + 1) == Some(&b'[') {
+            if let Some((alt, idx, end)) = parse_inline_marker(body, i) {
+                out.push_str(&f(alt, idx));
+                i = end;
+                continue;
+            }
+        }
+        let ch = body[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Parse `![alt](trellis:N)` at `start` (pointing at `!`). Returns `(alt, N,
+/// end_byte)` with `end_byte` just past the closing `)`, or `None` if the span
+/// isn't a well-formed Trellis inline-image marker.
+fn parse_inline_marker(body: &str, start: usize) -> Option<(&str, usize, usize)> {
+    let rest = body[start..].strip_prefix("![")?;
+    let close_alt = rest.find(']')?;
+    let alt = &rest[..close_alt];
+    let after = rest[close_alt + 1..].strip_prefix("(trellis:")?;
+    let close = after.find(')')?;
+    let num = &after[..close];
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let idx: usize = num.parse().ok()?;
+    let end = start + 2 + alt.len() + 1 + "(trellis:".len() + num.len() + 1;
+    Some((alt, idx, end))
+}
+
+/// Indices of the inline images referenced by `body`, in appearance order
+/// (duplicates included).
+pub(crate) fn inline_refs(body: &str) -> Vec<usize> {
+    let mut v = Vec::new();
+    map_inline_images(body, |_, n| {
+        v.push(n);
+        String::new()
+    });
+    v
+}
+
+/// The body with inline-image markers reduced to their alt text — for text
+/// width/height estimation, plain-text export, copy, and full-text search.
+pub(crate) fn strip_inline_markers(body: &str) -> String {
+    map_inline_images(body, |alt, _| alt.to_string())
+}
+
+/// Intrinsic pixel size of an encoded image, read from its header only (no full
+/// decode). `None` if the bytes aren't a recognizable image.
+fn image_dimensions(bytes: &[u8]) -> Option<(f32, f32)> {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let (w, h) = reader.into_dimensions().ok()?;
+    Some((w as f32, h as f32))
 }
 
 /// Estimate the `(width, height)` a block of text needs: width is the longest
@@ -737,6 +842,21 @@ impl Document {
             }
             _ => false,
         }
+    }
+
+    /// Append an image to a card's inline-image set and return its index, so the
+    /// caller can splice a `![alt](trellis:N)` marker into the body. Works on any
+    /// card kind (the marker only renders on Text cards).
+    pub fn add_inline_image(
+        &mut self,
+        node: NodeId,
+        card: CardId,
+        bytes: Vec<u8>,
+        img_name: String,
+    ) -> Option<usize> {
+        let c = self.card_mut(node, card)?;
+        c.inline_images.push(ImageEntry { data: bytes, name: img_name });
+        Some(c.inline_images.len() - 1)
     }
 
     /// Remove the `idx`th image (display order) from an Image card. Removing
@@ -1450,6 +1570,7 @@ impl Document {
             color: c.color,
             size: [c.size.x, c.size.y],
             font_scale: c.font_scale,
+            inline_images: c.inline_images.clone(),
             kind: c.kind.clone(),
         };
         serde_json::to_string_pretty(&exp).ok()
@@ -1470,6 +1591,7 @@ impl Document {
             c.color = exp.color;
             c.size = egui::vec2(exp.size[0].max(40.0), exp.size[1].max(30.0));
             c.font_scale = if exp.font_scale > 0.0 { exp.font_scale } else { 1.0 };
+            c.inline_images = exp.inline_images;
             c.editing = false;
         }
         Some(cid)
@@ -1677,6 +1799,10 @@ pub struct CardExport {
     pub size: [f32; 2],
     #[serde(default = "default_font_scale")]
     pub font_scale: f32,
+    /// Inline images referenced by the body (`![alt](trellis:N)`), embedded so
+    /// the card file (and any template built from it) is self-contained.
+    #[serde(default)]
+    pub inline_images: Vec<ImageEntry>,
     pub kind: CardKind,
 }
 
@@ -1713,9 +1839,24 @@ pub fn parse_node_export(json: &str) -> Option<NodeExport> {
     (exp.format == NODE_EXPORT_FORMAT).then_some(exp)
 }
 
+/// A Text card's body with inline-image markers rewritten to self-contained
+/// `data:` URIs, for the HTML and Markdown exporters (so the file needs no
+/// sidecar images). Unreferenced markers collapse to their alt text.
+fn inline_body_with_data_uris(card: &Card) -> String {
+    map_inline_images(&card.body, |alt, n| match card.inline_images.get(n) {
+        Some(e) => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&e.data);
+            let mime = mime_for(&e.name);
+            format!("![{alt}](data:{mime};base64,{b64})")
+        }
+        None => alt.to_string(),
+    })
+}
+
 fn searchable_body(card: &Card) -> String {
     match &card.kind {
-        CardKind::Text | CardKind::Code { .. } => card.body.clone(),
+        CardKind::Text => strip_inline_markers(&card.body),
+        CardKind::Code { .. } => card.body.clone(),
         CardKind::Checklist { items } => items
             .iter()
             .map(|i| i.text.as_str())
@@ -1804,7 +1945,7 @@ fn escape_html(s: &str) -> String {
 fn card_body_html(card: &Card) -> String {
     let mut s = String::new();
     match &card.kind {
-        CardKind::Text => s.push_str(&md_to_html(&card.body)),
+        CardKind::Text => s.push_str(&md_to_html(&inline_body_with_data_uris(card))),
         CardKind::Code { lang } => {
             let fenced = format!("```{lang}\n{}\n```", card.body);
             s.push_str(&md_to_html(&fenced));
@@ -1868,7 +2009,7 @@ fn card_body_md(card: &Card) -> String {
     let mut s = String::new();
     match &card.kind {
         CardKind::Text => {
-            s.push_str(card.body.trim_end());
+            s.push_str(inline_body_with_data_uris(card).trim_end());
             s.push_str("\n\n");
         }
         CardKind::Code { lang } => {
@@ -1921,7 +2062,10 @@ fn card_lines(card: &Card) -> Vec<ExportLine> {
     }
     match &card.kind {
         CardKind::Text => {
-            let body = card.body.trim_end();
+            // The selectable text layer carries the words; inline images become
+            // their alt text (the picture shows on the WYSIWYG screenshot page).
+            let stripped = strip_inline_markers(&card.body);
+            let body = stripped.trim_end();
             if !body.is_empty() {
                 out.push(ExportLine { text: body.to_string(), size: 10.5 });
             }
@@ -2367,6 +2511,73 @@ mod tests {
             ocr: String::new(),
         });
         assert!(img.fit_size().is_none());
+    }
+
+    /// A tiny encoded PNG of the given size, for inline-image tests.
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn inline_markers_map_strip_and_collect_refs() {
+        let body = "before ![a cat](trellis:0) middle ![](trellis:2) after ![x](trellis:notnum)";
+        // Refs are collected in order; the malformed one is ignored.
+        assert_eq!(inline_refs(body), vec![0, 2]);
+        // Strip reduces markers to their alt text (empty alt disappears).
+        assert_eq!(
+            strip_inline_markers(body),
+            "before a cat middle  after ![x](trellis:notnum)"
+        );
+        // map lets a caller splice arbitrary replacements.
+        let mapped = map_inline_images(body, |alt, n| format!("<{n}:{alt}>"));
+        assert!(mapped.contains("<0:a cat>") && mapped.contains("<2:>"));
+    }
+
+    #[test]
+    fn fit_size_text_grows_for_inline_image() {
+        let mut plain = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Text);
+        plain.body = "a short note".into();
+        let base = plain.fit_size().unwrap();
+
+        let mut withimg = Card::new(2, egui::pos2(0.0, 0.0), CardKind::Text);
+        withimg.body = "a short note\n\n![pic](trellis:0)".into();
+        withimg.inline_images = vec![ImageEntry { data: png_bytes(300, 200), name: "pic.png".into() }];
+        let grown = withimg.fit_size().unwrap();
+
+        // The 200px-tall image forces the card materially taller than text alone.
+        assert!(grown.y > base.y + 150.0, "image should add height: {base:?} -> {grown:?}");
+    }
+
+    #[test]
+    fn card_export_round_trips_inline_images() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let idx = doc.add_inline_image(n, cid, png_bytes(20, 10), "p.png".into()).unwrap();
+        doc.card_mut(n, cid).unwrap().body = format!("see ![p](trellis:{idx})");
+
+        let json = doc.export_card_json(n, cid).unwrap();
+        let exp = parse_card_export(&json).expect("valid card export");
+        assert_eq!(exp.inline_images.len(), 1);
+
+        let m = doc.add_node(None, "m".into());
+        let cid2 = doc.add_card_from_export(m, egui::pos2(5.0, 5.0), exp).unwrap();
+        assert_eq!(doc.card(m, cid2).unwrap().inline_images.len(), 1);
+    }
+
+    #[test]
+    fn inline_image_html_export_embeds_data_uri() {
+        let mut card = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Text);
+        card.body = "look: ![pic](trellis:0)".into();
+        card.inline_images = vec![ImageEntry { data: png_bytes(4, 4), name: "pic.png".into() }];
+        let html = card_body_html(&card);
+        assert!(html.contains("<img"), "renders an <img>: {html}");
+        assert!(html.contains("data:image/png;base64,"), "embeds a data URI: {html}");
     }
 
     #[test]

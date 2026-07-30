@@ -193,6 +193,7 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
         | A::SketchUndo(_)
         | A::SketchClear(_)
         | A::LoadImage(_)
+        | A::InsertInlineImage(..)
         | A::RemoveImage(..)
         | A::GroupSelected
         | A::Ungroup(_)
@@ -376,6 +377,13 @@ pub struct TrellisApp {
     basket_shot: Option<BasketShot>,
     /// Saved reusable card templates (persist in app config).
     templates: Vec<crate::model::CardExport>,
+    /// `bytes://` URIs of text-card inline images already registered with egui
+    /// this session (so each is uploaded once, not every frame).
+    inline_sent: std::collections::HashSet<String>,
+    /// Bumped whenever the document is replaced, and mixed into inline-image
+    /// URIs so a new document's images can't collide with the previous one's
+    /// cached textures.
+    inline_epoch: u64,
 
     // Agent HTTP API.
     api_rx: Option<Receiver<ApiCommand>>,
@@ -530,6 +538,8 @@ impl TrellisApp {
             card_rects: HashMap::new(),
             card_shot: None,
             basket_shot: None,
+            inline_sent: std::collections::HashSet::new(),
+            inline_epoch: 0,
             templates: cc
                 .storage
                 .and_then(|s| s.get_string(TEMPLATES_KEY))
@@ -819,10 +829,19 @@ impl TrellisApp {
         )
     }
 
+    /// Reset per-session inline-image registration when the document changes, so
+    /// a freshly loaded document's images can't reuse the previous document's
+    /// cached textures.
+    fn reset_inline_images(&mut self) {
+        self.inline_sent.clear();
+        self.inline_epoch = self.inline_epoch.wrapping_add(1);
+    }
+
     fn new_document(&mut self) {
         if !self.confirm_discard() {
             return;
         }
+        self.reset_inline_images();
         self.doc = Document::default();
         self.selected = self.doc.roots.first().copied();
         self.views.clear();
@@ -842,6 +861,7 @@ impl TrellisApp {
         {
             match read_document(&path) {
                 Ok(doc) => {
+                    self.reset_inline_images();
                     self.doc = doc;
                     self.selected = self.doc.roots.first().copied();
                     self.views.clear();
@@ -960,6 +980,7 @@ impl TrellisApp {
         if let Some(path) = self.file_dialog().add_filter("JSON", &["json"]).pick_file() {
             match std::fs::read_to_string(&path).map(|s| serde_json::from_str::<Document>(&s)) {
                 Ok(Ok(doc)) => {
+                    self.reset_inline_images();
                     self.doc = doc;
                     self.selected = self.doc.roots.first().copied();
                     self.views.clear();
@@ -1130,6 +1151,20 @@ impl TrellisApp {
     /// decodes as UTF-8 text (txt/md/source/…) → a text card holding the file's
     /// contents. Cards fan out from the drop position; unknown binaries are
     /// skipped.
+    /// The topmost Text card whose rect contains world-space `pos`, if any — so a
+    /// dropped image can go inline into a note rather than spawn a new card.
+    fn text_card_at(&self, node: NodeId, pos: egui::Pos2) -> Option<crate::model::CardId> {
+        let n = self.doc.nodes.get(&node)?;
+        n.cards
+            .iter()
+            .rev()
+            .find(|c| {
+                matches!(c.kind, CardKind::Text)
+                    && egui::Rect::from_min_size(c.pos, c.size).contains(pos)
+            })
+            .map(|c| c.id)
+    }
+
     fn drop_files(&mut self, node: NodeId, files: Vec<egui::DroppedFile>, pos: egui::Pos2) {
         let mut n = 0usize;
         for f in files {
@@ -1154,10 +1189,25 @@ impl TrellisApp {
                 .unwrap_or_default();
             let at = pos + egui::vec2(24.0, 24.0) * n as f32;
             if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp") {
-                let kind = CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new(), ocr: String::new() };
-                if let Some(cid) = self.doc.add_card(node, at, kind) {
-                    self.doc.add_image(node, cid, bytes, name);
-                    n += 1;
+                // Dropping an image onto a Text card embeds it inline in that
+                // note; anywhere else it becomes a new image card.
+                if let Some(tid) = self.text_card_at(node, pos) {
+                    let alt = name.rsplit_once('.').map(|(a, _)| a).unwrap_or(&name).to_string();
+                    if let Some(idx) = self.doc.add_inline_image(node, tid, bytes, name) {
+                        if let Some(c) = self.doc.card_mut(node, tid) {
+                            if !c.body.is_empty() && !c.body.ends_with('\n') {
+                                c.body.push('\n');
+                            }
+                            c.body.push_str(&format!("![{alt}](trellis:{idx})\n"));
+                        }
+                        n += 1;
+                    }
+                } else {
+                    let kind = CardKind::Image { data: Vec::new(), name: String::new(), extra: Vec::new(), ocr: String::new() };
+                    if let Some(cid) = self.doc.add_card(node, at, kind) {
+                        self.doc.add_image(node, cid, bytes, name);
+                        n += 1;
+                    }
                 }
             } else if let Ok(text) = String::from_utf8(bytes) {
                 // A dropped Trellis JSON card file becomes that exact card; any
@@ -1389,6 +1439,9 @@ impl TrellisApp {
                     self.doc.sketch_clear(node, cid);
                 }
                 CanvasAction::LoadImage(cid) => self.load_image_into(node, cid),
+                CanvasAction::InsertInlineImage(cid, at) => {
+                    self.insert_inline_image_into(node, cid, at)
+                }
                 CanvasAction::TableSetCell(cid, r, c, text) => {
                     if self.doc.table_set_cell(node, cid, r, c, text) {
                         self.mark_dirty();
@@ -1978,6 +2031,54 @@ impl TrellisApp {
             },
             Err(e) => self.status = format!("Read error: {e}"),
         }
+    }
+
+    /// Pick an image file and embed it inline in a Text card's body, splicing a
+    /// `![alt](trellis:N)` marker at char position `at` (the editor cursor).
+    fn insert_inline_image_into(&mut self, node: NodeId, card: crate::model::CardId, at: usize) {
+        let Some(path) = self
+            .file_dialog()
+            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
+            .pick_file()
+        else {
+            return;
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Image read error: {e}");
+                return;
+            }
+        };
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let alt = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let Some(idx) = self.doc.add_inline_image(node, card, bytes, name) else {
+            return;
+        };
+        let marker = format!("![{alt}](trellis:{idx})");
+        if let Some(c) = self.doc.card_mut(node, card) {
+            // Splice the marker at the cursor, padded with newlines so it lands on
+            // its own line and renders as a block image.
+            let at = at.min(c.body.chars().count());
+            let byte = c.body.char_indices().nth(at).map(|(b, _)| b).unwrap_or(c.body.len());
+            let mut ins = String::new();
+            if byte > 0 && !c.body[..byte].ends_with('\n') {
+                ins.push('\n');
+            }
+            ins.push_str(&marker);
+            if byte < c.body.len() && !c.body[byte..].starts_with('\n') {
+                ins.push('\n');
+            }
+            c.body.insert_str(byte, &ins);
+        }
+        self.mark_dirty();
+        self.status = "Inserted image".to_string();
     }
 
     fn load_image_into(&mut self, node: NodeId, card: crate::model::CardId) {
@@ -2673,6 +2774,8 @@ impl eframe::App for TrellisApp {
                         tex: &mut self.tex_cache,
                         card_rects: &mut self.card_rects,
                         templates: &template_names,
+                        inline_sent: &mut self.inline_sent,
+                        inline_epoch: self.inline_epoch,
                     };
                     let can_paste = self.card_clipboard.is_some();
                     let node_path = crate::tree::node_path(&self.doc, sel);

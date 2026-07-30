@@ -21,6 +21,12 @@ pub struct Env<'a> {
     pub card_rects: &'a mut HashMap<CardId, egui::Rect>,
     /// Names of the user's saved card templates, for the "Insert template" menu.
     pub templates: &'a [String],
+    /// `bytes://` URIs already registered with egui this session, so a text
+    /// card's inline images are uploaded once instead of every frame.
+    pub inline_sent: &'a mut std::collections::HashSet<String>,
+    /// Document generation, mixed into inline-image URIs so a reloaded document
+    /// can't collide with the previous one's cached image textures.
+    pub inline_epoch: u64,
 }
 
 /// Actions requested by the canvas, applied by the app afterwards.
@@ -55,6 +61,9 @@ pub enum CanvasAction {
     SketchUndo(CardId),
     SketchClear(CardId),
     LoadImage(CardId),
+    /// Pick an image file and embed it inline in a Text card's body, splicing a
+    /// `![](trellis:N)` marker at the given cursor char position (toolbar button).
+    InsertInlineImage(CardId, usize),
     RemoveImage(CardId, usize),
     /// Run OCR over an image card's images and store the extracted text.
     OcrCard(CardId),
@@ -784,6 +793,29 @@ fn card_ui(
     }
 }
 
+/// Rewrite a Text card's `![alt](trellis:N)` markers to `bytes://…` URIs,
+/// registering each referenced image's bytes with egui once (tracked in `sent`).
+/// egui's image loaders (installed at startup) decode and cache them, and the
+/// CommonMark viewer then shows them inline via `Image::from_uri`. A marker whose
+/// index has no image collapses to its alt text.
+fn resolve_inline_images(
+    ctx: &egui::Context,
+    card: &Card,
+    epoch: u64,
+    sent: &mut std::collections::HashSet<String>,
+) -> String {
+    crate::model::map_inline_images(&card.body, |alt, n| match card.inline_images.get(n) {
+        Some(e) => {
+            let uri = format!("bytes://trellis-{}-{}-{}-{}", epoch, card.id, n, e.data.len());
+            if sent.insert(uri.clone()) {
+                ctx.include_bytes(uri.clone(), e.data.clone());
+            }
+            format!("![{alt}]({uri})")
+        }
+        None => alt.to_string(),
+    })
+}
+
 fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &mut Vec<CanvasAction>) {
     ui.set_width(ui.available_width());
     match &card.kind {
@@ -849,6 +881,9 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                     }
                     if fmt_btn(ui, "link", "Link") {
                         edited = Some(make_link(&card.body, sel));
+                    }
+                    if fmt_btn(ui, "img", "Insert image (embed a picture in this note)") {
+                        actions.push(CanvasAction::InsertInlineImage(card.id, sel.1));
                     }
                     if fmt_btn(ui, "\u{2014}", "Horizontal rule") {
                         edited = Some(insert_hr(&card.body, sel));
@@ -964,9 +999,12 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
             } else if card.body.trim().is_empty() {
                 ui.weak("(empty — double-click title to edit)");
             } else {
-                // Render single newlines as line breaks (see hard_wrap).
+                // Resolve inline-image markers to registered `bytes://` URIs, then
+                // render single newlines as line breaks (see hard_wrap).
+                let resolved =
+                    resolve_inline_images(ui.ctx(), card, env.inline_epoch, env.inline_sent);
                 scale_text(ui, card.font_scale, |ui| {
-                    CommonMarkViewer::new().show(ui, env.md, &crate::model::hard_wrap(&card.body));
+                    CommonMarkViewer::new().show(ui, env.md, &crate::model::hard_wrap(&resolved));
                 });
             }
         }

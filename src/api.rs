@@ -127,6 +127,12 @@ pub struct AddCardInput {
     /// Base64 image bytes for an `image` card's first image (name = `title`).
     #[serde(default)]
     image_base64: Option<String>,
+    /// Base64 images to embed inline in a **text** card's body. Each becomes an
+    /// entry referenced by a `![alt](trellis:N)` marker you place in `body`
+    /// (N = its 0-based index here). Applied before `fit`, so `fit` sizes the
+    /// card to show them.
+    #[serde(default)]
+    inline_images: Option<Vec<String>>,
     /// Body font-size multiplier (1.0 = default), for text/code cards.
     #[serde(default)]
     font_scale: Option<f32>,
@@ -182,6 +188,11 @@ pub struct UpdateCardInput {
     /// Body font-size multiplier (1.0 = default), for text/code cards.
     #[serde(default)]
     font_scale: Option<f32>,
+    /// Replacement inline images (base64) for a **text** card, referenced by
+    /// `![alt](trellis:N)` markers in `body`. Replaces the card's whole inline
+    /// set. Applied before `fit`.
+    #[serde(default)]
+    inline_images: Option<Vec<String>>,
     /// Resize the card to fit its content (applied after all other fields).
     /// No effect on image cards.
     #[serde(default)]
@@ -729,6 +740,16 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                             doc.add_image(node, cid, bytes, img_name);
                         }
                     }
+                    // Optional inline images embedded in a text card's body.
+                    if let Some(list) = input.inline_images {
+                        for (i, b64) in list.iter().enumerate() {
+                            if let Ok(bytes) =
+                                base64::engine::general_purpose::STANDARD.decode(b64.trim())
+                            {
+                                doc.add_inline_image(node, cid, bytes, format!("inline-{i}"));
+                            }
+                        }
+                    }
                     // Fit to content last, once body/items/images are all set.
                     if fit {
                         if let Some(c) = doc.card_mut(node, cid) {
@@ -809,6 +830,20 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                             .into_iter()
                             .map(|i| ChecklistItem { done: i.done, text: i.text })
                             .collect();
+                    }
+                }
+                // Replacement inline images for a text card (base64 → entries).
+                if let Some(list) = patch.inline_images {
+                    c.inline_images.clear();
+                    for (i, b64) in list.iter().enumerate() {
+                        if let Ok(bytes) =
+                            base64::engine::general_purpose::STANDARD.decode(b64.trim())
+                        {
+                            c.inline_images.push(crate::model::ImageEntry {
+                                data: bytes,
+                                name: format!("inline-{i}"),
+                            });
+                        }
                     }
                 }
                 // Fit to content last, once every other field has been applied.
@@ -1104,6 +1139,13 @@ fn card_json(c: &Card) -> Value {
     match &c.kind {
         CardKind::Text => {
             v["body"] = json!(c.body);
+            if !c.inline_images.is_empty() {
+                v["inline_image_names"] = json!(c
+                    .inline_images
+                    .iter()
+                    .map(|e| e.name.as_str())
+                    .collect::<Vec<_>>());
+            }
         }
         CardKind::Code { lang } => {
             v["body"] = json!(c.body);
@@ -1296,6 +1338,35 @@ mod tests {
         let (_, resp) = process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
         assert_eq!(resp.status, 200);
         assert!(doc.card_mut(nid, cid).unwrap().size.x > 240.0, "patch fit should widen");
+    }
+
+    #[test]
+    fn create_text_card_with_inline_images_and_reports_names() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let png_b64 = {
+            let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
+            let mut buf = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            base64::engine::general_purpose::STANDARD.encode(buf.into_inner())
+        };
+        let body = format!(
+            r#"{{"kind":"text","title":"note","body":"see ![p](trellis:0)","inline_images":["{png_b64}"],"fit":true}}"#
+        );
+        let input: AddCardInput = serde_json::from_str(&body).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::AddCard { node: nid, input });
+        assert!(dirty);
+        let cid = serde_json::from_str::<Value>(&resp.body).unwrap()["id"].as_u64().unwrap();
+        let c = doc.card(nid, cid).unwrap();
+        assert_eq!(c.inline_images.len(), 1, "inline image stored");
+        let j = card_json(c);
+        assert_eq!(
+            j["inline_image_names"].as_array().map(|a| a.len()),
+            Some(1),
+            "card_json reports the inline image"
+        );
     }
 
     #[test]
