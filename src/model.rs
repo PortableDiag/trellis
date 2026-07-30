@@ -1150,6 +1150,27 @@ impl Document {
         }
     }
 
+    /// Move a card to `index` within its basket's card list, clamped to the
+    /// list length (so a huge `index` sends it to the end). That list order is
+    /// the draw order (last = on top) and the sequence [`Document::autosort`]
+    /// lays cards out in, so this is how an agent sets card order. Returns
+    /// whether it moved. `index` is the slot in the *resulting* list, counted
+    /// after the card is lifted out.
+    pub fn move_card(&mut self, node: NodeId, card: CardId, index: usize) -> bool {
+        let Some(n) = self.nodes.get_mut(&node) else { return false };
+        let Some(from) = n.cards.iter().position(|c| c.id == card) else { return false };
+        let c = n.cards.remove(from);
+        let to = index.min(n.cards.len());
+        n.cards.insert(to, c);
+        true
+    }
+
+    /// Index of `card` in its basket's list, or `None` if the node/card is
+    /// unknown. Lets callers translate a before/after target into a slot.
+    pub fn card_index(&self, node: NodeId, card: CardId) -> Option<usize> {
+        self.nodes.get(&node)?.cards.iter().position(|c| c.id == card)
+    }
+
     /// Bring a card to the front by moving it to the end of the draw order.
     pub fn raise_card(&mut self, node: NodeId, card: CardId) {
         if let Some(n) = self.nodes.get_mut(&node) {
@@ -1268,6 +1289,28 @@ impl Document {
             n.cards[i].docked_to = None;
         }
         true
+    }
+
+    /// Set `expanded` on every node in the subtree rooted at `id` (including
+    /// `id` when `include_root`), so a big branch opens or folds in one action.
+    /// Returns how many nodes actually changed.
+    pub fn set_subtree_expanded(&mut self, id: NodeId, expanded: bool, include_root: bool) -> usize {
+        let mut stack: Vec<NodeId> = if include_root {
+            vec![id]
+        } else {
+            self.nodes.get(&id).map(|n| n.children.clone()).unwrap_or_default()
+        };
+        let mut changed = 0;
+        while let Some(cur) = stack.pop() {
+            if let Some(n) = self.nodes.get_mut(&cur) {
+                if n.expanded != expanded {
+                    n.expanded = expanded;
+                    changed += 1;
+                }
+                stack.extend(n.children.iter().copied());
+            }
+        }
+        changed
     }
 
     /// Remove a node and its whole subtree; detaches it from its parent/roots.

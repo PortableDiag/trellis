@@ -46,6 +46,8 @@ pub enum TreeAction {
     Remove(NodeId),
     Rename(NodeId, String),
     ToggleExpand(NodeId),
+    /// Expand (`true`) or collapse (`false`) a node and its whole subtree.
+    SetSubtreeExpanded(NodeId, bool),
     MoveUp(NodeId),
     MoveDown(NodeId),
     MoveToTop(NodeId),
@@ -236,6 +238,17 @@ fn node_ui(
                 if ui.button("+  Add sibling").clicked() {
                     actions.push(TreeAction::AddSibling(id));
                     ui.close_menu();
+                }
+                if !node.children.is_empty() {
+                    ui.separator();
+                    if ui.button("⊞  Expand all").on_hover_text("Open this node and every subnode under it").clicked() {
+                        actions.push(TreeAction::SetSubtreeExpanded(id, true));
+                        ui.close_menu();
+                    }
+                    if ui.button("⊟  Collapse all").on_hover_text("Fold this whole branch away").clicked() {
+                        actions.push(TreeAction::SetSubtreeExpanded(id, false));
+                        ui.close_menu();
+                    }
                 }
                 ui.separator();
                 if ui.button("Move to top").clicked() {

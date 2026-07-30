@@ -1049,6 +1049,9 @@ impl TrellisApp {
                         n.expanded = !n.expanded;
                     }
                 }
+                TreeAction::SetSubtreeExpanded(id, expanded) => {
+                    self.doc.set_subtree_expanded(id, expanded, true);
+                }
                 TreeAction::MoveUp(id) => self.doc.move_sibling(id, true),
                 TreeAction::MoveDown(id) => self.doc.move_sibling(id, false),
                 TreeAction::MoveToTop(id) => self.doc.move_to_edge(id, true),

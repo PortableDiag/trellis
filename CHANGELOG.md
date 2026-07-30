@@ -4,6 +4,18 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.45.0]
+
+### Added
+- **Reorder cards within a basket** — `POST /api/nodes/{id}/cards/{cid}/move` with
+  `{before|after:<cid>}`, `{index:<n>}`, or `{to:"front"|"back"}`. Card order is both the
+  draw order (last = on top) and the order Autosort places cards in, so an agent can now lay
+  a basket out in a chosen reading order and then autosort it.
+- **Expand / collapse a whole branch** — right-click a node → **Expand all** / **Collapse
+  all** to open or fold its entire subtree in one click, for working with big node sets. Also
+  over the API: `POST /api/nodes/{id}/expand {expanded, recursive?}`. `GET /api/nodes/{id}`
+  now reports the node's `expanded` flag.
+
 ## [0.44.0]
 
 ### Added

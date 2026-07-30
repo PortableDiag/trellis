@@ -38,9 +38,13 @@ pub enum ApiRequest {
     DeleteNode(NodeId),
     // Reorder / reparent a node in the tree.
     MoveNode { id: NodeId, mv: MoveNodeInput },
+    // Expand or collapse a node (optionally its whole subtree).
+    SetExpanded { id: NodeId, expanded: bool, recursive: bool },
     AddCard { node: NodeId, input: AddCardInput },
     UpdateCard { node: NodeId, card: u64, patch: UpdateCardInput },
     DeleteCard { node: NodeId, card: u64 },
+    // Reorder a card within its basket (draw / autosort order).
+    MoveCard { node: NodeId, card: u64, mv: MoveCardInput },
     // Grouping.
     ListGroups(NodeId),
     CreateGroup { node: NodeId, cards: Vec<u64>, title: Option<String> },
@@ -95,6 +99,22 @@ struct CreateNodeInput {
     title: String,
 }
 
+/// Where to move a card within its basket's order (which is both the draw order
+/// — last is on top — and the order Autosort places cards in). Pick ONE:
+/// `before`/`after` another card id, an absolute `index`, or `to:"front"|"back"`
+/// (front = drawn on top / laid out last, back = first).
+#[derive(Deserialize)]
+pub struct MoveCardInput {
+    #[serde(default)]
+    before: Option<u64>,
+    #[serde(default)]
+    after: Option<u64>,
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    to: Option<String>,
+}
+
 /// Where to move a node. Pick ONE placement:
 /// - `before` / `after`: put this node immediately before/after that sibling,
 ///   adopting its parent (this is how you reparent across baskets).
@@ -116,6 +136,14 @@ pub struct MoveNodeInput {
     index: Option<usize>,
     #[serde(default)]
     to: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExpandInput {
+    expanded: bool,
+    /// Apply to the whole subtree (node + all descendants), not just this node.
+    #[serde(default)]
+    recursive: bool,
 }
 
 #[derive(Deserialize)]
@@ -450,6 +478,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             let mv: MoveNodeInput = parse(body)?;
             Ok(ApiRequest::MoveNode { id: pid(id)?, mv })
         }
+        (Method::Post, ["api", "nodes", id, "expand"]) => {
+            let i: ExpandInput = parse(body)?;
+            Ok(ApiRequest::SetExpanded { id: pid(id)?, expanded: i.expanded, recursive: i.recursive })
+        }
         (Method::Get, ["api", "nodes", id, "cards"]) => Ok(ApiRequest::ListCards(pid(id)?)),
         (Method::Post, ["api", "nodes", id, "cards"]) => {
             let input: AddCardInput = parse(body)?;
@@ -461,6 +493,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Delete, ["api", "nodes", nid, "cards", cid]) => {
             Ok(ApiRequest::DeleteCard { node: pid(nid)?, card: pid(cid)? })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "move"]) => {
+            let mv: MoveCardInput = parse(body)?;
+            Ok(ApiRequest::MoveCard { node: pid(nid)?, card: pid(cid)?, mv })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "dock"]) => {
             let i: DockInput = parse(body)?;
@@ -787,6 +823,20 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             };
             (true, ApiResponse::ok(json!({ "id": id, "parent": n.parent, "index": index })))
         }
+        ApiRequest::SetExpanded { id, expanded, recursive } => {
+            if !doc.nodes.contains_key(&id) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            let changed = if recursive {
+                doc.set_subtree_expanded(id, expanded, true)
+            } else {
+                let n = doc.nodes.get_mut(&id).unwrap();
+                let c = usize::from(n.expanded != expanded);
+                n.expanded = expanded;
+                c
+            };
+            (changed > 0, ApiResponse::ok(json!({ "id": id, "expanded": expanded, "changed": changed })))
+        }
         ApiRequest::AddCard { node, input } => {
             if !doc.nodes.contains_key(&node) {
                 return (false, ApiResponse::err(404, "node not found"));
@@ -969,6 +1019,41 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             }
             doc.remove_card(node, card);
             (true, ApiResponse::ok(json!({ "deleted": card })))
+        }
+        ApiRequest::MoveCard { node, card, mv } => {
+            let Some(cur) = doc.card_index(node, card) else {
+                return (false, ApiResponse::err(404, "card not found"));
+            };
+            if mv.before.is_none() && mv.after.is_none() && mv.index.is_none() && mv.to.is_none() {
+                return (
+                    false,
+                    ApiResponse::err(400, "specify a placement: before, after, index, or to:front|back"),
+                );
+            }
+            let index = if let Some(t) = mv.before.or(mv.after) {
+                let Some(tpos) = doc.card_index(node, t) else {
+                    return (false, ApiResponse::err(400, "target card not found"));
+                };
+                // move_card lifts the card out first, so a target after it shifts down one.
+                let tpos = if cur < tpos { tpos - 1 } else { tpos };
+                if mv.after.is_some() { tpos + 1 } else { tpos }
+            } else if let Some(i) = mv.index {
+                i
+            } else {
+                match mv.to.as_deref() {
+                    Some("back") => 0,
+                    Some("front") => usize::MAX,
+                    other => {
+                        return (
+                            false,
+                            ApiResponse::err(400, &format!("bad 'to' value {other:?} (use \"front\" or \"back\")")),
+                        );
+                    }
+                }
+            };
+            doc.move_card(node, card, index);
+            let idx = doc.card_index(node, card);
+            (true, ApiResponse::ok(json!({ "card": card, "index": idx })))
         }
         ApiRequest::ListGroups(node) => match doc.nodes.get(&node) {
             Some(n) => (false, ApiResponse::ok(json!({ "groups": groups_json(n) }))),
@@ -1172,6 +1257,7 @@ fn node_json(n: &crate::model::Node) -> Value {
         "title": n.title,
         "parent": n.parent,
         "children": n.children,
+        "expanded": n.expanded,
         "color": n.color,
         "bg": n.bg,
         "groups": groups_json(n),
@@ -1754,6 +1840,40 @@ mod tests {
         // Empty placement and unknown target are rejected.
         assert_eq!(mv(&mut doc, c, "{}").1.status, 400);
         assert_eq!(mv(&mut doc, c, r#"{"before":99999}"#).1.status, 400);
+    }
+
+    #[test]
+    fn move_card_reorders_within_basket() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let a = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let ids = |doc: &Document| doc.nodes[&n].cards.iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(ids(&doc), vec![a, b, c]);
+
+        let mv = |doc: &mut Document, card, body: &str| {
+            let req = route(&Method::Post, &format!("/api/nodes/{n}/cards/{card}/move"), "", body).unwrap();
+            process(doc, req)
+        };
+        // a to front (end of draw order).
+        assert_eq!(mv(&mut doc, a, r#"{"to":"front"}"#).1.status, 200);
+        assert_eq!(ids(&doc), vec![b, c, a]);
+        // c to back.
+        mv(&mut doc, c, r#"{"to":"back"}"#);
+        assert_eq!(ids(&doc), vec![c, b, a]);
+        // b before c (front-of-list edge).
+        mv(&mut doc, b, &format!(r#"{{"before":{c}}}"#));
+        assert_eq!(ids(&doc), vec![b, c, a]);
+        // b after a (target sits after b, so it lands last).
+        mv(&mut doc, b, &format!(r#"{{"after":{a}}}"#));
+        assert_eq!(ids(&doc), vec![c, a, b]);
+        // absolute index.
+        mv(&mut doc, b, r#"{"index":0}"#);
+        assert_eq!(ids(&doc), vec![b, c, a]);
+        // guards.
+        assert_eq!(mv(&mut doc, b, "{}").1.status, 400);
+        assert_eq!(mv(&mut doc, b, r#"{"before":99999}"#).1.status, 400);
     }
 
     #[test]

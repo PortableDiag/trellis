@@ -190,6 +190,28 @@ curl -sX POST $API/nodes/958/move -H "X-API-Key: $KEY" -d '{"to":"top"}'
 curl -sX POST $API/nodes/814/move -H "X-API-Key: $KEY" -d '{"parent":766}'
 ```
 
+### Expand / collapse
+Open or fold a node in the sidebar. `recursive` applies it to the whole subtree
+(node + every descendant) — the one-click way to tidy a big branch.
+```
+POST /api/nodes/{id}/expand  {expanded:true|false, recursive?:false}
+    → 200 {"id":<id>, "expanded":<bool>, "changed":<n>}    | 404
+```
+(`GET /api/nodes/{id}` now includes the node's `expanded` flag.)
+
+### Reorder a card
+Set a card's place in its basket's order — which is both the draw order (last =
+on top) and the sequence Autosort lays cards out in. Pick one placement:
+```
+POST /api/nodes/{id}/cards/{cid}/move  {before:<cid>}          before that card
+POST /api/nodes/{id}/cards/{cid}/move  {after:<cid>}           after that card
+POST /api/nodes/{id}/cards/{cid}/move  {index:<n>}             absolute 0-based slot (past end = last)
+POST /api/nodes/{id}/cards/{cid}/move  {to:"front"|"back"}     front = on top / laid out last
+    → 200 {"card":<cid>, "index":<n>}    | 400 (bad/empty placement) | 404 (card not found)
+```
+Tip: to lay a basket out in a specific reading order, `move` the cards into that
+order, then `POST …/autosort`.
+
 ### Groups
 Bundle 2+ cards into a labeled container that moves as one.
 ```
