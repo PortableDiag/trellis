@@ -277,6 +277,10 @@ struct BasketShot {
     idx: usize,
     captured: Vec<crate::model::ShotPage>,
     phase: ShotPhase,
+    /// Set once the canvas has actually rendered a frame with the current shot's
+    /// reframe applied. The screenshot is only requested after this — otherwise
+    /// the first shot (kicked off mid-frame) would capture the un-reframed view.
+    framed: bool,
 }
 
 /// Encode a raw RGBA buffer as PNG bytes.
@@ -1782,7 +1786,11 @@ impl TrellisApp {
     /// or `None` if no basket shot is framing this node.
     fn basket_frame_target(&self, sel: NodeId) -> Option<(egui::Pos2, egui::Vec2)> {
         let s = self.basket_shot.as_ref()?;
-        if s.node != sel || !matches!(s.phase, ShotPhase::Framing) {
+        // Frame during BOTH Framing and Requested: the framebuffer that egui
+        // captures is the frame *after* the screenshot is requested, so the
+        // reframe must still be in effect on that (Requested) frame or the shot
+        // captures the un-reframed view.
+        if s.node != sel {
             return None;
         }
         match s.queue.get(s.idx)? {
@@ -1829,7 +1837,7 @@ impl TrellisApp {
             queue.extend(n.cards.iter().map(|c| ShotKind::Card(c.id)));
         }
         self.basket_shot =
-            Some(BasketShot { node, fmt, saved_view, queue, idx: 0, captured: Vec::new(), phase: ShotPhase::Framing });
+            Some(BasketShot { node, fmt, saved_view, queue, idx: 0, captured: Vec::new(), phase: ShotPhase::Framing, framed: false });
         self.status = "Rendering basket…".to_string();
     }
 
@@ -1892,6 +1900,7 @@ impl TrellisApp {
             bs.idx += 1;
             if bs.idx < bs.queue.len() {
                 bs.phase = ShotPhase::Framing;
+                bs.framed = false; // wait for the next shot's reframe to render
             }
         }
         if idx + 1 >= qlen {
@@ -2651,6 +2660,11 @@ impl eframe::App for TrellisApp {
                     let basket_target = self.basket_frame_target(sel);
                     if let Some((pos, size)) = basket_target {
                         view = framed_view(ui.available_rect_before_wrap(), pos, size);
+                        // This frame renders the reframe, so a screenshot may now
+                        // be requested (the first shot is otherwise un-reframed).
+                        if let Some(bs) = self.basket_shot.as_mut() {
+                            bs.framed = true;
+                        }
                     }
                     let template_names: Vec<String> =
                         self.templates.iter().map(|t| t.title.clone()).collect();
@@ -2702,8 +2716,10 @@ impl eframe::App for TrellisApp {
             ctx.request_repaint();
         }
         // Same driver for a basket export (one shot per frame across the queue).
+        // Only request the shot once the reframe has actually rendered (`framed`),
+        // so the overview/first page fits all cards instead of the starting view.
         if let Some(bs) = self.basket_shot.as_mut() {
-            if matches!(bs.phase, ShotPhase::Framing) {
+            if matches!(bs.phase, ShotPhase::Framing) && bs.framed {
                 bs.phase = ShotPhase::Requested;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
             }

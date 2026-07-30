@@ -4,6 +4,17 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.42.0]
+
+### Fixed
+- **Basket PDF/PNG overview now fits the whole basket.** The overview page (and the PNG
+  export) captured the *current* on-screen view — so a basket bigger than the window came
+  out cropped, showing only the cards that happened to be visible. It now zooms out to fit
+  **all** cards in the basket. (Cause: the framebuffer egui captures is the frame *after* the
+  screenshot is requested, so the fit-all reframe has to stay applied for that extra frame;
+  it was being dropped too early. This also fixes far-off-screen cards being missing from the
+  per-card pages.)
+
 ## [0.41.0]
 
 ### Added
