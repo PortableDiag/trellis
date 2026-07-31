@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.51.0]
+
+### Added
+- **Version history** (**Tools → Version history**) — as you save, Trellis keeps automatic
+  timestamped snapshots of the document in a hidden sibling folder (`.<name>.history/`), up to
+  25, at least a few minutes apart. Browse them and **Restore** an older version as the current
+  document (then save to keep it). This is a local safety net, distinct from the external Backup
+  module. Snapshots are written off the UI thread alongside each save.
+
 ## [0.50.0]
 
 ### Added

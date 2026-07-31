@@ -349,6 +349,8 @@ pub struct TrellisApp {
     save_rx: Receiver<(PathBuf, Result<(), String>, u64)>,
     status: String,
 
+    /// Version-history browse/restore window.
+    show_history: bool,
     /// Backup settings (destinations, schedule, encryption); persisted as JSON.
     backup_cfg: crate::backup::BackupConfig,
     show_backup: bool,
@@ -565,6 +567,7 @@ impl TrellisApp {
             save_rx,
             status: "Ready".to_string(),
             backup_cfg,
+            show_history: false,
             show_backup: false,
             backing_up: false,
             last_backup: None,
@@ -856,6 +859,7 @@ impl TrellisApp {
     fn write_to(&mut self, path: PathBuf) {
         match serialize_and_write(&self.doc, &path) {
             Ok(_) => {
+                write_history_snapshot(&path);
                 self.dirty = false;
                 self.last_change = None;
                 self.status = format!("Saved → {}", path.display());
@@ -878,6 +882,9 @@ impl TrellisApp {
         let ctx = self.egui_ctx.clone();
         std::thread::spawn(move || {
             let res = serialize_and_write(&doc, &path);
+            if res.is_ok() {
+                write_history_snapshot(&path);
+            }
             let _ = tx.send((path, res, snapshot));
             ctx.request_repaint();
         });
@@ -2617,6 +2624,10 @@ impl TrellisApp {
                         }
                         ui.close_menu();
                     }
+                    if ui.button("Version history…").clicked() {
+                        self.show_history = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Backup…").clicked() {
                         self.show_backup = true;
                         ui.close_menu();
@@ -2904,6 +2915,63 @@ impl TrellisApp {
         self.show_backup = open;
         if do_backup {
             self.start_backup(true);
+        }
+    }
+
+    fn history_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_history;
+        let path = self.target_path();
+        let snaps = history_snapshots(&path);
+        let mut restore: Option<PathBuf> = None;
+        egui::Window::new("Version history")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    "Automatic snapshots of this document, taken as you save (kept up to \
+                     25, at least a few minutes apart). Restoring loads an older version \
+                     as the current document — save to keep it.",
+                );
+                ui.add_space(6.0);
+                if snaps.is_empty() {
+                    ui.weak("No snapshots yet — they start accumulating after you save.");
+                }
+                egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, false]).show(ui, |ui| {
+                    for (p, name) in &snaps {
+                        ui.horizontal(|ui| {
+                            let size = p.metadata().map(|m| m.len()).unwrap_or(0);
+                            ui.label(format_stamp(name));
+                            ui.weak(format!("{} KB", size / 1024));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("Restore").clicked() {
+                                    restore = Some(p.clone());
+                                }
+                            });
+                        });
+                        ui.separator();
+                    }
+                });
+            });
+        self.show_history = open;
+        if let Some(p) = restore {
+            if self.confirm_discard() {
+                match read_document(&p) {
+                    Ok(doc) => {
+                        self.reset_inline_images();
+                        self.doc = doc;
+                        self.selected = self.doc.roots.first().copied();
+                        self.views.clear();
+                        self.reset_history();
+                        self.mark_dirty(); // restored content isn't saved until the user saves
+                        self.show_history = false;
+                        self.status = format!("Restored snapshot {}", format_stamp(&p.file_name().unwrap_or_default().to_string_lossy()));
+                    }
+                    Err(e) => self.status = format!("Restore failed: {e}"),
+                }
+            }
         }
     }
 
@@ -3561,6 +3629,9 @@ impl eframe::App for TrellisApp {
         if self.show_backup {
             self.backup_window(ctx);
         }
+        if self.show_history {
+            self.history_window(ctx);
+        }
 
         self.lightbox_ui(ctx);
     }
@@ -3698,12 +3769,81 @@ fn subseq_score(q: &str, text: &str) -> Option<i32> {
     }
 }
 
+/// Turn a snapshot filename `20260730-142530.ron.gz` into `2026-07-30 14:25:30`.
+/// Falls back to the raw name if it isn't in the expected shape.
+fn format_stamp(name: &str) -> String {
+    let s = name.split('.').next().unwrap_or(name); // strip .ron.gz
+    let b = s.as_bytes();
+    if b.len() == 15 && b[8] == b'-' && s.is_char_boundary(15) {
+        format!(
+            "{}-{}-{} {}:{}:{}",
+            &s[0..4], &s[4..6], &s[6..8], &s[9..11], &s[11..13], &s[13..15]
+        )
+    } else {
+        name.to_string()
+    }
+}
+
 fn serialize_doc(doc: &Document) -> Result<Vec<u8>, String> {
     use std::io::Write;
     let s = ron::to_string(doc).map_err(|e| e.to_string())?;
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     enc.write_all(s.as_bytes()).map_err(|e| e.to_string())?;
     enc.finish().map_err(|e| e.to_string())
+}
+
+/// How many version snapshots to keep, and the minimum gap between them so a
+/// burst of autosaves doesn't churn through the whole history in a minute.
+const HISTORY_KEEP: usize = 25;
+const HISTORY_MIN_GAP_SECS: u64 = 180;
+
+/// The hidden sibling directory that holds a document's version snapshots, e.g.
+/// `Notes.ron` → `.Notes.ron.history/`. `None` for a pathless document.
+fn history_dir(doc_path: &std::path::Path) -> Option<PathBuf> {
+    let name = doc_path.file_name()?.to_string_lossy();
+    Some(doc_path.with_file_name(format!(".{name}.history")))
+}
+
+/// List a document's snapshots, newest first: `(path, filename)`.
+fn history_snapshots(doc_path: &std::path::Path) -> Vec<(PathBuf, String)> {
+    let Some(dir) = history_dir(doc_path) else { return Vec::new() };
+    let mut v: Vec<(PathBuf, String)> = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "gz"))
+            .filter_map(|p| p.file_name().map(|n| (p.clone(), n.to_string_lossy().into_owned())))
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    v.sort_by(|a, b| b.1.cmp(&a.1)); // timestamped names sort chronologically
+    v
+}
+
+/// After a successful save, drop a timestamped snapshot into the history dir
+/// (unless the newest one is younger than the min gap), then prune to the cap.
+/// Runs on whatever thread saved; failures are best-effort and ignored.
+fn write_history_snapshot(doc_path: &std::path::Path) {
+    let Some(dir) = history_dir(doc_path) else { return };
+    let snaps = history_snapshots(doc_path);
+    if let Some((newest, _)) = snaps.first() {
+        if let Ok(age) = newest.metadata().and_then(|m| m.modified()).and_then(|t| t.elapsed().map_err(std::io::Error::other)) {
+            if age.as_secs() < HISTORY_MIN_GAP_SECS {
+                return;
+            }
+        }
+    }
+    let Ok(bytes) = std::fs::read(doc_path) else { return };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let stamp = crate::backup::stamp(std::time::SystemTime::now());
+    let _ = std::fs::write(dir.join(format!("{stamp}.ron.gz")), &bytes);
+    // Prune oldest beyond the cap.
+    let snaps = history_snapshots(doc_path);
+    for (path, _) in snaps.into_iter().skip(HISTORY_KEEP) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn serialize_and_write(doc: &Document, path: &std::path::Path) -> Result<(), String> {
@@ -3790,6 +3930,12 @@ mod tests {
     fn download_name_keeps_stored_name_and_extension() {
         assert_eq!(download_image_name("photo.jpg", 0), "photo.jpg");
         assert_eq!(download_image_name("scan.PNG", 3), "scan.PNG");
+    }
+
+    #[test]
+    fn format_stamp_is_human_readable() {
+        assert_eq!(format_stamp("20260730-142530.ron.gz"), "2026-07-30 14:25:30");
+        assert_eq!(format_stamp("weird-name"), "weird-name");
     }
 
     #[test]

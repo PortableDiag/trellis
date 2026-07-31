@@ -101,6 +101,10 @@ and zooms (Ctrl+scroll); each node remembers its view.
   Set an interval and a per-disk retention count; it runs on a background thread
   so a slow target never freezes the app. Restore with
   `gpg -d file.ron.gz.gpg > file.ron.gz` (if encrypted), then open the `.ron.gz`.
+- **Version history** (**Tools → Version history**) — automatic timestamped
+  snapshots taken as you save (kept up to 25, a few minutes apart, in a hidden
+  `.<name>.history/` folder); browse and **Restore** an older version. A local
+  safety net, separate from Backup.
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
