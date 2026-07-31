@@ -357,6 +357,14 @@ GET /api/tasks           → 200 {"today_days":N,"count":M,"tasks":[{node,node_t
 GET /api/tasks?all=true  → include completed tasks too (default excludes them)
 ```
 
+### Version history
+Browse the automatic save-time snapshots and restore one (replaces the current
+document in memory — save to keep it). Snapshots live in `.<name>.history/`.
+```
+GET  /api/history                 → 200 {"count":N,"snapshots":[{file,when,bytes}, …]}   (newest first)
+POST /api/history/restore  {file} → 200 {"restored":true}   | 400 bad name | 404 not found
+```
+
 ### Backup
 Trigger a full-document backup, or read the backup status. Destinations,
 schedule, and encryption are configured in the app (**Tools → Backup…**); this

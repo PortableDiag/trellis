@@ -827,6 +827,44 @@ impl TrellisApp {
                 self.start_backup(true);
                 Some(api::ApiResponse::ok(serde_json::json!({ "started": true })))
             }
+            api::ApiRequest::HistoryList => {
+                let snaps: Vec<_> = history_snapshots(&self.target_path())
+                    .into_iter()
+                    .map(|(p, name)| {
+                        serde_json::json!({
+                            "file": name,
+                            "when": format_stamp(&name),
+                            "bytes": p.metadata().map(|m| m.len()).unwrap_or(0),
+                        })
+                    })
+                    .collect();
+                Some(api::ApiResponse::ok(serde_json::json!({ "count": snaps.len(), "snapshots": snaps })))
+            }
+            api::ApiRequest::HistoryRestore(file) => {
+                // Guard against path traversal: accept a bare snapshot filename only.
+                if file.contains('/') || file.contains("..") {
+                    return Some(api::ApiResponse::err(400, "file must be a snapshot filename"));
+                }
+                let Some(dir) = history_dir(&self.target_path()) else {
+                    return Some(api::ApiResponse::err(404, "no history for this document"));
+                };
+                let path = dir.join(file);
+                if !path.is_file() {
+                    return Some(api::ApiResponse::err(404, "snapshot not found"));
+                }
+                match read_document(&path) {
+                    Ok(doc) => {
+                        self.reset_inline_images();
+                        self.doc = doc;
+                        self.selected = self.doc.roots.first().copied();
+                        self.views.clear();
+                        self.reset_history();
+                        self.mark_dirty();
+                        Some(api::ApiResponse::ok(serde_json::json!({ "restored": true })))
+                    }
+                    Err(e) => Some(api::ApiResponse::err(500, &format!("restore failed: {e}"))),
+                }
+            }
             _ => None,
         }
     }
@@ -2774,15 +2812,22 @@ impl TrellisApp {
                         "DELETE /api/nodes/{id}",
                         "POST   /api/nodes/{id}/move     {before|after|index|to, parent?}",
                         "POST   /api/nodes/{id}/expand   {expanded, recursive?}",
+                        "GET    /api/nodes/{id}/backlinks          (cards that [[link]] here)",
                         "GET    /api/nodes/{id}/cards",
                         "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, pos?, inline_images?}",
                         "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, …}",
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to}",
                         "DELETE /api/nodes/{id}/cards/{cid}",
                         "POST   /api/nodes/{id}/autosort",
-                        "GET    /api/export?format=markdown|html|json|pdf|png|gif",
                         "GET    /api/search?q=...",
+                        "GET    /api/tags[?name=<tag>]             (all tags / cards with a tag)",
+                        "GET    /api/properties[?key=<k>&value=<v>]   (keys / matching cards)",
+                        "GET    /api/query?tag=&key=&value=&text=  (combined card query)",
+                        "GET    /api/tasks[?all=true]              (due:: agenda, bucketed)",
+                        "GET    /api/export?format=markdown|html|json|pdf|png|gif",
                         "GET    /api/wait?rev=<n>                  (long-poll for changes)",
+                        "GET    /api/history                       (version snapshots)",
+                        "POST   /api/history/restore     {file}    (restore a snapshot)",
                         "GET    /api/backup                        (status)",
                         "POST   /api/backup/run                    (back up now)",
                         "",

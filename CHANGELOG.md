@@ -4,6 +4,16 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.53.0]
+
+### Added
+- **Version history over the API** — `GET /api/history` lists snapshots; `POST /api/history/restore
+  {file}` restores one (path-traversal-guarded). Closes the API-parity gap for version history.
+
+### Changed
+- Refreshed the in-app **Settings → Endpoints** list to include every current endpoint (tags,
+  properties, query, tasks, backlinks, history), so it stays a complete quick reference.
+
 ## [0.52.0]
 
 ### Added

@@ -79,10 +79,12 @@ pub enum ApiRequest {
     Tasks { include_done: bool },
     // Cards that [[link]] to a node.
     Backlinks(NodeId),
-    // Backup control — handled by the app loop (needs backup config + doc file),
-    // not by `process`, since `process` only sees the `Document`.
+    // Backup + version-history control — handled by the app loop (they need the
+    // doc's on-disk path / config), not `process`, which only sees the Document.
     BackupStatus,
     BackupRun,
+    HistoryList,
+    HistoryRestore(String),
 }
 
 pub struct ApiResponse {
@@ -589,6 +591,15 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }),
         (Method::Get, ["api", "backup"]) => Ok(ApiRequest::BackupStatus),
         (Method::Post, ["api", "backup", "run"]) => Ok(ApiRequest::BackupRun),
+        (Method::Get, ["api", "history"]) => Ok(ApiRequest::HistoryList),
+        (Method::Post, ["api", "history", "restore"]) => {
+            #[derive(Deserialize)]
+            struct RestoreInput {
+                file: String,
+            }
+            let i: RestoreInput = parse(body)?;
+            Ok(ApiRequest::HistoryRestore(i.file))
+        }
         _ => Err((404, format!("no route for {:?} {}", method, path))),
     }
 }
@@ -1361,8 +1372,11 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         // Backup requests are intercepted and answered by the app loop (they need
         // the backup config + document file). This is only reached if that
         // interception is ever missed — report it rather than silently no-op.
-        ApiRequest::BackupStatus | ApiRequest::BackupRun => {
-            (false, ApiResponse::err(500, "backup request not handled by the app"))
+        ApiRequest::BackupStatus
+        | ApiRequest::BackupRun
+        | ApiRequest::HistoryList
+        | ApiRequest::HistoryRestore(_) => {
+            (false, ApiResponse::err(500, "request not handled by the app loop"))
         }
     }
 }
