@@ -90,6 +90,12 @@ pub enum ApiRequest {
     HistoryList,
     HistoryRestore(String),
     OcrAll,
+    // Reusable card templates (the UI's Save as template / Insert template). These
+    // live in app config, not the Document, so the app loop answers them.
+    TemplateList,
+    TemplateRegister { node: NodeId, card: u64, title: Option<String> },
+    TemplateInsert { index: usize, node: NodeId, pos: Option<[f32; 2]> },
+    TemplateDelete(usize),
 }
 
 pub struct ApiResponse {
@@ -634,6 +640,35 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             }
             let i: RestoreInput = parse(body)?;
             Ok(ApiRequest::HistoryRestore(i.file))
+        }
+        (Method::Get, ["api", "templates"]) => Ok(ApiRequest::TemplateList),
+        (Method::Post, ["api", "templates"]) => {
+            #[derive(Deserialize)]
+            struct RegInput {
+                node: NodeId,
+                card: u64,
+                #[serde(default)]
+                title: Option<String>,
+            }
+            let i: RegInput = parse(body)?;
+            Ok(ApiRequest::TemplateRegister { node: i.node, card: i.card, title: i.title })
+        }
+        (Method::Post, ["api", "templates", idx, "insert"]) => {
+            #[derive(Deserialize)]
+            struct InsInput {
+                node: NodeId,
+                #[serde(default)]
+                pos: Option<[f32; 2]>,
+            }
+            let index: usize =
+                idx.parse().map_err(|_| (400, format!("bad template index: {idx}")))?;
+            let i: InsInput = parse(body)?;
+            Ok(ApiRequest::TemplateInsert { index, node: i.node, pos: i.pos })
+        }
+        (Method::Delete, ["api", "templates", idx]) => {
+            let index: usize =
+                idx.parse().map_err(|_| (400, format!("bad template index: {idx}")))?;
+            Ok(ApiRequest::TemplateDelete(index))
         }
         _ => Err((404, format!("no route for {:?} {}", method, path))),
     }
@@ -1427,7 +1462,11 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::BackupRun
         | ApiRequest::HistoryList
         | ApiRequest::HistoryRestore(_)
-        | ApiRequest::OcrAll => {
+        | ApiRequest::OcrAll
+        | ApiRequest::TemplateList
+        | ApiRequest::TemplateRegister { .. }
+        | ApiRequest::TemplateInsert { .. }
+        | ApiRequest::TemplateDelete(_) => {
             (false, ApiResponse::err(500, "request not handled by the app loop"))
         }
     }
@@ -1509,7 +1548,7 @@ fn export_response(doc: &Document, format: &str) -> (bool, ApiResponse) {
     (false, resp)
 }
 
-fn card_json(c: &Card) -> Value {
+pub(crate) fn card_json(c: &Card) -> Value {
     let mut v = json!({
         "id": c.id,
         "title": c.title,

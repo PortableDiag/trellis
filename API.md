@@ -405,6 +405,33 @@ POST /api/backup/run   → 200 {"started":true}
 The run happens on a worker thread; poll `GET /api/backup` (`running`,
 `last_result`) for the outcome.
 
+### Templates
+Reusable card snapshots — the same ones as the app's right-click **Save as
+template** / **Insert template**. A template captures a card's *whole* definition
+(kind, title, body, size, colors — including a table's columns, header flag,
+per-cell colors and widths, or a checklist's items), so it's ideal for stamping
+out a fixed layout (e.g. a Task / Local / Prod verification grid) again and
+again. Templates persist in the app config, so they survive restarts and are
+shared by the UI and the API. Index is a 0-based position in the list.
+```
+GET    /api/templates
+  → 200 {"count":N,"templates":[{index, title, kind}, …]}
+
+POST   /api/templates              {node, card, title?}
+  → 200 {"index":<n>,"title":"..."}   | 404 (node/card not found)
+  Snapshot an existing card as a template. Build the card however you like first
+  (e.g. create a table, set its cells/colors), then register it — optional
+  `title` overrides the card's title as the template name.
+
+POST   /api/templates/{index}/insert  {node, pos?}
+  → 200 {"node":<id>,"card":{<created card>}}   | 404 (no template / node)
+  Stamp the template into a basket as a new card (`pos` defaults to [40,40]).
+
+DELETE /api/templates/{index}      → 200 {"deleted":<index>,"title":"..."}   | 404
+```
+There is no separate "create a template from scratch" body — register from a card
+so the template captures exactly what you'd see on the canvas.
+
 ### Live updates (long-poll)
 Be woken the instant the document changes, instead of polling on a timer.
 ```

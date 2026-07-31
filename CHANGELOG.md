@@ -4,6 +4,24 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.58.0]
+
+### Added
+- **Card templates over the API.** The reusable card snapshots you make with right-click
+  **Save as template** / **Insert template** are now fully agent-drivable, so an agent can build a
+  layout once and stamp it out repeatedly — e.g. a Task / Local / Prod verification grid it fills
+  in as it works:
+  - `GET /api/templates` — list saved templates (`index`, `title`, `kind`).
+  - `POST /api/templates {node, card, title?}` — snapshot an existing card as a template (build a
+    table with headers + cell colors first, then register it). Captures the card's whole
+    definition, tables and all.
+  - `POST /api/templates/{index}/insert {node, pos?}` — stamp a template into a basket as a new
+    card; returns the created card.
+  - `DELETE /api/templates/{index}` — remove a template.
+
+  Templates persist in app config and are shared by the UI and the API. API.md and the in-app
+  Settings → Endpoints list updated to match.
+
 ## [0.57.4]
 
 ### Docs

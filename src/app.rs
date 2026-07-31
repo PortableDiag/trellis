@@ -921,6 +921,10 @@ impl TrellisApp {
                 let _ = cmd.resp.send(resp);
                 continue;
             }
+            if let Some(resp) = self.handle_api_templates(&cmd.req) {
+                let _ = cmd.resp.send(resp);
+                continue;
+            }
             let (changed, resp) = api::process(&mut self.doc, cmd.req);
             if changed {
                 self.mark_dirty();
@@ -1011,6 +1015,85 @@ impl TrellisApp {
             api::ApiRequest::OcrAll => {
                 let n = self.ocr_all();
                 Some(api::ApiResponse::ok(serde_json::json!({ "started": n > 0, "cards": n })))
+            }
+            _ => None,
+        }
+    }
+
+    /// Answer the card-template API endpoints from app state. Templates are the
+    /// same reusable card snapshots as the UI's Save as template / Insert template
+    /// (persisted in app config, not the Document), so they can't live in
+    /// `api::process`. Returns `None` for any other request.
+    fn handle_api_templates(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
+        match req {
+            api::ApiRequest::TemplateList => {
+                let list: Vec<_> = self
+                    .templates
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        serde_json::json!({ "index": i, "title": t.title, "kind": t.kind.label() })
+                    })
+                    .collect();
+                Some(api::ApiResponse::ok(
+                    serde_json::json!({ "count": self.templates.len(), "templates": list }),
+                ))
+            }
+            // Snapshot an existing card into a reusable template (mirrors the
+            // right-click "Save as template"). Build the card however you like
+            // first (e.g. a table with headers + cell colors), then register it.
+            api::ApiRequest::TemplateRegister { node, card, title } => {
+                let Some(json) = self.doc.export_card_json(*node, *card) else {
+                    return Some(api::ApiResponse::err(404, "node or card not found"));
+                };
+                let Some(mut exp) = crate::model::parse_card_export(&json) else {
+                    return Some(api::ApiResponse::err(500, "could not build a template from that card"));
+                };
+                if let Some(t) = title {
+                    if !t.trim().is_empty() {
+                        exp.title = t.clone();
+                    }
+                }
+                let name = if exp.title.trim().is_empty() {
+                    exp.kind.label().to_string()
+                } else {
+                    exp.title.clone()
+                };
+                let index = self.templates.len();
+                self.templates.push(exp);
+                Some(api::ApiResponse::ok(serde_json::json!({ "index": index, "title": name })))
+            }
+            // Stamp a saved template into a basket as a new card (mirrors "Insert
+            // template"). Returns the created card.
+            api::ApiRequest::TemplateInsert { index, node, pos } => {
+                let Some(exp) = self.templates.get(*index).cloned() else {
+                    return Some(api::ApiResponse::err(404, "no template at that index"));
+                };
+                if !self.doc.nodes.contains_key(node) {
+                    return Some(api::ApiResponse::err(404, "node not found"));
+                }
+                let p = pos
+                    .map(|[x, y]| egui::pos2(x, y))
+                    .unwrap_or_else(|| egui::pos2(40.0, 40.0));
+                match self.doc.add_card_from_export(*node, p, exp) {
+                    Some(cid) => {
+                        self.mark_dirty();
+                        let card = self.doc.card(*node, cid).map(api::card_json);
+                        Some(api::ApiResponse::ok(
+                            serde_json::json!({ "node": node, "card": card }),
+                        ))
+                    }
+                    None => Some(api::ApiResponse::err(500, "could not insert template")),
+                }
+            }
+            api::ApiRequest::TemplateDelete(index) => {
+                if *index >= self.templates.len() {
+                    return Some(api::ApiResponse::err(404, "no template at that index"));
+                }
+                let t = self.templates.remove(*index);
+                Some(api::ApiResponse::ok(
+                    serde_json::json!({ "deleted": index, "title": t.title }),
+                ))
             }
             _ => None,
         }
@@ -3030,6 +3113,10 @@ impl TrellisApp {
                         "POST   /api/history/restore     {file}    (restore a snapshot)",
                         "GET    /api/backup                        (status)",
                         "POST   /api/backup/run                    (back up now)",
+                        "GET    /api/templates                     (saved card templates)",
+                        "POST   /api/templates          {node, card, title?}   (save a card as a template)",
+                        "POST   /api/templates/{i}/insert {node, pos?}         (stamp it into a basket)",
+                        "DELETE /api/templates/{i}",
                         "",
                         "Full reference: API.md in the source repo.",
                     ] {
