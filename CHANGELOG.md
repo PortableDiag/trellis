@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.57.1]
+
+### Fixed
+- **Agenda / Kanban clicks now reveal the actual card.** Clicking a task in the Agenda panel
+  (or a card on the Kanban board) previously only selected its *node* — if you were already
+  viewing that basket, or the card was scrolled off in a large basket, nothing appeared to
+  happen. Now the canvas recenters on the exact card and flashes a brief highlight outline so
+  the click clearly lands.
+
 ## [0.57.0]
 
 ### Added

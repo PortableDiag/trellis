@@ -12,6 +12,9 @@ use emath::TSTransform;
 pub const MIN_ZOOM: f32 = 0.2;
 pub const MAX_ZOOM: f32 = 3.0;
 
+/// How long (seconds) the reveal-a-card flash outline lingers, fading out.
+pub const HIGHLIGHT_SECS: f64 = 1.4;
+
 /// Shared, frame-persistent caches the canvas needs.
 pub struct Env<'a> {
     pub md: &'a mut CommonMarkCache,
@@ -27,6 +30,12 @@ pub struct Env<'a> {
     /// Document generation, mixed into inline-image URIs so a reloaded document
     /// can't collide with the previous one's cached image textures.
     pub inline_epoch: u64,
+    /// One-shot request to recenter the view on this card (agenda/Kanban row
+    /// click). Consumed by the app after the call.
+    pub focus_card: Option<CardId>,
+    /// Card to flash-highlight, and the `ui.input().time` at which the flash ends.
+    pub highlight_card: Option<CardId>,
+    pub highlight_until: f64,
 }
 
 /// Actions requested by the canvas, applied by the app afterwards.
@@ -186,6 +195,17 @@ pub fn ui(
     }
     if cmd && ui.input(|i| i.key_pressed(egui::Key::Num0)) {
         *view = TSTransform::IDENTITY; // reset works even if zoom is disabled
+    }
+
+    // One-shot: recenter the view on a card the app asked us to reveal (agenda /
+    // Kanban row click). Keep the current zoom; just pan so the card's center
+    // lands in the middle of the canvas.
+    if let Some(fid) = env.focus_card {
+        if let Some(c) = node.cards.iter().find(|c| c.id == fid) {
+            let world_center = c.pos + c.size * 0.5;
+            view.translation = (canvas_rect.center() - canvas_rect.min)
+                - view.scaling * world_center.to_vec2();
+        }
     }
 
     // world → screen for this canvas.
@@ -491,6 +511,27 @@ pub fn ui(
             6.0 * zoom,
             egui::Stroke::new(2.5, egui::Color32::from_rgb(0x4a, 0xde, 0x80)),
         );
+    }
+
+    // Reveal flash: a card the app asked us to jump to (agenda/Kanban) gets a
+    // bright outline that fades over HIGHLIGHT_SECS, so a click clearly lands.
+    if let Some(hid) = env.highlight_card {
+        let now = ui.input(|i| i.time);
+        if now < env.highlight_until {
+            if let Some(c) = node.cards.iter().find(|c| c.id == hid) {
+                let frac = ((env.highlight_until - now) / HIGHLIGHT_SECS).clamp(0.0, 1.0) as f32;
+                let alpha = (frac * 255.0) as u8;
+                ui.painter_at(canvas_rect).rect_stroke(
+                    screen_rect(c).expand(4.0 * zoom),
+                    6.0 * zoom,
+                    egui::Stroke::new(
+                        3.0,
+                        egui::Color32::from_rgba_unmultiplied(0xff, 0xd1, 0x66, alpha),
+                    ),
+                );
+                ui.ctx().request_repaint(); // keep animating the fade
+            }
+        }
     }
 
     // Reset-view button — in a foreground layer, untransformed, so it stays put

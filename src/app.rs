@@ -372,6 +372,12 @@ pub struct TrellisApp {
     switcher_index: usize,
     /// A node the tree should scroll into view next frame (set by the switcher).
     scroll_to: Option<NodeId>,
+    /// A card the canvas should recenter on next frame (agenda/Kanban row click).
+    /// One-shot: cleared right after the canvas consumes it.
+    focus_card: Option<CardId>,
+    /// The card to flash-highlight on the canvas, and the `ctx` time the flash ends.
+    highlight_card: Option<CardId>,
+    highlight_until: f64,
     /// Tags panel: browse #tags and the cards that carry them.
     tags_open: bool,
     tag_selected: Option<String>,
@@ -593,6 +599,9 @@ impl TrellisApp {
             switcher_query: String::new(),
             switcher_index: 0,
             scroll_to: None,
+            focus_card: None,
+            highlight_card: None,
+            highlight_until: 0.0,
             tags_open: false,
             tag_selected: None,
             find_open: false,
@@ -3457,7 +3466,7 @@ impl TrellisApp {
     fn agenda_panel(&mut self, ctx: &egui::Context) {
         let today = crate::api::today_days();
         let mut tasks = self.doc.tasks();
-        let mut jump: Option<NodeId> = None;
+        let mut jump: Option<(NodeId, CardId)> = None;
         egui::SidePanel::right("agenda").resizable(true).default_width(320.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Agenda");
@@ -3507,15 +3516,15 @@ impl TrellisApp {
                                 .sense(egui::Sense::click()),
                         );
                         if ui.add(egui::Label::new(title).sense(egui::Sense::click())).clicked() || row.clicked() {
-                            jump = Some(t.node);
+                            jump = Some((t.node, t.card));
                         }
                         ui.small(egui::RichText::new(&t.node_title).weak());
                     }
                 }
             });
         });
-        if let Some(id) = jump {
-            self.jump_to_node(id);
+        if let Some((node, card)) = jump {
+            self.jump_to_card(ctx, node, card);
         }
     }
 
@@ -3715,7 +3724,7 @@ impl TrellisApp {
                 cols.push(k.clone());
             }
         }
-        let mut jump: Option<NodeId> = None;
+        let mut jump: Option<(NodeId, CardId)> = None;
         let mut moves: Vec<(NodeId, CardId, String)> = Vec::new();
         egui::Window::new("Kanban board")
             .open(&mut open)
@@ -3751,7 +3760,7 @@ impl TrellisApp {
                                                 },
                                             );
                                             if src.response.clicked() {
-                                                jump = Some(node);
+                                                jump = Some((node, card));
                                             }
                                         }
                                     })
@@ -3771,8 +3780,8 @@ impl TrellisApp {
                 self.mark_dirty();
             }
         }
-        if let Some(id) = jump {
-            self.jump_to_node(id);
+        if let Some((node, card)) = jump {
+            self.jump_to_card(ctx, node, card);
         }
     }
 
@@ -3802,6 +3811,16 @@ impl TrellisApp {
         self.scroll_to = Some(id);
         self.switcher_open = false;
         self.mark_dirty(); // expanded flags are persisted
+    }
+
+    /// Like [`jump_to_node`], but also reveals a specific card: the canvas
+    /// recenters on it and flashes a fading outline so the click clearly lands.
+    /// Used by the agenda and Kanban rows (a task is one canonical card).
+    fn jump_to_card(&mut self, ctx: &egui::Context, node: NodeId, card: CardId) {
+        self.jump_to_node(node);
+        self.focus_card = Some(card);
+        self.highlight_card = Some(card);
+        self.highlight_until = ctx.input(|i| i.time) + canvas::HIGHLIGHT_SECS;
     }
 }
 
@@ -4034,6 +4053,9 @@ impl eframe::App for TrellisApp {
                         templates: &template_names,
                         inline_sent: &mut self.inline_sent,
                         inline_epoch: self.inline_epoch,
+                        focus_card: self.focus_card,
+                        highlight_card: self.highlight_card,
+                        highlight_until: self.highlight_until,
                     };
                     let can_paste = self.card_clipboard.is_some();
                     let node_path = crate::tree::node_path(&self.doc, sel);
@@ -4050,6 +4072,9 @@ impl eframe::App for TrellisApp {
                         &mut env,
                         &self.card_sel,
                     );
+                    // The recenter is one-shot: the canvas consumed it this frame,
+                    // so the user can pan freely afterward.
+                    self.focus_card = None;
                     // Never let a temporary export reframe overwrite the real view.
                     if framing_card.is_none() && basket_target.is_none() {
                         self.views.insert(sel, view);
