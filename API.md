@@ -543,6 +543,27 @@ curl -s -X PATCH -H "X-API-Key: $KEY" \
 # Export the whole document to PDF and save it
 curl -s -H "X-API-Key: $KEY" "$API/export?format=pdf" \
   | python3 -c 'import sys,json,base64;open("trellis.pdf","wb").write(base64.b64decode(json.load(sys.stdin)["base64"]))'
+
+# Templates: build a Task / Local / Prod verification grid once, then reuse it.
+# 1) Make a table card and set it up (header row + column titles).
+CID=$(curl -s -H "X-API-Key: $KEY" -d '{"kind":"table","title":"Verify"}' \
+      $API/nodes/$NID/cards | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -H "X-API-Key: $KEY" -d '{"op":"set_header","header":true}' $API/nodes/$NID/cards/$CID/table
+curl -s -H "X-API-Key: $KEY" -d '{"op":"set_cell","row":0,"col":0,"text":"Task"}'  $API/nodes/$NID/cards/$CID/table
+curl -s -H "X-API-Key: $KEY" -d '{"op":"set_cell","row":0,"col":1,"text":"Local"}' $API/nodes/$NID/cards/$CID/table
+curl -s -H "X-API-Key: $KEY" -d '{"op":"set_cell","row":0,"col":2,"text":"Prod"}'  $API/nodes/$NID/cards/$CID/table
+
+# 2) Register that card as a reusable template; capture its index.
+IDX=$(curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID,\"card\":$CID,\"title\":\"Local/Prod verify\"}" \
+      $API/templates | python3 -c 'import sys,json;print(json.load(sys.stdin)["index"])')
+
+# 3) Later — stamp a fresh copy into any basket; the response includes the new card.
+#    Then fill/colour its cells (set_cell / set_bg green|red) as you verify each task.
+curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID}" $API/templates/$IDX/insert
+
+# List the saved templates, or delete one by index.
+curl -s -H "X-API-Key: $KEY" $API/templates
+curl -s -X DELETE -H "X-API-Key: $KEY" $API/templates/$IDX
 ```
 
 ## Notes for agents collaborating on notes
