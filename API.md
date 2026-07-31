@@ -344,6 +344,12 @@ GET /api/properties                    → 200 {"properties":[{"key":"due","coun
 GET /api/properties?key=due            → 200 {"key":"due","value":null,"hits":[{node,node_title,snippet}, …]}
 GET /api/properties?key=status&value=open → 200 hits where status == open
 ```
+Set a property on a card (rewrites the `key:: …` line in its body, or appends
+one) — e.g. to move a card on the Kanban board:
+```
+POST /api/nodes/{id}/cards/{cid}/property  {key, value}
+    → 200 {"card":<cid>,"key":<k>,"value":<v>}   | 404
+```
 
 ### Find cards (combined query)
 AND-combine a `#tag`, a property (`key`, optional `value`), and free `text`

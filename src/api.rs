@@ -45,6 +45,8 @@ pub enum ApiRequest {
     DeleteCard { node: NodeId, card: u64 },
     // Reorder a card within its basket (draw / autosort order).
     MoveCard { node: NodeId, card: u64, mv: MoveCardInput },
+    // Set an inline key:: value property on a card (e.g. status for the board).
+    SetCardProperty { node: NodeId, card: u64, key: String, value: String },
     // Grouping.
     ListGroups(NodeId),
     CreateGroup { node: NodeId, cards: Vec<u64>, title: Option<String> },
@@ -518,6 +520,15 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "nodes", nid, "cards", cid, "move"]) => {
             let mv: MoveCardInput = parse(body)?;
             Ok(ApiRequest::MoveCard { node: pid(nid)?, card: pid(cid)?, mv })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "property"]) => {
+            #[derive(Deserialize)]
+            struct PropInput {
+                key: String,
+                value: String,
+            }
+            let i: PropInput = parse(body)?;
+            Ok(ApiRequest::SetCardProperty { node: pid(nid)?, card: pid(cid)?, key: i.key, value: i.value })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "dock"]) => {
             let i: DockInput = parse(body)?;
@@ -1124,6 +1135,13 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             doc.move_card(node, card, index);
             let idx = doc.card_index(node, card);
             (true, ApiResponse::ok(json!({ "card": card, "index": idx })))
+        }
+        ApiRequest::SetCardProperty { node, card, key, value } => {
+            if doc.set_card_property(node, card, &key, &value) {
+                (true, ApiResponse::ok(json!({ "card": card, "key": key.to_lowercase(), "value": value })))
+            } else {
+                (false, ApiResponse::err(404, "card not found"))
+            }
         }
         ApiRequest::ListGroups(node) => match doc.nodes.get(&node) {
             Some(n) => (false, ApiResponse::ok(json!({ "groups": groups_json(n) }))),

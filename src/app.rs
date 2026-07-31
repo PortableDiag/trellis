@@ -386,6 +386,8 @@ pub struct TrellisApp {
     agenda_show_done: bool,
     /// Backlinks panel: cards that `[[link]]` to the selected node.
     backlinks_open: bool,
+    /// Kanban board window: cards grouped by `status::`, drag between columns.
+    kanban_open: bool,
     /// Link-graph window state (force-directed layout, rebuilt when opened).
     graph_open: bool,
     graph_built: bool,
@@ -601,6 +603,7 @@ impl TrellisApp {
             agenda_open: false,
             agenda_show_done: false,
             backlinks_open: false,
+            kanban_open: false,
             graph_open: false,
             graph_built: false,
             graph_layout: HashMap::new(),
@@ -2737,6 +2740,14 @@ impl TrellisApp {
                         self.graph_built = false;
                         ui.close_menu();
                     }
+                    if ui
+                        .button("Kanban board…")
+                        .on_hover_text("Cards with a status:: property as columns; drag to change status")
+                        .clicked()
+                    {
+                        self.kanban_open = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     ui.menu_button("Themes", |ui| {
                         for (t, label) in Theme::ALL {
@@ -2944,6 +2955,7 @@ impl TrellisApp {
                         "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, pos?, inline_images?}",
                         "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, …}",
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to}",
+                        "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
                         "DELETE /api/nodes/{id}/cards/{cid}",
                         "POST   /api/nodes/{id}/autosort",
                         "GET    /api/search?q=...",
@@ -3691,6 +3703,79 @@ impl TrellisApp {
         }
     }
 
+    /// Kanban board: cards that have a `status::` property, in columns by status.
+    /// Drag a card to another column to rewrite its `status`. Click to jump.
+    fn kanban_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.kanban_open;
+        let board = self.doc.cards_by_status();
+        // Standard columns first, then any other statuses in use.
+        let mut cols: Vec<String> = ["todo", "doing", "done"].iter().map(|s| s.to_string()).collect();
+        for k in board.keys() {
+            if !cols.contains(k) {
+                cols.push(k.clone());
+            }
+        }
+        let mut jump: Option<NodeId> = None;
+        let mut moves: Vec<(NodeId, CardId, String)> = Vec::new();
+        egui::Window::new("Kanban board")
+            .open(&mut open)
+            .default_size([760.0, 480.0])
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.small("Cards with a status:: property. Drag a card to another column to change its status.");
+                if board.is_empty() {
+                    ui.weak("No cards have a status:: property yet. Add `status:: todo` to a card.");
+                }
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        let empty = Vec::new();
+                        for col in &cols {
+                            let cards = board.get(col).unwrap_or(&empty);
+                            let resp = ui
+                                .allocate_ui(egui::vec2(210.0, ui.available_height().max(120.0)), |ui| {
+                                    ui.group(|ui| {
+                                        ui.set_min_width(196.0);
+                                        ui.set_min_height(110.0);
+                                        ui.strong(format!("{col}  ({})", cards.len()));
+                                        ui.separator();
+                                        for &(node, card, ref title, ref nt) in cards {
+                                            let src = ui.dnd_drag_source(
+                                                egui::Id::new(("kb", node, card)),
+                                                (node, card),
+                                                |ui| {
+                                                    ui.group(|ui| {
+                                                        ui.set_min_width(176.0);
+                                                        ui.label(title);
+                                                        ui.small(egui::RichText::new(nt).weak());
+                                                    });
+                                                },
+                                            );
+                                            if src.response.clicked() {
+                                                jump = Some(node);
+                                            }
+                                        }
+                                    })
+                                    .response
+                                })
+                                .response;
+                            if let Some(p) = resp.dnd_release_payload::<(NodeId, CardId)>() {
+                                moves.push((p.0, p.1, col.clone()));
+                            }
+                        }
+                    });
+                });
+            });
+        self.kanban_open = open;
+        for (n, c, status) in moves {
+            if self.doc.set_card_property(n, c, "status", &status) {
+                self.mark_dirty();
+            }
+        }
+        if let Some(id) = jump {
+            self.jump_to_node(id);
+        }
+    }
+
     /// Navigate a clicked `[[wiki-link]]` (its URL-encoded target) to the node
     /// it names, or report that no such node exists.
     fn follow_wikilink(&mut self, encoded: &str) {
@@ -3874,6 +3959,9 @@ impl eframe::App for TrellisApp {
         }
         if self.graph_open {
             self.graph_window(ctx);
+        }
+        if self.kanban_open {
+            self.kanban_window(ctx);
         }
 
         // Follow [[wiki-links]] (rendered as the `trellis:` URL scheme) by

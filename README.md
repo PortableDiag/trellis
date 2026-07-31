@@ -140,6 +140,9 @@ and zooms (Ctrl+scroll); each node remembers its view.
   that links to the current node ("linked here").
 - **Link graph** (View → Link graph) — a force-directed picture of the wiki-link
   web across the tree; click a node to open it.
+- **Kanban board** (View → Kanban board) — cards with a `status::` property shown
+  as columns (To do / Doing / Done, plus any custom status); drag a card between
+  columns to change its status. Reads the same properties as the agenda.
 - **View → Themes** — Trellis (default), Light, or Terminal Green
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN

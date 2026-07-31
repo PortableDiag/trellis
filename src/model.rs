@@ -1920,6 +1920,53 @@ impl Document {
             .map(|(_, v)| v)
     }
 
+    /// Set (or insert) an inline `key:: value` property on a card by editing its
+    /// body: rewrites the first line-level `key:: …` if present, else appends a
+    /// new line. Returns whether the card exists. Used by the Kanban board to
+    /// change a card's `status`.
+    pub fn set_card_property(&mut self, node: NodeId, card: CardId, key: &str, value: &str) -> bool {
+        let key = key.to_lowercase();
+        let Some(c) = self.card_mut(node, card) else { return false };
+        let prefix = format!("{key}:: ");
+        let mut lines: Vec<String> = c.body.lines().map(|l| l.to_string()).collect();
+        let mut replaced = false;
+        for line in lines.iter_mut() {
+            let trimmed = line.trim_start();
+            if trimmed.to_lowercase().starts_with(&prefix) {
+                let indent = &line[..line.len() - trimmed.len()];
+                *line = format!("{indent}{key}:: {value}");
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            lines.push(format!("{key}:: {value}"));
+        }
+        c.body = lines.join("\n");
+        true
+    }
+
+    /// Cards that carry a `status::` property, grouped by status value (for a
+    /// Kanban board). Each entry: `(node, card, card title, node title)`.
+    #[allow(clippy::type_complexity)]
+    pub fn cards_by_status(&self) -> std::collections::BTreeMap<String, Vec<(NodeId, CardId, String, String)>> {
+        let mut m: std::collections::BTreeMap<String, Vec<(NodeId, CardId, String, String)>> =
+            std::collections::BTreeMap::new();
+        for node in self.nodes.values() {
+            for card in &node.cards {
+                if let Some((_, v)) = card.properties().into_iter().find(|(k, _)| k == "status") {
+                    let title = if card.title.trim().is_empty() {
+                        searchable_body(card).lines().next().unwrap_or("").chars().take(50).collect()
+                    } else {
+                        card.title.clone()
+                    };
+                    m.entry(v.to_lowercase()).or_default().push((node.id, card.id, title, node.title.clone()));
+                }
+            }
+        }
+        m
+    }
+
     /// Every property key used across the document with how many cards use it.
     pub fn property_keys(&self) -> Vec<(String, usize)> {
         let mut m: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -3104,6 +3151,24 @@ mod tests {
         assert_eq!(doc.query_cards(Some("nope"), None, None, None).len(), 0);
         // No filters -> nothing.
         assert_eq!(doc.query_cards(None, None, None, None).len(), 0);
+    }
+
+    #[test]
+    fn set_card_property_replaces_or_appends() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().body = "ship it\nstatus:: todo".into();
+        // Replace an existing property.
+        assert!(doc.set_card_property(n, c, "status", "doing"));
+        assert_eq!(doc.card_property(n, c, "status").as_deref(), Some("doing"));
+        // Append a new one.
+        doc.set_card_property(n, c, "priority", "high");
+        assert_eq!(doc.card_property(n, c, "priority").as_deref(), Some("high"));
+        // Board groups by status.
+        let board = doc.cards_by_status();
+        assert_eq!(board.get("doing").map(|v| v.len()), Some(1));
+        assert!(board.get("todo").is_none());
     }
 
     #[test]

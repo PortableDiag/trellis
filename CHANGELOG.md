@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.56.0]
+
+### Added
+- **Kanban board** (**View → Kanban board**) — every card with a `status::` property shown as a
+  column by status (To do / Doing / Done, plus any other status values you use). Drag a card to
+  another column to change its `status`; click to jump to its basket. No new card type — it reads
+  the same properties the agenda uses, so a task is one card seen two ways. API to move cards:
+  `POST /api/nodes/{id}/cards/{cid}/property {key, value}`.
+
 ## [0.55.0]
 
 ### Added
