@@ -119,7 +119,10 @@ and zooms (Ctrl+scroll); each node remembers its view.
   and **PNG (overview)**, a single image of the basket as arranged.
 
 **App**
-- Full-text **search** across every node title and card (Ctrl+F)
+- Full-text **search** across every node title and card (Ctrl+F). Clicking a
+  result reveals the matching card — the canvas recenters on it and it flashes
+  briefly — not just its basket. The **Find**, **Tags**, and **Backlinks** panels
+  reveal the clicked card the same way.
 - **Quick switcher** (Ctrl+O) — fuzzy-jump to any node by title or path; Enter
   opens it, expanding its ancestors and scrolling it into view. Fast navigation
   for a deep tree.

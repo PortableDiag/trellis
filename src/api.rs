@@ -1336,7 +1336,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let hits: Vec<Value> = doc
                 .search(&q)
                 .into_iter()
-                .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
+                .map(|h| json!({ "node": h.node, "card": h.card, "node_title": h.node_title, "snippet": h.snippet }))
                 .collect();
             (false, ApiResponse::ok(json!({ "hits": hits })))
         }
@@ -1352,7 +1352,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let hits: Vec<Value> = doc
                 .cards_with_tag(&tag)
                 .into_iter()
-                .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
+                .map(|h| json!({ "node": h.node, "card": h.card, "node_title": h.node_title, "snippet": h.snippet }))
                 .collect();
             (false, ApiResponse::ok(json!({ "tag": tag.trim_start_matches('#'), "hits": hits })))
         }
@@ -1368,7 +1368,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let hits: Vec<Value> = doc
                 .cards_with_property(&key, value.as_deref())
                 .into_iter()
-                .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
+                .map(|h| json!({ "node": h.node, "card": h.card, "node_title": h.node_title, "snippet": h.snippet }))
                 .collect();
             (false, ApiResponse::ok(json!({ "key": key, "value": value, "hits": hits })))
         }
@@ -1376,7 +1376,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let hits: Vec<Value> = doc
                 .query_cards(tag.as_deref(), key.as_deref(), value.as_deref(), text.as_deref())
                 .into_iter()
-                .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
+                .map(|h| json!({ "node": h.node, "card": h.card, "node_title": h.node_title, "snippet": h.snippet }))
                 .collect();
             (false, ApiResponse::ok(json!({ "count": hits.len(), "hits": hits })))
         }
@@ -1407,7 +1407,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let hits: Vec<Value> = doc
                 .backlinks(id)
                 .into_iter()
-                .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
+                .map(|h| json!({ "node": h.node, "card": h.card, "node_title": h.node_title, "snippet": h.snippet }))
                 .collect();
             (false, ApiResponse::ok(json!({ "node": id, "count": hits.len(), "hits": hits })))
         }

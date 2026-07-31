@@ -106,10 +106,14 @@ GET /api/nodes/{id}/cards
   → 200 {"cards":[<card>…]}                                      | 404
 
 GET /api/search?q=<text>
-  → 200 {"hits":[ {node,node_title,snippet} ]}                   (case-insensitive)
+  → 200 {"hits":[ {node,card,node_title,snippet} ]}                   (case-insensitive)
 ```
 Note: `tree` and `nodes` report `cards` as a **count**; `GET /api/nodes/{id}`
 returns the **full card objects**.
+
+In every `hits` list (search, tags, properties, query, backlinks), `card` is the
+id of the matching card so a client can point straight at it. It is `null` only
+for a search hit that matched a **node title** rather than a card.
 
 ### Create
 ```
@@ -313,7 +317,7 @@ are a single rendered image of the document text. Decode `base64` to get the fil
 wiki-link; in the app it renders as a clickable link that navigates to that node.
 This lists the cards that link *to* a node.
 ```
-GET /api/nodes/{id}/backlinks → 200 {"node":<id>,"count":N,"hits":[{node,node_title,snippet}, …]}  | 404
+GET /api/nodes/{id}/backlinks → 200 {"node":<id>,"count":N,"hits":[{node,card,node_title,snippet}, …]}  | 404
 ```
 
 ### Link graph
@@ -330,7 +334,7 @@ whose first char is a letter — so `# Heading`, `page#frag`, and `#123` are not
 tags; `#work/urgent` (nested) is. Tags are lowercased.
 ```
 GET /api/tags            → 200 {"tags":[{"tag":"todo","count":3}, …]}   (all tags, by name)
-GET /api/tags?name=todo  → 200 {"tag":"todo","hits":[{node,node_title,snippet}, …]}
+GET /api/tags?name=todo  → 200 {"tag":"todo","hits":[{node,card,node_title,snippet}, …]}
 ```
 
 ### Properties
@@ -341,7 +345,7 @@ whole line or bracketed inline (`[due:: 2026-08-15]`). Keys are lowercased. A
 card's parsed properties are included in its JSON as `properties:[{key,value}]`.
 ```
 GET /api/properties                    → 200 {"properties":[{"key":"due","count":4}, …]}
-GET /api/properties?key=due            → 200 {"key":"due","value":null,"hits":[{node,node_title,snippet}, …]}
+GET /api/properties?key=due            → 200 {"key":"due","value":null,"hits":[{node,card,node_title,snippet}, …]}
 GET /api/properties?key=status&value=open → 200 hits where status == open
 ```
 Set a property on a card (rewrites the `key:: …` line in its body, or appends
@@ -356,7 +360,7 @@ AND-combine a `#tag`, a property (`key`, optional `value`), and free `text`
 across the whole tree. Powers the **View → Find cards** panel.
 ```
 GET /api/query?tag=todo&key=status&value=open&text=release
-    → 200 {"count":N,"hits":[{node,node_title,snippet}, …]}
+    → 200 {"count":N,"hits":[{node,card,node_title,snippet}, …]}
 ```
 All params optional, but at least one of `tag`/`key`/`text` is needed (else empty).
 

@@ -1858,6 +1858,7 @@ impl Document {
             if node.title.to_lowercase().contains(&q) {
                 hits.push(SearchHit {
                     node: node.id,
+                    card: None,
                     node_title: node.title.clone(),
                     snippet: "(title)".to_string(),
                 });
@@ -1867,6 +1868,7 @@ impl Document {
                 if let Some(pos) = hay.to_lowercase().find(&q) {
                     hits.push(SearchHit {
                         node: node.id,
+                        card: Some(card.id),
                         node_title: node.title.clone(),
                         snippet: snippet_around(&hay, pos, q.len()),
                     });
@@ -1911,6 +1913,7 @@ impl Document {
                         .unwrap_or_else(|| snippet_around(&hay, 0, 0));
                     hits.push(SearchHit {
                         node: node.id,
+                        card: Some(card.id),
                         node_title: node.title.clone(),
                         snippet,
                     });
@@ -2054,6 +2057,7 @@ impl Document {
                 if links.iter().any(|t| self.resolve_link(t) == Some(node)) {
                     hits.push(SearchHit {
                         node: n.id,
+                        card: Some(card.id),
                         node_title: n.title.clone(),
                         snippet: snippet_around(&hay, 0, 0),
                     });
@@ -2107,6 +2111,7 @@ impl Document {
                 }
                 hits.push(SearchHit {
                     node: node.id,
+                    card: Some(card.id),
                     node_title: node.title.clone(),
                     snippet: snippet_around(&hay, 0, 0),
                 });
@@ -2164,6 +2169,7 @@ impl Document {
                 }) {
                     hits.push(SearchHit {
                         node: node.id,
+                        card: Some(card.id),
                         node_title: node.title.clone(),
                         snippet: format!("{key}: {v}"),
                     });
@@ -2359,6 +2365,10 @@ pub(crate) fn extract_tags(text: &str) -> Vec<String> {
 
 pub struct SearchHit {
     pub node: NodeId,
+    /// The specific card that matched, so callers can reveal it (recenter +
+    /// flash), not just its basket. `None` for a node-title match, which has no
+    /// card to point at.
+    pub card: Option<CardId>,
     pub node_title: String,
     pub snippet: String,
 }

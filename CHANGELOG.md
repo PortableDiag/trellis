@@ -4,6 +4,22 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.57.3]
+
+### Changed
+- **Search, Find, Tags, and Backlinks now reveal the exact card, not just its basket.** Clicking
+  a result recenters the canvas on the matching card and flashes a brief highlight — the same
+  reveal the Agenda and Kanban board got in v0.57.1 — instead of only selecting its node. Search
+  in particular previously just selected the node and never moved the canvas, so a match in a
+  basket you were already viewing (or scrolled off) appeared to do nothing. This completes the
+  "reveal-on-click parity" across every result panel.
+
+### API
+- Every `hits` list (`/api/search`, `/api/tags?name=`, `/api/properties`, `/api/query`,
+  `/api/nodes/{id}/backlinks`) now includes a **`card`** id on each hit, so an agent can point
+  straight at the matching card. It is `null` only for a search hit that matched a node **title**
+  rather than a card.
+
 ## [0.57.2]
 
 ### Fixed

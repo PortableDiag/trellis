@@ -3232,6 +3232,7 @@ impl TrellisApp {
     }
 
     fn search_panel(&mut self, ctx: &egui::Context) {
+        let mut jump: Option<(NodeId, Option<CardId>)> = None;
         egui::SidePanel::right("search")
             .resizable(true)
             .default_width(260.0)
@@ -3267,7 +3268,7 @@ impl TrellisApp {
                                     .sense(egui::Sense::click()))
                                 .clicked()
                             {
-                                self.selected = Some(hit.node);
+                                jump = Some((hit.node, hit.card));
                             }
                             ui.small(hit.snippet);
                         });
@@ -3275,6 +3276,9 @@ impl TrellisApp {
                     }
                 });
             });
+        if let Some((node, card)) = jump {
+            self.reveal_hit(ctx, node, card);
+        }
     }
 
     /// Ctrl+O: a centered palette to fuzzy-jump to any node by title or path.
@@ -3365,7 +3369,7 @@ impl TrellisApp {
 
     /// Right-side panel: browse every #tag, then the cards carrying one.
     fn tags_panel(&mut self, ctx: &egui::Context) {
-        let mut jump: Option<NodeId> = None;
+        let mut jump: Option<(NodeId, Option<CardId>)> = None;
         egui::SidePanel::right("tags").resizable(true).default_width(260.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Tags");
@@ -3410,7 +3414,7 @@ impl TrellisApp {
                                     .sense(egui::Sense::click()))
                                 .clicked()
                             {
-                                jump = Some(hit.node);
+                                jump = Some((hit.node, hit.card));
                             }
                             ui.small(hit.snippet);
                             ui.separator();
@@ -3419,15 +3423,15 @@ impl TrellisApp {
                 }
             }
         });
-        if let Some(id) = jump {
-            self.jump_to_node(id);
+        if let Some((node, card)) = jump {
+            self.reveal_hit(ctx, node, card);
         }
     }
 
     /// Right-side panel: filter cards across the whole tree by tag / property /
     /// text (all dropdown-driven, no syntax), with click-to-jump results.
     fn find_panel(&mut self, ctx: &egui::Context) {
-        let mut jump: Option<NodeId> = None;
+        let mut jump: Option<(NodeId, Option<CardId>)> = None;
         let tags = self.doc.tag_counts();
         let keys = self.doc.property_keys();
         egui::SidePanel::right("find").resizable(true).default_width(280.0).show(ctx, |ui| {
@@ -3494,15 +3498,15 @@ impl TrellisApp {
                         .add(egui::Label::new(egui::RichText::new(&hit.node_title).strong()).sense(egui::Sense::click()))
                         .clicked()
                     {
-                        jump = Some(hit.node);
+                        jump = Some((hit.node, hit.card));
                     }
                     ui.small(hit.snippet);
                     ui.separator();
                 }
             });
         });
-        if let Some(id) = jump {
-            self.jump_to_node(id);
+        if let Some((node, card)) = jump {
+            self.reveal_hit(ctx, node, card);
         }
     }
 
@@ -3575,7 +3579,7 @@ impl TrellisApp {
 
     /// Right-side panel: cards elsewhere that `[[link]]` to the selected node.
     fn backlinks_panel(&mut self, ctx: &egui::Context) {
-        let mut jump: Option<NodeId> = None;
+        let mut jump: Option<(NodeId, Option<CardId>)> = None;
         egui::SidePanel::right("backlinks").resizable(true).default_width(260.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Backlinks");
@@ -3607,7 +3611,7 @@ impl TrellisApp {
                                 .add(egui::Label::new(egui::RichText::new(&hit.node_title).strong()).sense(egui::Sense::click()))
                                 .clicked()
                             {
-                                jump = Some(hit.node);
+                                jump = Some((hit.node, hit.card));
                             }
                             ui.small(hit.snippet);
                             ui.separator();
@@ -3616,8 +3620,8 @@ impl TrellisApp {
                 }
             }
         });
-        if let Some(id) = jump {
-            self.jump_to_node(id);
+        if let Some((node, card)) = jump {
+            self.reveal_hit(ctx, node, card);
         }
     }
 
@@ -3866,6 +3870,16 @@ impl TrellisApp {
         self.focus_card = Some(card);
         self.highlight_card = Some(card);
         self.highlight_until = ctx.input(|i| i.time) + canvas::HIGHLIGHT_SECS;
+    }
+
+    /// Reveal a `SearchHit`: if it points at a specific card, jump to it
+    /// (recenter + flash); otherwise (a node-title match) just navigate to the
+    /// node. Used by the Search, Find, Tags, and Backlinks panels.
+    fn reveal_hit(&mut self, ctx: &egui::Context, node: NodeId, card: Option<CardId>) {
+        match card {
+            Some(c) => self.jump_to_card(ctx, node, c),
+            None => self.jump_to_node(node),
+        }
     }
 }
 
