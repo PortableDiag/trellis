@@ -132,9 +132,11 @@ and zooms (Ctrl+scroll); each node remembers its view.
   a property (+ value) from dropdowns, optionally add text; results link back to
   their basket. No syntax to remember.
 - **Task agenda** (View → Agenda) — every card with a `due:: <date>` becomes a
-  task, grouped **Overdue / Today / This week / Later** across all baskets, click
-  to jump. A task is done when it has `status:: done` (or its checklist is fully
-  checked). Track deadlines that span workspaces without copying cards around.
+  task, grouped **Overdue / Today / This week / Later** across all baskets. Click
+  a task to jump **straight to that card** — the basket recenters on it and it
+  flashes briefly so you can't lose it. A task is done when it has `status:: done`
+  (or its checklist is fully checked). Track deadlines that span workspaces
+  without copying cards around.
 - **Wiki-links & backlinks** — write `[[Node Title]]` in a card to make a
   clickable link that jumps to that node; **View → Backlinks** shows everything
   that links to the current node ("linked here").
@@ -142,7 +144,8 @@ and zooms (Ctrl+scroll); each node remembers its view.
   web across the tree; click a node to open it.
 - **Kanban board** (View → Kanban board) — cards with a `status::` property shown
   as columns (To do / Doing / Done, plus any custom status); drag a card between
-  columns to change its status. Reads the same properties as the agenda.
+  columns to change its status, or click one to jump straight to that card on its
+  basket. Reads the same properties as the agenda.
 - **View → Themes** — Trellis (default), Light, or Terminal Green
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN
