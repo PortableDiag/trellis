@@ -246,11 +246,11 @@ fn node_ui(
                 }
                 if !node.children.is_empty() {
                     ui.separator();
-                    if ui.button("⊞  Expand all").on_hover_text("Open this node and every subnode under it").clicked() {
+                    if ui.button("▾  Expand all").on_hover_text("Open this node and every subnode under it").clicked() {
                         actions.push(TreeAction::SetSubtreeExpanded(id, true));
                         ui.close_menu();
                     }
-                    if ui.button("⊟  Collapse all").on_hover_text("Fold this whole branch away").clicked() {
+                    if ui.button("▸  Collapse all").on_hover_text("Fold this whole branch away").clicked() {
                         actions.push(TreeAction::SetSubtreeExpanded(id, false));
                         ui.close_menu();
                     }

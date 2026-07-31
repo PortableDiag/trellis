@@ -74,6 +74,9 @@ pub enum ApiRequest {
     // key:: value properties: list keys, or (with ?key=[&value=]) matching cards.
     PropertyKeys,
     PropertyCards { key: String, value: Option<String> },
+    // Combined dropdown-style query across the tree, and the due-date agenda.
+    QueryCards { tag: Option<String>, key: Option<String>, value: Option<String>, text: Option<String> },
+    Tasks { include_done: bool },
     // Backup control — handled by the app loop (needs backup config + doc file),
     // not by `process`, since `process` only sees the `Document`.
     BackupStatus,
@@ -572,9 +575,37 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Some(key) => Ok(ApiRequest::PropertyCards { key, value: query_get(query, "value") }),
             None => Ok(ApiRequest::PropertyKeys),
         },
+        (Method::Get, ["api", "query"]) => Ok(ApiRequest::QueryCards {
+            tag: query_get(query, "tag"),
+            key: query_get(query, "key"),
+            value: query_get(query, "value"),
+            text: query_get(query, "text"),
+        }),
+        (Method::Get, ["api", "tasks"]) => Ok(ApiRequest::Tasks {
+            include_done: query_get(query, "all").as_deref() == Some("true"),
+        }),
         (Method::Get, ["api", "backup"]) => Ok(ApiRequest::BackupStatus),
         (Method::Post, ["api", "backup", "run"]) => Ok(ApiRequest::BackupRun),
         _ => Err((404, format!("no route for {:?} {}", method, path))),
+    }
+}
+
+/// Today as days since the Unix epoch (UTC), for bucketing due dates.
+pub fn today_days() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 86_400) as i64)
+        .unwrap_or(0)
+}
+
+/// Which agenda bucket a due date falls in, relative to `today` (both in days).
+pub fn task_bucket(due_days: Option<i64>, today: i64) -> &'static str {
+    match due_days {
+        None => "nodate",
+        Some(d) if d < today => "overdue",
+        Some(d) if d == today => "today",
+        Some(d) if d <= today + 7 => "week",
+        Some(_) => "later",
     }
 }
 
@@ -1284,6 +1315,34 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
                 .collect();
             (false, ApiResponse::ok(json!({ "key": key, "value": value, "hits": hits })))
+        }
+        ApiRequest::QueryCards { tag, key, value, text } => {
+            let hits: Vec<Value> = doc
+                .query_cards(tag.as_deref(), key.as_deref(), value.as_deref(), text.as_deref())
+                .into_iter()
+                .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
+                .collect();
+            (false, ApiResponse::ok(json!({ "count": hits.len(), "hits": hits })))
+        }
+        ApiRequest::Tasks { include_done } => {
+            let today = today_days();
+            let tasks: Vec<Value> = doc
+                .tasks()
+                .into_iter()
+                .filter(|t| include_done || !t.done)
+                .map(|t| {
+                    json!({
+                        "node": t.node,
+                        "node_title": t.node_title,
+                        "card": t.card,
+                        "title": t.title,
+                        "due": t.due,
+                        "done": t.done,
+                        "bucket": task_bucket(t.due_days, today),
+                    })
+                })
+                .collect();
+            (false, ApiResponse::ok(json!({ "today_days": today, "count": tasks.len(), "tasks": tasks })))
         }
         // Backup requests are intercepted and answered by the app loop (they need
         // the backup config + document file). This is only reached if that

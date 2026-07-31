@@ -330,6 +330,25 @@ GET /api/properties?key=due            → 200 {"key":"due","value":null,"hits":
 GET /api/properties?key=status&value=open → 200 hits where status == open
 ```
 
+### Find cards (combined query)
+AND-combine a `#tag`, a property (`key`, optional `value`), and free `text`
+across the whole tree. Powers the **View → Find cards** panel.
+```
+GET /api/query?tag=todo&key=status&value=open&text=release
+    → 200 {"count":N,"hits":[{node,node_title,snippet}, …]}
+```
+All params optional, but at least one of `tag`/`key`/`text` is needed (else empty).
+
+### Tasks (agenda)
+Every card carrying a `due:: <date>` property, as tasks. A task is **done** if it
+has `status:: done|complete|closed` or (for a checklist) all items are checked.
+`bucket` is relative to today (UTC): `overdue` · `today` · `week` (next 7 days) ·
+`later` · `nodate` (unparseable date). Powers the **View → Agenda** panel.
+```
+GET /api/tasks           → 200 {"today_days":N,"count":M,"tasks":[{node,node_title,card,title,due,done,bucket}, …]}
+GET /api/tasks?all=true  → include completed tasks too (default excludes them)
+```
+
 ### Backup
 Trigger a full-document backup, or read the backup status. Destinations,
 schedule, and encryption are configured in the app (**Tools → Backup…**); this

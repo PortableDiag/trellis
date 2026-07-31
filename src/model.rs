@@ -1937,6 +1937,92 @@ impl Document {
         m.into_iter().collect()
     }
 
+    /// AND-combine filters across every card: an optional `#tag`, an optional
+    /// property `key` (optionally `= value`), and optional `text` (substring in
+    /// title or body). Returns hits for cards matching *all* provided filters;
+    /// empty if no filter is set. Powers the Find-cards panel.
+    pub fn query_cards(
+        &self,
+        tag: Option<&str>,
+        key: Option<&str>,
+        value: Option<&str>,
+        text: Option<&str>,
+    ) -> Vec<SearchHit> {
+        let tag = tag.map(|t| t.trim_start_matches('#').to_lowercase()).filter(|t| !t.is_empty());
+        let key = key.map(|k| k.to_lowercase()).filter(|k| !k.is_empty());
+        let value = value.map(|v| v.to_lowercase()).filter(|v| !v.is_empty());
+        let text = text.map(|t| t.to_lowercase()).filter(|t| !t.is_empty());
+        if tag.is_none() && key.is_none() && text.is_none() {
+            return Vec::new();
+        }
+        let mut hits = Vec::new();
+        for node in self.nodes.values() {
+            for card in &node.cards {
+                let hay = format!("{} {}", card.title, searchable_body(card));
+                let hay_lc = hay.to_lowercase();
+                if let Some(t) = &tag {
+                    if !extract_tags(&hay).iter().any(|x| x == t) {
+                        continue;
+                    }
+                }
+                if let Some(k) = &key {
+                    let props = extract_properties(&hay);
+                    let ok = props.iter().any(|(pk, pv)| {
+                        pk == k && value.as_ref().map_or(true, |w| pv.to_lowercase() == *w)
+                    });
+                    if !ok {
+                        continue;
+                    }
+                }
+                if let Some(t) = &text {
+                    if !hay_lc.contains(t) {
+                        continue;
+                    }
+                }
+                hits.push(SearchHit {
+                    node: node.id,
+                    node_title: node.title.clone(),
+                    snippet: snippet_around(&hay, 0, 0),
+                });
+            }
+        }
+        hits
+    }
+
+    /// Every card that carries a `due::` date, as a task, across all baskets.
+    /// A task is "done" if it has `status:: done|complete|closed` or (for a
+    /// checklist) every item is checked. `due_days` is the date parsed to days
+    /// since the epoch (or `None` if unparseable), so the caller can bucket it.
+    pub fn tasks(&self) -> Vec<TaskItem> {
+        let mut out = Vec::new();
+        for node in self.nodes.values() {
+            for card in &node.cards {
+                let props = card.properties();
+                let Some((_, due)) = props.iter().find(|(k, _)| k == "due") else { continue };
+                let done = props.iter().any(|(k, v)| {
+                    k == "status"
+                        && matches!(v.to_lowercase().as_str(), "done" | "complete" | "completed" | "closed")
+                }) || matches!(&card.kind, CardKind::Checklist { items }
+                        if !items.is_empty() && items.iter().all(|i| i.done));
+                let title = if card.title.trim().is_empty() {
+                    searchable_body(card).lines().next().unwrap_or("").chars().take(60).collect()
+                } else {
+                    card.title.clone()
+                };
+                out.push(TaskItem {
+                    node: node.id,
+                    node_title: node.title.clone(),
+                    card: card.id,
+                    title,
+                    due: due.clone(),
+                    due_days: parse_ymd(due),
+                    done,
+                });
+            }
+        }
+        out
+    }
+
     /// Cards that have property `key` (optionally `= value`, case-insensitive),
     /// each as a search hit whose snippet is `key: value`.
     pub fn cards_with_property(&self, key: &str, value: Option<&str>) -> Vec<SearchHit> {
@@ -1970,49 +2056,54 @@ impl Document {
 /// values are trimmed. Order is preserved; a later value for a key wins in
 /// [`Document::card_property`].
 pub(crate) fn extract_properties(text: &str) -> Vec<(String, String)> {
-    let b = text.as_bytes();
     let mut out: Vec<(String, String)> = Vec::new();
-    let mut i = 0;
-    while i + 2 < b.len() {
-        // A property marker is `::` followed by a space/tab.
-        if b[i] == b':' && b[i + 1] == b':' && (b[i + 2] == b' ' || b[i + 2] == b'\t') {
-            // Walk back over the key (word chars) to its start.
-            let mut ks = i;
-            while ks > 0 {
-                let c = b[ks - 1];
-                if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
-                    ks -= 1;
-                } else {
-                    break;
-                }
-            }
-            if ks < i {
-                let opener = if ks > 0 { b[ks - 1] } else { 0 };
-                let key = text[ks..i].to_lowercase();
-                let mut vs = i + 2;
-                while vs < b.len() && (b[vs] == b' ' || b[vs] == b'\t') {
-                    vs += 1;
-                }
-                let mut ve = vs;
-                while ve < b.len() {
-                    let c = b[ve];
-                    if c == b'\n'
-                        || (opener == b'[' && c == b']')
-                        || (opener == b'(' && c == b')')
-                    {
+    for line in text.lines() {
+        let b = line.as_bytes();
+        // Pass 1: find every `key:: ` marker on the line.
+        // (key_start, colon_index, value_start, opener_byte)
+        let mut marks: Vec<(usize, usize, usize, u8)> = Vec::new();
+        let mut i = 0;
+        while i + 2 < b.len() {
+            if b[i] == b':' && b[i + 1] == b':' && (b[i + 2] == b' ' || b[i + 2] == b'\t') {
+                let mut ks = i;
+                while ks > 0 {
+                    let c = b[ks - 1];
+                    if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
+                        ks -= 1;
+                    } else {
                         break;
                     }
-                    ve += 1;
                 }
-                let value = text[vs..ve].trim().to_string();
-                if !value.is_empty() {
-                    out.push((key, value));
+                if ks < i {
+                    let opener = if ks > 0 { b[ks - 1] } else { 0 };
+                    let mut vs = i + 2;
+                    while vs < b.len() && (b[vs] == b' ' || b[vs] == b'\t') {
+                        vs += 1;
+                    }
+                    marks.push((ks, i, vs, opener));
+                    i = vs; // keep scanning the value so later fields are found too
+                    continue;
                 }
-                i = ve;
-                continue;
+            }
+            i += 1;
+        }
+        // Pass 2: each field's value runs to the next field, a closing bracket
+        // (if it was opened with `[`/`(`), or the end of the line.
+        for (mi, &(ks, ci, vs, opener)) in marks.iter().enumerate() {
+            let key = line[ks..ci].to_lowercase();
+            let ve = if opener == b'[' || opener == b'(' {
+                let close = if opener == b'[' { ']' } else { ')' };
+                line[vs..].find(close).map(|p| vs + p).unwrap_or(line.len())
+            } else if mi + 1 < marks.len() {
+                marks[mi + 1].0
+            } else {
+                line.len()
+            };
+            let value = line[vs..ve].trim().to_string();
+            if !value.is_empty() {
+                out.push((key, value));
             }
         }
-        i += 1;
     }
     out
 }
@@ -2060,6 +2151,38 @@ pub struct SearchHit {
     pub node: NodeId,
     pub node_title: String,
     pub snippet: String,
+}
+
+/// A card carrying a `due::` date, surfaced by [`Document::tasks`] for the agenda.
+pub struct TaskItem {
+    pub node: NodeId,
+    pub node_title: String,
+    pub card: CardId,
+    pub title: String,
+    /// The raw `due` value as written (e.g. `2026-08-15`).
+    pub due: String,
+    /// `due` parsed to days since the Unix epoch, or `None` if unparseable.
+    pub due_days: Option<i64>,
+    pub done: bool,
+}
+
+/// Parse a `YYYY-MM-DD` date to days since 1970-01-01 (UTC), or `None`. Uses
+/// Howard Hinnant's days-from-civil algorithm (inverse of the stamp formatter).
+pub fn parse_ymd(s: &str) -> Option<i64> {
+    let mut it = s.trim().splitn(3, '-');
+    let y: i64 = it.next()?.trim().parse().ok()?;
+    let m: i64 = it.next()?.trim().parse().ok()?;
+    let d: i64 = it.next()?.trim().parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
 }
 
 /// Format marker written into a single-card JSON export, checked on import so a
@@ -2805,6 +2928,40 @@ mod tests {
             .write_to(&mut buf, image::ImageFormat::Png)
             .unwrap();
         buf.into_inner()
+    }
+
+    #[test]
+    fn parse_ymd_matches_known_dates() {
+        assert_eq!(parse_ymd("1970-01-01"), Some(0));
+        assert_eq!(parse_ymd("2026-07-30"), Some(20664)); // 20664 days after epoch
+        assert_eq!(parse_ymd("2026-07-31").unwrap(), parse_ymd("2026-07-30").unwrap() + 1);
+        assert_eq!(parse_ymd("not-a-date"), None);
+        assert_eq!(parse_ymd("2026-13-01"), None); // bad month
+    }
+
+    #[test]
+    fn tasks_and_query_gather_across_baskets() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "Project".into());
+        let b = doc.add_node(None, "Daily".into());
+        let c1 = doc.add_card(a, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(a, c1).unwrap().title = "Ship release".into();
+        doc.card_mut(a, c1).unwrap().body = "#todo due:: 2026-08-15".into();
+        let c2 = doc.add_card(b, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(b, c2).unwrap().body = "call vendor due:: 2026-08-01 status:: done".into();
+
+        let tasks = doc.tasks();
+        assert_eq!(tasks.len(), 2);
+        let done: Vec<_> = tasks.iter().filter(|t| t.done).collect();
+        assert_eq!(done.len(), 1); // the status:: done one
+        assert!(tasks.iter().any(|t| t.title == "Ship release" && !t.done));
+
+        // Combined query: tag AND property.
+        assert_eq!(doc.query_cards(Some("todo"), Some("due"), None, None).len(), 1);
+        assert_eq!(doc.query_cards(Some("todo"), None, None, Some("ship")).len(), 1);
+        assert_eq!(doc.query_cards(Some("nope"), None, None, None).len(), 0);
+        // No filters -> nothing.
+        assert_eq!(doc.query_cards(None, None, None, None).len(), 0);
     }
 
     #[test]

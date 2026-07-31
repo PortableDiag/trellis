@@ -4,6 +4,22 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.50.0]
+
+### Added
+- **Find cards** (**View → Find cards**) — a cross-tree query panel driven entirely by
+  dropdowns (pick a `#tag`, pick a property + value) plus an optional text box; no syntax to
+  remember. Live results link back to their basket. API: `GET /api/query?tag=&key=&value=&text=`.
+- **Task agenda** (**View → Agenda**) — every card with a `due:: <date>` shown as a task,
+  grouped **Overdue / Today / This week / Later**, across every basket, click to jump. A task
+  is done when it has `status:: done` (or a fully-checked checklist); completed tasks are
+  hidden unless you tick "Show completed". One canonical task, no copying. API: `GET /api/tasks`.
+
+### Fixed
+- Replaced UI glyphs that rendered as empty squares in the bundled font (the backup window's
+  add/remove buttons, the tree's Expand-all/Collapse-all items, the Tags panel back button)
+  with glyphs the font actually includes.
+
 ## [0.49.0]
 
 ### Added

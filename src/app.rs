@@ -373,6 +373,15 @@ pub struct TrellisApp {
     /// Tags panel: browse #tags and the cards that carry them.
     tags_open: bool,
     tag_selected: Option<String>,
+    /// Find-cards panel: dropdown query (tag / property / text) across the tree.
+    find_open: bool,
+    find_tag: Option<String>,
+    find_key: Option<String>,
+    find_value: String,
+    find_text: String,
+    /// Agenda panel: open tasks (`due::` dates) grouped by when they're due.
+    agenda_open: bool,
+    agenda_show_done: bool,
     show_about: bool,
     theme: Theme,
     /// Whether Ctrl+scroll / Ctrl +/- zoom the canvas (Settings; on by default).
@@ -570,6 +579,13 @@ impl TrellisApp {
             scroll_to: None,
             tags_open: false,
             tag_selected: None,
+            find_open: false,
+            find_tag: None,
+            find_key: None,
+            find_value: String::new(),
+            find_text: String::new(),
+            agenda_open: false,
+            agenda_show_done: false,
             show_about: false,
             theme,
             zoom_enabled,
@@ -2540,6 +2556,22 @@ impl TrellisApp {
                         self.tags_open = true;
                         ui.close_menu();
                     }
+                    if ui
+                        .button("Find cards…")
+                        .on_hover_text("Filter cards across the tree by tag, property, or text")
+                        .clicked()
+                    {
+                        self.find_open = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("Agenda (tasks)…")
+                        .on_hover_text("Open tasks with a due:: date, grouped by when they're due")
+                        .clicked()
+                    {
+                        self.agenda_open = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     ui.menu_button("Themes", |ui| {
                         for (t, label) in Theme::ALL {
@@ -2799,7 +2831,7 @@ impl TrellisApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.heading("Destinations");
-                    ui.menu_button("＋ Add", |ui| {
+                    ui.menu_button("+ Add", |ui| {
                         for kind in [DestKind::Disk, DestKind::Sftp, DestKind::Rclone] {
                             if ui.button(kind.label()).clicked() {
                                 cfg.destinations.push(BackupDest::new(kind));
@@ -2821,7 +2853,7 @@ impl TrellisApp {
                                         .desired_width(120.0)
                                         .hint_text("label (optional)"),
                                 );
-                                if ui.button("✖").on_hover_text("Remove this destination").clicked() {
+                                if ui.button("×").on_hover_text("Remove this destination").clicked() {
                                     remove = Some(i);
                                 }
                             });
@@ -3046,7 +3078,7 @@ impl TrellisApp {
                     }
                 }
                 Some(tag) => {
-                    if ui.button("‹ all tags").clicked() {
+                    if ui.button("← all tags").clicked() {
                         self.tag_selected = None;
                     }
                     ui.label(egui::RichText::new(format!("#{tag}")).strong());
@@ -3068,6 +3100,155 @@ impl TrellisApp {
                     });
                 }
             }
+        });
+        if let Some(id) = jump {
+            self.jump_to_node(id);
+        }
+    }
+
+    /// Right-side panel: filter cards across the whole tree by tag / property /
+    /// text (all dropdown-driven, no syntax), with click-to-jump results.
+    fn find_panel(&mut self, ctx: &egui::Context) {
+        let mut jump: Option<NodeId> = None;
+        let tags = self.doc.tag_counts();
+        let keys = self.doc.property_keys();
+        egui::SidePanel::right("find").resizable(true).default_width(280.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Find cards");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("×").clicked() {
+                        self.find_open = false;
+                    }
+                });
+            });
+            ui.separator();
+
+            egui::ComboBox::from_label("Tag")
+                .selected_text(self.find_tag.clone().map(|t| format!("#{t}")).unwrap_or_else(|| "(any)".into()))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.find_tag, None, "(any)");
+                    for (t, c) in &tags {
+                        ui.selectable_value(&mut self.find_tag, Some(t.clone()), format!("#{t} ({c})"));
+                    }
+                });
+            egui::ComboBox::from_label("Property")
+                .selected_text(self.find_key.clone().unwrap_or_else(|| "(any)".into()))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.find_key, None, "(any)");
+                    for (k, c) in &keys {
+                        ui.selectable_value(&mut self.find_key, Some(k.clone()), format!("{k} ({c})"));
+                    }
+                });
+            if self.find_key.is_some() {
+                ui.horizontal(|ui| {
+                    ui.label("= ");
+                    ui.add(egui::TextEdit::singleline(&mut self.find_value).hint_text("any value").desired_width(150.0));
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.label("Text");
+                ui.add(egui::TextEdit::singleline(&mut self.find_text).hint_text("contains…").desired_width(150.0));
+            });
+            if ui.button("Clear filters").clicked() {
+                self.find_tag = None;
+                self.find_key = None;
+                self.find_value.clear();
+                self.find_text.clear();
+            }
+            ui.separator();
+
+            let val = self.find_value.trim();
+            let txt = self.find_text.trim();
+            let hits = self.doc.query_cards(
+                self.find_tag.as_deref(),
+                self.find_key.as_deref(),
+                if val.is_empty() { None } else { Some(val) },
+                if txt.is_empty() { None } else { Some(txt) },
+            );
+            if self.find_tag.is_none() && self.find_key.is_none() && txt.is_empty() {
+                ui.weak("Pick a tag or property, or type text, to list matching cards.");
+            } else {
+                ui.weak(format!("{} match(es)", hits.len()));
+            }
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for hit in hits {
+                    if ui
+                        .add(egui::Label::new(egui::RichText::new(&hit.node_title).strong()).sense(egui::Sense::click()))
+                        .clicked()
+                    {
+                        jump = Some(hit.node);
+                    }
+                    ui.small(hit.snippet);
+                    ui.separator();
+                }
+            });
+        });
+        if let Some(id) = jump {
+            self.jump_to_node(id);
+        }
+    }
+
+    /// Right-side panel: every open task (a card with a `due::` date) across the
+    /// tree, grouped by when it's due. Click a task to jump to its basket.
+    fn agenda_panel(&mut self, ctx: &egui::Context) {
+        let today = crate::api::today_days();
+        let mut tasks = self.doc.tasks();
+        let mut jump: Option<NodeId> = None;
+        egui::SidePanel::right("agenda").resizable(true).default_width(320.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Agenda");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("×").clicked() {
+                        self.agenda_open = false;
+                    }
+                });
+            });
+            ui.checkbox(&mut self.agenda_show_done, "Show completed");
+            ui.separator();
+            tasks.retain(|t| self.agenda_show_done || !t.done);
+            tasks.sort_by_key(|t| t.due_days.unwrap_or(i64::MAX));
+            if tasks.is_empty() {
+                ui.weak("No tasks yet. Add `due:: 2026-08-15` to any card to see it here.");
+            }
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for (label, key) in [
+                    ("Overdue", "overdue"),
+                    ("Today", "today"),
+                    ("This week", "week"),
+                    ("Later", "later"),
+                    ("No date", "nodate"),
+                ] {
+                    let group: Vec<&crate::model::TaskItem> = tasks
+                        .iter()
+                        .filter(|t| crate::api::task_bucket(t.due_days, today) == key)
+                        .collect();
+                    if group.is_empty() {
+                        continue;
+                    }
+                    let color = match key {
+                        "overdue" => egui::Color32::from_rgb(220, 90, 90),
+                        "today" => egui::Color32::from_rgb(230, 170, 60),
+                        _ => ui.visuals().weak_text_color(),
+                    };
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(label).strong().color(color));
+                    for t in group {
+                        let title = if t.done {
+                            egui::RichText::new(&t.title).strikethrough().weak()
+                        } else {
+                            egui::RichText::new(&t.title)
+                        };
+                        let row = ui.add(
+                            egui::Label::new(format!("  {}  ", t.due))
+                                .sense(egui::Sense::click()),
+                        );
+                        if ui.add(egui::Label::new(title).sense(egui::Sense::click())).clicked() || row.clicked() {
+                            jump = Some(t.node);
+                        }
+                        ui.small(egui::RichText::new(&t.node_title).weak());
+                    }
+                }
+            });
         });
         if let Some(id) = jump {
             self.jump_to_node(id);
@@ -3233,6 +3414,12 @@ impl eframe::App for TrellisApp {
         }
         if self.tags_open {
             self.tags_panel(ctx);
+        }
+        if self.find_open {
+            self.find_panel(ctx);
+        }
+        if self.agenda_open {
+            self.agenda_panel(ctx);
         }
 
         egui::SidePanel::left("tree")
