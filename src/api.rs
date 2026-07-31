@@ -388,9 +388,21 @@ pub fn serve(
                         &b"application/json"[..],
                     )
                     .unwrap();
-                    let http = tiny_http::Response::from_string(resp.body)
+                    // Permissive CORS so browser extensions / bookmarklets / web
+                    // clients can call the (still key-gated) API from any origin.
+                    let cors = [
+                        (&b"Access-Control-Allow-Origin"[..], &b"*"[..]),
+                        (&b"Access-Control-Allow-Methods"[..], &b"GET, POST, PATCH, DELETE, OPTIONS"[..]),
+                        (&b"Access-Control-Allow-Headers"[..], &b"X-Api-Key, Content-Type"[..]),
+                    ];
+                    let mut http = tiny_http::Response::from_string(resp.body)
                         .with_status_code(resp.status)
                         .with_header(header);
+                    for (name, value) in cors {
+                        if let Ok(h) = tiny_http::Header::from_bytes(name, value) {
+                            http.add_header(h);
+                        }
+                    }
                     let _ = request.respond(http);
                 });
             }
@@ -412,6 +424,13 @@ fn handle(
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (raw_url, String::new()),
     };
+
+    // CORS preflight: answer OPTIONS without auth (the browser sends no key on
+    // preflight). The actual CORS headers are attached to every response in the
+    // serve loop, so a browser extension / bookmarklet can call the API.
+    if method == Method::Options {
+        return ApiResponse { status: 204, body: String::new() };
+    }
 
     // Everything but health requires the configured key.
     let is_health = method == Method::Get && path == "/api/health";

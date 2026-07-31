@@ -156,6 +156,8 @@ and zooms (Ctrl+scroll); each node remembers its view.
   on the same notes. **Live updates:** `GET /api/wait` long-polls so clients react
   the instant anything changes. Enable it in **Tools → Settings**; see
   [API.md](API.md).
+- **Web clipper** — a small Chrome/Edge extension (`web-clipper/`) clips the
+  current page or your text selection into a Trellis basket over the LAN API.
 - **Companion mobile app** — a native Android viewer/capture app talks to the
   agent API over the LAN: browse the tree and baskets, full-text search, zoom
   images, and capture a note or photo into a node, all updating live. Separate

@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font: 13px/1.4 system-ui, sans-serif; width: 300px; margin: 0; padding: 12px; }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    label { display: block; margin: 6px 0 2px; color: #555; }
+    input { width: 100%; box-sizing: border-box; padding: 5px; }
+    .row { display: flex; gap: 8px; margin-top: 10px; }
+    button { flex: 1; padding: 8px; cursor: pointer; }
+    #status { margin-top: 8px; min-height: 16px; color: #2a2; font-size: 12px; }
+    #status.err { color: #c22; }
+    details { margin-top: 10px; }
+    summary { cursor: pointer; color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Clip to Trellis</h1>
+  <div class="row">
+    <button id="clip-sel">Clip selection</button>
+    <button id="clip-page">Clip page</button>
+  </div>
+  <div id="status"></div>
+  <details>
+    <summary>Settings</summary>
+    <label>Server (LAN)</label>
+    <input id="server" placeholder="http://192.168.1.20:7373">
+    <label>API key</label>
+    <input id="key" type="password" placeholder="from Trellis → Settings">
+    <label>Target basket (node id)</label>
+    <input id="node" placeholder="e.g. 42 — right-click a node → Copy node id">
+  </details>
+  <script src="popup.js"></script>
+</body>
+</html>

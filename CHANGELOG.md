@@ -4,6 +4,16 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.57.0]
+
+### Added
+- **Web clipper browser extension** (`web-clipper/`) — a small Manifest V3 extension for
+  Chrome/Edge that clips the current page, or the selected text, into a Trellis basket over the
+  LAN API. Load it unpacked; see `web-clipper/README.md`.
+- **CORS on the API** — the key-gated API now sends permissive CORS headers and answers OPTIONS
+  preflight, so browser extensions, bookmarklets, and future web clients can call it from any
+  origin (the API key is still required).
+
 ## [0.56.0]
 
 ### Added
