@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.59.0]
+
+### Added
+- **Minimap** (**Settings → Canvas → Minimap**, on by default) — a small overview of the whole
+  basket in the canvas's bottom-right corner, with an amber reticle showing your current view.
+  Each card is a dot in its own color, so you can spot cards that sit far from the main cluster
+  without zooming out. **Click or drag on the minimap to jump the view there.** Pure view aid — no
+  document or API change.
+
 ## [0.58.0]
 
 ### Added

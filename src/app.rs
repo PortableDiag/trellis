@@ -67,6 +67,7 @@ const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
 const SNAP_MODE_KEY: &str = "snap_mode";
+const MINIMAP_KEY: &str = "minimap";
 const THEME_KEY: &str = "theme";
 const AUTOSAVE_KEY: &str = "autosave";
 const BACKUP_KEY: &str = "backup";
@@ -445,6 +446,9 @@ pub struct TrellisApp {
     dock_mode: bool,
     /// When on, a dragged card's edges snap to nearby cards' edges.
     snap_mode: bool,
+    /// When on, a small overview map in the canvas's bottom-right shows the whole
+    /// basket and a reticle of the current view (Settings; on by default).
+    minimap_enabled: bool,
     /// A copied card, ready to paste into any basket.
     card_clipboard: Option<crate::model::Card>,
     /// Runtime multi-selection of cards in the current basket, used to build a
@@ -555,6 +559,11 @@ impl TrellisApp {
             .and_then(|s| s.get_string(SNAP_MODE_KEY))
             .map(|s| s == "true")
             .unwrap_or(false);
+        let minimap_enabled = cc
+            .storage
+            .and_then(|s| s.get_string(MINIMAP_KEY))
+            .map(|s| s != "false")
+            .unwrap_or(true);
         let theme = cc
             .storage
             .and_then(|s| s.get_string(THEME_KEY))
@@ -655,6 +664,7 @@ impl TrellisApp {
             show_about: false,
             theme,
             zoom_enabled,
+            minimap_enabled,
             reorder_mode: false,
             dock_mode,
             snap_mode,
@@ -3050,6 +3060,12 @@ impl TrellisApp {
                     "Zoom with Ctrl+scroll and Ctrl +/−",
                 )
                 .on_hover_text("Ctrl+0 and Reset view still reset zoom when this is off.");
+                ui.checkbox(&mut self.minimap_enabled, "Minimap (overview + view reticle, bottom-right)")
+                    .on_hover_text(
+                        "A small map of the whole basket in the canvas corner, with a box showing \
+                         your current view. Click or drag on it to jump the view. Spot cards that \
+                         sit outside the main cluster without zooming out.",
+                    );
                 ui.checkbox(&mut self.dock_mode, "Dock mode (drag a card onto another to stick it)")
                     .on_hover_text(
                         "When on, dropping a card on another docks them so they move together; \
@@ -4208,6 +4224,7 @@ impl eframe::App for TrellisApp {
                         focus_card: self.focus_card,
                         highlight_card: self.highlight_card,
                         highlight_until: self.highlight_until,
+                        minimap: self.minimap_enabled,
                     };
                     let can_paste = self.card_clipboard.is_some();
                     let node_path = crate::tree::node_path(&self.doc, sel);
@@ -4310,6 +4327,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(ZOOM_ENABLED_KEY, self.zoom_enabled.to_string());
         storage.set_string(DOCK_MODE_KEY, self.dock_mode.to_string());
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
+        storage.set_string(MINIMAP_KEY, self.minimap_enabled.to_string());
         storage.set_string(THEME_KEY, self.theme.key().to_string());
         storage.set_string(AUTOSAVE_KEY, self.autosave.to_string());
         storage.set_string(BACKUP_KEY, self.backup_cfg.to_json());

@@ -64,7 +64,10 @@ the title bar copies the card's text (checklists as Markdown task lines) to
 both the clipboard and the X11 primary selection. Right-click → **Copy** →
 **Card id** / **Card path** copies the card's identifier or breadcrumb, so you
 can point an agent at that exact card. The canvas pans
-and zooms (Ctrl+scroll); each node remembers its view.
+and zooms (Ctrl+scroll); each node remembers its view. A **minimap** in the
+bottom-right corner (toggle in **Settings → Canvas**) shows the whole basket at a
+glance with a reticle for your current view — so you can spot cards that sit far
+from the main cluster, and click or drag on it to jump there without zooming out.
 
 **Organizing cards**
 - **Group** — Ctrl/Cmd+click cards to multi-select, then "Group N cards" wraps

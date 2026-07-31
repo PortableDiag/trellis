@@ -36,6 +36,8 @@ pub struct Env<'a> {
     /// Card to flash-highlight, and the `ui.input().time` at which the flash ends.
     pub highlight_card: Option<CardId>,
     pub highlight_until: f64,
+    /// Draw the bottom-right minimap (overview of the basket + a view reticle).
+    pub minimap: bool,
 }
 
 /// Actions requested by the canvas, applied by the app afterwards.
@@ -164,14 +166,57 @@ pub fn ui(
     painter.rect_filled(canvas_rect, 0.0, bg);
     draw_grid(&painter, canvas_rect, *view, ui.visuals().weak_text_color());
 
-    // Pan by dragging empty canvas (screen-space delta).
-    if canvas_resp.dragged_by(egui::PointerButton::Primary) {
+    // Minimap interaction — resolved from raw pointer input *before* the canvas
+    // pan, so a press that starts on the map claims the view (recenter on the
+    // pointed-at spot) and the empty-canvas pan is suppressed. The drag latches
+    // via a memory flag so it keeps tracking even if the pointer leaves the box.
+    // The map's *visuals* are painted later, on top of the cards.
+    let minimap_geom = if env.minimap { minimap_geometry(canvas_rect, &node.cards) } else { None };
+    let mut minimap_active = false; // a minimap drag owns the view this frame
+    let mut minimap_over = false; // pointer is over the map (suppress canvas gestures)
+    if let Some(g) = &minimap_geom {
+        let drag_id = ui.id().with("minimap_drag");
+        let mut dragging = ui.memory(|m| m.data.get_temp::<bool>(drag_id).unwrap_or(false));
+        let (down, clicked, pos) = ui.input(|i| {
+            (i.pointer.primary_down(), i.pointer.primary_clicked(), i.pointer.latest_pos())
+        });
+        if let Some(p) = pos {
+            minimap_over = g.outer.contains(p);
+            if down && minimap_over {
+                dragging = true;
+            }
+        }
+        if !down {
+            dragging = false;
+        }
+        // Recenter on the pointed-at spot for a held drag, or a single click on the
+        // map (a click completes without ever leaving `primary_down` true for a
+        // rendered frame, so it needs its own case).
+        let target = if dragging || (clicked && minimap_over) { pos } else { None };
+        if let Some(p) = target {
+            // Clamp to the map, map back to world, recenter the view there.
+            let cp = egui::pos2(
+                p.x.clamp(g.inner.min.x, g.inner.max.x),
+                p.y.clamp(g.inner.min.y, g.inner.max.y),
+            );
+            let w = g.world_min + (cp - g.inner.min) / g.scale;
+            view.translation =
+                (canvas_rect.center() - canvas_rect.min) - view.scaling * w.to_vec2();
+            minimap_active = true;
+            ui.ctx().request_repaint();
+        }
+        ui.memory_mut(|m| m.data.insert_temp(drag_id, dragging));
+    }
+
+    // Pan by dragging empty canvas (screen-space delta) — unless the minimap has
+    // claimed this drag.
+    if canvas_resp.dragged_by(egui::PointerButton::Primary) && !minimap_active {
         view.translation += canvas_resp.drag_delta();
     }
 
     // Wheel over empty canvas pans; Ctrl+wheel (and pinch) zoom instead — egui
     // routes Ctrl+scroll into zoom_delta and out of smooth_scroll_delta.
-    if canvas_resp.hovered() {
+    if canvas_resp.hovered() && !minimap_over {
         view.translation += ui.input(|i| i.smooth_scroll_delta);
         if zoom_enabled {
             let zd = ui.input(|i| i.zoom_delta());
@@ -212,7 +257,7 @@ pub fn ui(
     let to_screen = TSTransform::from_translation(canvas_rect.min.to_vec2()) * *view;
 
     // Double-click empty canvas → drop a text card at that world position.
-    if canvas_resp.double_clicked() {
+    if canvas_resp.double_clicked() && !minimap_over {
         if let Some(p) = canvas_resp.interact_pointer_pos() {
             actions.push(CanvasAction::AddCard(CardKind::Text, to_screen.inverse() * p));
         }
@@ -532,6 +577,41 @@ pub fn ui(
                 ui.ctx().request_repaint(); // keep animating the fade
             }
         }
+    }
+
+    // Minimap visuals — painted on top of the cards. A small overview of the
+    // whole basket in the bottom-right, with an amber reticle for the current
+    // view, so you can spot cards far from the main cluster (and click/drag to jump
+    // there — handled at the top of this function). Toggle in Settings → Canvas.
+    if let Some(g) = &minimap_geom {
+        let paint = ui.painter_at(canvas_rect);
+        paint.rect_filled(g.outer, 4.0, ui.visuals().panel_fill.gamma_multiply(0.92));
+        let border = if minimap_over {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        paint.rect_stroke(g.outer, 4.0, egui::Stroke::new(1.0, border));
+        let w2m = |w: egui::Pos2| g.inner.min + (w - g.world_min) * g.scale;
+        for c in &node.cards {
+            let r = egui::Rect::from_min_max(w2m(c.pos), w2m(c.pos + c.size));
+            let col = egui::Color32::from_rgb(c.color[0], c.color[1], c.color[2]);
+            paint.rect_filled(r, 0.0, col.gamma_multiply(0.85));
+        }
+        // Reticle: the current viewport (screen → world → minimap).
+        let inv = |sp: egui::Pos2| {
+            egui::pos2(
+                (sp.x - canvas_rect.min.x - view.translation.x) / view.scaling,
+                (sp.y - canvas_rect.min.y - view.translation.y) / view.scaling,
+            )
+        };
+        let reticle = egui::Rect::from_min_max(w2m(inv(canvas_rect.min)), w2m(inv(canvas_rect.max)))
+            .intersect(g.inner);
+        paint.rect_stroke(
+            reticle,
+            0.0,
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
+        );
     }
 
     // Reset-view button — in a foreground layer, untransformed, so it stays put
@@ -2347,6 +2427,52 @@ fn singleline_primary(
         }
     }
     (text, changed, out.response)
+}
+
+/// Placement of the bottom-right minimap: its outer box, the inner drawing area,
+/// and the world→minimap mapping (`inner.min + (world - world_min) * scale`).
+struct MinimapGeom {
+    outer: egui::Rect,
+    inner: egui::Rect,
+    world_min: egui::Pos2,
+    scale: f32,
+}
+
+/// Compute the minimap box for the current basket: the world bounding box of all
+/// cards, fit (preserving aspect) into a small box tucked into the canvas's
+/// bottom-right corner. `None` if the basket is empty.
+fn minimap_geometry(canvas_rect: egui::Rect, cards: &[Card]) -> Option<MinimapGeom> {
+    if cards.is_empty() {
+        return None;
+    }
+    let mut min = egui::pos2(f32::MAX, f32::MAX);
+    let mut max = egui::pos2(f32::MIN, f32::MIN);
+    for c in cards {
+        min.x = min.x.min(c.pos.x);
+        min.y = min.y.min(c.pos.y);
+        max.x = max.x.max(c.pos.x + c.size.x);
+        max.y = max.y.max(c.pos.y + c.size.y);
+    }
+    // Guard a degenerate span (a single tiny card) against divide-by-zero.
+    let world_size = egui::vec2((max.x - min.x).max(1.0), (max.y - min.y).max(1.0));
+    // Fit the content aspect into a max box, but never bigger than a fraction of
+    // the canvas (so a tiny window still leaves room to work).
+    let max_w = (canvas_rect.width() * 0.28).clamp(80.0, 200.0);
+    let max_h = (canvas_rect.height() * 0.28).clamp(60.0, 150.0);
+    let scale = (max_w / world_size.x).min(max_h / world_size.y);
+    let inner_size = world_size * scale;
+    let pad = 6.0;
+    let margin = 12.0;
+    let outer_size = inner_size + egui::vec2(pad * 2.0, pad * 2.0);
+    let outer = egui::Rect::from_min_size(
+        egui::pos2(
+            canvas_rect.right() - margin - outer_size.x,
+            canvas_rect.bottom() - margin - outer_size.y,
+        ),
+        outer_size,
+    );
+    let inner = egui::Rect::from_min_size(outer.min + egui::vec2(pad, pad), inner_size);
+    Some(MinimapGeom { outer, inner, world_min: min, scale })
 }
 
 fn draw_grid(painter: &egui::Painter, rect: egui::Rect, view: TSTransform, color: egui::Color32) {
