@@ -308,6 +308,14 @@ GET /api/export?format=<fmt>
 `format` defaults to `markdown`. `pdf` is a paginated A4 document; `png`/`gif`
 are a single rendered image of the document text. Decode `base64` to get the file.
 
+### Backlinks
+`[[Node Title]]` (or `[[id]]`, or `[[Target|shown text]]`) written in a card is a
+wiki-link; in the app it renders as a clickable link that navigates to that node.
+This lists the cards that link *to* a node.
+```
+GET /api/nodes/{id}/backlinks → 200 {"node":<id>,"count":N,"hits":[{node,node_title,snippet}, …]}  | 404
+```
+
 ### Tags
 `#tags` written anywhere in a card (body, title, checklist items, table cells)
 are indexed across the whole document. A tag starts at a `#` on a word boundary

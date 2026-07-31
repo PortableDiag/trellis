@@ -384,6 +384,8 @@ pub struct TrellisApp {
     /// Agenda panel: open tasks (`due::` dates) grouped by when they're due.
     agenda_open: bool,
     agenda_show_done: bool,
+    /// Backlinks panel: cards that `[[link]]` to the selected node.
+    backlinks_open: bool,
     show_about: bool,
     theme: Theme,
     /// Whether Ctrl+scroll / Ctrl +/- zoom the canvas (Settings; on by default).
@@ -589,6 +591,7 @@ impl TrellisApp {
             find_text: String::new(),
             agenda_open: false,
             agenda_show_done: false,
+            backlinks_open: false,
             show_about: false,
             theme,
             zoom_enabled,
@@ -2579,6 +2582,14 @@ impl TrellisApp {
                         self.agenda_open = true;
                         ui.close_menu();
                     }
+                    if ui
+                        .button("Backlinks…")
+                        .on_hover_text("Cards that [[link]] to the selected node")
+                        .clicked()
+                    {
+                        self.backlinks_open = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     ui.menu_button("Themes", |ui| {
                         for (t, label) in Theme::ALL {
@@ -3323,6 +3334,64 @@ impl TrellisApp {
         }
     }
 
+    /// Right-side panel: cards elsewhere that `[[link]]` to the selected node.
+    fn backlinks_panel(&mut self, ctx: &egui::Context) {
+        let mut jump: Option<NodeId> = None;
+        egui::SidePanel::right("backlinks").resizable(true).default_width(260.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Backlinks");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("×").clicked() {
+                        self.backlinks_open = false;
+                    }
+                });
+            });
+            ui.separator();
+            match self.selected {
+                None => {
+                    ui.weak("Select a node to see what links to it.");
+                }
+                Some(sel) => {
+                    let title = self.doc.nodes.get(&sel).map(|n| n.title.clone()).unwrap_or_default();
+                    ui.label(egui::RichText::new(format!("Linked to: {title}")).strong());
+                    ui.small(egui::RichText::new(format!("Use [[{title}]] in a card to link here.")).weak());
+                    ui.separator();
+                    let hits = self.doc.backlinks(sel);
+                    if hits.is_empty() {
+                        ui.weak("Nothing links here yet.");
+                    } else {
+                        ui.weak(format!("{} card(s) link here", hits.len()));
+                    }
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        for hit in hits {
+                            if ui
+                                .add(egui::Label::new(egui::RichText::new(&hit.node_title).strong()).sense(egui::Sense::click()))
+                                .clicked()
+                            {
+                                jump = Some(hit.node);
+                            }
+                            ui.small(hit.snippet);
+                            ui.separator();
+                        }
+                    });
+                }
+            }
+        });
+        if let Some(id) = jump {
+            self.jump_to_node(id);
+        }
+    }
+
+    /// Navigate a clicked `[[wiki-link]]` (its URL-encoded target) to the node
+    /// it names, or report that no such node exists.
+    fn follow_wikilink(&mut self, encoded: &str) {
+        let target = crate::model::decode_link(encoded);
+        match self.doc.resolve_link(&target) {
+            Some(id) => self.jump_to_node(id),
+            None => self.status = format!("No node named \"{target}\" to link to"),
+        }
+    }
+
     /// Select a node, open its ancestors so it's visible, and scroll to it.
     fn jump_to_node(&mut self, id: NodeId) {
         let mut cur = self.doc.nodes.get(&id).and_then(|n| n.parent);
@@ -3488,6 +3557,20 @@ impl eframe::App for TrellisApp {
         }
         if self.agenda_open {
             self.agenda_panel(ctx);
+        }
+        if self.backlinks_open {
+            self.backlinks_panel(ctx);
+        }
+
+        // Follow [[wiki-links]] (rendered as the `trellis:` URL scheme) by
+        // navigating instead of letting eframe open a browser.
+        let clicked = ctx.output(|o| o.open_url.as_ref().map(|u| u.url.clone()));
+        if let Some(url) = clicked {
+            if let Some(t) = url.strip_prefix("trellis:") {
+                let target = t.to_string();
+                ctx.output_mut(|o| o.open_url = None);
+                self.follow_wikilink(&target);
+            }
         }
 
         egui::SidePanel::left("tree")

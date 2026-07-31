@@ -4,6 +4,14 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.52.0]
+
+### Added
+- **Wiki-links + backlinks** — write `[[Node Title]]` (or `[[id]]`, or `[[Target|shown text]]`)
+  in any card and it renders as a clickable link that jumps to that node. **View → Backlinks**
+  shows every card that links *to* the selected node ("linked here"), click to jump. API:
+  `GET /api/nodes/{id}/backlinks`. Foundation for the graph view.
+
 ## [0.51.0]
 
 ### Added

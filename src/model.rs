@@ -1937,6 +1937,39 @@ impl Document {
         m.into_iter().collect()
     }
 
+    /// Resolve a `[[wiki-link]]` target to a node: a numeric id, else the first
+    /// node whose title matches case-insensitively.
+    pub fn resolve_link(&self, target: &str) -> Option<NodeId> {
+        let t = target.trim();
+        if let Ok(id) = t.parse::<NodeId>() {
+            if self.nodes.contains_key(&id) {
+                return Some(id);
+            }
+        }
+        let tl = t.to_lowercase();
+        self.nodes.values().find(|n| n.title.to_lowercase() == tl).map(|n| n.id)
+    }
+
+    /// Cards anywhere whose `[[links]]` point at `node` — the "linked here"
+    /// backlinks. Each hit is the linking card's basket + a snippet.
+    pub fn backlinks(&self, node: NodeId) -> Vec<SearchHit> {
+        let mut hits = Vec::new();
+        for n in self.nodes.values() {
+            for card in &n.cards {
+                let hay = format!("{}\n{}", card.title, searchable_body(card));
+                let links = extract_wikilinks(&hay);
+                if links.iter().any(|t| self.resolve_link(t) == Some(node)) {
+                    hits.push(SearchHit {
+                        node: n.id,
+                        node_title: n.title.clone(),
+                        snippet: snippet_around(&hay, 0, 0),
+                    });
+                }
+            }
+        }
+        hits
+    }
+
     /// AND-combine filters across every card: an optional `#tag`, an optional
     /// property `key` (optionally `= value`), and optional `text` (substring in
     /// title or body). Returns hits for cards matching *all* provided filters;
@@ -2046,6 +2079,90 @@ impl Document {
         }
         hits
     }
+}
+
+/// Targets of `[[wiki-links]]` in `text`, in order. `[[Target|Display]]` yields
+/// `Target`. Whitespace-trimmed; empties skipped.
+pub(crate) fn extract_wikilinks(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        if b[i] == b'[' && b[i + 1] == b'[' {
+            if let Some(end) = text[i + 2..].find("]]") {
+                let inner = &text[i + 2..i + 2 + end];
+                let target = inner.split('|').next().unwrap_or("").trim();
+                if !target.is_empty() {
+                    out.push(target.to_string());
+                }
+                i = i + 2 + end + 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Rewrite `[[Target]]` / `[[Target|Display]]` into Markdown links
+/// `[Display](trellis:<encoded target>)` so the card renderer shows them as
+/// clickable links; the app intercepts the `trellis:` scheme to navigate.
+pub fn wikilinks_to_md(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if i + 1 < b.len() && b[i] == b'[' && b[i + 1] == b'[' {
+            if let Some(end) = text[i + 2..].find("]]") {
+                let inner = &text[i + 2..i + 2 + end];
+                let mut parts = inner.splitn(2, '|');
+                let target = parts.next().unwrap_or("").trim();
+                let display = parts.next().map(|d| d.trim()).filter(|d| !d.is_empty()).unwrap_or(target);
+                if !target.is_empty() {
+                    out.push_str(&format!("[{display}](trellis:{})", encode_link(target)));
+                    i = i + 2 + end + 2;
+                    continue;
+                }
+            }
+        }
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Percent-encode the bytes that would break a Markdown link URL (spaces,
+/// parens, and non-ASCII). Enough for round-tripping a node title through a URL.
+fn encode_link(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Decode a `%XX` percent-encoded string produced by [`encode_link`].
+pub fn decode_link(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Extract inline `key:: value` properties from `text` (Dataview-style). The
@@ -2962,6 +3079,27 @@ mod tests {
         assert_eq!(doc.query_cards(Some("nope"), None, None, None).len(), 0);
         // No filters -> nothing.
         assert_eq!(doc.query_cards(None, None, None, None).len(), 0);
+    }
+
+    #[test]
+    fn wikilinks_parse_render_and_backlink() {
+        assert_eq!(extract_wikilinks("see [[Project Falcon]] and [[42|the plan]]"),
+            vec!["Project Falcon".to_string(), "42".to_string()]);
+        let md = wikilinks_to_md("go to [[Project Falcon]]!");
+        assert_eq!(md, "go to [Project Falcon](trellis:Project%20Falcon)!");
+        assert_eq!(decode_link("Project%20Falcon"), "Project Falcon");
+
+        let mut doc = Document::empty();
+        let target = doc.add_node(None, "Project Falcon".into());
+        let other = doc.add_node(None, "Daily".into());
+        let c = doc.add_card(other, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(other, c).unwrap().body = "notes about [[Project Falcon]]".into();
+        assert_eq!(doc.resolve_link("Project Falcon"), Some(target));
+        assert_eq!(doc.resolve_link(&target.to_string()), Some(target));
+        assert_eq!(doc.resolve_link("nope"), None);
+        let bl = doc.backlinks(target);
+        assert_eq!(bl.len(), 1);
+        assert_eq!(bl[0].node, other);
     }
 
     #[test]

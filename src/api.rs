@@ -77,6 +77,8 @@ pub enum ApiRequest {
     // Combined dropdown-style query across the tree, and the due-date agenda.
     QueryCards { tag: Option<String>, key: Option<String>, value: Option<String>, text: Option<String> },
     Tasks { include_done: bool },
+    // Cards that [[link]] to a node.
+    Backlinks(NodeId),
     // Backup control — handled by the app loop (needs backup config + doc file),
     // not by `process`, since `process` only sees the `Document`.
     BackupStatus,
@@ -495,6 +497,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             let i: ExpandInput = parse(body)?;
             Ok(ApiRequest::SetExpanded { id: pid(id)?, expanded: i.expanded, recursive: i.recursive })
         }
+        (Method::Get, ["api", "nodes", id, "backlinks"]) => Ok(ApiRequest::Backlinks(pid(id)?)),
         (Method::Get, ["api", "nodes", id, "cards"]) => Ok(ApiRequest::ListCards(pid(id)?)),
         (Method::Post, ["api", "nodes", id, "cards"]) => {
             let input: AddCardInput = parse(body)?;
@@ -1343,6 +1346,17 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 })
                 .collect();
             (false, ApiResponse::ok(json!({ "today_days": today, "count": tasks.len(), "tasks": tasks })))
+        }
+        ApiRequest::Backlinks(id) => {
+            if !doc.nodes.contains_key(&id) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            let hits: Vec<Value> = doc
+                .backlinks(id)
+                .into_iter()
+                .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
+                .collect();
+            (false, ApiResponse::ok(json!({ "node": id, "count": hits.len(), "hits": hits })))
         }
         // Backup requests are intercepted and answered by the app loop (they need
         // the backup config + document file). This is only reached if that

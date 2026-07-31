@@ -132,6 +132,9 @@ and zooms (Ctrl+scroll); each node remembers its view.
   task, grouped **Overdue / Today / This week / Later** across all baskets, click
   to jump. A task is done when it has `status:: done` (or its checklist is fully
   checked). Track deadlines that span workspaces without copying cards around.
+- **Wiki-links & backlinks** — write `[[Node Title]]` in a card to make a
+  clickable link that jumps to that node; **View → Backlinks** shows everything
+  that links to the current node ("linked here").
 - **View → Themes** — Trellis (default), Light, or Terminal Green
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN

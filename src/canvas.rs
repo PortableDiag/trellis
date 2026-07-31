@@ -1003,8 +1003,9 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                 // render single newlines as line breaks (see hard_wrap).
                 let resolved =
                     resolve_inline_images(ui.ctx(), card, env.inline_epoch, env.inline_sent);
+                let linked = crate::model::wikilinks_to_md(&resolved);
                 scale_text(ui, card.font_scale, |ui| {
-                    CommonMarkViewer::new().show(ui, env.md, &crate::model::hard_wrap(&resolved));
+                    CommonMarkViewer::new().show(ui, env.md, &crate::model::hard_wrap(&linked));
                 });
             }
         }
