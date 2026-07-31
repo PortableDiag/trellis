@@ -309,6 +309,41 @@ fn framed_view(canvas_rect: egui::Rect, card_pos: egui::Pos2, card_size: egui::V
     TSTransform { scaling: s, translation: offset - card_pos.to_vec2() * s }
 }
 
+/// Precise "Fit to content" size for the interactive right-click action.
+///
+/// For **Text** cards this measures the actual rendered text with egui's fonts,
+/// laid out at the fitted card width, so the card's height matches what's really
+/// drawn. `Card::fit_size` must stay egui-free (it runs off the UI thread for the
+/// API / import path), so it can only *estimate* — and its estimate ran ~2× tall
+/// when a long title widened the card past the width it measured wrapping at. On
+/// the UI thread we have the real font metrics and the true wrap width, so we use
+/// them. Non-text kinds fall back to the estimate (which drives their width too).
+fn fit_card_size(ctx: &egui::Context, c: &crate::model::Card) -> Option<egui::Vec2> {
+    let base = c.fit_size()?;
+    if !matches!(c.kind, CardKind::Text) {
+        return Some(base);
+    }
+    const TITLE_H: f32 = 24.0;
+    const PAD: f32 = 6.0;
+    const MIN_H: f32 = 90.0;
+    const MAX_H: f32 = 1400.0;
+    let fs = if c.font_scale > 0.0 { c.font_scale } else { 1.0 };
+    let w = base.x; // keep the estimate's width; only the height was wrong
+    let wrap_w = (w - PAD * 2.0).max(1.0);
+    // Same text the CommonMark view shows: image markers → alt text, zero-width
+    // markup (`*`, `` ` ``) dropped. Single newlines already break lines in a
+    // galley, matching the card's hard-wrap render.
+    let text = crate::model::strip_size_markup(&crate::model::strip_inline_markers(&c.body));
+    let font = egui::FontId::proportional(14.0 * fs);
+    let galley = ctx.fonts(|f| f.layout(text, font, egui::Color32::WHITE, wrap_w));
+    let mut content_h = galley.size().y;
+    for (_iw, ih) in c.inline_image_sizes(wrap_w) {
+        content_h += ih + 6.0; // inline images stack under the text
+    }
+    let h = (TITLE_H + PAD * 2.0 + content_h).clamp(MIN_H, MAX_H);
+    Some(egui::vec2(w, h))
+}
+
 /// A short human label for a card kind, used in status messages.
 fn card_kind_label(kind: &CardKind) -> &'static str {
     match kind {
@@ -1561,7 +1596,13 @@ impl TrellisApp {
         }
     }
 
-    fn apply_canvas(&mut self, node: NodeId, actions: Vec<CanvasAction>, pointer_down: bool) {
+    fn apply_canvas(
+        &mut self,
+        ctx: &egui::Context,
+        node: NodeId,
+        actions: Vec<CanvasAction>,
+        pointer_down: bool,
+    ) {
         // ResetView only nudges the (unsaved) pan, so it must not dirty the doc.
         if actions.iter().any(|a| {
             !matches!(
@@ -1629,8 +1670,12 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::FitCard(cid) => {
-                    if let Some(c) = self.doc.card_mut(node, cid) {
-                        if let Some(sz) = c.fit_size() {
+                    // Measure Text height from the real galley (matches the render)
+                    // rather than the off-thread estimate — see `fit_card_size`.
+                    if let Some(sz) =
+                        self.doc.card(node, cid).and_then(|c| fit_card_size(ctx, c))
+                    {
+                        if let Some(c) = self.doc.card_mut(node, cid) {
                             c.size = sz.max(MIN_CARD);
                         }
                     }
@@ -4080,7 +4125,7 @@ impl eframe::App for TrellisApp {
                         self.views.insert(sel, view);
                     }
                     let pointer_down = ui.input(|i| i.pointer.any_down());
-                    self.apply_canvas(sel, actions, pointer_down);
+                    self.apply_canvas(ctx, sel, actions, pointer_down);
                 } else {
                     self.selected = None;
                 }

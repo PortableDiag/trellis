@@ -4,6 +4,18 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.57.2]
+
+### Fixed
+- **"Fit to content" no longer leaves a Text card almost twice as tall as its text.** A card
+  whose title is long enough to widen it (the width floor keeps the title readable) had its
+  height measured for a *narrower* wrap than it actually renders at — so the estimate reserved
+  far too many lines and the card came out ~2× tall with a big empty gap under the text. The
+  height is now measured at the card's real wrap width, with a rendered-accurate line height and
+  markdown syntax (`**`, `` ` ``) excluded. The right-click **Fit to content** action goes
+  further and measures the *actual* rendered text with egui's fonts, so the card hugs its content
+  exactly. The same tightened estimate applies to cards sized via the API `fit` flag / import.
+
 ## [0.57.1]
 
 ### Fixed

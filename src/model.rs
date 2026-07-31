@@ -354,27 +354,42 @@ impl Card {
 
         let fs = if self.font_scale > 0.0 { self.font_scale } else { 1.0 };
         let font_px = 14.0 * fs;
-        let line_h = font_px * 1.5;
-        let char_w = font_px * 0.6; // generous average width for proportional text
+        let line_h = font_px * 1.3; // ≈ egui's rendered row height for a 14px font
+        let char_w = font_px * 0.5; // average glyph advance for proportional text
 
         // Keep the title readable in the title bar: title text plus room for the
         // edit/copy buttons.
         let title_w = self.title.chars().count() as f32 * 8.0 + 96.0;
 
+        // Text couples width and height: a long title widens the card, and the
+        // body then wraps at that wider width (so it needs fewer lines). Decide
+        // the final width first, then measure height at the *actual* wrap width —
+        // otherwise the card comes out far too tall, its height computed for a
+        // narrow wrap it never actually renders at.
+        if let CardKind::Text = self.kind {
+            // Image markers reduce to their alt text; markup that occupies no
+            // rendered width (`*`, `` ` ``) is dropped so the estimate tracks the
+            // CommonMark render, not the raw source.
+            let stripped = strip_size_markup(&strip_inline_markers(&self.body));
+            let longest =
+                stripped.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
+            let natural_w = (longest * char_w).max(char_w * 8.0);
+            let imgs = self.inline_image_sizes(TEXT_WRAP_W);
+            let img_w = imgs.iter().map(|(iw, _)| *iw).fold(0.0_f32, f32::max);
+            let content_w = natural_w.min(TEXT_WRAP_W).max(img_w);
+            let w = (content_w + PAD * 2.0).max(title_w).clamp(MIN_W, MAX_W);
+            let wrap_w = (w - PAD * 2.0).max(char_w);
+            let mut content_h = wrapped_height(&stripped, char_w, line_h, wrap_w);
+            for (_iw, ih) in &imgs {
+                content_h += ih + 6.0; // each inline image stacks under the text
+            }
+            let h = (TITLE_H + PAD * 2.0 + content_h).clamp(MIN_H, MAX_H);
+            return Some(egui::vec2(w, h));
+        }
+
         let (content_w, content_h) = match &self.kind {
             CardKind::Image { .. } => return None,
-            CardKind::Text => {
-                // Measure the text with image markers reduced to their alt text,
-                // then stack each referenced image's on-screen size underneath —
-                // so a card with a big picture auto-sizes tall enough to show it.
-                let stripped = strip_inline_markers(&self.body);
-                let (mut w, mut h) = wrapped_extent(&stripped, char_w, line_h, TEXT_WRAP_W);
-                for (iw, ih) in self.inline_image_sizes(TEXT_WRAP_W) {
-                    w = w.max(iw);
-                    h += ih + 6.0;
-                }
-                (w, h)
-            }
+            CardKind::Text => unreachable!("handled above"),
             CardKind::Code { .. } => {
                 // Monospace, no wrap: fit the longest line and every line.
                 let cw = font_px * 0.62;
@@ -422,7 +437,7 @@ impl Card {
     /// body, in appearance order, scaled so its width fits `max_w`. Reads only
     /// the image header (cheap; no full decode and no egui), so [`Card::fit_size`]
     /// can call it off the UI thread.
-    fn inline_image_sizes(&self, max_w: f32) -> Vec<(f32, f32)> {
+    pub(crate) fn inline_image_sizes(&self, max_w: f32) -> Vec<(f32, f32)> {
         let mut out = Vec::new();
         for idx in inline_refs(&self.body) {
             if let Some(entry) = self.inline_images.get(idx) {
@@ -506,20 +521,26 @@ fn image_dimensions(bytes: &[u8]) -> Option<(f32, f32)> {
     Some((w as f32, h as f32))
 }
 
-/// Estimate the `(width, height)` a block of text needs: width is the longest
-/// line (capped at `max_w`); height accounts for wrapping at that width. Used by
-/// [`Card::fit_size`].
-fn wrapped_extent(text: &str, char_w: f32, line_h: f32, max_w: f32) -> (f32, f32) {
-    let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
-    let natural_w = (longest * char_w).max(char_w * 8.0); // never absurdly thin
-    let content_w = natural_w.min(max_w);
-    let cols = (content_w / char_w).max(1.0);
-    let mut lines = 0.0f32;
+/// Estimate the height a block of text needs when wrapped at `wrap_w`: each
+/// source line contributes at least one row, plus one more per `wrap_w`-worth of
+/// overflow. Used by the off-thread [`Card::fit_size`] estimate; the interactive
+/// Fit action measures the real galley instead (see `app::fit_card_size`).
+fn wrapped_height(text: &str, char_w: f32, line_h: f32, wrap_w: f32) -> f32 {
+    let cols = (wrap_w / char_w).max(1.0);
+    let mut rows = 0.0f32;
     for line in text.lines() {
         let n = line.chars().count() as f32;
-        lines += (n / cols).ceil().max(1.0);
+        rows += (n / cols).ceil().max(1.0);
     }
-    (content_w, lines.max(1.0) * line_h)
+    rows.max(1.0) * line_h
+}
+
+/// Drop inline markup that occupies no width when rendered — emphasis `*`, code
+/// `` ` ``, strikethrough `~` — so text measurement tracks the CommonMark render
+/// rather than counting the raw markers. Shared by the `fit_size` estimate and
+/// the interactive Fit measurement.
+pub(crate) fn strip_size_markup(s: &str) -> String {
+    s.chars().filter(|c| !matches!(c, '*' | '`' | '~')).collect()
 }
 
 /// A node in the tree. Its `cards` form the basket shown when it is selected.
