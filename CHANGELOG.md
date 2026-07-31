@@ -4,6 +4,16 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.55.0]
+
+### Added
+- **Snip to card** (**Tools → Snip to card**) — capture a screen region straight into an image
+  card in the current basket (uses the first available region-screenshot tool: spectacle,
+  gnome-screenshot, maim, scrot, or ImageMagick import). Runs off the UI thread.
+- **OCR all images** (**Tools → OCR all images**) — run OCR over every image card that doesn't
+  have extracted text yet, in one background pass, making old scans/screenshots searchable.
+  Also over the API: `POST /api/ocr`.
+
 ## [0.54.0]
 
 ### Added

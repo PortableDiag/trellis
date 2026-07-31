@@ -439,6 +439,9 @@ pub struct TrellisApp {
     /// OCR results from background tesseract threads: (node, card, text-or-error).
     ocr_tx: Sender<(NodeId, CardId, Result<String, String>)>,
     ocr_rx: Receiver<(NodeId, CardId, Result<String, String>)>,
+    /// Snip (region screenshot) results: (target node, png-bytes-or-error).
+    snip_tx: Sender<(NodeId, Result<Vec<u8>, String>)>,
+    snip_rx: Receiver<(NodeId, Result<Vec<u8>, String>)>,
     /// Cloned egui context, so background threads (OCR) can wake the UI when done.
     egui_ctx: egui::Context,
     api_key: String,
@@ -541,6 +544,7 @@ impl TrellisApp {
         let (api_tx, api_rx) = std::sync::mpsc::channel::<ApiCommand>();
         let doc_revision = Arc::new(AtomicU64::new(0));
         let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
+        let (snip_tx, snip_rx) = std::sync::mpsc::channel();
         let (save_tx, save_rx) = std::sync::mpsc::channel();
         let (backup_tx, backup_rx) = std::sync::mpsc::channel();
         let (api_server, api_status) = match api::serve(
@@ -627,6 +631,8 @@ impl TrellisApp {
             doc_revision,
             ocr_tx,
             ocr_rx,
+            snip_tx,
+            snip_rx,
             egui_ctx: cc.egui_ctx.clone(),
             api_key,
             api_port,
@@ -773,6 +779,87 @@ impl TrellisApp {
         }
     }
 
+    /// OCR every image card that has images but no extracted text yet, on one
+    /// background worker (sequential, so we don't spawn 100 tesseract processes).
+    /// Returns how many cards were queued.
+    fn ocr_all(&mut self) -> usize {
+        let mut targets: Vec<(NodeId, CardId, Vec<Vec<u8>>)> = Vec::new();
+        for (nid, node) in &self.doc.nodes {
+            for card in &node.cards {
+                if let CardKind::Image { ocr, .. } = &card.kind {
+                    if ocr.trim().is_empty() {
+                        let imgs: Vec<Vec<u8>> = card.kind.images().iter().map(|(d, _)| d.to_vec()).collect();
+                        if !imgs.is_empty() {
+                            targets.push((*nid, card.id, imgs));
+                        }
+                    }
+                }
+            }
+        }
+        if targets.is_empty() {
+            self.status = "No image cards need OCR".into();
+            return 0;
+        }
+        let count = targets.len();
+        self.status = format!("OCR running on {count} image card(s)…");
+        let tx = self.ocr_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            for (nid, cid, imgs) in targets {
+                let res = ocr_images(&imgs);
+                let _ = tx.send((nid, cid, res));
+                ctx.request_repaint();
+            }
+        });
+        count
+    }
+
+    /// Capture a screen region into an image card in the selected basket. The
+    /// region-select tool runs on a worker thread (it takes over the screen), so
+    /// the UI never blocks; the captured PNG comes back through `snip_rx`.
+    fn start_snip(&mut self) {
+        let Some(node) = self.selected else {
+            self.status = "Select a basket first, then Snip".into();
+            return;
+        };
+        self.status = "Select a screen region to capture…".into();
+        let tx = self.snip_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let res = capture_region();
+            let _ = tx.send((node, res));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Turn finished snips into image cards in their target basket.
+    fn pump_snip(&mut self) {
+        let done: Vec<_> = std::iter::from_fn(|| self.snip_rx.try_recv().ok()).collect();
+        for (node, res) in done {
+            match res {
+                Ok(bytes) if !bytes.is_empty() => {
+                    if !self.doc.nodes.contains_key(&node) {
+                        continue;
+                    }
+                    let kind = CardKind::Image {
+                        data: Vec::new(),
+                        name: String::new(),
+                        extra: Vec::new(),
+                        ocr: String::new(),
+                    };
+                    if let Some(cid) = self.doc.add_card(node, egui::pos2(40.0, 40.0), kind) {
+                        self.doc.add_image(node, cid, bytes, "snip.png".to_string());
+                        self.selected = Some(node);
+                        self.mark_dirty();
+                        self.status = "Snip added as an image card".into();
+                    }
+                }
+                Ok(_) => self.status = "Snip cancelled".into(),
+                Err(e) => self.status = format!("Snip failed: {e}"),
+            }
+        }
+    }
+
     fn pump_api(&mut self) {
         let mut cmds = Vec::new();
         if let Some(rx) = &self.api_rx {
@@ -873,6 +960,10 @@ impl TrellisApp {
                     }
                     Err(e) => Some(api::ApiResponse::err(500, &format!("restore failed: {e}"))),
                 }
+            }
+            api::ApiRequest::OcrAll => {
+                let n = self.ocr_all();
+                Some(api::ApiResponse::ok(serde_json::json!({ "started": n > 0, "cards": n })))
             }
             _ => None,
         }
@@ -2691,6 +2782,23 @@ impl TrellisApp {
                         }
                         ui.close_menu();
                     }
+                    if ui
+                        .add_enabled(self.selected.is_some(), egui::Button::new("Snip to card…"))
+                        .on_hover_text("Capture a screen region into an image card in this basket")
+                        .clicked()
+                    {
+                        self.start_snip();
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("OCR all images")
+                        .on_hover_text("Extract text from every image card that doesn't have it yet")
+                        .clicked()
+                    {
+                        self.ocr_all();
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Version history…").clicked() {
                         self.show_history = true;
                         ui.close_menu();
@@ -2843,6 +2951,7 @@ impl TrellisApp {
                         "GET    /api/properties[?key=<k>&value=<v>]   (keys / matching cards)",
                         "GET    /api/query?tag=&key=&value=&text=  (combined card query)",
                         "GET    /api/tasks[?all=true]              (due:: agenda, bucketed)",
+                        "POST   /api/ocr                           (OCR all un-OCR'd images)",
                         "GET    /api/export?format=markdown|html|json|pdf|png|gif",
                         "GET    /api/wait?rev=<n>                  (long-poll for changes)",
                         "GET    /api/history                       (version snapshots)",
@@ -3623,6 +3732,8 @@ impl eframe::App for TrellisApp {
         self.pump_api();
         // Apply any finished background OCR results.
         self.pump_ocr();
+        // Turn finished region-snips into image cards.
+        self.pump_snip();
 
         // Apply finished background saves.
         self.pump_save();
@@ -3978,6 +4089,39 @@ fn setup_fonts(ctx: &egui::Context) {
 
 /// A random API key (48 hex chars from the OS RNG, falling back to a weak
 /// time/pid mix if `/dev/urandom` is unavailable).
+/// Capture a user-selected screen region to PNG bytes, trying the region-select
+/// screenshot tools commonly present on Linux desktops in turn. An empty `Vec`
+/// means the user cancelled the selection.
+fn capture_region() -> Result<Vec<u8>, String> {
+    let out = std::env::temp_dir().join(format!("trellis-snip-{}.png", std::process::id()));
+    let path = out.to_string_lossy().to_string();
+    // (binary, args) — each does interactive region select and writes `path`.
+    let candidates: [(&str, Vec<&str>); 5] = [
+        ("spectacle", vec!["-b", "-n", "-r", "-o", &path]),
+        ("gnome-screenshot", vec!["-a", "-f", &path]),
+        ("maim", vec!["-s", &path]),
+        ("scrot", vec!["-s", &path]),
+        ("import", vec![&path]), // ImageMagick: click-drag a region
+    ];
+    let mut tried = Vec::new();
+    for (bin, args) in candidates {
+        match std::process::Command::new(bin).args(&args).status() {
+            Ok(status) => {
+                if !status.success() {
+                    // Non-zero usually means the user pressed Esc to cancel.
+                    let _ = std::fs::remove_file(&out);
+                    return Ok(Vec::new());
+                }
+                let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
+                let _ = std::fs::remove_file(&out);
+                return Ok(bytes);
+            }
+            Err(_) => tried.push(bin),
+        }
+    }
+    Err(format!("no screenshot tool found (tried {}); install one, e.g. maim or scrot", tried.join(", ")))
+}
+
 /// Run tesseract OCR over each image's bytes and return the combined text.
 /// Writes each image to a temp file and shells out to the `tesseract` CLI
 /// (a runtime dependency). Called on a background thread.

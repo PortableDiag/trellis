@@ -87,6 +87,7 @@ pub enum ApiRequest {
     BackupRun,
     HistoryList,
     HistoryRestore(String),
+    OcrAll,
 }
 
 pub struct ApiResponse {
@@ -594,6 +595,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }),
         (Method::Get, ["api", "backup"]) => Ok(ApiRequest::BackupStatus),
         (Method::Post, ["api", "backup", "run"]) => Ok(ApiRequest::BackupRun),
+        (Method::Post, ["api", "ocr"]) => Ok(ApiRequest::OcrAll),
         (Method::Get, ["api", "history"]) => Ok(ApiRequest::HistoryList),
         (Method::Post, ["api", "history", "restore"]) => {
             #[derive(Deserialize)]
@@ -1387,7 +1389,8 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         ApiRequest::BackupStatus
         | ApiRequest::BackupRun
         | ApiRequest::HistoryList
-        | ApiRequest::HistoryRestore(_) => {
+        | ApiRequest::HistoryRestore(_)
+        | ApiRequest::OcrAll => {
             (false, ApiResponse::err(500, "request not handled by the app loop"))
         }
     }

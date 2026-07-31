@@ -364,6 +364,16 @@ GET /api/tasks           → 200 {"today_days":N,"count":M,"tasks":[{node,node_t
 GET /api/tasks?all=true  → include completed tasks too (default excludes them)
 ```
 
+### OCR
+Run OCR (tesseract) over every image card that has images but no extracted text
+yet, so scans/screenshots become full-text searchable. Runs on a background
+worker; poll `/api/search` for the results.
+```
+POST /api/ocr → 200 {"started":<bool>,"cards":<n queued>}
+```
+(The **Snip to card** capture — grab a screen region into an image card — is
+UI-only, since it needs a human to select the region on screen.)
+
 ### Version history
 Browse the automatic save-time snapshots and restore one (replaces the current
 document in memory — save to keep it). Snapshots live in `.<name>.history/`.

@@ -93,6 +93,9 @@ and zooms (Ctrl+scroll); each node remembers its view.
   it never freezes the UI. Files are **gzip-compressed** (RON format, `.ron`;
   image-heavy documents shrink dramatically) and older plain-text `.ron` files
   still open.
+- **Snip to card** (Tools → Snip to card) — capture a screen region straight
+  into an image card in the current basket. **OCR all images** (Tools) extracts
+  text from every image card that lacks it, making old scans searchable.
 - **Backup** (**Tools → Backup…**) — scheduled, full-document backups to
   external locations (this is backup, *not* version history: each run writes a
   complete, self-contained copy). Destinations: **Disk** (a local/mounted
