@@ -1950,6 +1950,31 @@ impl Document {
         self.nodes.values().find(|n| n.title.to_lowercase() == tl).map(|n| n.id)
     }
 
+    /// The wiki-link graph: the nodes that participate in at least one link
+    /// (as source or target) and the de-duplicated directed edges between them.
+    /// Day-to-day nodes with no links are left out so the graph stays legible.
+    pub fn link_graph(&self) -> (Vec<NodeId>, Vec<(NodeId, NodeId)>) {
+        let mut edges: Vec<(NodeId, NodeId)> = Vec::new();
+        let mut involved = std::collections::BTreeSet::new();
+        for n in self.nodes.values() {
+            for card in &n.cards {
+                let hay = format!("{}\n{}", card.title, searchable_body(card));
+                for target in extract_wikilinks(&hay) {
+                    if let Some(t) = self.resolve_link(&target) {
+                        if t != n.id {
+                            edges.push((n.id, t));
+                            involved.insert(n.id);
+                            involved.insert(t);
+                        }
+                    }
+                }
+            }
+        }
+        edges.sort();
+        edges.dedup();
+        (involved.into_iter().collect(), edges)
+    }
+
     /// Cards anywhere whose `[[links]]` point at `node` — the "linked here"
     /// backlinks. Each hit is the linking card's basket + a snippet.
     pub fn backlinks(&self, node: NodeId) -> Vec<SearchHit> {

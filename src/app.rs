@@ -386,6 +386,11 @@ pub struct TrellisApp {
     agenda_show_done: bool,
     /// Backlinks panel: cards that `[[link]]` to the selected node.
     backlinks_open: bool,
+    /// Link-graph window state (force-directed layout, rebuilt when opened).
+    graph_open: bool,
+    graph_built: bool,
+    graph_layout: HashMap<NodeId, egui::Pos2>,
+    graph_edges: Vec<(NodeId, NodeId)>,
     show_about: bool,
     theme: Theme,
     /// Whether Ctrl+scroll / Ctrl +/- zoom the canvas (Settings; on by default).
@@ -592,6 +597,10 @@ impl TrellisApp {
             agenda_open: false,
             agenda_show_done: false,
             backlinks_open: false,
+            graph_open: false,
+            graph_built: false,
+            graph_layout: HashMap::new(),
+            graph_edges: Vec::new(),
             show_about: false,
             theme,
             zoom_enabled,
@@ -2628,6 +2637,15 @@ impl TrellisApp {
                         self.backlinks_open = true;
                         ui.close_menu();
                     }
+                    if ui
+                        .button("Link graph…")
+                        .on_hover_text("Visualize the [[wiki-link]] web across the tree")
+                        .clicked()
+                    {
+                        self.graph_open = true;
+                        self.graph_built = false;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     ui.menu_button("Themes", |ui| {
                         for (t, label) in Theme::ALL {
@@ -2813,6 +2831,7 @@ impl TrellisApp {
                         "POST   /api/nodes/{id}/move     {before|after|index|to, parent?}",
                         "POST   /api/nodes/{id}/expand   {expanded, recursive?}",
                         "GET    /api/nodes/{id}/backlinks          (cards that [[link]] here)",
+                        "GET    /api/graph                         (wiki-link nodes + edges)",
                         "GET    /api/nodes/{id}/cards",
                         "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, pos?, inline_images?}",
                         "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, …}",
@@ -3427,6 +3446,142 @@ impl TrellisApp {
         }
     }
 
+    /// Compute a force-directed layout of the wiki-link graph (once, when the
+    /// window opens). Nodes start on a circle, then repel each other while edges
+    /// pull linked nodes together — a few hundred cheap iterations settle it.
+    fn build_graph(&mut self) {
+        let (ids, edges) = self.doc.link_graph();
+        self.graph_edges = edges;
+        self.graph_layout.clear();
+        let n = ids.len();
+        if n == 0 {
+            self.graph_built = true;
+            return;
+        }
+        for (i, &id) in ids.iter().enumerate() {
+            let a = std::f32::consts::TAU * i as f32 / n as f32;
+            self.graph_layout.insert(id, egui::pos2(a.cos() * 200.0, a.sin() * 200.0));
+        }
+        let k = (250.0 / (n as f32).sqrt()).max(30.0); // ideal separation
+        for _ in 0..300 {
+            let mut disp: HashMap<NodeId, egui::Vec2> =
+                ids.iter().map(|&id| (id, egui::Vec2::ZERO)).collect();
+            for i in 0..ids.len() {
+                for j in (i + 1)..ids.len() {
+                    let mut d = self.graph_layout[&ids[i]] - self.graph_layout[&ids[j]];
+                    let mut len = d.length();
+                    if len < 0.01 {
+                        d = egui::vec2(0.1 * (i as f32 + 1.0), 0.1);
+                        len = d.length();
+                    }
+                    let f = k * k / len;
+                    let dir = d / len;
+                    *disp.get_mut(&ids[i]).unwrap() += dir * f;
+                    *disp.get_mut(&ids[j]).unwrap() -= dir * f;
+                }
+            }
+            for &(u, v) in &self.graph_edges {
+                let d = self.graph_layout[&u] - self.graph_layout[&v];
+                let len = d.length().max(0.01);
+                let f = len * len / k;
+                let dir = d / len;
+                *disp.get_mut(&u).unwrap() -= dir * f;
+                *disp.get_mut(&v).unwrap() += dir * f;
+            }
+            for &id in &ids {
+                let mut dv = disp[&id];
+                let l = dv.length();
+                if l > 20.0 {
+                    dv = dv / l * 20.0; // cap movement per step
+                }
+                *self.graph_layout.get_mut(&id).unwrap() += dv;
+            }
+        }
+        self.graph_built = true;
+    }
+
+    /// The link-graph window: draws the force-directed layout, click a node to
+    /// jump to it. Rebuilt each time it's opened so it reflects current links.
+    fn graph_window(&mut self, ctx: &egui::Context) {
+        if !self.graph_built {
+            self.build_graph();
+        }
+        let mut open = self.graph_open;
+        let mut jump: Option<NodeId> = None;
+        egui::Window::new("Link graph")
+            .open(&mut open)
+            .default_size([620.0, 520.0])
+            .resizable(true)
+            .show(ctx, |ui| {
+                if self.graph_layout.is_empty() {
+                    ui.weak("No links yet. Write [[Node Title]] in a card to connect nodes here.");
+                    return;
+                }
+                ui.small(format!("{} linked nodes · {} links · click a node to open it", self.graph_layout.len(), self.graph_edges.len()));
+                let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+                let painter = ui.painter_at(rect);
+                // Fit the layout's bounding box into the paint area.
+                let mut min = egui::pos2(f32::MAX, f32::MAX);
+                let mut max = egui::pos2(f32::MIN, f32::MIN);
+                for p in self.graph_layout.values() {
+                    min.x = min.x.min(p.x);
+                    min.y = min.y.min(p.y);
+                    max.x = max.x.max(p.x);
+                    max.y = max.y.max(p.y);
+                }
+                let span = (max - min).max(egui::vec2(1.0, 1.0));
+                let margin = 40.0;
+                let scale = ((rect.width() - 2.0 * margin) / span.x)
+                    .min((rect.height() - 2.0 * margin) / span.y)
+                    .clamp(0.05, 2.5);
+                let lcenter = egui::pos2((min.x + max.x) * 0.5, (min.y + max.y) * 0.5);
+                let map = |p: egui::Pos2| rect.center() + (p - lcenter) * scale;
+
+                let edge_stroke = egui::Stroke::new(1.0, ui.visuals().weak_text_color());
+                for &(u, v) in &self.graph_edges {
+                    if let (Some(a), Some(b)) = (self.graph_layout.get(&u), self.graph_layout.get(&v)) {
+                        painter.line_segment([map(*a), map(*b)], edge_stroke);
+                    }
+                }
+                let hover = resp.hover_pos();
+                let mut hit: Option<NodeId> = None;
+                for (&id, p) in &self.graph_layout {
+                    let sp = map(*p);
+                    let is_sel = self.selected == Some(id);
+                    let near = hover.map_or(false, |h| h.distance(sp) <= 10.0);
+                    if near {
+                        hit = Some(id);
+                    }
+                    let col = match self.doc.nodes.get(&id).and_then(|n| n.color) {
+                        Some(c) => egui::Color32::from_rgb(c[0], c[1], c[2]),
+                        None => ui.visuals().selection.bg_fill,
+                    };
+                    painter.circle_filled(sp, if near || is_sel { 8.0 } else { 5.0 }, col);
+                    let title = self.doc.nodes.get(&id).map(|n| n.title.clone()).unwrap_or_default();
+                    let short: String = title.chars().take(24).collect();
+                    painter.text(
+                        sp + egui::vec2(8.0, -8.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        short,
+                        egui::FontId::proportional(11.0),
+                        ui.visuals().text_color(),
+                    );
+                }
+                if resp.clicked() {
+                    if let Some(id) = hit {
+                        jump = Some(id);
+                    }
+                }
+            });
+        self.graph_open = open;
+        if !open {
+            self.graph_built = false; // rebuild next open
+        }
+        if let Some(id) = jump {
+            self.jump_to_node(id);
+        }
+    }
+
     /// Navigate a clicked `[[wiki-link]]` (its URL-encoded target) to the node
     /// it names, or report that no such node exists.
     fn follow_wikilink(&mut self, encoded: &str) {
@@ -3605,6 +3760,9 @@ impl eframe::App for TrellisApp {
         }
         if self.backlinks_open {
             self.backlinks_panel(ctx);
+        }
+        if self.graph_open {
+            self.graph_window(ctx);
         }
 
         // Follow [[wiki-links]] (rendered as the `trellis:` URL scheme) by

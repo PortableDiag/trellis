@@ -79,6 +79,8 @@ pub enum ApiRequest {
     Tasks { include_done: bool },
     // Cards that [[link]] to a node.
     Backlinks(NodeId),
+    // The wiki-link graph (linked nodes + directed edges).
+    Graph,
     // Backup + version-history control — handled by the app loop (they need the
     // doc's on-disk path / config), not `process`, which only sees the Document.
     BackupStatus,
@@ -572,6 +574,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "search"]) => {
             Ok(ApiRequest::Search(query_get(query, "q").unwrap_or_default()))
         }
+        (Method::Get, ["api", "graph"]) => Ok(ApiRequest::Graph),
         (Method::Get, ["api", "tags"]) => match query_get(query, "name") {
             Some(name) => Ok(ApiRequest::TagCards(name)),
             None => Ok(ApiRequest::Tags),
@@ -1368,6 +1371,15 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .map(|h| json!({ "node": h.node, "node_title": h.node_title, "snippet": h.snippet }))
                 .collect();
             (false, ApiResponse::ok(json!({ "node": id, "count": hits.len(), "hits": hits })))
+        }
+        ApiRequest::Graph => {
+            let (ids, edges) = doc.link_graph();
+            let nodes: Vec<Value> = ids
+                .iter()
+                .map(|id| json!({ "id": id, "title": doc.nodes.get(id).map(|n| n.title.clone()).unwrap_or_default() }))
+                .collect();
+            let edges: Vec<Value> = edges.iter().map(|(u, v)| json!([u, v])).collect();
+            (false, ApiResponse::ok(json!({ "nodes": nodes, "edges": edges })))
         }
         // Backup requests are intercepted and answered by the app loop (they need
         // the backup config + document file). This is only reached if that

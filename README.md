@@ -135,6 +135,8 @@ and zooms (Ctrl+scroll); each node remembers its view.
 - **Wiki-links & backlinks** — write `[[Node Title]]` in a card to make a
   clickable link that jumps to that node; **View → Backlinks** shows everything
   that links to the current node ("linked here").
+- **Link graph** (View → Link graph) — a force-directed picture of the wiki-link
+  web across the tree; click a node to open it.
 - **View → Themes** — Trellis (default), Light, or Terminal Green
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN

@@ -4,6 +4,13 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.54.0]
+
+### Added
+- **Link graph** (**View → Link graph**) — a force-directed visualization of the `[[wiki-link]]`
+  web: nodes that participate in links, edges between them, click a node to open it. Rebuilt each
+  time it's opened so it reflects current links. API: `GET /api/graph` (nodes + edges).
+
 ## [0.53.0]
 
 ### Added

@@ -316,6 +316,13 @@ This lists the cards that link *to* a node.
 GET /api/nodes/{id}/backlinks → 200 {"node":<id>,"count":N,"hits":[{node,node_title,snippet}, …]}  | 404
 ```
 
+### Link graph
+The wiki-link graph: nodes that take part in at least one `[[link]]`, and the
+directed edges between them (source → target). Powers **View → Link graph**.
+```
+GET /api/graph → 200 {"nodes":[{id,title}, …], "edges":[[from,to], …]}
+```
+
 ### Tags
 `#tags` written anywhere in a card (body, title, checklist items, table cells)
 are indexed across the whole document. A tag starts at a `#` on a word boundary
