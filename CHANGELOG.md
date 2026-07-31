@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.57.4]
+
+### Docs
+- **In-app Settings → Endpoints list brought back to full parity with API.md.** It was missing the
+  card **dock**, **group-membership**, **table**, **sketch**, and **images** endpoints and the
+  **groups** CRUD; all are now listed (the sub-verbs — `GET`/`DELETE`/`PATCH` variants — noted
+  inline). The card create/patch field lists and the `card` id now returned on search hits are
+  reflected too. API.md stays the canonical reference and was already current.
+
 ## [0.57.3]
 
 ### Changed
