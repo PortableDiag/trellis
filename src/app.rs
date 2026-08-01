@@ -3317,6 +3317,7 @@ impl TrellisApp {
                         "GET    /api/properties[?key=<k>&value=<v>]   (keys / matching cards)",
                         "GET    /api/query?tag=&key=&value=&text=  (combined card query)",
                         "GET    /api/tasks[?all=true]              (due:: agenda, bucketed)",
+                        "GET    /api/kanban                        (cards grouped by status:: → columns)",
                         "POST   /api/ocr                           (OCR all un-OCR'd images)",
                         "GET    /api/export?format=markdown|html|json|pdf|png|gif",
                         "GET    /api/wait?rev=<n>                  (long-poll for changes)",

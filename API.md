@@ -374,6 +374,15 @@ GET /api/tasks           → 200 {"today_days":N,"count":M,"tasks":[{node,node_t
 GET /api/tasks?all=true  → include completed tasks too (default excludes them)
 ```
 
+### Kanban
+Cards grouped by their `status::` value — the **View → Kanban** board's columns.
+Each card carries its title, basket (`node_title`), `due::` date, `#tags`, and
+accent `color`. Read-only; change a card's column with the card `property`
+endpoint (`POST …/cards/{cid}/property {key:"status", value:"done"}`).
+```
+GET /api/kanban → 200 {"today_days":N,"columns":[{"status":"doing","count":2,"cards":[{node,node_title,card,title,due,tags,color}, …]}, …]}
+```
+
 ### OCR
 Run OCR (tesseract) over every image card that has images but no extracted text
 yet, so scans/screenshots become full-text searchable. Runs on a background

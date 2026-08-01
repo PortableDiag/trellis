@@ -79,6 +79,8 @@ pub enum ApiRequest {
     // Combined dropdown-style query across the tree, and the due-date agenda.
     QueryCards { tag: Option<String>, key: Option<String>, value: Option<String>, text: Option<String> },
     Tasks { include_done: bool },
+    // Cards grouped by `status::` value — the Kanban board's columns.
+    Kanban,
     // Cards that [[link]] to a node.
     Backlinks(NodeId),
     // The wiki-link graph (linked nodes + directed edges).
@@ -629,6 +631,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "tasks"]) => Ok(ApiRequest::Tasks {
             include_done: query_get(query, "all").as_deref() == Some("true"),
         }),
+        (Method::Get, ["api", "kanban"]) => Ok(ApiRequest::Kanban),
         (Method::Get, ["api", "backup"]) => Ok(ApiRequest::BackupStatus),
         (Method::Post, ["api", "backup", "run"]) => Ok(ApiRequest::BackupRun),
         (Method::Post, ["api", "ocr"]) => Ok(ApiRequest::OcrAll),
@@ -1434,6 +1437,31 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 })
                 .collect();
             (false, ApiResponse::ok(json!({ "today_days": today, "count": tasks.len(), "tasks": tasks })))
+        }
+        ApiRequest::Kanban => {
+            let today = today_days();
+            let columns: Vec<Value> = doc
+                .cards_by_status()
+                .into_iter()
+                .map(|(status, cards)| {
+                    let cards: Vec<Value> = cards
+                        .into_iter()
+                        .map(|kc| {
+                            json!({
+                                "node": kc.node,
+                                "node_title": kc.node_title,
+                                "card": kc.card,
+                                "title": kc.title,
+                                "due": kc.due,
+                                "tags": kc.tags,
+                                "color": kc.color,
+                            })
+                        })
+                        .collect();
+                    json!({ "status": status, "count": cards.len(), "cards": cards })
+                })
+                .collect();
+            (false, ApiResponse::ok(json!({ "today_days": today, "columns": columns })))
         }
         ApiRequest::Backlinks(id) => {
             if !doc.nodes.contains_key(&id) {

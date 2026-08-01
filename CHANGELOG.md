@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.63.0]
+
+### Added
+- **`GET /api/kanban`** — cards grouped by their `status::` value into columns
+  (each card with its title, basket, `due::`, `#tags`, and accent color), so the
+  Kanban board is reachable over the API. Read-only; the existing card `property`
+  endpoint changes a card's column. Powers the Android app's new read-only Kanban.
+  API.md + the in-app Endpoints list updated.
+
 ## [0.62.1]
 
 ### Fixed
