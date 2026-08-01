@@ -38,6 +38,61 @@ pub struct Env<'a> {
     pub highlight_until: f64,
     /// Draw the bottom-right minimap (overview of the basket + a view reticle).
     pub minimap: bool,
+    /// Theme-driven card look (Normal / Sticky / Futuristic).
+    pub style: CardStyle,
+}
+
+/// How cards are painted, chosen by the active theme. `Normal` is the default
+/// look (panel-fill body + accent title bar). `Sticky` paints the whole card one
+/// solid paper color — header and body the same, like a real sticky note.
+/// `Futuristic` gives it a beveled tech-panel frame.
+#[derive(Clone, Copy, PartialEq)]
+pub enum CardStyle {
+    Normal,
+    Sticky,
+    Futuristic,
+}
+
+/// The default accent a fresh card is created with (`model::Card::new`). In the
+/// Sticky theme, a card still on this default is drawn as classic yellow paper;
+/// once recolored, the whole note takes the chosen color.
+const DEFAULT_CARD_COLOR: [u8; 3] = [0x3b, 0x82, 0xf6];
+
+/// Darken an opaque color by scaling its RGB toward black (keeps full alpha,
+/// unlike `gamma_multiply`, which also fades the alpha).
+fn darken(c: egui::Color32, f: f32) -> egui::Color32 {
+    egui::Color32::from_rgb(
+        (c.r() as f32 * f) as u8,
+        (c.g() as f32 * f) as u8,
+        (c.b() as f32 * f) as u8,
+    )
+}
+
+/// A rectangle with its top-right and bottom-left corners cut at 45° (a diagonal
+/// bevel) — the tech-panel look for the Futuristic theme. `c` is the cut size.
+fn bevel_diag(rect: egui::Rect, c: f32) -> Vec<egui::Pos2> {
+    let c = c.min(rect.width() * 0.5).min(rect.height() * 0.5);
+    vec![
+        rect.left_top(),
+        egui::pos2(rect.right() - c, rect.top()),
+        egui::pos2(rect.right(), rect.top() + c),
+        rect.right_bottom(),
+        egui::pos2(rect.left() + c, rect.bottom()),
+        egui::pos2(rect.left(), rect.bottom() - c),
+    ]
+}
+
+/// The title strip with only its top-right corner cut, matching the top of a
+/// `bevel_diag` card.
+fn bevel_title(title: egui::Rect, c: f32) -> Vec<egui::Pos2> {
+    let c = c.min(title.width() * 0.5);
+    vec![
+        title.left_top(),
+        egui::pos2(title.right() - c, title.top()),
+        egui::pos2(title.right(), title.top() + c),
+        title.right_bottom(),
+        title.left_bottom(),
+    ]
 }
 
 /// Actions requested by the canvas, applied by the app afterwards.
@@ -739,8 +794,51 @@ fn card_ui(
 
     let accent = egui::Color32::from_rgb(card.color[0], card.color[1], card.color[2]);
     let p = ui.painter_at(clip);
-    p.rect_filled(rect, r, ui.visuals().panel_fill);
-    p.rect_stroke(rect, r, egui::Stroke::new(1.0, accent));
+    let title_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), title_h));
+    // --- card frame, per theme ---------------------------------------------
+    match env.style {
+        CardStyle::Sticky => {
+            // One solid paper color for the whole note — header and body the
+            // same, like a real sticky. A default (uncolored) card is yellow;
+            // recoloring paints the entire note.
+            let paper = if card.color == DEFAULT_CARD_COLOR {
+                egui::Color32::from_rgb(0xff, 0xe9, 0x6b)
+            } else {
+                accent
+            };
+            p.rect_filled(rect, r, paper);
+            p.rect_stroke(rect, r, egui::Stroke::new(1.0, darken(paper, 0.72)));
+            // A faint divider under the title keeps it readable without a
+            // differently-colored header bar.
+            p.line_segment(
+                [
+                    egui::pos2(rect.left() + 4.0 * zoom, title_rect.bottom()),
+                    egui::pos2(rect.right() - 4.0 * zoom, title_rect.bottom()),
+                ],
+                egui::Stroke::new(1.0, darken(paper, 0.78)),
+            );
+        }
+        CardStyle::Futuristic => {
+            // Angular tech panel: sharp frame with the top-right and bottom-left
+            // corners beveled, and a cyan-accent edge.
+            let c = 14.0 * zoom;
+            p.add(egui::Shape::convex_polygon(
+                bevel_diag(rect, c),
+                ui.visuals().panel_fill,
+                egui::Stroke::new(1.2, accent),
+            ));
+            p.add(egui::Shape::convex_polygon(
+                bevel_title(title_rect, c),
+                accent.gamma_multiply(0.28),
+                egui::Stroke::NONE,
+            ));
+        }
+        CardStyle::Normal => {
+            p.rect_filled(rect, r, ui.visuals().panel_fill);
+            p.rect_stroke(rect, r, egui::Stroke::new(1.0, accent));
+            p.rect_filled(title_rect, r, accent.gamma_multiply(0.35));
+        }
+    }
     // Multi-select outline (Ctrl+click builds a selection to group).
     if selected {
         p.rect_stroke(
@@ -749,9 +847,6 @@ fn card_ui(
             egui::Stroke::new((2.0 * zoom).max(1.5), egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
         );
     }
-
-    let title_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), title_h));
-    p.rect_filled(title_rect, r, accent.gamma_multiply(0.35));
     // Small marker on a docked card's title bar.
     if card.docked_to.is_some() {
         p.circle_filled(

@@ -85,19 +85,28 @@ enum Theme {
     Trellis,
     Light,
     TerminalGreen,
+    StickyNotes,
+    Futuristic,
+    SynthWave,
 }
 
 impl Theme {
-    const ALL: [(Theme, &'static str); 3] = [
+    const ALL: [(Theme, &'static str); 6] = [
         (Theme::Trellis, "Trellis"),
         (Theme::Light, "Light"),
         (Theme::TerminalGreen, "Terminal Green"),
+        (Theme::StickyNotes, "Sticky Notes"),
+        (Theme::Futuristic, "Futuristic"),
+        (Theme::SynthWave, "SynthWave"),
     ];
 
     fn from_key(s: &str) -> Theme {
         match s {
             "Light" => Theme::Light,
             "TerminalGreen" => Theme::TerminalGreen,
+            "StickyNotes" => Theme::StickyNotes,
+            "Futuristic" => Theme::Futuristic,
+            "SynthWave" => Theme::SynthWave,
             // "Dark" is the pre-rename key for the default look; keep it mapping
             // to Trellis so existing settings load unchanged.
             _ => Theme::Trellis,
@@ -109,6 +118,9 @@ impl Theme {
             Theme::Trellis => "Trellis",
             Theme::Light => "Light",
             Theme::TerminalGreen => "TerminalGreen",
+            Theme::StickyNotes => "StickyNotes",
+            Theme::Futuristic => "Futuristic",
+            Theme::SynthWave => "SynthWave",
         }
     }
 
@@ -117,6 +129,9 @@ impl Theme {
             Theme::Light => egui::Visuals::light(),
             Theme::Trellis => egui::Visuals::dark(),
             Theme::TerminalGreen => terminal_green_visuals(),
+            Theme::StickyNotes => sticky_notes_visuals(),
+            Theme::Futuristic => futuristic_visuals(),
+            Theme::SynthWave => synthwave_visuals(),
         }
     }
 }
@@ -157,6 +172,127 @@ fn terminal_green_visuals() -> egui::Visuals {
     w.active.fg_stroke = Stroke::new(1.5, green);
     w.active.bg_stroke = Stroke::new(1.0, green);
     w.open.fg_stroke = Stroke::new(1.0, green);
+    v
+}
+
+/// Warm sticky-note look: yellow-paper cards on a cork board, dark-ink text.
+fn sticky_notes_visuals() -> egui::Visuals {
+    use egui::{Color32, Stroke};
+    let paper = Color32::from_rgb(0xff, 0xee, 0x93); // sticky yellow (card / panel fill)
+    let paper_hi = Color32::from_rgb(0xff, 0xf6, 0xc2);
+    let board = Color32::from_rgb(0x9c, 0x7c, 0x4c); // cork board (canvas background)
+    let ink = Color32::from_rgb(0x39, 0x2b, 0x10); // dark brown ink
+
+    let mut v = egui::Visuals::light();
+    v.override_text_color = Some(ink);
+    v.hyperlink_color = Color32::from_rgb(0x8a, 0x53, 0x00);
+    v.panel_fill = paper;
+    v.window_fill = paper;
+    v.extreme_bg_color = board;
+    v.faint_bg_color = paper_hi;
+    v.code_bg_color = Color32::from_rgb(0xf3, 0xdd, 0x82);
+    v.window_stroke = Stroke::new(1.0, Color32::from_rgb(0xd8, 0xbd, 0x64));
+    v.selection.bg_fill = Color32::from_rgb(0xff, 0xc9, 0x4d).gamma_multiply(0.55);
+    v.selection.stroke = Stroke::new(1.0, Color32::from_rgb(0xc9, 0x7a, 0x00));
+
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = paper;
+    w.noninteractive.weak_bg_fill = paper;
+    w.noninteractive.fg_stroke = Stroke::new(1.0, ink);
+    w.inactive.bg_fill = paper_hi;
+    w.inactive.weak_bg_fill = paper_hi;
+    w.inactive.fg_stroke = Stroke::new(1.0, ink);
+    w.hovered.bg_fill = Color32::from_rgb(0xff, 0xe0, 0x6b);
+    w.hovered.weak_bg_fill = Color32::from_rgb(0xff, 0xe0, 0x6b);
+    w.hovered.fg_stroke = Stroke::new(1.5, ink);
+    w.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(0xd8, 0xa8, 0x2a));
+    w.active.bg_fill = Color32::from_rgb(0xff, 0xd4, 0x4a);
+    w.active.weak_bg_fill = Color32::from_rgb(0xff, 0xd4, 0x4a);
+    w.active.fg_stroke = Stroke::new(1.5, ink);
+    w.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(0xc9, 0x7a, 0x00));
+    v
+}
+
+/// A translucent-cyan sci-fi HUD ("Minority Report") look on near-black.
+fn futuristic_visuals() -> egui::Visuals {
+    use egui::{Color32, Stroke};
+    let cyan = Color32::from_rgb(0x5a, 0xe6, 0xff);
+    let dim = Color32::from_rgb(0x2b, 0x88, 0xa8);
+    let text = Color32::from_rgb(0xd6, 0xf4, 0xff);
+    let bg = Color32::from_rgb(0x03, 0x07, 0x10);
+    let panel = Color32::from_rgb(0x08, 0x14, 0x20);
+
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(text);
+    v.hyperlink_color = cyan;
+    v.panel_fill = panel;
+    v.window_fill = panel;
+    v.extreme_bg_color = bg;
+    v.faint_bg_color = Color32::from_rgb(0x0b, 0x1c, 0x2b);
+    v.code_bg_color = bg;
+    v.window_stroke = Stroke::new(1.0, dim);
+    v.selection.bg_fill = cyan.gamma_multiply(0.20);
+    v.selection.stroke = Stroke::new(1.0, cyan);
+
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = panel;
+    w.noninteractive.weak_bg_fill = panel;
+    w.noninteractive.fg_stroke = Stroke::new(1.0, dim);
+    w.inactive.bg_fill = Color32::from_rgb(0x0d, 0x20, 0x30);
+    w.inactive.weak_bg_fill = Color32::from_rgb(0x0d, 0x20, 0x30);
+    w.inactive.fg_stroke = Stroke::new(1.0, text);
+    w.hovered.bg_fill = Color32::from_rgb(0x12, 0x2c, 0x40);
+    w.hovered.weak_bg_fill = Color32::from_rgb(0x12, 0x2c, 0x40);
+    w.hovered.fg_stroke = Stroke::new(1.5, cyan);
+    w.hovered.bg_stroke = Stroke::new(1.0, dim);
+    w.active.bg_fill = Color32::from_rgb(0x16, 0x38, 0x50);
+    w.active.weak_bg_fill = Color32::from_rgb(0x16, 0x38, 0x50);
+    w.active.fg_stroke = Stroke::new(1.5, cyan);
+    w.active.bg_stroke = Stroke::new(1.0, cyan);
+    w.open.fg_stroke = Stroke::new(1.0, cyan);
+    v
+}
+
+/// Synthwave / outrun neon (the classic Outrun palette): hot pink #FF3864 +
+/// electric cyan #2DE2E6 on deep violet #0D0221, with purple UI chrome.
+fn synthwave_visuals() -> egui::Visuals {
+    use egui::{Color32, Stroke};
+    let pink = Color32::from_rgb(0xff, 0x38, 0x64); // #FF3864
+    let cyan = Color32::from_rgb(0x2d, 0xe2, 0xe6); // #2DE2E6
+    let magenta = Color32::from_rgb(0x92, 0x00, 0x75); // #920075
+    let text = Color32::from_rgb(0xd8, 0xf5, 0xf7); // light cyan-white
+    let bg = Color32::from_rgb(0x0d, 0x02, 0x21); // #0D0221
+    let panel = Color32::from_rgb(0x24, 0x17, 0x34); // #241734
+    let purple = Color32::from_rgb(0x2e, 0x21, 0x57); // #2E2157
+
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(text);
+    v.hyperlink_color = cyan;
+    v.panel_fill = panel;
+    v.window_fill = panel;
+    v.extreme_bg_color = bg;
+    v.faint_bg_color = purple;
+    v.code_bg_color = bg;
+    v.window_stroke = Stroke::new(1.0, magenta);
+    v.selection.bg_fill = pink.gamma_multiply(0.30);
+    v.selection.stroke = Stroke::new(1.0, pink);
+
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = panel;
+    w.noninteractive.weak_bg_fill = panel;
+    w.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(0xb7, 0x9a, 0xdf));
+    w.inactive.bg_fill = purple;
+    w.inactive.weak_bg_fill = purple;
+    w.inactive.fg_stroke = Stroke::new(1.0, text);
+    w.hovered.bg_fill = Color32::from_rgb(0x54, 0x0d, 0x6e); // #540D6E
+    w.hovered.weak_bg_fill = Color32::from_rgb(0x54, 0x0d, 0x6e);
+    w.hovered.fg_stroke = Stroke::new(1.5, cyan);
+    w.hovered.bg_stroke = Stroke::new(1.0, cyan);
+    w.active.bg_fill = Color32::from_rgb(0x79, 0x1e, 0x94); // #791E94
+    w.active.weak_bg_fill = Color32::from_rgb(0x79, 0x1e, 0x94);
+    w.active.fg_stroke = Stroke::new(1.5, pink);
+    w.active.bg_stroke = Stroke::new(1.0, pink);
+    w.open.fg_stroke = Stroke::new(1.0, pink);
     v
 }
 
@@ -4296,6 +4432,11 @@ impl eframe::App for TrellisApp {
                         highlight_card: self.highlight_card,
                         highlight_until: self.highlight_until,
                         minimap: self.minimap_enabled,
+                        style: match self.theme {
+                            Theme::StickyNotes => canvas::CardStyle::Sticky,
+                            Theme::Futuristic => canvas::CardStyle::Futuristic,
+                            _ => canvas::CardStyle::Normal,
+                        },
                     };
                     let can_paste = self.card_clipboard.is_some();
                     let node_path = crate::tree::node_path(&self.doc, sel);

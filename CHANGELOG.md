@@ -4,6 +4,18 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.61.0]
+
+### Added
+- **Three new themes** (View → Themes), selectable like the others:
+  - **Sticky Notes** — cards are solid single-color paper (header and body the same color, like a
+    real sticky), yellow by default; recoloring a card paints the whole note. On a cork-board canvas.
+  - **Futuristic** — a Minority-Report holographic-blue HUD, with cards drawn as beveled tech panels
+    (top-right and bottom-left corners cut) and cyan-accent edges.
+  - **SynthWave** — the classic outrun neon palette: hot pink (#FF3864) + electric cyan (#2DE2E6)
+    on deep violet (#0D0221), with purple UI chrome.
+  Themes now drive card *rendering* (a per-theme `CardStyle`), not just colors.
+
 ## [0.60.0]
 
 ### Fixed

@@ -154,7 +154,11 @@ from the main cluster, and click or drag on it to jump there without zooming out
   `due::` date (red when overdue), and its `#tags`. Drag a card between columns to
   change its status, or click one to jump straight to it on its basket; toggle
   **Show done** to hide the finished pile. Reads the same properties as the agenda.
-- **View → Themes** — Trellis (default), Light, or Terminal Green
+- **View → Themes** — Trellis (default), Light, Terminal Green, **Sticky Notes**
+  (solid single-color paper cards — yellow by default, the whole note takes the
+  color you give it — on a cork board), **Futuristic** (a Minority-Report blue HUD
+  with beveled tech-panel cards), or **SynthWave** (the outrun neon palette:
+  hot pink + electric cyan on deep violet)
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN
   access** in Settings for phones/other devices) with full parity to the app:
