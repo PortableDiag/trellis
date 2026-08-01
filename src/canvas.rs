@@ -261,22 +261,26 @@ pub fn ui(
     if let Some(g) = &minimap_geom {
         let drag_id = ui.id().with("minimap_drag");
         let mut dragging = ui.memory(|m| m.data.get_temp::<bool>(drag_id).unwrap_or(false));
-        let (down, clicked, pos) = ui.input(|i| {
-            (i.pointer.primary_down(), i.pointer.primary_clicked(), i.pointer.latest_pos())
+        let (pressed, down, pos) = ui.input(|i| {
+            (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.latest_pos())
         });
         if let Some(p) = pos {
             minimap_over = g.outer.contains(p);
-            if down && minimap_over {
+            // Only claim the view if the press *began* on the map. A canvas drag
+            // that merely passes over the minimap must NOT grab the reticle and
+            // teleport the view — you have to press down inside the map first.
+            if pressed && minimap_over {
                 dragging = true;
             }
         }
+        // Recenter on the pointed-at spot while a latched minimap drag is held. A
+        // plain click lands here too: the press over the map recenters at once —
+        // computed *before* clearing the latch so a fast click (press+release in
+        // one frame, `down` already false) still recenters.
+        let target = if dragging { pos } else { None };
         if !down {
             dragging = false;
         }
-        // Recenter on the pointed-at spot for a held drag, or a single click on the
-        // map (a click completes without ever leaving `primary_down` true for a
-        // rendered frame, so it needs its own case).
-        let target = if dragging || (clicked && minimap_over) { pos } else { None };
         if let Some(p) = target {
             // Clamp to the map, map back to world, recenter the view there.
             let cp = egui::pos2(

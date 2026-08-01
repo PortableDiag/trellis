@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.63.1]
+
+### Fixed
+- **A canvas drag that passes over the minimap no longer hijacks the view.** The
+  minimap claimed any drag while the pointer was over it, so a normal drag that
+  strayed into the bottom-right corner would grab the reticle and teleport you
+  elsewhere. It now only takes over when the **press begins inside the map** —
+  click into the minimap first, then drag. Clicking the map to jump still works.
+
 ## [0.63.0]
 
 ### Added
