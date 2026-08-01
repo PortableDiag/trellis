@@ -4,6 +4,26 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.62.0]
+
+### Fixed
+- **Card titles are always readable now.** They used egui's *strong* text color,
+  which is the theme's loud active-widget accent — so SynthWave rendered **pink
+  title text on a blue card**, a low-contrast eyesore. Titles now pick a light or
+  dark color from the title bar's own brightness, in every theme.
+
+### Changed
+- **Neon themes glow, and Futuristic skews harder.** Futuristic and SynthWave draw
+  a soft accent **glow** behind each card for a radiant look. Futuristic's beveled
+  tech-panel corners are bigger (a more pronounced angular skew, with a bright edge
+  on the top-right cut) while the card content stays axis-aligned.
+- **Futuristic is now clearly its own theme** — a teal-tinted dark with brighter
+  cyan, lifted well off Trellis's neutral gray so the two dark themes no longer
+  look near-identical.
+- **SynthWave reworked into a Hotline-Miami look** — a dark, near-black interface
+  (readable, not a wash of purple) with hot pink + electric cyan used only as
+  *accents*: card edges, glow, selection, active widgets, and links.
+
 ## [0.61.0]
 
 ### Added

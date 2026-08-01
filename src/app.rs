@@ -216,11 +216,13 @@ fn sticky_notes_visuals() -> egui::Visuals {
 /// A translucent-cyan sci-fi HUD ("Minority Report") look on near-black.
 fn futuristic_visuals() -> egui::Visuals {
     use egui::{Color32, Stroke};
-    let cyan = Color32::from_rgb(0x5a, 0xe6, 0xff);
-    let dim = Color32::from_rgb(0x2b, 0x88, 0xa8);
-    let text = Color32::from_rgb(0xd6, 0xf4, 0xff);
-    let bg = Color32::from_rgb(0x03, 0x07, 0x10);
-    let panel = Color32::from_rgb(0x08, 0x14, 0x20);
+    let cyan = Color32::from_rgb(0x4d, 0xe4, 0xff);
+    let dim = Color32::from_rgb(0x35, 0xa6, 0xcc);
+    let text = Color32::from_rgb(0xe2, 0xfb, 0xff);
+    let bg = Color32::from_rgb(0x03, 0x0a, 0x12);
+    // A distinctly teal-tinted panel (lifted well off Trellis's neutral gray so
+    // the two dark themes don't read the same).
+    let panel = Color32::from_rgb(0x0b, 0x22, 0x30);
 
     let mut v = egui::Visuals::dark();
     v.override_text_color = Some(text);
@@ -228,42 +230,43 @@ fn futuristic_visuals() -> egui::Visuals {
     v.panel_fill = panel;
     v.window_fill = panel;
     v.extreme_bg_color = bg;
-    v.faint_bg_color = Color32::from_rgb(0x0b, 0x1c, 0x2b);
+    v.faint_bg_color = Color32::from_rgb(0x0d, 0x28, 0x38);
     v.code_bg_color = bg;
     v.window_stroke = Stroke::new(1.0, dim);
-    v.selection.bg_fill = cyan.gamma_multiply(0.20);
+    v.selection.bg_fill = cyan.gamma_multiply(0.22);
     v.selection.stroke = Stroke::new(1.0, cyan);
 
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = panel;
     w.noninteractive.weak_bg_fill = panel;
     w.noninteractive.fg_stroke = Stroke::new(1.0, dim);
-    w.inactive.bg_fill = Color32::from_rgb(0x0d, 0x20, 0x30);
-    w.inactive.weak_bg_fill = Color32::from_rgb(0x0d, 0x20, 0x30);
+    w.inactive.bg_fill = Color32::from_rgb(0x11, 0x2b, 0x3b);
+    w.inactive.weak_bg_fill = Color32::from_rgb(0x11, 0x2b, 0x3b);
     w.inactive.fg_stroke = Stroke::new(1.0, text);
-    w.hovered.bg_fill = Color32::from_rgb(0x12, 0x2c, 0x40);
-    w.hovered.weak_bg_fill = Color32::from_rgb(0x12, 0x2c, 0x40);
+    w.hovered.bg_fill = Color32::from_rgb(0x18, 0x3a, 0x4e);
+    w.hovered.weak_bg_fill = Color32::from_rgb(0x18, 0x3a, 0x4e);
     w.hovered.fg_stroke = Stroke::new(1.5, cyan);
     w.hovered.bg_stroke = Stroke::new(1.0, dim);
-    w.active.bg_fill = Color32::from_rgb(0x16, 0x38, 0x50);
-    w.active.weak_bg_fill = Color32::from_rgb(0x16, 0x38, 0x50);
+    w.active.bg_fill = Color32::from_rgb(0x1e, 0x48, 0x60);
+    w.active.weak_bg_fill = Color32::from_rgb(0x1e, 0x48, 0x60);
     w.active.fg_stroke = Stroke::new(1.5, cyan);
     w.active.bg_stroke = Stroke::new(1.0, cyan);
     w.open.fg_stroke = Stroke::new(1.0, cyan);
     v
 }
 
-/// Synthwave / outrun neon (the classic Outrun palette): hot pink #FF3864 +
-/// electric cyan #2DE2E6 on deep violet #0D0221, with purple UI chrome.
+/// Synthwave / Hotline-Miami: a dark, near-black interface (readable, not a wash
+/// of purple) with hot pink + electric cyan used only as *accents* — edges,
+/// strokes, selection, active widgets, links — over the dark chrome.
 fn synthwave_visuals() -> egui::Visuals {
     use egui::{Color32, Stroke};
-    let pink = Color32::from_rgb(0xff, 0x38, 0x64); // #FF3864
-    let cyan = Color32::from_rgb(0x2d, 0xe2, 0xe6); // #2DE2E6
-    let magenta = Color32::from_rgb(0x92, 0x00, 0x75); // #920075
-    let text = Color32::from_rgb(0xd8, 0xf5, 0xf7); // light cyan-white
-    let bg = Color32::from_rgb(0x0d, 0x02, 0x21); // #0D0221
-    let panel = Color32::from_rgb(0x24, 0x17, 0x34); // #241734
-    let purple = Color32::from_rgb(0x2e, 0x21, 0x57); // #2E2157
+    let pink = Color32::from_rgb(0xff, 0x3b, 0x6b); // hot pink (accent only)
+    let cyan = Color32::from_rgb(0x2d, 0xe6, 0xf0); // electric cyan (accent only)
+    let magenta = Color32::from_rgb(0xb0, 0x24, 0x6e); // muted magenta chrome edge
+    let text = Color32::from_rgb(0xe8, 0xe6, 0xee); // clean light lavender-white
+    let dim = Color32::from_rgb(0x92, 0x88, 0xa6); // muted lavender-grey (secondary)
+    let bg = Color32::from_rgb(0x08, 0x06, 0x0d); // near-black, faint cool violet
+    let panel = Color32::from_rgb(0x15, 0x12, 0x1e); // dark panel (barely-there violet)
 
     let mut v = egui::Visuals::dark();
     v.override_text_color = Some(text);
@@ -271,25 +274,25 @@ fn synthwave_visuals() -> egui::Visuals {
     v.panel_fill = panel;
     v.window_fill = panel;
     v.extreme_bg_color = bg;
-    v.faint_bg_color = purple;
+    v.faint_bg_color = Color32::from_rgb(0x1c, 0x18, 0x28);
     v.code_bg_color = bg;
     v.window_stroke = Stroke::new(1.0, magenta);
-    v.selection.bg_fill = pink.gamma_multiply(0.30);
+    v.selection.bg_fill = pink.gamma_multiply(0.28);
     v.selection.stroke = Stroke::new(1.0, pink);
 
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = panel;
     w.noninteractive.weak_bg_fill = panel;
-    w.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(0xb7, 0x9a, 0xdf));
-    w.inactive.bg_fill = purple;
-    w.inactive.weak_bg_fill = purple;
+    w.noninteractive.fg_stroke = Stroke::new(1.0, dim);
+    w.inactive.bg_fill = Color32::from_rgb(0x20, 0x1b, 0x2c);
+    w.inactive.weak_bg_fill = Color32::from_rgb(0x20, 0x1b, 0x2c);
     w.inactive.fg_stroke = Stroke::new(1.0, text);
-    w.hovered.bg_fill = Color32::from_rgb(0x54, 0x0d, 0x6e); // #540D6E
-    w.hovered.weak_bg_fill = Color32::from_rgb(0x54, 0x0d, 0x6e);
+    w.hovered.bg_fill = Color32::from_rgb(0x2a, 0x23, 0x38);
+    w.hovered.weak_bg_fill = Color32::from_rgb(0x2a, 0x23, 0x38);
     w.hovered.fg_stroke = Stroke::new(1.5, cyan);
     w.hovered.bg_stroke = Stroke::new(1.0, cyan);
-    w.active.bg_fill = Color32::from_rgb(0x79, 0x1e, 0x94); // #791E94
-    w.active.weak_bg_fill = Color32::from_rgb(0x79, 0x1e, 0x94);
+    w.active.bg_fill = Color32::from_rgb(0x33, 0x2a, 0x42);
+    w.active.weak_bg_fill = Color32::from_rgb(0x33, 0x2a, 0x42);
     w.active.fg_stroke = Stroke::new(1.5, pink);
     w.active.bg_stroke = Stroke::new(1.0, pink);
     w.open.fg_stroke = Stroke::new(1.0, pink);
@@ -4437,6 +4440,7 @@ impl eframe::App for TrellisApp {
                             Theme::Futuristic => canvas::CardStyle::Futuristic,
                             _ => canvas::CardStyle::Normal,
                         },
+                        glow: matches!(self.theme, Theme::Futuristic | Theme::SynthWave),
                     };
                     let can_paste = self.card_clipboard.is_some();
                     let node_path = crate::tree::node_path(&self.doc, sel);

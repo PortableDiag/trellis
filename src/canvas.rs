@@ -40,6 +40,9 @@ pub struct Env<'a> {
     pub minimap: bool,
     /// Theme-driven card look (Normal / Sticky / Futuristic).
     pub style: CardStyle,
+    /// Draw a soft accent-colored glow behind each card (the radiant neon
+    /// themes: Futuristic, SynthWave).
+    pub glow: bool,
 }
 
 /// How cards are painted, chosen by the active theme. `Normal` is the default
@@ -66,6 +69,32 @@ fn darken(c: egui::Color32, f: f32) -> egui::Color32 {
         (c.g() as f32 * f) as u8,
         (c.b() as f32 * f) as u8,
     )
+}
+
+/// Linear-ish mix of two opaque colors (`t` = weight of `b`), for approximating
+/// what a translucent title tint looks like once painted over the body.
+fn mix(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let m = |x: u8, y: u8| (x as f32 * (1.0 - t) + y as f32 * t) as u8;
+    egui::Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
+/// Perceived luminance (0=black, 1=white) of an opaque color.
+fn luminance(c: egui::Color32) -> f32 {
+    (0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32) / 255.0
+}
+
+/// A readable card-title color for a title bar of the given background: the
+/// theme's bright text on a dark bar, near-black on a light one. This decouples
+/// the title from the theme's *accent* (egui's `strong_text_color` is the loud
+/// active-widget color), which otherwise put e.g. SynthWave's pink text on a
+/// blue card — a contrast no-no.
+fn title_text_color(v: &egui::Visuals, bar_bg: egui::Color32) -> egui::Color32 {
+    if luminance(bar_bg) < 0.5 {
+        v.override_text_color.unwrap_or(egui::Color32::from_gray(0xEC))
+    } else {
+        egui::Color32::from_gray(0x18)
+    }
 }
 
 /// A rectangle with its top-right and bottom-left corners cut at 45° (a diagonal
@@ -794,7 +823,33 @@ fn card_ui(
 
     let accent = egui::Color32::from_rgb(card.color[0], card.color[1], card.color[2]);
     let p = ui.painter_at(clip);
+    let panel = ui.visuals().panel_fill;
     let title_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), title_h));
+    let bevel_c = 18.0 * zoom; // Futuristic corner-cut (bigger = more skewed)
+
+    // Radiant glow behind the frame — concentric accent rings, brightest at the
+    // edge, fading outward (the neon themes: Futuristic / SynthWave).
+    if env.glow {
+        let bevel = env.style == CardStyle::Futuristic;
+        for i in (1..=5).rev() {
+            let grow = i as f32 * 2.2 * zoom;
+            let a = 0.05 + 0.035 * (5 - i) as f32; // inner rings brighter
+            let col = accent.gamma_multiply(a);
+            let stroke = egui::Stroke::new(2.2 * zoom, col);
+            if bevel {
+                p.add(egui::Shape::convex_polygon(
+                    bevel_diag(rect.expand(grow), bevel_c + grow),
+                    egui::Color32::TRANSPARENT,
+                    stroke,
+                ));
+            } else {
+                p.rect_stroke(rect.expand(grow), r + grow, stroke);
+            }
+        }
+    }
+
+    // The effective title-bar background (for picking a readable title color).
+    let title_bg;
     // --- card frame, per theme ---------------------------------------------
     match env.style {
         CardStyle::Sticky => {
@@ -806,6 +861,7 @@ fn card_ui(
             } else {
                 accent
             };
+            title_bg = paper;
             p.rect_filled(rect, r, paper);
             p.rect_stroke(rect, r, egui::Stroke::new(1.0, darken(paper, 0.72)));
             // A faint divider under the title keeps it readable without a
@@ -820,21 +876,30 @@ fn card_ui(
         }
         CardStyle::Futuristic => {
             // Angular tech panel: sharp frame with the top-right and bottom-left
-            // corners beveled, and a cyan-accent edge.
-            let c = 14.0 * zoom;
+            // corners beveled, and a bright accent edge. A brighter diagonal on
+            // the top-right cut plays up the skew (content stays axis-aligned).
+            title_bg = mix(panel, accent, 0.30);
             p.add(egui::Shape::convex_polygon(
-                bevel_diag(rect, c),
-                ui.visuals().panel_fill,
-                egui::Stroke::new(1.2, accent),
+                bevel_diag(rect, bevel_c),
+                panel,
+                egui::Stroke::new(1.6, accent),
             ));
             p.add(egui::Shape::convex_polygon(
-                bevel_title(title_rect, c),
-                accent.gamma_multiply(0.28),
+                bevel_title(title_rect, bevel_c),
+                accent.gamma_multiply(0.30),
                 egui::Stroke::NONE,
             ));
+            p.line_segment(
+                [
+                    egui::pos2(rect.right() - bevel_c, rect.top()),
+                    egui::pos2(rect.right(), rect.top() + bevel_c),
+                ],
+                egui::Stroke::new(2.2 * zoom, accent),
+            );
         }
         CardStyle::Normal => {
-            p.rect_filled(rect, r, ui.visuals().panel_fill);
+            title_bg = mix(panel, accent, 0.35);
+            p.rect_filled(rect, r, panel);
             p.rect_stroke(rect, r, egui::Stroke::new(1.0, accent));
             p.rect_filled(title_rect, r, accent.gamma_multiply(0.35));
         }
@@ -921,7 +986,7 @@ fn card_ui(
         egui::Align2::LEFT_CENTER,
         title_text,
         egui::FontId::proportional(13.0 * zoom),
-        ui.visuals().strong_text_color(),
+        title_text_color(ui.visuals(), title_bg),
     );
 
     // Edit/view toggle button on the right of the title bar (for text/code).
