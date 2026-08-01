@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.59.1]
+
+### Fixed
+- **Tables now scale uniformly when you zoom the canvas** (`ctrl+scroll`). The card frame and cell
+  text scaled with zoom, but the cell **rectangles** (column widths, row heights, handles) were
+  drawn at a fixed pixel size — so the grid stayed full-size inside a shrinking card and columns got
+  clipped. Every table dimension is now multiplied by the zoom, so the whole table shrinks and grows
+  as one, like every other card.
+
 ## [0.59.0]
 
 ### Added

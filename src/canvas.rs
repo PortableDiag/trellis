@@ -1258,7 +1258,7 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
             egui::ScrollArea::horizontal()
                 .id_salt(("table_h", card.id))
                 .show(ui, |ui| {
-                    table_ui(ui, card, table, actions);
+                    table_ui(ui, card, table, zoom, actions);
                 });
         }
         k @ CardKind::Image { .. } => {
@@ -1746,10 +1746,23 @@ const TABLE_HANDLE_W: f32 = 20.0;
 /// import/export), row/column handles with insert/delete menus, draggable
 /// column-resize grips, and a TextEdit per cell. View mode renders the same
 /// grid read-only with cell colors.
-fn table_ui(ui: &mut egui::Ui, card: &Card, table: &crate::model::TableData, actions: &mut Vec<CanvasAction>) {
+fn table_ui(
+    ui: &mut egui::Ui,
+    card: &Card,
+    table: &crate::model::TableData,
+    zoom: f32,
+    actions: &mut Vec<CanvasAction>,
+) {
     let id = card.id;
     let cols = table.n_cols();
     let focus_key = ui.id().with(("table_focus", id));
+    // Every pixel dimension below is multiplied by `zoom` so the grid scales
+    // uniformly with the card (the cell *text* is already scaled by the body's
+    // font scaler; the cell rects/handles/spacing were not, which left the grid
+    // full-size inside a shrinking frame). `cw(c)` is a column's on-screen width.
+    let row_h = TABLE_ROW_H * zoom;
+    let handle_w = TABLE_HANDLE_W * zoom;
+    let cw = |c: usize| table.col_width(c) * zoom;
 
     if card.editing {
         // --- toolbar ------------------------------------------------------
@@ -1814,13 +1827,13 @@ fn table_ui(ui: &mut egui::Ui, card: &Card, table: &crate::model::TableData, act
 
         // --- column header strip (letters + resize grips) -----------------
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.add_space(TABLE_HANDLE_W + 2.0);
+            ui.spacing_mut().item_spacing.x = 2.0 * zoom;
+            ui.add_space(handle_w + 2.0 * zoom);
             for c in 0..cols {
-                let w = table.col_width(c);
+                let w = cw(c);
                 let btn = ui.add_sized(
-                    [(w - 10.0).max(20.0), 16.0],
-                    egui::Button::new(egui::RichText::new(col_letter(c)).size(10.0)).small(),
+                    [(w - 10.0 * zoom).max(20.0 * zoom), 16.0 * zoom],
+                    egui::Button::new(egui::RichText::new(col_letter(c)).size(10.0 * zoom)).small(),
                 );
                 btn.context_menu(|ui| {
                     if ui.button("Insert column left").clicked() {
@@ -1838,7 +1851,7 @@ fn table_ui(ui: &mut egui::Ui, card: &Card, table: &crate::model::TableData, act
                 });
                 // Resize grip.
                 let (grip, gresp) =
-                    ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::drag());
+                    ui.allocate_exact_size(egui::vec2(8.0 * zoom, 16.0 * zoom), egui::Sense::drag());
                 let gcol = if gresp.hovered() || gresp.dragged() {
                     ui.visuals().strong_text_color()
                 } else {
@@ -1849,7 +1862,9 @@ fn table_ui(ui: &mut egui::Ui, card: &Card, table: &crate::model::TableData, act
                     egui::Stroke::new(2.0, gcol),
                 );
                 if gresp.dragged() && gresp.drag_delta().x != 0.0 {
-                    actions.push(CanvasAction::TableSetColWidth(id, c, w + gresp.drag_delta().x));
+                    // Drag is in screen px; store the world-space column width.
+                    let world_w = table.col_width(c) + gresp.drag_delta().x / zoom;
+                    actions.push(CanvasAction::TableSetColWidth(id, c, world_w));
                 }
             }
         });
@@ -1859,11 +1874,11 @@ fn table_ui(ui: &mut egui::Ui, card: &Card, table: &crate::model::TableData, act
     let header_bg = ui.visuals().faint_bg_color;
     for (r, row) in table.rows.iter().enumerate() {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().item_spacing.x = 2.0 * zoom;
             if card.editing {
                 let rh = ui.add_sized(
-                    [TABLE_HANDLE_W, TABLE_ROW_H],
-                    egui::Button::new(egui::RichText::new(format!("{}", r + 1)).size(10.0)).small(),
+                    [handle_w, row_h],
+                    egui::Button::new(egui::RichText::new(format!("{}", r + 1)).size(10.0 * zoom)).small(),
                 );
                 rh.context_menu(|ui| {
                     if ui.button("Insert row above").clicked() {
@@ -1881,9 +1896,9 @@ fn table_ui(ui: &mut egui::Ui, card: &Card, table: &crate::model::TableData, act
                 });
             }
             for (c, cell) in row.iter().enumerate() {
-                let w = table.col_width(c);
+                let w = cw(c);
                 let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(w, TABLE_ROW_H), egui::Sense::hover());
+                    ui.allocate_exact_size(egui::vec2(w, row_h), egui::Sense::hover());
                 // Cell background: explicit color, else header shading, else a
                 // faint outline so the grid reads as a grid.
                 if let Some([rr, gg, bb]) = cell.bg {
@@ -1902,8 +1917,8 @@ fn table_ui(ui: &mut egui::Ui, card: &Card, table: &crate::model::TableData, act
                     let mut text = cell.text.clone();
                     let mut te = egui::TextEdit::singleline(&mut text)
                         .frame(false)
-                        .margin(egui::vec2(4.0, 3.0))
-                        .desired_width(w - 8.0);
+                        .margin(egui::vec2(4.0 * zoom, 3.0 * zoom))
+                        .desired_width(w - 8.0 * zoom);
                     if let Some(fg) = fg {
                         te = te.text_color(fg);
                     }
@@ -1915,7 +1930,7 @@ fn table_ui(ui: &mut egui::Ui, card: &Card, table: &crate::model::TableData, act
                         actions.push(CanvasAction::TableSetCell(id, r, c, text));
                     }
                 } else {
-                    let clipped = ui.painter_at(rect.shrink2(egui::vec2(4.0, 0.0)));
+                    let clipped = ui.painter_at(rect.shrink2(egui::vec2(4.0 * zoom, 0.0)));
                     let galley = ui.fonts(|f| {
                         f.layout_no_wrap(
                             cell.text.clone(),
@@ -1931,7 +1946,7 @@ fn table_ui(ui: &mut egui::Ui, card: &Card, table: &crate::model::TableData, act
                     });
                     clipped.galley(
                         egui::pos2(
-                            rect.left() + 4.0,
+                            rect.left() + 4.0 * zoom,
                             rect.center().y - galley.size().y / 2.0,
                         ),
                         galley,
