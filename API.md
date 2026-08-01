@@ -62,6 +62,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `group` | all | group id this card belongs to, or null — set via the group sub-resource (below) |
 | `docked_to` | all | id of the card this one is docked to, or null — set via the dock sub-resource |
 | `body` | text, code | Markdown (text) or source (code) |
+| `inline_image_names` | text | names of images embedded in the body via `![](trellis:N)` markers (read; present only when the card has inline images). Set/replace with the `inline_images` field on create/PATCH |
 | `lang` | code | syntax-highlight language, e.g. `"rust"` |
 | `items` | checklist | `[{ "done": bool, "text": string }]` |
 | `image_name`, `image_names`, `bytes` | image | first/all image names + total byte count (read); set image bytes via the images sub-resource (below) |
@@ -120,7 +121,7 @@ for a search hit that matched a **node title** rather than a card.
 POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
-POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, color?, font_scale?, fit?, image_base64?}
+POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, color?, font_scale?, fit?, image_base64?, inline_images?}
   → 201 {"id":<new>}   | 404 if node doesn't exist
 ```
 `kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
@@ -129,9 +130,13 @@ POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, co
 each other. `size` is `[w,h]`. `color` sets the title-bar accent at creation (see
 the accepted formats below). `items` is used only for `checklist`; `lang` only
 for `code`. `image_base64` gives an `image` card its first image (base64 file
-bytes; the `title` becomes its name). **`fit: true`** sizes the card to fit its
-content (overrides `size`), so a card comes out readable instead of a tiny square —
-recommended for agent-created cards. No effect on image cards.
+bytes; the `title` becomes its name). `inline_images` embeds images **inside a
+text card's body**: pass an array of base64 file bytes, then reference each in
+`body` with a `![alt](trellis:N)` marker (`N` = its 0-based index in the array);
+they export as data URIs in HTML/Markdown and show on the card's PDF page.
+**`fit: true`** sizes the card to fit its content (overrides `size`), so a card
+comes out readable instead of a tiny square — recommended for agent-created
+cards. No effect on image cards.
 
 ### Update
 ```
@@ -140,7 +145,7 @@ PATCH /api/nodes/{id}              {title?, color?, bg?}
         color: tag color; bg: basket background color — both setting only
         (can't clear via API; use the app's Default to reset)
 
-PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, fit?, lang?, pos?, size?, items?, rows?, header?}
+PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, fit?, lang?, pos?, size?, items?, rows?, header?, inline_images?}
   → 200 {<updated card>}   | 404
 ```
 Every field is optional; only those present are changed. `pos`/`size` are
@@ -148,7 +153,8 @@ Every field is optional; only those present are changed. `pos`/`size` are
 every other field; overrides `size`); `font_scale` sizes text/code body font (1.0 = default);
 `lang` applies to code cards, `items` replaces a checklist's items (send them in
 the desired order to **reorder** a checklist), `rows` bulk-replaces a table's cell
-text, `header` toggles a table's header row. **`kind` converts the card to
+text, `header` toggles a table's header row, `inline_images` replaces the text
+card's embedded inline images (same base64 + `![](trellis:N)` scheme as create). **`kind` converts the card to
 another kind** (`text`/`code`/`checklist`/`table`/`image`) — apply it in the same
 PATCH as `items`/`rows`/etc. and the new content lands in the converted card. The
 response is the full updated card object.
