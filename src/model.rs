@@ -1973,19 +1973,31 @@ impl Document {
     /// Cards that carry a `status::` property, grouped by status value (for a
     /// Kanban board). Each entry: `(node, card, card title, node title)`.
     #[allow(clippy::type_complexity)]
-    pub fn cards_by_status(&self) -> std::collections::BTreeMap<String, Vec<(NodeId, CardId, String, String)>> {
-        let mut m: std::collections::BTreeMap<String, Vec<(NodeId, CardId, String, String)>> =
+    pub fn cards_by_status(&self) -> std::collections::BTreeMap<String, Vec<KanbanCard>> {
+        let mut m: std::collections::BTreeMap<String, Vec<KanbanCard>> =
             std::collections::BTreeMap::new();
         for node in self.nodes.values() {
             for card in &node.cards {
-                if let Some((_, v)) = card.properties().into_iter().find(|(k, _)| k == "status") {
-                    let title = if card.title.trim().is_empty() {
-                        searchable_body(card).lines().next().unwrap_or("").chars().take(50).collect()
-                    } else {
-                        card.title.clone()
-                    };
-                    m.entry(v.to_lowercase()).or_default().push((node.id, card.id, title, node.title.clone()));
-                }
+                let props = card.properties();
+                let Some((_, status)) = props.iter().find(|(k, _)| k == "status") else {
+                    continue;
+                };
+                let title = if card.title.trim().is_empty() {
+                    searchable_body(card).lines().next().unwrap_or("").chars().take(50).collect()
+                } else {
+                    card.title.clone()
+                };
+                let due = props.iter().find(|(k, _)| k == "due").map(|(_, v)| v.clone());
+                let tags = extract_tags(&format!("{} {}", card.title, searchable_body(card)));
+                m.entry(status.to_lowercase()).or_default().push(KanbanCard {
+                    node: node.id,
+                    card: card.id,
+                    title,
+                    node_title: node.title.clone(),
+                    color: card.color,
+                    due,
+                    tags,
+                });
             }
         }
         m
@@ -2384,6 +2396,20 @@ pub struct TaskItem {
     /// `due` parsed to days since the Unix epoch, or `None` if unparseable.
     pub due_days: Option<i64>,
     pub done: bool,
+}
+
+/// A card on the Kanban board — its status column plus the bits the board shows.
+pub struct KanbanCard {
+    pub node: NodeId,
+    pub card: CardId,
+    pub title: String,
+    pub node_title: String,
+    /// The card's accent color `[r,g,b]` (shown as the card's border on the board).
+    pub color: [u8; 3],
+    /// The `due::` value if the card has one (e.g. `2026-08-15`).
+    pub due: Option<String>,
+    /// `#tags` on the card, in first-seen order.
+    pub tags: Vec<String>,
 }
 
 /// Parse a `YYYY-MM-DD` date to days since 1970-01-01 (UTC), or `None`. Uses

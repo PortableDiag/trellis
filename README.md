@@ -149,9 +149,11 @@ from the main cluster, and click or drag on it to jump there without zooming out
 - **Link graph** (View → Link graph) — a force-directed picture of the wiki-link
   web across the tree; click a node to open it.
 - **Kanban board** (View → Kanban board) — cards with a `status::` property shown
-  as columns (To do / Doing / Done, plus any custom status); drag a card between
-  columns to change its status, or click one to jump straight to that card on its
-  basket. Reads the same properties as the agenda.
+  as columns (To do / Doing / Done, plus any custom status) that divide the window
+  width and each scroll their own cards. Every card shows its accent color, its
+  `due::` date (red when overdue), and its `#tags`. Drag a card between columns to
+  change its status, or click one to jump straight to it on its basket; toggle
+  **Show done** to hide the finished pile. Reads the same properties as the agenda.
 - **View → Themes** — Trellis (default), Light, or Terminal Green
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN

@@ -357,6 +357,54 @@ fn card_kind_label(kind: &CardKind) -> &'static str {
     }
 }
 
+/// One draggable Kanban card: an accent-colored frame with the title, its `due::`
+/// date (red when overdue), up to three `#tags`, and its basket. Click to reveal
+/// the card; drag it to another column to change its `status`.
+fn kanban_card_ui(
+    ui: &mut egui::Ui,
+    kc: &crate::model::KanbanCard,
+    today: i64,
+    jump: &mut Option<(NodeId, CardId)>,
+) {
+    let accent = egui::Color32::from_rgb(kc.color[0], kc.color[1], kc.color[2]);
+    let src = ui.dnd_drag_source(
+        egui::Id::new(("kb", kc.node, kc.card)),
+        (kc.node, kc.card),
+        |ui| {
+            egui::Frame::none()
+                .fill(ui.visuals().faint_bg_color)
+                .stroke(egui::Stroke::new(1.5, accent))
+                .rounding(4.0)
+                .inner_margin(6.0)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width()); // fill the column
+                    ui.label(egui::RichText::new(&kc.title).strong());
+                    if kc.due.is_some() || !kc.tags.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            if let Some(due) = &kc.due {
+                                let overdue =
+                                    crate::model::parse_ymd(due).map_or(false, |d| d < today);
+                                let col = if overdue {
+                                    egui::Color32::from_rgb(0xff, 0x6b, 0x6b)
+                                } else {
+                                    ui.visuals().weak_text_color()
+                                };
+                                ui.small(egui::RichText::new(format!("⏳ {due}")).color(col));
+                            }
+                            for t in kc.tags.iter().take(3) {
+                                ui.small(egui::RichText::new(format!("#{t}")).weak());
+                            }
+                        });
+                    }
+                    ui.small(egui::RichText::new(&kc.node_title).weak());
+                });
+        },
+    );
+    if src.response.clicked() {
+        *jump = Some((kc.node, kc.card));
+    }
+}
+
 pub struct TrellisApp {
     doc: Document,
     selected: Option<NodeId>,
@@ -430,6 +478,8 @@ pub struct TrellisApp {
     backlinks_open: bool,
     /// Kanban board window: cards grouped by `status::`, drag between columns.
     kanban_open: bool,
+    /// Kanban: show the `done` column (it piles up; hide it to focus on active work).
+    kanban_show_done: bool,
     /// Link-graph window state (force-directed layout, rebuilt when opened).
     graph_open: bool,
     graph_built: bool,
@@ -657,6 +707,7 @@ impl TrellisApp {
             agenda_show_done: false,
             backlinks_open: false,
             kanban_open: false,
+            kanban_show_done: true,
             graph_open: false,
             graph_built: false,
             graph_layout: HashMap::new(),
@@ -3882,48 +3933,67 @@ impl TrellisApp {
                 cols.push(k.clone());
             }
         }
+        if !self.kanban_show_done {
+            cols.retain(|c| c != "done");
+        }
+        let today = crate::api::today_days();
+        let mut show_done = self.kanban_show_done;
         let mut jump: Option<(NodeId, CardId)> = None;
         let mut moves: Vec<(NodeId, CardId, String)> = Vec::new();
         egui::Window::new("Kanban board")
             .open(&mut open)
-            .default_size([760.0, 480.0])
+            .default_size([900.0, 560.0])
             .resizable(true)
             .show(ctx, |ui| {
-                ui.small("Cards with a status:: property. Drag a card to another column to change its status.");
+                ui.horizontal(|ui| {
+                    ui.small("Cards with a status:: property. Drag a card between columns to change its status.");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.checkbox(&mut show_done, "Show done");
+                    });
+                });
                 if board.is_empty() {
                     ui.weak("No cards have a status:: property yet. Add `status:: todo` to a card.");
                 }
+                ui.separator();
+
+                // Columns divide the window width so they fit without scrolling;
+                // only scroll horizontally once there are more columns than fit
+                // (each floored at 180px).
+                let n = cols.len().max(1) as f32;
+                let gap = ui.spacing().item_spacing.x;
+                let col_w = (((ui.available_width() - gap * (n - 1.0)) / n) - 2.0).max(180.0);
+                let col_h = ui.available_height().max(140.0);
+
                 egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.horizontal_top(|ui| {
                         let empty = Vec::new();
                         for col in &cols {
                             let cards = board.get(col).unwrap_or(&empty);
+                            // top_down layout so cards stack vertically (the group
+                            // would otherwise inherit this row's horizontal layout).
                             let resp = ui
-                                .allocate_ui(egui::vec2(210.0, ui.available_height().max(120.0)), |ui| {
-                                    ui.group(|ui| {
-                                        ui.set_min_width(196.0);
-                                        ui.set_min_height(110.0);
-                                        ui.strong(format!("{col}  ({})", cards.len()));
-                                        ui.separator();
-                                        for &(node, card, ref title, ref nt) in cards {
-                                            let src = ui.dnd_drag_source(
-                                                egui::Id::new(("kb", node, card)),
-                                                (node, card),
-                                                |ui| {
-                                                    ui.group(|ui| {
-                                                        ui.set_min_width(176.0);
-                                                        ui.label(title);
-                                                        ui.small(egui::RichText::new(nt).weak());
-                                                    });
-                                                },
-                                            );
-                                            if src.response.clicked() {
-                                                jump = Some((node, card));
-                                            }
-                                        }
-                                    })
-                                    .response
-                                })
+                                .allocate_ui_with_layout(
+                                    egui::vec2(col_w, col_h),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                                            ui.set_width(col_w - 12.0);
+                                            ui.set_min_height(col_h - 8.0);
+                                            ui.strong(format!("{col}  ({})", cards.len()));
+                                            ui.separator();
+                                            // Each column scrolls its own cards, so a
+                                            // tall column never overflows the board.
+                                            egui::ScrollArea::vertical()
+                                                .id_salt(("kbcol", col))
+                                                .auto_shrink([false, false])
+                                                .show(ui, |ui| {
+                                                    for kc in cards {
+                                                        kanban_card_ui(ui, kc, today, &mut jump);
+                                                    }
+                                                });
+                                        });
+                                    },
+                                )
                                 .response;
                             if let Some(p) = resp.dnd_release_payload::<(NodeId, CardId)>() {
                                 moves.push((p.0, p.1, col.clone()));
@@ -3933,6 +4003,7 @@ impl TrellisApp {
                 });
             });
         self.kanban_open = open;
+        self.kanban_show_done = show_done;
         for (n, c, status) in moves {
             if self.doc.set_card_property(n, c, "status", &status) {
                 self.mark_dirty();

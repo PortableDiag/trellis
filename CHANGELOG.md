@@ -4,6 +4,21 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.60.0]
+
+### Fixed
+- **Kanban board no longer sprawls sideways.** Cards in a column were laid out *horizontally* (the
+  column's group inherited the row's layout direction), so a column was as wide as all its cards in a
+  row — a `done` column with a dozen cards ran far off the right edge and forced endless horizontal
+  scrolling. Cards now **stack vertically**, and each column **scrolls its own cards**, so a tall
+  column never overflows the board.
+
+### Changed
+- **Kanban board is much nicer.** Columns now **divide the window width** (no horizontal scroll until
+  you genuinely have more columns than fit). Each card shows its **accent color** (as its border),
+  its **`due::` date** (red when overdue), and its **`#tags`** — not just the title. A **Show done**
+  toggle hides the finished pile to focus on active work. Bigger default window.
+
 ## [0.59.1]
 
 ### Fixed
