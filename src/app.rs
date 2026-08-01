@@ -264,6 +264,7 @@ fn synthwave_visuals() -> egui::Visuals {
     let cyan = Color32::from_rgb(0x2d, 0xe6, 0xf0); // electric cyan (accent only)
     let magenta = Color32::from_rgb(0xb0, 0x24, 0x6e); // muted magenta chrome edge
     let text = Color32::from_rgb(0xe8, 0xe6, 0xee); // clean light lavender-white
+    let bright = Color32::from_rgb(0xf6, 0xf3, 0xfc); // strong/emphasis text (near-white)
     let dim = Color32::from_rgb(0x92, 0x88, 0xa6); // muted lavender-grey (secondary)
     let bg = Color32::from_rgb(0x08, 0x06, 0x0d); // near-black, faint cool violet
     let panel = Color32::from_rgb(0x15, 0x12, 0x1e); // dark panel (barely-there violet)
@@ -293,9 +294,13 @@ fn synthwave_visuals() -> egui::Visuals {
     w.hovered.bg_stroke = Stroke::new(1.0, cyan);
     w.active.bg_fill = Color32::from_rgb(0x33, 0x2a, 0x42);
     w.active.weak_bg_fill = Color32::from_rgb(0x33, 0x2a, 0x42);
-    w.active.fg_stroke = Stroke::new(1.5, pink);
+    // Strong/emphasis text (egui's strong_text_color = active.fg) must be readable,
+    // NOT the loud pink — pink stays an accent on the active border below, on
+    // selection, links, and window edges. Otherwise every `.strong()` label
+    // (Kanban titles, search/tag/agenda/backlinks headers) renders pink.
+    w.active.fg_stroke = Stroke::new(1.5, bright);
     w.active.bg_stroke = Stroke::new(1.0, pink);
-    w.open.fg_stroke = Stroke::new(1.0, pink);
+    w.open.fg_stroke = Stroke::new(1.0, bright);
     v
 }
 

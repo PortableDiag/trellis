@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.62.1]
+
+### Fixed
+- **SynthWave no longer paints every bold label pink.** The theme's *strong* text
+  color (used by every `.strong()` label — Kanban card titles, and the Search /
+  Tags / Agenda / Backlinks headers) was the loud pink accent, so emphasis text
+  read pink-on-dark all over the app. Strong text is now a bright near-white;
+  pink stays an accent on active borders, selection, links, and window edges.
+
 ## [0.62.0]
 
 ### Fixed
