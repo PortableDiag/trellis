@@ -85,7 +85,9 @@ from the main cluster, and click or drag on it to jump there without zooming out
   get the same via `"fit": true` on card create/update.
 - **Templates** — right-click a card → **Save as template** to reuse a card you make often
   (e.g. a *Today's Todos* checklist); right-click the canvas → **Insert template** to drop a
-  fresh copy at the click point. Templates persist across restarts.
+  fresh copy at the click point. Edit a master card and right-click → **Update template** to
+  re-snapshot that template *in place* (keeps its name), so a dedicated Templates node becomes
+  a maintainable template library. Templates persist across restarts.
 
 **Documents & interop**
 - **Drag & drop** text/Markdown or image files onto a basket to create the
@@ -156,9 +158,10 @@ from the main cluster, and click or drag on it to jump there without zooming out
   **Show done** to hide the finished pile. Reads the same properties as the agenda.
 - **View → Themes** — Trellis (default), Light, Terminal Green, **Sticky Notes**
   (solid single-color paper cards — yellow by default, the whole note takes the
-  color you give it — on a cork board), **Futuristic** (a Minority-Report blue HUD
-  with beveled tech-panel cards), or **SynthWave** (the outrun neon palette:
-  hot pink + electric cyan on deep violet)
+  color you give it — on a cork board), **Futuristic** (a Minority-Report teal HUD
+  with beveled tech-panel cards), or **SynthWave** (a dark, near-black
+  Hotline-Miami interface with hot pink + electric cyan used only as *accents*).
+  The two neon themes draw a soft accent **glow** behind each card.
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN
   access** in Settings for phones/other devices) with full parity to the app:
@@ -166,16 +169,20 @@ from the main cluster, and click or drag on it to jump there without zooming out
   kind, edit tables cell-by-cell (colors, headers, rows/cols), upload images
   (incl. inline images in text cards), build groups, join/leave and dock cards,
   **reorder and reparent nodes** (`/nodes/{id}/move`), **reorder cards** within a
-  basket (`/cards/{cid}/move`), **expand/collapse** subtrees, trigger a
-  **backup**, and export the document (incl. PDF/PNG) — so agents can collaborate
-  on the same notes. **Live updates:** `GET /api/wait` long-polls so clients react
+  basket (`/cards/{cid}/move`), **expand/collapse** subtrees, query the tree by
+  `#tags` / `key:: value` properties / due-date **agenda** (`/tasks`) / **Kanban**
+  columns (`/kanban`) / wiki-link **graph**, register · insert · **update**
+  reusable card **templates**, trigger a **backup**, and export the document
+  (incl. PDF/PNG) — so agents can collaborate on the same notes. **Live updates:** `GET /api/wait` long-polls so clients react
   the instant anything changes. Enable it in **Tools → Settings**; see
   [API.md](API.md).
 - **Web clipper** — a small Chrome/Edge extension (`web-clipper/`) clips the
   current page or your text selection into a Trellis basket over the LAN API.
 - **Companion mobile app** — a native Android viewer/capture app talks to the
   agent API over the LAN: browse the tree and baskets, full-text search, zoom
-  images, and capture a note or photo into a node, all updating live. Separate
+  images, capture a note or photo into a node, and read-only **Agenda** and
+  **Kanban** task views — all updating live, and with an **offline** cache so a
+  document you've opened stays readable when the desktop is unreachable. Separate
   repo: [trellis-android](https://github.com/PortableDiag/trellis-android).
 
 ## Keyboard
