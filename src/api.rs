@@ -97,6 +97,8 @@ pub enum ApiRequest {
     TemplateList,
     TemplateRegister { node: NodeId, card: u64, title: Option<String> },
     TemplateInsert { index: usize, node: NodeId, pos: Option<[f32; 2]> },
+    // Re-snapshot an existing template slot from a (usually edited) card, in place.
+    TemplateUpdate { index: usize, node: NodeId, card: u64, title: Option<String> },
     TemplateDelete(usize),
 }
 
@@ -667,6 +669,19 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
                 idx.parse().map_err(|_| (400, format!("bad template index: {idx}")))?;
             let i: InsInput = parse(body)?;
             Ok(ApiRequest::TemplateInsert { index, node: i.node, pos: i.pos })
+        }
+        (Method::Post, ["api", "templates", idx, "update"]) => {
+            #[derive(Deserialize)]
+            struct UpdInput {
+                node: NodeId,
+                card: u64,
+                #[serde(default)]
+                title: Option<String>,
+            }
+            let index: usize =
+                idx.parse().map_err(|_| (400, format!("bad template index: {idx}")))?;
+            let i: UpdInput = parse(body)?;
+            Ok(ApiRequest::TemplateUpdate { index, node: i.node, card: i.card, title: i.title })
         }
         (Method::Delete, ["api", "templates", idx]) => {
             let index: usize =
@@ -1494,6 +1509,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::TemplateList
         | ApiRequest::TemplateRegister { .. }
         | ApiRequest::TemplateInsert { .. }
+        | ApiRequest::TemplateUpdate { .. }
         | ApiRequest::TemplateDelete(_) => {
             (false, ApiResponse::err(500, "request not handled by the app loop"))
         }

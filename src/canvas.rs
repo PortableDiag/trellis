@@ -178,6 +178,9 @@ pub enum CanvasAction {
     ImportCard(egui::Pos2),
     /// Save a card as a reusable template (stored in app config).
     SaveAsTemplate(CardId),
+    /// Overwrite the template at this index from this card (re-snapshot in place),
+    /// so an edited Templates-folder master updates the stored template.
+    UpdateTemplate(usize, CardId),
     /// Insert the template at this index as a new card at the world pos.
     InsertTemplate(usize, egui::Pos2),
     /// Delete the saved template at this index.
@@ -977,7 +980,7 @@ fn card_ui(
     if handle.double_clicked() && supports_edit(&card.kind) {
         actions.push(CanvasAction::SetEditing(card.id, !card.editing));
     }
-    handle.context_menu(|ui| card_menu(ui, card, node_path, actions));
+    handle.context_menu(|ui| card_menu(ui, card, node_path, env.templates, actions));
 
     // Title label.
     let title_text = if card.title.is_empty() {
@@ -1680,7 +1683,13 @@ fn card_path(card: &Card, node_path: &str) -> String {
     }
 }
 
-fn card_menu(ui: &mut egui::Ui, card: &Card, node_path: &str, actions: &mut Vec<CanvasAction>) {
+fn card_menu(
+    ui: &mut egui::Ui,
+    card: &Card,
+    node_path: &str,
+    templates: &[String],
+    actions: &mut Vec<CanvasAction>,
+) {
     if supports_edit(&card.kind) {
         let label = if card.editing { "Preview" } else { "Edit" };
         if ui.button(label).clicked() {
@@ -1708,6 +1717,20 @@ fn card_menu(ui: &mut egui::Ui, card: &Card, node_path: &str, actions: &mut Vec<
     {
         actions.push(CanvasAction::SaveAsTemplate(card.id));
         ui.close_menu();
+    }
+    // Overwrite an existing template from this (edited) card — the "template
+    // editor" flow: keep a master in a Templates node, tweak it, then update.
+    if !templates.is_empty() {
+        ui.menu_button("Update template", |ui| {
+            ui.label("Replace which template with this card?");
+            for (i, name) in templates.iter().enumerate() {
+                let label = if name.trim().is_empty() { "(untitled)" } else { name.as_str() };
+                if ui.button(label).clicked() {
+                    actions.push(CanvasAction::UpdateTemplate(i, card.id));
+                    ui.close_menu();
+                }
+            }
+        });
     }
     if ui.button("Copy card").clicked() {
         actions.push(CanvasAction::CopyCard(card.id));

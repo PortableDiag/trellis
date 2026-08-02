@@ -442,10 +442,19 @@ POST   /api/templates/{index}/insert  {node, pos?}
   → 200 {"node":<id>,"card":{<created card>}}   | 404 (no template / node)
   Stamp the template into a basket as a new card (`pos` defaults to [40,40]).
 
+POST   /api/templates/{index}/update  {node, card, title?}
+  → 200 {"updated":<index>,"title":"..."}   | 404 (no template / node / card)
+  Re-snapshot an existing template slot from a card, in place — the template keeps
+  its index (and its current name unless `title` is given). This is the "template
+  editor" flow: keep a master card in a Templates node, edit it, then update, and
+  every future insert stamps the new version.
+
 DELETE /api/templates/{index}      → 200 {"deleted":<index>,"title":"..."}   | 404
 ```
 There is no separate "create a template from scratch" body — register from a card
-so the template captures exactly what you'd see on the canvas.
+so the template captures exactly what you'd see on the canvas. Editing a card you
+registered does **not** change the stored template until you `update` it (or the
+right-click **Update template**) — templates are snapshots, not live links.
 
 ### Live updates (long-poll)
 Be woken the instant the document changes, instead of polling on a timer.
@@ -575,6 +584,12 @@ IDX=$(curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID,\"card\":$CID,\"title\":\"
 # 3) Later — stamp a fresh copy into any basket; the response includes the new card.
 #    Then fill/colour its cells (set_cell / set_bg green|red) as you verify each task.
 curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID}" $API/templates/$IDX/insert
+
+# 3b) The "template editor" flow — keep the master card, edit it, then re-snapshot
+#     the SAME template in place (keeps its index + name). Every later insert now
+#     stamps the new version. (Add a column, then update.)
+curl -s -H "X-API-Key: $KEY" -d '{"op":"insert_col","at":3}' $API/nodes/$NID/cards/$CID/table
+curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID,\"card\":$CID}" $API/templates/$IDX/update
 
 # List the saved templates, or delete one by index.
 curl -s -H "X-API-Key: $KEY" $API/templates

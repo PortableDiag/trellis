@@ -1291,6 +1291,27 @@ impl TrellisApp {
                     None => Some(api::ApiResponse::err(500, "could not insert template")),
                 }
             }
+            // Re-snapshot an existing template slot from a card, keeping its index
+            // (and its title unless a new one is given). This is what makes a
+            // Templates-folder master editable: tweak the card, then update.
+            api::ApiRequest::TemplateUpdate { index, node, card, title } => {
+                if *index >= self.templates.len() {
+                    return Some(api::ApiResponse::err(404, "no template at that index"));
+                }
+                let Some(json) = self.doc.export_card_json(*node, *card) else {
+                    return Some(api::ApiResponse::err(404, "node or card not found"));
+                };
+                let Some(mut exp) = crate::model::parse_card_export(&json) else {
+                    return Some(api::ApiResponse::err(500, "could not build a template from that card"));
+                };
+                exp.title = match title {
+                    Some(t) if !t.trim().is_empty() => t.clone(),
+                    _ => self.templates[*index].title.clone(), // keep the existing name
+                };
+                let name = exp.title.clone();
+                self.templates[*index] = exp;
+                Some(api::ApiResponse::ok(serde_json::json!({ "updated": index, "title": name })))
+            }
             api::ApiRequest::TemplateDelete(index) => {
                 if *index >= self.templates.len() {
                     return Some(api::ApiResponse::err(404, "no template at that index"));
@@ -1913,6 +1934,7 @@ impl TrellisApp {
                     | CanvasAction::ToggleDockMode
                     | CanvasAction::ToggleSnapMode
                     | CanvasAction::SaveAsTemplate(_)
+                    | CanvasAction::UpdateTemplate(..)
                     | CanvasAction::DeleteTemplate(_)
             )
         }) {
@@ -1986,6 +2008,19 @@ impl TrellisApp {
                         let name = exp.title.clone();
                         if self.doc.add_card_from_export(node, pos, exp).is_some() {
                             self.status = format!("Inserted template \"{name}\"");
+                        }
+                    }
+                }
+                CanvasAction::UpdateTemplate(idx, cid) => {
+                    if idx < self.templates.len() {
+                        if let Some(json) = self.doc.export_card_json(node, cid) {
+                            if let Some(mut exp) = crate::model::parse_card_export(&json) {
+                                // Keep the template's existing name.
+                                exp.title = self.templates[idx].title.clone();
+                                let name = exp.title.clone();
+                                self.templates[idx] = exp;
+                                self.status = format!("Updated template \"{name}\"");
+                            }
                         }
                     }
                 }
@@ -3328,6 +3363,7 @@ impl TrellisApp {
                         "GET    /api/templates                     (saved card templates)",
                         "POST   /api/templates          {node, card, title?}   (save a card as a template)",
                         "POST   /api/templates/{i}/insert {node, pos?}         (stamp it into a basket)",
+                        "POST   /api/templates/{i}/update {node, card, title?} (re-snapshot in place from a card)",
                         "DELETE /api/templates/{i}",
                         "",
                         "Full reference: API.md in the source repo.",

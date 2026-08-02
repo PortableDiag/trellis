@@ -4,6 +4,17 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.64.0]
+
+### Added
+- **Editable templates — "Update template".** A template was a frozen snapshot;
+  editing the card you registered never changed it. Now you can keep a **master
+  card** (e.g. in a Templates node), edit it, then **right-click → Update template
+  → pick which** to re-snapshot that template *in place* — it keeps its index and
+  name, and every future **Insert template** stamps the new version. Over the API:
+  `POST /api/templates/{index}/update {node, card, title?}`. This makes a Templates
+  node a real, maintainable template library (edit the master, update, reuse).
+
 ## [0.63.1]
 
 ### Fixed
