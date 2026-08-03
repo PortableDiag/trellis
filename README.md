@@ -87,7 +87,9 @@ from the main cluster, and click or drag on it to jump there without zooming out
   (e.g. a *Today's Todos* checklist); right-click the canvas → **Insert template** to drop a
   fresh copy at the click point. Edit a master card and right-click → **Update template** to
   re-snapshot that template *in place* (keeps its name), so a dedicated Templates node becomes
-  a maintainable template library. Templates persist across restarts.
+  a maintainable template library. Templates persist across restarts. They're stored with the
+  app's settings rather than in the document, so each instance (see
+  [Separate documents](#separate-documents-side-by-side)) has its **own** template list.
 
 **Documents & interop**
 - **Drag & drop** text/Markdown or image files onto a basket to create the
@@ -109,10 +111,13 @@ from the main cluster, and click or drag on it to jump there without zooming out
   Set an interval and a per-disk retention count; it runs on a background thread
   so a slow target never freezes the app. Restore with
   `gpg -d file.ron.gz.gpg > file.ron.gz` (if encrypted), then open the `.ron.gz`.
+  Backup settings are per instance and back up the document that instance has
+  open, so configure them once per document.
 - **Version history** (**Tools → Version history**) — automatic timestamped
   snapshots taken as you save (kept up to 25, a few minutes apart, in a hidden
-  `.<name>.history/` folder); browse and **Restore** an older version. A local
-  safety net, separate from Backup.
+  `.<name>.history/` folder beside the document, so each document has its own);
+  browse and **Restore** an older version. A local safety net, separate from
+  Backup. Edits made over the agent API are snapshotted the same way.
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
@@ -174,8 +179,10 @@ from the main cluster, and click or drag on it to jump there without zooming out
   columns (`/kanban`) / wiki-link **graph**, register · insert · **update**
   reusable card **templates**, trigger a **backup**, and export the document
   (incl. PDF/PNG) — so agents can collaborate on the same notes. **Live updates:** `GET /api/wait` long-polls so clients react
-  the instant anything changes. Enable it in **Tools → Settings**; see
-  [API.md](API.md).
+  the instant anything changes. An instance serves one document, so **the port
+  addresses the document** — `GET /api/instance` reports which one is open, and
+  edits are autosaved a couple of seconds later without anyone pressing Save.
+  Enable it in **Tools → Settings**; see [API.md](API.md).
 - **Web clipper** — a small Chrome/Edge extension (`web-clipper/`) clips the
   current page or your text selection into a Trellis basket over the LAN API.
 - **Companion mobile app** — a native Android viewer/capture app talks to the
@@ -249,7 +256,9 @@ to render inline text-color spans; edit it there, not the crates.io copy.
 ## Docs
 
 - [API.md](API.md) — the localhost agent HTTP API.
+- [web-clipper/README.md](web-clipper/README.md) — the Chrome/Edge clipper extension.
 - [CHANGELOG.md](CHANGELOG.md) — version history.
+- `trellis --help` — command-line arguments (document, port, data directory).
 
 ## License
 

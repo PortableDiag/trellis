@@ -104,7 +104,7 @@ Which document *this* instance is serving. With one instance per document (each
 on its own port), call this first to confirm you're driving the right one.
 ```
 GET /api/instance
-  → 200 {"app":"trellis","version":"0.65.0","document":"work.ron",
+  → 200 {"app":"trellis","version":"0.65.1","document":"work.ron",
          "path":"/home/you/work.ron","port":7373,"lan":false,
          "nodes":42,"unsaved_changes":false}
 ```
@@ -441,6 +441,11 @@ POST /api/backup/run   → 200 {"started":true}
 The run happens on a worker thread; poll `GET /api/backup` (`running`,
 `last_result`) for the outcome.
 
+Backup settings live in the app config, so they are **per instance**, and a run
+backs up **the document that instance has open**. Running an instance per
+document therefore gives each document its own schedule and destinations —
+configure them separately.
+
 ### Templates
 Reusable card snapshots — the same ones as the app's right-click **Save as
 template** / **Insert template**. A template captures a card's *whole* definition
@@ -449,6 +454,14 @@ per-cell colors and widths, or a checklist's items), so it's ideal for stamping
 out a fixed layout (e.g. a Task / Local / Prod verification grid) again and
 again. Templates persist in the app config, so they survive restarts and are
 shared by the UI and the API. Index is a 0-based position in the list.
+
+They live in the app config rather than the document, so a template library is
+**per instance, not per document**: instances started with different
+`--data-dir`s have independent template lists, and one instance's templates are
+invisible to another. (Two instances sharing a data directory would share
+templates — but they'd also fight over the same port and settings, so don't.) To
+reuse a template elsewhere, insert it into a basket in the other instance and
+register it there.
 ```
 GET    /api/templates
   → 200 {"count":N,"templates":[{index, title, kind}, …]}
@@ -640,5 +653,13 @@ curl -s -X DELETE -H "X-API-Key: $KEY" $API/templates/$IDX
   time on the UI thread, so there are no partial writes, but there is also no
   transaction across multiple calls. Read-modify-write can race with a human
   editing in the window; keep changes small and re-read if it matters.
-- **Persistence:** API edits mark the document dirty and are written on save /
-  autosave-on-exit, same as manual edits.
+- **Persistence:** you don't have to trigger a save. An API edit marks the
+  document dirty and autosave writes it to disk **~2 seconds after the last
+  change** (debounced, so a burst of calls saves once at the end), on a worker
+  thread, even if the window is idle and unfocused. Each save also writes a
+  version-history snapshot. If the user has turned autosave off in Settings, the
+  change sits in memory until they save — there is no save endpoint. Check
+  `unsaved_changes` in `GET /api/instance` if it matters.
+- **Which document you're editing:** one instance serves one document, so the
+  **port identifies the document**. Before writing to a box that runs several
+  instances, call `GET /api/instance` and check `document`/`path`.

@@ -7,6 +7,9 @@ text you've selected — into a Trellis basket over the [LAN API](../API.md).
 
 1. In Trellis, open **Tools → Settings**, enable **LAN access**, and copy your
    **API key**. Note the server address shown (e.g. `http://192.168.1.20:7373`).
+   If you run an instance per document, the **port picks the document** clips land
+   in — use the port of the instance holding the notes you're clipping into, and
+   its API key (each instance has its own).
 2. Right-click the basket you want clips to land in → **Copy** → **Node id**.
 3. In Chrome/Edge go to `chrome://extensions`, turn on **Developer mode**, click
    **Load unpacked**, and select this `web-clipper/` folder.

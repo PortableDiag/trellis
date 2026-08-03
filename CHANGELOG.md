@@ -4,6 +4,29 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.65.1]
+
+### Changed
+- **Docs brought current for running several instances.** A three-way audit of
+  the 49 live routes against API.md and the in-app **Settings → Endpoints** list
+  came back at full parity; the rest of the docs now match the behaviour too:
+  - **Templates and backup settings are per instance**, not per document — they
+    live in the app config, so instances with different `--data-dir`s have
+    independent template libraries and backup schedules, and a backup covers the
+    document that instance has open. Now stated in API.md and the README instead
+    of only being implied.
+  - **Version history** is per document (a hidden `.<name>.history/` beside the
+    file), and edits made over the API are snapshotted like any other.
+  - **What "saved" means for an agent:** an API edit is written to disk about two
+    seconds after the last change, debounced, on a worker thread, even when the
+    window is idle — no save endpoint and nothing to press. API.md's persistence
+    note said only "on save / autosave-on-exit", which undersold it.
+  - The **web clipper** README notes that with an instance per document, the
+    port (and key) chooses which document clips land in.
+  - The **Settings → Port** hint mentions `--port` / `--data-dir` and points at
+    `GET /api/instance`, and the README's Docs list links the clipper and
+    `trellis --help`.
+
 ## [0.65.0]
 
 ### Added

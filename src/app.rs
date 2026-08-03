@@ -3358,7 +3358,14 @@ impl TrellisApp {
                     ui.label("Port");
                     ui.horizontal(|ui| {
                         ui.add(egui::DragValue::new(&mut self.api_port).range(1024..=65535));
-                        ui.weak("(restart to apply a port change)");
+                        ui.weak("(restart to apply — or launch with --port)")
+                            .on_hover_text(
+                                "One instance serves one document, so the port is how an agent \
+                                 addresses this document. Launch with --port to pin it, and \
+                                 --data-dir to give an instance its own key/port/settings so \
+                                 several can run at once. GET /api/instance reports which \
+                                 document a port is serving.",
+                            );
                     });
                     ui.end_row();
 
