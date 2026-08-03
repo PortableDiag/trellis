@@ -80,7 +80,7 @@ pub enum ApiRequest {
     PropertyCards { key: String, value: Option<String> },
     // Combined dropdown-style query across the tree, and the due-date agenda.
     QueryCards { tag: Option<String>, key: Option<String>, value: Option<String>, text: Option<String> },
-    Tasks { include_done: bool },
+    Tasks { include_done: bool, project: Option<NodeId> },
     // Cards grouped by `status::` value — the Kanban board's columns.
     Kanban,
     // Cards that [[link]] to a node.
@@ -680,6 +680,12 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }),
         (Method::Get, ["api", "tasks"]) => Ok(ApiRequest::Tasks {
             include_done: query_get(query, "all").as_deref() == Some("true"),
+            project: match query_get(query, "project") {
+                Some(v) => Some(
+                    v.parse().map_err(|_| (400, format!("bad project node id: {v}")))?,
+                ),
+                None => None,
+            },
         }),
         (Method::Get, ["api", "kanban"]) => Ok(ApiRequest::Kanban),
         (Method::Get, ["api", "instance"]) => Ok(ApiRequest::Instance),
@@ -1557,17 +1563,27 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .collect();
             (false, ApiResponse::ok(json!({ "count": hits.len(), "hits": hits })))
         }
-        ApiRequest::Tasks { include_done } => {
+        ApiRequest::Tasks { include_done, project } => {
             let today = today_days();
+            if let Some(p) = project {
+                if !doc.nodes.contains_key(&p) {
+                    return (false, ApiResponse::err(404, "project node not found"));
+                }
+            }
             let tasks: Vec<Value> = doc
                 .tasks()
                 .into_iter()
                 .filter(|t| include_done || !t.done)
+                // `project` accepts any node, not just a root: filtering to a
+                // sub-branch is the same question asked more narrowly.
+                .filter(|t| project.map_or(true, |p| doc.is_under(t.node, p)))
                 .map(|t| {
                     json!({
                         "node": t.node,
                         "node_title": t.node_title,
                         "node_path": t.node_path,
+                        "project": t.root,
+                        "project_title": t.root_title,
                         "card": t.card,
                         "title": t.title,
                         "due": t.due,

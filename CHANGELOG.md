@@ -4,6 +4,21 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.70.0]
+
+### Added
+- **Filter the Agenda by project.** A dropdown at the top of the panel narrows
+  the list to one top-level project, with an × to go back to all of them. The
+  choice is remembered between launches, and a project that no longer exists
+  falls back to "all" rather than silently hiding every task.
+- **Colour in the Agenda.** Each row gets a dot, and its project name is drawn,
+  in that project's colour — the node's own colour tag when it has one (so it
+  matches the tree), otherwise a stable colour picked from a palette. A long
+  agenda now groups by project at a glance instead of reading as a grey wall.
+- **`GET /api/tasks?project=<node id>`** filters the same way for agents. It
+  accepts any node, not just a root, so you can narrow to a sub-branch with the
+  same parameter; tasks also now carry `project` and `project_title`.
+
 ## [0.69.0]
 
 ### Fixed

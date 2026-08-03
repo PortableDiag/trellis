@@ -71,6 +71,7 @@ const SNAP_MODE_KEY: &str = "snap_mode";
 const MINIMAP_KEY: &str = "minimap";
 const THEME_KEY: &str = "theme";
 const AUTOSAVE_KEY: &str = "autosave";
+const AGENDA_PROJECT_KEY: &str = "agenda_project";
 const BACKUP_KEY: &str = "backup";
 /// How long the document must be idle (no further changes) before an autosave
 /// fires — so continuous editing (e.g. dragging a card) never saves mid-gesture.
@@ -595,6 +596,29 @@ pub struct Startup {
     pub data_dir: Option<PathBuf>,
 }
 
+/// Colour for a project (top-level node) in task views.
+///
+/// Uses the node's own colour tag when it has one, so the Agenda matches the dot
+/// in the tree. Untagged projects still need to be tellable apart, so they fall
+/// back to a fixed palette indexed by node id — stable for the life of the
+/// document, and never the same colour twice until the palette wraps.
+pub fn project_color(doc: &Document, root: NodeId) -> egui::Color32 {
+    const FALLBACK: [egui::Color32; 8] = [
+        egui::Color32::from_rgb(0x5c, 0xa8, 0xe6),
+        egui::Color32::from_rgb(0xe1, 0x6f, 0x6f),
+        egui::Color32::from_rgb(0x54, 0xbd, 0x86),
+        egui::Color32::from_rgb(0xe3, 0xac, 0x53),
+        egui::Color32::from_rgb(0xa4, 0x8b, 0xe0),
+        egui::Color32::from_rgb(0x4c, 0xbf, 0xbf),
+        egui::Color32::from_rgb(0xdd, 0x7f, 0xbb),
+        egui::Color32::from_rgb(0x9a, 0xa8, 0xb5),
+    ];
+    match doc.nodes.get(&root).and_then(|n| n.color) {
+        Some([r, g, b]) => egui::Color32::from_rgb(r, g, b),
+        None => FALLBACK[(root as usize) % FALLBACK.len()],
+    }
+}
+
 /// The open document's file name, or `untitled` — what identifies an instance to
 /// a human (window title) and to an agent (`GET /api/instance`).
 pub fn doc_display_name(path: Option<&std::path::Path>) -> String {
@@ -682,6 +706,10 @@ pub struct TrellisApp {
     /// Agenda panel: open tasks (`due::` dates) grouped by when they're due.
     agenda_open: bool,
     agenda_show_done: bool,
+    /// Agenda filter: show only tasks under this project (top-level node).
+    /// `None` = every project. Persisted, since it's a working context you'd
+    /// rather not reset on every launch.
+    agenda_project: Option<NodeId>,
     /// Backlinks panel: cards that `[[link]]` to the selected node.
     backlinks_open: bool,
     /// Kanban board window: cards grouped by `status::`, drag between columns.
@@ -951,6 +979,10 @@ impl TrellisApp {
             find_text: String::new(),
             agenda_open: false,
             agenda_show_done: false,
+            agenda_project: cc
+                .storage
+                .and_then(|st| st.get_string(AGENDA_PROJECT_KEY))
+                .and_then(|v| v.parse().ok()),
             backlinks_open: false,
             kanban_open: false,
             kanban_show_done: true,
@@ -3680,7 +3712,7 @@ impl TrellisApp {
                         "GET    /api/tags[?name=<tag>]             (all tags / cards with a tag)",
                         "GET    /api/properties[?key=<k>&value=<v>]   (keys / matching cards)",
                         "GET    /api/query?tag=&key=&value=&text=  (combined card query)",
-                        "GET    /api/tasks[?all=true]              (due:: agenda, bucketed)",
+                        "GET    /api/tasks[?all=true][&project=<id>]  (due:: agenda, bucketed)",
                         "GET    /api/kanban                        (cards grouped by status:: → columns)",
                         "POST   /api/ocr                           (OCR all un-OCR'd images)",
                         "GET    /api/export?format=markdown|html|json|pdf|png|gif",
@@ -4197,8 +4229,69 @@ impl TrellisApp {
                 });
             });
             ui.checkbox(&mut self.agenda_show_done, "Show completed");
+
+            // Filter to one project. Projects are the top-level nodes, so this
+            // is "whose tasks am I looking at" — the thing a bare due-date list
+            // can't tell you.
+            let mut projects: Vec<(NodeId, String)> = Vec::new();
+            for t in &tasks {
+                if !projects.iter().any(|(id, _)| *id == t.root) {
+                    projects.push((t.root, t.root_title.clone()));
+                }
+            }
+            // Keep the tree's own order rather than first-seen, so the menu reads
+            // the same way the left panel does.
+            projects.sort_by_key(|(id, _)| {
+                self.doc.roots.iter().position(|r| r == id).unwrap_or(usize::MAX)
+            });
+            // A project that no longer exists (deleted, or a different document)
+            // must not silently hide every task.
+            if self.agenda_project.is_some_and(|p| !projects.iter().any(|(id, _)| *id == p)) {
+                self.agenda_project = None;
+            }
+            let current = self
+                .agenda_project
+                .and_then(|p| projects.iter().find(|(id, _)| *id == p))
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| "All projects".to_string());
+            ui.horizontal(|ui| {
+                ui.label("Project");
+                egui::ComboBox::from_id_salt("agenda_project")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(self.agenda_project.is_none(), "All projects")
+                            .clicked()
+                        {
+                            self.agenda_project = None;
+                        }
+                        for (id, title) in &projects {
+                            let on = self.agenda_project == Some(*id);
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(10.0, 10.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(
+                                    rect.center(),
+                                    4.0,
+                                    project_color(&self.doc, *id),
+                                );
+                                if ui.selectable_label(on, title).clicked() {
+                                    self.agenda_project = Some(*id);
+                                }
+                            });
+                        }
+                    });
+                if self.agenda_project.is_some() && ui.small_button("×").on_hover_text("Show every project").clicked() {
+                    self.agenda_project = None;
+                }
+            });
             ui.separator();
             tasks.retain(|t| self.agenda_show_done || !t.done);
+            if let Some(p) = self.agenda_project {
+                tasks.retain(|t| t.root == p);
+            }
             tasks.sort_by_key(|t| t.due_days.unwrap_or(i64::MAX));
             if tasks.is_empty() {
                 ui.weak("No tasks yet. Add `due:: 2026-08-15` to any card to see it here.");
@@ -4231,17 +4324,50 @@ impl TrellisApp {
                         } else {
                             egui::RichText::new(&t.title)
                         };
-                        let row = ui.add(
-                            egui::Label::new(format!("  {}  ", t.due))
-                                .sense(egui::Sense::click()),
-                        );
-                        if ui.add(egui::Label::new(title).sense(egui::Sense::click())).clicked() || row.clicked() {
+                        let pcolor = project_color(&self.doc, t.root);
+                        let row = ui.horizontal(|ui| {
+                            // A dot in the project's colour, so a glance down the
+                            // list groups by project without reading a word.
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                            ui.painter().circle_filled(rect.center(), 4.0, pcolor);
+                            ui.add(
+                                egui::Label::new(format!("{}  ", t.due))
+                                    .sense(egui::Sense::click()),
+                            )
+                        });
+                        if ui.add(egui::Label::new(title).sense(egui::Sense::click())).clicked()
+                            || row.inner.clicked()
+                        {
                             jump = Some((t.node, t.card));
                         }
                         // Full breadcrumb, not just the parent: "Open Items"
                         // exists under more than one project, and the bare name
-                        // has had agents attribute a task to the wrong one.
-                        ui.small(egui::RichText::new(&t.node_path).weak());
+                        // has had agents attribute a task to the wrong one. The
+                        // project half carries its colour so it reads at a glance.
+                        let mut job = egui::text::LayoutJob::default();
+                        let small = egui::TextStyle::Small.resolve(ui.style());
+                        let (proj, rest) = match t.node_path.split_once(" › ") {
+                            Some((a, b)) => (a.to_string(), format!(" › {b}")),
+                            None => (t.node_path.clone(), String::new()),
+                        };
+                        job.append(
+                            &proj,
+                            0.0,
+                            egui::TextFormat { font_id: small.clone(), color: pcolor, ..Default::default() },
+                        );
+                        if !rest.is_empty() {
+                            job.append(
+                                &rest,
+                                0.0,
+                                egui::TextFormat {
+                                    font_id: small,
+                                    color: ui.visuals().weak_text_color(),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        ui.label(job);
                     }
                 }
             });
@@ -4924,6 +5050,10 @@ impl eframe::App for TrellisApp {
         storage.set_string(MINIMAP_KEY, self.minimap_enabled.to_string());
         storage.set_string(THEME_KEY, self.theme.key().to_string());
         storage.set_string(AUTOSAVE_KEY, self.autosave.to_string());
+        storage.set_string(
+            AGENDA_PROJECT_KEY,
+            self.agenda_project.map(|n| n.to_string()).unwrap_or_default(),
+        );
         storage.set_string(BACKUP_KEY, self.backup_cfg.to_json());
         if let Ok(s) = serde_json::to_string(&self.templates) {
             storage.set_string(TEMPLATES_KEY, s);

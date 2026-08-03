@@ -411,9 +411,15 @@ has `status:: done|complete|closed` or (for a checklist) all items are checked.
 `bucket` is relative to today (UTC): `overdue` · `today` · `week` (next 7 days) ·
 `later` · `nodate` (unparseable date). Powers the **View → Agenda** panel.
 ```
-GET /api/tasks           → 200 {"today_days":N,"count":M,"tasks":[{node,node_title,node_path,card,title,due,done,bucket}, …]}
+GET /api/tasks           → 200 {"today_days":N,"count":M,"tasks":[{node,node_title,node_path,project,project_title,card,title,due,done,bucket}, …]}
+GET /api/tasks?project=<node id>   only tasks under that node (a project, or any sub-branch)
+  | 400 (bad id)   | 404 (node not found)
 GET /api/tasks?all=true  → include completed tasks too (default excludes them)
 ```
+
+`project` / `project_title` are the task's **top-level ancestor** — the project
+it belongs to. `?project=<node id>` filters to one; it accepts any node, not just
+a root, so you can narrow to a sub-branch with the same parameter.
 
 **`node_path` is the root-to-basket breadcrumb** (`Super Weapon News › Open
 Items`), and it is what you should show or reason about — **`node_title` alone is

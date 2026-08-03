@@ -2212,6 +2212,29 @@ impl Document {
         m
     }
 
+    /// The top-level ancestor of `id` — the "project" a node belongs to. Returns
+    /// `id` itself when it is already a root.
+    pub fn root_of(&self, id: NodeId) -> NodeId {
+        let mut cur = id;
+        while let Some(p) = self.nodes.get(&cur).and_then(|n| n.parent) {
+            cur = p;
+        }
+        cur
+    }
+
+    /// Is `id` `ancestor`, or somewhere beneath it? Used to filter a view down to
+    /// one project (or any sub-branch of one).
+    pub fn is_under(&self, id: NodeId, ancestor: NodeId) -> bool {
+        let mut cur = Some(id);
+        while let Some(n) = cur {
+            if n == ancestor {
+                return true;
+            }
+            cur = self.nodes.get(&n).and_then(|x| x.parent);
+        }
+        false
+    }
+
     /// Root-to-node breadcrumb of titles, e.g. `Super Weapon News › Open Items`.
     ///
     /// Task and Kanban views need this, not just the parent's title: basket names
@@ -2382,10 +2405,13 @@ impl Document {
                 } else {
                     card.title.clone()
                 };
+                let root = self.root_of(node.id);
                 out.push(TaskItem {
                     node: node.id,
                     node_title: node.title.clone(),
                     node_path: self.node_path(node.id),
+                    root,
+                    root_title: self.nodes.get(&root).map(|n| n.title.clone()).unwrap_or_default(),
                     card: card.id,
                     title,
                     due: due.clone(),
@@ -2623,6 +2649,9 @@ pub struct TaskItem {
     /// Root-to-basket breadcrumb, so two projects' "Open Items" are tellable
     /// apart at a glance.
     pub node_path: String,
+    /// Top-level ancestor — the project this task belongs to.
+    pub root: NodeId,
+    pub root_title: String,
     pub card: CardId,
     pub title: String,
     /// The raw `due` value as written (e.g. `2026-08-15`).
