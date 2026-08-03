@@ -354,6 +354,7 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
         | A::TableInsertCol(..)
         | A::TableRemoveCol(..)
         | A::TableToggleHeader(_)
+        | A::TableSetChart(..)
         | A::TableImport(_) => UndoKind::Discrete,
         _ => UndoKind::None,
     }
@@ -2467,6 +2468,13 @@ impl TrellisApp {
                         self.mark_dirty();
                     }
                 }
+                CanvasAction::TableSetChart(cid, spec) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        if let CardKind::Table { table } = &mut c.kind {
+                            table.chart = spec;
+                        }
+                    }
+                }
                 CanvasAction::TableToggleHeader(cid) => {
                     if self.doc.table_toggle_header(node, cid) {
                         self.mark_dirty();
@@ -3655,7 +3663,7 @@ impl TrellisApp {
                         "GET    /api/nodes/{id}/backlinks          (cards that [[link]] here)",
                         "GET    /api/graph                         (wiki-link nodes + edges)",
                         "GET    /api/nodes/{id}/cards",
-                        "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, pos?, size?, fit?, image_base64?, inline_images?}",
+                        "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, size?, fit?, image_base64?, inline_images?}",
                         "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, size?, items?, …}",
                         "DELETE /api/nodes/{id}/cards/{cid}",
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
@@ -3663,6 +3671,7 @@ impl TrellisApp {
                         "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE …/dock)",
                         "POST   /api/nodes/{id}/cards/{cid}/group {group}           (remove: DELETE …/group)",
                         "POST   /api/nodes/{id}/cards/{cid}/table {op, …}           (set_cell / insert_row / …)",
+                        "POST   /api/nodes/{id}/cards/{cid}/chart {kind, label_col?, value_cols?, show_table?}  (bar|line|scatter; DELETE …/chart = plain grid)",
                         "POST   /api/nodes/{id}/cards/{cid}/sketch {op, …}          (add_stroke / undo / clear)",
                         "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}    (GET / DELETE …/images/{idx})",
                         "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",

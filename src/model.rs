@@ -76,6 +76,99 @@ pub struct TableData {
     /// Style the first row as a header.
     #[serde(default = "default_true")]
     pub header: bool,
+    /// Draw this table as a chart instead of a grid. `None` = plain table, which
+    /// is what every table saved before charts existed deserializes to.
+    #[serde(default)]
+    pub chart: Option<ChartSpec>,
+}
+
+/// Parse a spreadsheet-ish number: `1,234.5`, `$12`, `40%`, `(3)` = -3.
+/// Returns `None` for anything that isn't a number, so the caller can treat it
+/// as a gap rather than a zero.
+pub fn parse_number(s: &str) -> Option<f64> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let negated = t.starts_with('(') && t.ends_with(')');
+    let core: String = t
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .chars()
+        .filter(|c| !matches!(c, ',' | '$' | '£' | '€' | '%' | ' ' | '\u{a0}'))
+        .collect();
+    let v: f64 = core.parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    Some(if negated { -v } else { v })
+}
+
+/// How a table is drawn as a chart. The table stays the single source of the
+/// data — this only says how to read it, so editing a cell updates the chart.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChartSpec {
+    pub kind: ChartKind,
+    /// Column supplying each point's label / x-axis category (0-based).
+    #[serde(default)]
+    pub label_col: usize,
+    /// Columns plotted as series. Empty = every numeric column except
+    /// `label_col`, so a chart keeps working when you add a column.
+    #[serde(default)]
+    pub value_cols: Vec<usize>,
+    /// Show the source grid under the chart as well.
+    #[serde(default)]
+    pub show_table: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChartKind {
+    Bar,
+    Line,
+    Scatter,
+}
+
+impl ChartKind {
+    pub const ALL: [ChartKind; 3] = [ChartKind::Bar, ChartKind::Line, ChartKind::Scatter];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ChartKind::Bar => "Bar",
+            ChartKind::Line => "Line",
+            ChartKind::Scatter => "Scatter",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            ChartKind::Bar => "bar",
+            ChartKind::Line => "line",
+            ChartKind::Scatter => "scatter",
+        }
+    }
+
+    /// Parse an API/serde value; `None` for anything unknown so callers can
+    /// report a useful error instead of silently picking a chart type.
+    pub fn from_key(s: &str) -> Option<ChartKind> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "bar" => Some(ChartKind::Bar),
+            "line" => Some(ChartKind::Line),
+            "scatter" | "points" => Some(ChartKind::Scatter),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ChartSpec {
+    fn default() -> Self {
+        ChartSpec {
+            kind: ChartKind::Bar,
+            label_col: 0,
+            value_cols: Vec::new(),
+            show_table: false,
+        }
+    }
 }
 
 pub const TABLE_DEFAULT_COL_W: f32 = 110.0;
@@ -87,6 +180,7 @@ impl TableData {
             rows: vec![vec![TableCell::default(); cols]; rows],
             col_widths: Vec::new(),
             header: true,
+            chart: None,
         }
     }
 
@@ -112,7 +206,76 @@ impl TableData {
         if rows.is_empty() {
             rows.push(vec![TableCell::default(); cols]);
         }
-        TableData { rows, col_widths: Vec::new(), header: true }
+        TableData { rows, col_widths: Vec::new(), header: true, chart: None }
+    }
+
+    /// Read the table as chart data: `(labels, series)` where each series is a
+    /// column name and one value per label row. Non-numeric cells become gaps
+    /// (`None`) rather than zeros — a blank cell in a status grid is "no data",
+    /// and plotting it as 0 would invent a reading that isn't there.
+    ///
+    /// Numbers may carry the usual decoration: thousands separators, a leading
+    /// currency symbol, a trailing `%`, and parenthesised negatives.
+    pub fn chart_data(&self, spec: &ChartSpec) -> (Vec<String>, Vec<(String, Vec<Option<f64>>)>) {
+        let body_start = if self.header { 1 } else { 0 };
+        let n_cols = self.n_cols();
+        let label_col = spec.label_col.min(n_cols.saturating_sub(1));
+
+        // Which columns to plot: the explicit list, else every column that has
+        // at least one parseable number in the body (excluding the label column).
+        let cols: Vec<usize> = if spec.value_cols.is_empty() {
+            (0..n_cols)
+                .filter(|c| *c != label_col)
+                .filter(|c| {
+                    self.rows
+                        .iter()
+                        .skip(body_start)
+                        .any(|r| r.get(*c).and_then(|cell| parse_number(&cell.text)).is_some())
+                })
+                .collect()
+        } else {
+            spec.value_cols.iter().copied().filter(|c| *c < n_cols).collect()
+        };
+
+        let labels: Vec<String> = self
+            .rows
+            .iter()
+            .skip(body_start)
+            .enumerate()
+            .map(|(i, r)| {
+                let t = r.get(label_col).map(|c| c.text.trim()).unwrap_or("");
+                if t.is_empty() {
+                    format!("{}", i + 1)
+                } else {
+                    t.to_string()
+                }
+            })
+            .collect();
+
+        let series = cols
+            .into_iter()
+            .map(|c| {
+                let name = if self.header {
+                    self.rows
+                        .first()
+                        .and_then(|r| r.get(c))
+                        .map(|cell| cell.text.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| format!("Column {}", c + 1))
+                } else {
+                    format!("Column {}", c + 1)
+                };
+                let vals = self
+                    .rows
+                    .iter()
+                    .skip(body_start)
+                    .map(|r| r.get(c).and_then(|cell| parse_number(&cell.text)))
+                    .collect();
+                (name, vals)
+            })
+            .collect();
+
+        (labels, series)
     }
 
     /// The table as CSV text (used by export and the card copy button).
@@ -3398,6 +3561,54 @@ mod tests {
         let html = card_body_html(&card);
         assert!(html.contains("<img"), "renders an <img>: {html}");
         assert!(html.contains("data:image/png;base64,"), "embeds a data URI: {html}");
+    }
+
+    #[test]
+    fn chart_number_parsing_accepts_decorated_cells() {
+        assert_eq!(parse_number("42"), Some(42.0));
+        assert_eq!(parse_number(" 1,234.5 "), Some(1234.5));
+        assert_eq!(parse_number("$12"), Some(12.0));
+        assert_eq!(parse_number("40%"), Some(40.0));
+        assert_eq!(parse_number("(3)"), Some(-3.0));
+        // Not numbers — must be gaps, never 0, or a blank status cell would
+        // plot as a real reading.
+        assert_eq!(parse_number(""), None);
+        assert_eq!(parse_number("pass"), None);
+        assert_eq!(parse_number("-"), None);
+    }
+
+    #[test]
+    fn chart_data_reads_labels_series_and_gaps() {
+        let t = TableData::from_values(vec![
+            vec!["Week".into(), "Sales".into(), "Notes".into(), "Cost".into()],
+            vec!["W1".into(), "10".into(), "good".into(), "4".into()],
+            vec!["W2".into(), "".into(), "meh".into(), "5".into()],
+            vec!["W3".into(), "30".into(), "".into(), "6".into()],
+        ]);
+        let spec = ChartSpec::default(); // label_col 0, auto series
+        let (labels, series) = t.chart_data(&spec);
+        assert_eq!(labels, vec!["W1", "W2", "W3"]);
+        // "Notes" holds no numbers, so it is not offered as a series.
+        let names: Vec<&str> = series.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["Sales", "Cost"]);
+        assert_eq!(series[0].1, vec![Some(10.0), None, Some(30.0)], "blank stays a gap");
+        assert_eq!(series[1].1, vec![Some(4.0), Some(5.0), Some(6.0)]);
+
+        // An explicit column list wins over the auto-detection.
+        let spec = ChartSpec { value_cols: vec![3], ..ChartSpec::default() };
+        let (_, series) = t.chart_data(&spec);
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].0, "Cost");
+    }
+
+    #[test]
+    fn table_without_a_chart_field_still_loads() {
+        // Tables saved before charts existed have no `chart` key at all.
+        let t: TableData = ron::from_str(
+            "(rows: [[(text: \"a\", bg: None, fg: None)]], col_widths: [], header: true)",
+        )
+        .expect("pre-chart table must still deserialize");
+        assert!(t.chart.is_none());
     }
 
     #[test]

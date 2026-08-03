@@ -142,7 +142,7 @@ for a search hit that matched a **node title** rather than a card.
 POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
-POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, color?, font_scale?, fit?, image_base64?, inline_images?}
+POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, rows?, header?, pos?, size?, color?, font_scale?, fit?, image_base64?, inline_images?}
   → 201 {"id":<new>}   | 404 if node doesn't exist
 ```
 `kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
@@ -150,7 +150,9 @@ POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, pos?, size?, co
 (default `[40,40]`); pass distinct positions to avoid stacking cards on top of
 each other. `size` is `[w,h]`. `color` sets the title-bar accent at creation (see
 the accepted formats below). `items` is used only for `checklist`; `lang` only
-for `code`. `image_base64` gives an `image` card its first image (base64 file
+for `code`. `rows` fills a **table** card's cells row by row (`[["a","b"],…]`,
+ragged rows padded to the widest) and `header` styles its first row — so a
+populated table, and a chart drawn from it, take one call instead of three. `image_base64` gives an `image` card its first image (base64 file
 bytes; the `title` becomes its name). `inline_images` embeds images **inside a
 text card's body**: pass an array of base64 file bytes, then reference each in
 `body` with a `![alt](trellis:N)` marker (`N` = its 0-based index in the array);
@@ -526,6 +528,35 @@ so the template captures exactly what you'd see on the canvas. Editing a card yo
 registered does **not** change the stored template until you `update` it (or the
 right-click **Update template**) — templates are snapshots, not live links.
 
+### Charts
+Draw a **table** card as a chart. The table stays the data — the chart is a view
+of the same cells, so editing a cell (or a `rows` PATCH, or a `table` op) redraws
+it. No separate card kind, and the grid is still there underneath when you want it.
+```
+POST   /api/nodes/{id}/cards/{cid}/chart  {kind, label_col?, value_cols?, show_table?}
+  → 200 {"chart":{kind, label_col, value_cols, show_table}}
+  | 400 (not a table card / bad kind)   | 404 (node or card not found)
+
+DELETE /api/nodes/{id}/cards/{cid}/chart  → 200 {"chart":null}
+  Back to a plain grid.
+```
+- **`kind`** — `bar`, `line`, or `scatter`. (Pie is not in this version.)
+- **`label_col`** (default `0`) — the column supplying each point's label / x-axis
+  category.
+- **`value_cols`** — columns to plot. Omit or leave empty to plot **every numeric
+  column** except `label_col`, so the chart keeps working when you add a column.
+- **`show_table`** (default `false`) — also show the source grid under the chart.
+- Omitted fields keep their current value, so you can flip `kind` without
+  restating the columns.
+
+A card's JSON carries `chart` (the object above, or `null`) alongside `rows`.
+
+**How cells are read:** the header row supplies series names when `header` is
+true. Numbers may be decorated — `1,234.5`, `$12`, `40%`, `(3)` = −3. A cell that
+isn't a number is a **gap**, not a zero: a line breaks across it and a bar is
+omitted, because plotting a blank status cell as 0 would invent a reading that
+was never taken. A lone value between two gaps still shows, as a dot.
+
 ### Live updates (long-poll)
 Be woken the instant the document changes, instead of polling on a timer.
 ```
@@ -667,6 +698,17 @@ curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID}" $API/templates/$IDX/insert
 curl -s -H "X-API-Key: $KEY" $API/templates      # master_node / master_card per template
 curl -s -H "X-API-Key: $KEY" -d '{"op":"insert_col","at":3}' $API/nodes/$NID/cards/$CID/table
 curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID,\"card\":$CID}" $API/templates/$IDX/update
+
+# Chart a table: make the populated table and chart it in two calls.
+CID=$(curl -s -H "X-API-Key: $KEY" -d '{"kind":"table","title":"Quarterly revenue",
+      "rows":[["Quarter","Revenue","Costs"],["Q1","1200","800"],["Q2","1850","900"]],
+      "size":[520,300]}' $API/nodes/$NID/cards | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -X POST -H "X-API-Key: $KEY" -d '{"kind":"bar"}' $API/nodes/$NID/cards/$CID/chart
+# Line chart of one column, with the grid kept visible underneath:
+curl -s -X POST -H "X-API-Key: $KEY" \
+     -d '{"kind":"line","value_cols":[1],"show_table":true}' $API/nodes/$NID/cards/$CID/chart
+# Back to a plain table:
+curl -s -X DELETE -H "X-API-Key: $KEY" $API/nodes/$NID/cards/$CID/chart
 
 # Got templates from before the Templates basket existed? Give them master cards
 # (creates the basket; only fills in what's missing, so it's safe to repeat).

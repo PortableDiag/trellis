@@ -195,6 +195,8 @@ pub enum CanvasAction {
     TableRemoveCol(CardId, usize),
     TableSetColWidth(CardId, usize, f32),
     TableToggleHeader(CardId),
+    /// Draw this table as a chart (`None` = back to a plain grid).
+    TableSetChart(CardId, Option<crate::model::ChartSpec>),
     TableImport(CardId),
     TableExportCsv(CardId),
     TableExportXlsx(CardId),
@@ -1422,6 +1424,15 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
             if card.editing {
                 title_field(ui, card, actions);
             }
+            // A chart is a *view* of the table, not a separate card kind: the
+            // cells stay the data, so editing one redraws the chart.
+            if let Some(spec) = table.chart.clone() {
+                chart_ui(ui, card, table, &spec, zoom);
+                if !spec.show_table {
+                    return;
+                }
+                ui.add_space(4.0 * zoom);
+            }
             egui::ScrollArea::horizontal()
                 .id_salt(("table_h", card.id))
                 .show(ui, |ui| {
@@ -1933,6 +1944,143 @@ const TABLE_HANDLE_W: f32 = 20.0;
 /// import/export), row/column handles with insert/delete menus, draggable
 /// column-resize grips, and a TextEdit per cell. View mode renders the same
 /// grid read-only with cell colors.
+/// Series colors, picked to stay distinguishable on both the light and dark
+/// themes rather than following the card accent (which varies per card).
+const SERIES_COLORS: [egui::Color32; 8] = [
+    egui::Color32::from_rgb(0x4d, 0x9d, 0xe0), // blue
+    egui::Color32::from_rgb(0xe1, 0x5f, 0x5f), // red
+    egui::Color32::from_rgb(0x3b, 0xb2, 0x73), // green
+    egui::Color32::from_rgb(0xe1, 0xa3, 0x3f), // amber
+    egui::Color32::from_rgb(0x9b, 0x7e, 0xdb), // violet
+    egui::Color32::from_rgb(0x37, 0xb5, 0xb5), // teal
+    egui::Color32::from_rgb(0xd9, 0x6d, 0xb0), // pink
+    egui::Color32::from_rgb(0x8a, 0x9a, 0xa8), // slate
+];
+
+/// Draw a table card as a chart. **Every pixel dimension here is scaled by
+/// `zoom`** — the canvas paints cards at their screen rect with no transform
+/// layer, so anything left unscaled keeps its size while the card shrinks.
+fn chart_ui(
+    ui: &mut egui::Ui,
+    card: &Card,
+    table: &crate::model::TableData,
+    spec: &crate::model::ChartSpec,
+    zoom: f32,
+) {
+    use crate::model::ChartKind;
+    use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points, PlotPoints};
+
+    let (labels, series) = table.chart_data(spec);
+    if labels.is_empty() || series.is_empty() {
+        ui.small(
+            egui::RichText::new("No numeric columns to chart — add numbers, or pick columns.")
+                .color(ui.visuals().weak_text_color()),
+        );
+        return;
+    }
+
+    // Fill the card, leaving room for the grid underneath when it's shown.
+    let avail = ui.available_size();
+    let h = if spec.show_table { (avail.y * 0.55).max(80.0 * zoom) } else { avail.y.max(60.0 * zoom) };
+
+    let label_for = {
+        let labels = labels.clone();
+        move |i: f64| -> String {
+            let idx = i.round() as isize;
+            if idx >= 0 && (idx as usize) < labels.len() {
+                labels[idx as usize].clone()
+            } else {
+                String::new()
+            }
+        }
+    };
+
+    let mut plot = Plot::new(("chart", card.id))
+        .height(h)
+        .width(avail.x.max(60.0 * zoom))
+        .allow_scroll(false) // the canvas owns scroll/zoom; a plot stealing it fights the card
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_boxed_zoom(false)
+        .show_axes([true, true])
+        .x_axis_formatter(move |m, _| label_for(m.value))
+        .label_formatter(|name, v| {
+            if name.is_empty() {
+                format!("{:.4}", v.y)
+            } else {
+                format!("{name}: {:.4}", v.y)
+            }
+        });
+    if series.len() > 1 {
+        plot = plot.legend(Legend::default());
+    }
+
+    plot.show(ui, |plot_ui| {
+        let n = series.len().max(1);
+        for (si, (name, vals)) in series.iter().enumerate() {
+            let color = SERIES_COLORS[si % SERIES_COLORS.len()];
+            match spec.kind {
+                ChartKind::Bar => {
+                    // Group the series side by side within each label slot.
+                    let w = 0.8 / n as f64;
+                    let bars: Vec<Bar> = vals
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, v)| v.map(|v| (i, v)))
+                        .map(|(i, v)| {
+                            let off = (si as f64 - (n as f64 - 1.0) / 2.0) * w;
+                            Bar::new(i as f64 + off, v).width(w * 0.9)
+                        })
+                        .collect();
+                    plot_ui.bar_chart(BarChart::new(bars).color(color).name(name));
+                }
+                ChartKind::Line => {
+                    // Gaps split the line rather than being bridged, so a
+                    // missing reading doesn't look like a measured one.
+                    let mut run: Vec<[f64; 2]> = Vec::new();
+                    let mut first = true;
+                    // Flush a finished run: two or more samples draw a segment, a
+                    // lone one draws a dot. A single reading between two gaps has
+                    // no segment to belong to, and dropping it would hide real
+                    // data — it must still show.
+                    let mut flush = |plot_ui: &mut egui_plot::PlotUi,
+                                     run: &mut Vec<[f64; 2]>,
+                                     first: &mut bool| {
+                        if run.len() > 1 {
+                            let l = Line::new(PlotPoints::from(std::mem::take(run))).color(color);
+                            plot_ui.line(if *first { l.name(name) } else { l });
+                            *first = false;
+                        } else if !run.is_empty() {
+                            let p = Points::new(std::mem::take(run))
+                                .color(color)
+                                .radius(3.0 * zoom);
+                            plot_ui.points(if *first { p.name(name) } else { p });
+                            *first = false;
+                        }
+                    };
+                    for (i, v) in vals.iter().enumerate() {
+                        match v {
+                            Some(v) => run.push([i as f64, *v]),
+                            None => flush(plot_ui, &mut run, &mut first),
+                        }
+                    }
+                    flush(plot_ui, &mut run, &mut first);
+                }
+                ChartKind::Scatter => {
+                    let pts: Vec<[f64; 2]> = vals
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, v)| v.map(|v| [i as f64, v]))
+                        .collect();
+                    plot_ui.points(
+                        Points::new(pts).color(color).radius(3.5 * zoom).name(name),
+                    );
+                }
+            }
+        }
+    });
+}
+
 fn table_ui(
     ui: &mut egui::Ui,
     card: &Card,
@@ -1963,6 +2111,41 @@ fn table_ui(
             let mut header = table.header;
             if ui.checkbox(&mut header, "header").changed() {
                 actions.push(CanvasAction::TableToggleHeader(id));
+            }
+            ui.separator();
+            // Chart: a view of this same table, so the cells stay the data.
+            let cur = table.chart.clone();
+            let cur_label = cur.as_ref().map_or("Chart: off", |c| match c.kind {
+                crate::model::ChartKind::Bar => "Chart: bar",
+                crate::model::ChartKind::Line => "Chart: line",
+                crate::model::ChartKind::Scatter => "Chart: scatter",
+            });
+            egui::ComboBox::from_id_salt(("chart_kind", id))
+                .selected_text(cur_label)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(cur.is_none(), "Off (plain table)").clicked() {
+                        actions.push(CanvasAction::TableSetChart(id, None));
+                    }
+                    for k in crate::model::ChartKind::ALL {
+                        let on = cur.as_ref().is_some_and(|c| c.kind == k);
+                        if ui.selectable_label(on, k.label()).clicked() {
+                            let mut spec = cur.clone().unwrap_or_default();
+                            spec.kind = k;
+                            actions.push(CanvasAction::TableSetChart(id, Some(spec)));
+                        }
+                    }
+                });
+            if let Some(c) = &cur {
+                let mut show = c.show_table;
+                if ui
+                    .checkbox(&mut show, "grid")
+                    .on_hover_text("Show the source table under the chart")
+                    .changed()
+                {
+                    let mut spec = c.clone();
+                    spec.show_table = show;
+                    actions.push(CanvasAction::TableSetChart(id, Some(spec)));
+                }
             }
             ui.separator();
             if ui.small_button("Import…").on_hover_text("Load a CSV or XLSX file").clicked() {

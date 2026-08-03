@@ -4,6 +4,31 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.67.0]
+
+### Added
+- **Charts.** A **table** card can now be drawn as a **bar, line or scatter**
+  chart — pick one from the table's toolbar (or `POST
+  /api/nodes/{id}/cards/{cid}/chart {kind}`; `DELETE` the same path goes back to a
+  grid). The table stays the data: the chart is a *view* of the same cells, so
+  editing a cell — or a `rows` PATCH, or a table op — redraws it, and **Show grid**
+  keeps the spreadsheet visible underneath.
+  - Series come from the columns, named by the header row. Leave `value_cols`
+    empty and every numeric column is plotted, so adding a column just works.
+  - Numbers may be decorated: `1,234.5`, `$12`, `40%`, `(3)` = −3.
+  - **A non-numeric cell is a gap, not a zero** — a line breaks across it rather
+    than diving to 0, because plotting a blank status cell as a measured 0 would
+    invent data. A lone reading between two gaps still shows, as a dot.
+  - *Pie charts are not in this version.*
+- **`rows` and `header` on card creation.** `POST /api/nodes/{id}/cards` now
+  accepts a table's cells directly, so a populated table — and a chart drawn from
+  it — takes one call instead of create-then-PATCH.
+
+### Fixed
+- **A `rows` PATCH no longer turns a chart back into a plain grid.** `rows`
+  replaces the table's *data*; the chart is a view setting on that data and now
+  survives the refill.
+
 ## [0.66.0]
 
 ### Added

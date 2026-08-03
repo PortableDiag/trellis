@@ -59,6 +59,8 @@ pub enum ApiRequest {
     SetCardGroup { node: NodeId, card: u64, group: Option<GroupId> },
     // Fine-grained table editing (cell colors, header, widths, row/col ops).
     TableOp { node: NodeId, card: u64, op: TableOpInput },
+    // Draw a table card as a chart, or turn the chart off.
+    SetChart { node: NodeId, card: u64, spec: Option<ChartInput> },
     // Sketch editing (add stroke / undo / clear).
     SketchOp { node: NodeId, card: u64, op: SketchOpInput },
     // Image bytes.
@@ -159,6 +161,21 @@ pub struct MoveCardInput {
     pos: Option<[f32; 2]>,
 }
 
+/// Body of `POST /api/nodes/{id}/cards/{cid}/chart` — how to draw a table card
+/// as a chart. Omitted fields keep their current value, so you can flip the kind
+/// without restating the columns.
+#[derive(Deserialize)]
+pub struct ChartInput {
+    /// `bar` | `line` | `scatter`.
+    pub kind: String,
+    #[serde(default)]
+    pub label_col: Option<usize>,
+    #[serde(default)]
+    pub value_cols: Option<Vec<usize>>,
+    #[serde(default)]
+    pub show_table: Option<bool>,
+}
+
 /// Where to move a node. Pick ONE placement:
 /// - `before` / `after`: put this node immediately before/after that sibling,
 ///   adopting its parent (this is how you reparent across baskets).
@@ -213,6 +230,14 @@ pub struct AddCardInput {
     lang: Option<String>,
     #[serde(default)]
     items: Option<Vec<ChecklistItemInput>>,
+    /// Cell text for a `table` card, row by row — so a populated table (and a
+    /// chart drawn from it) can be created in one call instead of create-then-
+    /// PATCH. Ragged rows are padded to the widest.
+    #[serde(default)]
+    rows: Option<Vec<Vec<String>>>,
+    /// Style the first row as a header (table cards; default true).
+    #[serde(default)]
+    header: Option<bool>,
     #[serde(default)]
     pos: Option<[f32; 2]>,
     /// Card size (width, height).
@@ -584,6 +609,17 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Delete, ["api", "nodes", nid, "cards", cid, "group"]) => {
             Ok(ApiRequest::SetCardGroup { node: pid(nid)?, card: pid(cid)?, group: None })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "chart"]) => {
+            let node: NodeId = nid.parse().map_err(|_| (400, format!("bad node id: {nid}")))?;
+            let card: u64 = cid.parse().map_err(|_| (400, format!("bad card id: {cid}")))?;
+            let i: ChartInput = parse(body)?;
+            Ok(ApiRequest::SetChart { node, card, spec: Some(i) })
+        }
+        (Method::Delete, ["api", "nodes", nid, "cards", cid, "chart"]) => {
+            let node: NodeId = nid.parse().map_err(|_| (400, format!("bad node id: {nid}")))?;
+            let card: u64 = cid.parse().map_err(|_| (400, format!("bad card id: {cid}")))?;
+            Ok(ApiRequest::SetChart { node, card, spec: None })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "table"]) => {
             let op: TableOpInput = parse(body)?;
@@ -1019,7 +1055,16 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         .map(|i| ChecklistItem { done: i.done, text: i.text })
                         .collect(),
                 },
-                "table" => CardKind::Table { table: crate::model::TableData::empty(3, 3) },
+                "table" => {
+                    let mut t = match input.rows.clone() {
+                        Some(rows) if !rows.is_empty() => crate::model::TableData::from_values(rows),
+                        _ => crate::model::TableData::empty(3, 3),
+                    };
+                    if let Some(h) = input.header {
+                        t.header = h;
+                    }
+                    CardKind::Table { table: t }
+                }
                 "image" => CardKind::Image {
                     data: Vec::new(),
                     name: input.title.clone(),
@@ -1140,7 +1185,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some(rows) = patch.rows {
                     if let CardKind::Table { table } = &mut c.kind {
+                        // `rows` replaces the *data*; the chart is a view setting
+                        // on that data, so refilling a table must not silently
+                        // turn its chart back into a grid.
+                        let chart = table.chart.take();
                         *table = crate::model::TableData::from_values(rows);
+                        table.chart = chart;
                     }
                 }
                 if let Some(items) = patch.items {
@@ -1312,6 +1362,48 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 (true, ApiResponse::ok(card_json(c)))
             } else {
                 (false, ApiResponse::err(404, "card or group not found"))
+            }
+        }
+        ApiRequest::SetChart { node, card, spec } => {
+            let Some(c) = doc.card_mut(node, card) else {
+                return (false, ApiResponse::err(404, "node or card not found"));
+            };
+            let CardKind::Table { table } = &mut c.kind else {
+                return (
+                    false,
+                    ApiResponse::err(400, "charts are drawn from a table card's cells; convert the card to a table first"),
+                );
+            };
+            match spec {
+                None => {
+                    table.chart = None;
+                    (true, ApiResponse::ok(json!({ "chart": Value::Null })))
+                }
+                Some(i) => {
+                    let Some(kind) = crate::model::ChartKind::from_key(&i.kind) else {
+                        return (
+                            false,
+                            ApiResponse::err(400, "kind must be one of: bar, line, scatter"),
+                        );
+                    };
+                    let cur = table.chart.clone().unwrap_or_default();
+                    let spec = crate::model::ChartSpec {
+                        kind,
+                        label_col: i.label_col.unwrap_or(cur.label_col),
+                        value_cols: i.value_cols.unwrap_or(cur.value_cols),
+                        show_table: i.show_table.unwrap_or(cur.show_table),
+                    };
+                    table.chart = Some(spec.clone());
+                    (
+                        true,
+                        ApiResponse::ok(json!({ "chart": {
+                            "kind": spec.kind.key(),
+                            "label_col": spec.label_col,
+                            "value_cols": spec.value_cols,
+                            "show_table": spec.show_table,
+                        }})),
+                    )
+                }
             }
         }
         ApiRequest::TableOp { node, card, op } => {
@@ -1668,6 +1760,15 @@ pub(crate) fn card_json(c: &Card) -> Value {
         }
         CardKind::Table { table } => {
             v["header"] = json!(table.header);
+            v["chart"] = match &table.chart {
+                Some(c) => json!({
+                    "kind": c.kind.key(),
+                    "label_col": c.label_col,
+                    "value_cols": c.value_cols,
+                    "show_table": c.show_table,
+                }),
+                None => Value::Null,
+            };
             v["rows"] = json!(table
                 .rows
                 .iter()

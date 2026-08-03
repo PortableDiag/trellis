@@ -40,7 +40,11 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 - **Table** — a small spreadsheet: inline cell editing, insert/delete/resize
   rows and columns (right-click the row/column handles), per-cell **background
   and font colors**, an optional header row, and **CSV/XLSX import & export**
-  (XLSX export keeps your colors). The copy button copies the table as CSV.
+  (XLSX export keeps your colors). The copy button copies the table as CSV. Turn one
+  into a **chart** (bar, line or scatter) from the table's toolbar — the cells stay
+  the data, so editing one redraws the chart, and you can keep the grid visible
+  underneath. Non-numeric cells are gaps, not zeros, so a blank never plots as a
+  measured 0.
 - **Sketch** — a freehand draw surface: pick a **brush color and size**, draw
   with the mouse/pen, **undo the last stroke** or **clear**. Strokes are vector
   (they scale with zoom and export to HTML as inline SVG).
