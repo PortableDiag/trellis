@@ -4,6 +4,27 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.68.0]
+
+### Added
+- **Pie charts.** A table card can now be drawn as a **pie** (`kind: "pie"`, or
+  `donut`), joining bar/line/scatter. Slices are labelled with their percentage
+  when there's room, the legend lists every slice, and hovering one lifts it and
+  shows its exact value.
+
+  A pie divides a single whole, so it behaves differently from the x/y charts —
+  deliberately, and both rules are documented:
+  - It draws the **first** series only. Other columns are ignored rather than
+    stacked, because a pie can only show one set of parts.
+  - **Only positive values get a slice.** Blanks, zeros and negatives are
+    skipped, and percentages are of the positive total. A negative has no arc,
+    and quietly folding it in as its magnitude would misstate every other slice.
+    A table with nothing positive says so instead of drawing an empty circle.
+
+### Fixed
+- **`show_table` now works with a pie** — the grid is drawn under the chart, as
+  it already was for the other kinds.
+
 ## [0.67.0]
 
 ### Added

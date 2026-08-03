@@ -540,7 +540,8 @@ POST   /api/nodes/{id}/cards/{cid}/chart  {kind, label_col?, value_cols?, show_t
 DELETE /api/nodes/{id}/cards/{cid}/chart  → 200 {"chart":null}
   Back to a plain grid.
 ```
-- **`kind`** — `bar`, `line`, or `scatter`. (Pie is not in this version.)
+- **`kind`** — `bar`, `line`, `scatter`, or `pie` (`donut` is accepted as an
+  alias).
 - **`label_col`** (default `0`) — the column supplying each point's label / x-axis
   category.
 - **`value_cols`** — columns to plot. Omit or leave empty to plot **every numeric
@@ -550,6 +551,15 @@ DELETE /api/nodes/{id}/cards/{cid}/chart  → 200 {"chart":null}
   restating the columns.
 
 A card's JSON carries `chart` (the object above, or `null`) alongside `rows`.
+
+**Pie is different in two ways**, because it divides a single whole rather than
+plotting x against y:
+- It draws the **first** series only — `value_cols[0]` if you gave one, else the
+  first numeric column. The other columns are ignored, not stacked.
+- Only **positive** values get a slice. Blanks, zeros and negatives are skipped,
+  and percentages are of the positive total — a negative has no arc, and folding
+  it in as its magnitude would misstate every other slice. `show_table` still
+  works, and hovering a slice shows its exact value and percentage.
 
 **How cells are read:** the header row supplies series names when `header` is
 true. Numbers may be decorated — `1,234.5`, `$12`, `40%`, `(3)` = −3. A cell that
@@ -704,6 +714,9 @@ CID=$(curl -s -H "X-API-Key: $KEY" -d '{"kind":"table","title":"Quarterly revenu
       "rows":[["Quarter","Revenue","Costs"],["Q1","1200","800"],["Q2","1850","900"]],
       "size":[520,300]}' $API/nodes/$NID/cards | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 curl -s -X POST -H "X-API-Key: $KEY" -d '{"kind":"bar"}' $API/nodes/$NID/cards/$CID/chart
+# Pie of one column (proportions of a whole; only positive values get a slice):
+curl -s -X POST -H "X-API-Key: $KEY" \
+     -d '{"kind":"pie","label_col":0,"value_cols":[1]}' $API/nodes/$NID/cards/$CID/chart
 # Line chart of one column, with the grid kept visible underneath:
 curl -s -X POST -H "X-API-Key: $KEY" \
      -d '{"kind":"line","value_cols":[1],"show_table":true}' $API/nodes/$NID/cards/$CID/chart

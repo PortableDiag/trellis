@@ -1957,6 +1957,191 @@ const SERIES_COLORS: [egui::Color32; 8] = [
     egui::Color32::from_rgb(0x8a, 0x9a, 0xa8), // slate
 ];
 
+/// Draw a table card as a **pie**: proportions of a whole.
+///
+/// egui_plot has no pie, so this is painted by hand. A slice wider than a
+/// half-turn isn't convex, and egui fills assume convexity, so each slice is
+/// filled as a fan of sub-wedges (≤ 60° each) and the outline is stroked
+/// separately — otherwise a single dominant slice tessellates inside out.
+///
+/// Only the **first** series is used: a pie shows one set of parts. Non-positive
+/// and missing values are skipped — a negative has no meaningful arc, and
+/// silently folding it in as its absolute value would misstate every percentage.
+fn pie_ui(
+    ui: &mut egui::Ui,
+    table: &crate::model::TableData,
+    spec: &crate::model::ChartSpec,
+    zoom: f32,
+) {
+    use std::f32::consts::TAU;
+
+    let (labels, series) = table.chart_data(spec);
+    let Some((series_name, vals)) = series.first() else {
+        ui.small(
+            egui::RichText::new("No numeric column to chart.")
+                .color(ui.visuals().weak_text_color()),
+        );
+        return;
+    };
+
+    let slices: Vec<(String, f64)> = vals
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| v.filter(|v| *v > 0.0).map(|v| (i, v)))
+        .map(|(i, v)| (labels.get(i).cloned().unwrap_or_default(), v))
+        .collect();
+    let total: f64 = slices.iter().map(|(_, v)| *v).sum();
+    if slices.is_empty() || total <= 0.0 {
+        ui.small(
+            egui::RichText::new(format!(
+                "\"{series_name}\" has no positive values to divide into a pie."
+            ))
+            .color(ui.visuals().weak_text_color()),
+        );
+        return;
+    }
+
+    let avail = ui.available_size();
+    let h = if spec.show_table {
+        (avail.y * 0.55).max(80.0 * zoom)
+    } else {
+        avail.y.max(80.0 * zoom)
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(avail.x, h), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    // Legend on the right when there's room for it, else all pie.
+    let legend_w = if rect.width() > 260.0 * zoom {
+        (rect.width() * 0.34).min(190.0 * zoom)
+    } else {
+        0.0
+    };
+    let pie_rect = egui::Rect::from_min_size(
+        rect.min,
+        egui::vec2(rect.width() - legend_w, rect.height()),
+    );
+    let center = pie_rect.center();
+    let radius = (pie_rect.width().min(pie_rect.height()) / 2.0 - 4.0 * zoom).max(6.0 * zoom);
+
+    // Which slice is the pointer over? Cheap, and it makes small slices readable.
+    let hovered = resp.hover_pos().and_then(|p| {
+        let d = p - center;
+        if d.length() > radius {
+            return None;
+        }
+        // Angles run clockwise from 12 o'clock, matching the draw order.
+        let mut a = (d.x).atan2(-d.y);
+        if a < 0.0 {
+            a += TAU;
+        }
+        let mut acc = 0.0;
+        for (i, (_, v)) in slices.iter().enumerate() {
+            let sweep = (*v / total) as f32 * TAU;
+            if a >= acc && a < acc + sweep {
+                return Some(i);
+            }
+            acc += sweep;
+        }
+        None
+    });
+
+    let mut start = 0.0f32;
+    let mut bounds: Vec<f32> = Vec::with_capacity(slices.len() + 1);
+    for (i, (label, v)) in slices.iter().enumerate() {
+        let frac = (*v / total) as f32;
+        let sweep = frac * TAU;
+        let base = SERIES_COLORS[i % SERIES_COLORS.len()];
+        let color = if hovered == Some(i) { mix(base, egui::Color32::WHITE, 0.25) } else { base };
+        let r = if hovered == Some(i) { radius + 2.0 * zoom } else { radius };
+        bounds.push(start);
+
+        // One polygon per slice: egui fills a polygon as a fan from its first
+        // vertex, and every point on the arc is visible from the centre, so this
+        // tessellates correctly even past a half-turn. Splitting it into
+        // sub-wedges instead leaves anti-aliased seams across the slice.
+        let segs = ((sweep / 0.12).ceil() as usize).max(2);
+        let mut pts = Vec::with_capacity(segs + 2);
+        pts.push(center);
+        for sgi in 0..=segs {
+            let a = start + sweep * sgi as f32 / segs as f32;
+            pts.push(center + egui::vec2(a.sin(), -a.cos()) * r);
+        }
+        painter.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+
+        // Percentage inside the slice, when it's big enough to hold text.
+        if frac >= 0.06 {
+            let mid = start + sweep / 2.0;
+            let at = center + egui::vec2(mid.sin(), -mid.cos()) * (r * 0.62);
+            painter.text(
+                at,
+                egui::Align2::CENTER_CENTER,
+                format!("{:.0}%", frac * 100.0),
+                egui::FontId::proportional(11.0 * zoom),
+                title_text_color(ui.visuals(), color),
+            );
+        }
+        let _ = label;
+        start += sweep;
+    }
+    bounds.push(start);
+
+    // Separators + rim, drawn over the fills so no sub-wedge seams show.
+    let edge = egui::Stroke::new(1.0 * zoom, ui.visuals().panel_fill);
+    for a in &bounds {
+        painter.line_segment(
+            [center, center + egui::vec2(a.sin(), -a.cos()) * radius],
+            edge,
+        );
+    }
+
+    if legend_w > 0.0 {
+        let x = pie_rect.right() + 8.0 * zoom;
+        let line_h = 15.0 * zoom;
+        let max_rows = ((rect.height() / line_h).floor() as usize).max(1);
+        let mut y = rect.top() + 4.0 * zoom;
+        for (i, (label, v)) in slices.iter().take(max_rows).enumerate() {
+            let color = SERIES_COLORS[i % SERIES_COLORS.len()];
+            let sw = 8.0 * zoom;
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(x, y + (line_h - sw) / 2.0),
+                    egui::vec2(sw, sw),
+                ),
+                1.0 * zoom,
+                color,
+            );
+            let pct = (*v / total) * 100.0;
+            painter.text(
+                egui::pos2(x + sw + 5.0 * zoom, y + line_h / 2.0),
+                egui::Align2::LEFT_CENTER,
+                format!("{label}  {pct:.0}%"),
+                egui::FontId::proportional(11.0 * zoom),
+                ui.visuals().text_color(),
+            );
+            y += line_h;
+        }
+        if slices.len() > max_rows {
+            painter.text(
+                egui::pos2(x, y + line_h / 2.0),
+                egui::Align2::LEFT_CENTER,
+                format!("+{} more", slices.len() - max_rows),
+                egui::FontId::proportional(11.0 * zoom),
+                ui.visuals().weak_text_color(),
+            );
+        }
+    }
+
+    // Exact value on hover — the percentage alone loses the underlying number,
+    // and small slices have no room for a label at all.
+    if let Some(i) = hovered {
+        let (label, v) = &slices[i];
+        resp.on_hover_text(format!(
+            "{label}: {v} ({:.1}%)",
+            (*v / total) * 100.0
+        ));
+    }
+}
+
 /// Draw a table card as a chart. **Every pixel dimension here is scaled by
 /// `zoom`** — the canvas paints cards at their screen rect with no transform
 /// layer, so anything left unscaled keeps its size while the card shrinks.
@@ -1969,6 +2154,12 @@ fn chart_ui(
 ) {
     use crate::model::ChartKind;
     use egui_plot::{Bar, BarChart, Legend, Line, Plot, Points, PlotPoints};
+
+    // A pie is proportions of one series, not an x/y plot — its own painter.
+    if spec.kind == ChartKind::Pie {
+        pie_ui(ui, table, spec, zoom);
+        return;
+    }
 
     let (labels, series) = table.chart_data(spec);
     if labels.is_empty() || series.is_empty() {
@@ -2076,6 +2267,8 @@ fn chart_ui(
                         Points::new(pts).color(color).radius(3.5 * zoom).name(name),
                     );
                 }
+                // Handled by pie_ui before we ever build a Plot.
+                ChartKind::Pie => {}
             }
         }
     });
@@ -2119,6 +2312,7 @@ fn table_ui(
                 crate::model::ChartKind::Bar => "Chart: bar",
                 crate::model::ChartKind::Line => "Chart: line",
                 crate::model::ChartKind::Scatter => "Chart: scatter",
+                crate::model::ChartKind::Pie => "Chart: pie",
             });
             egui::ComboBox::from_id_salt(("chart_kind", id))
                 .selected_text(cur_label)

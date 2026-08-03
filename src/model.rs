@@ -121,22 +121,27 @@ pub struct ChartSpec {
     pub show_table: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChartKind {
     Bar,
     Line,
     Scatter,
+    /// Proportions of a whole. Unlike the others this plots a **single** series
+    /// (the first one), because a pie can only show one set of parts.
+    Pie,
 }
 
 impl ChartKind {
-    pub const ALL: [ChartKind; 3] = [ChartKind::Bar, ChartKind::Line, ChartKind::Scatter];
+    pub const ALL: [ChartKind; 4] =
+        [ChartKind::Bar, ChartKind::Line, ChartKind::Scatter, ChartKind::Pie];
 
     pub fn label(self) -> &'static str {
         match self {
             ChartKind::Bar => "Bar",
             ChartKind::Line => "Line",
             ChartKind::Scatter => "Scatter",
+            ChartKind::Pie => "Pie",
         }
     }
 
@@ -145,6 +150,7 @@ impl ChartKind {
             ChartKind::Bar => "bar",
             ChartKind::Line => "line",
             ChartKind::Scatter => "scatter",
+            ChartKind::Pie => "pie",
         }
     }
 
@@ -155,6 +161,7 @@ impl ChartKind {
             "bar" => Some(ChartKind::Bar),
             "line" => Some(ChartKind::Line),
             "scatter" | "points" => Some(ChartKind::Scatter),
+            "pie" | "doughnut" | "donut" => Some(ChartKind::Pie),
             _ => None,
         }
     }
@@ -3575,6 +3582,42 @@ mod tests {
         assert_eq!(parse_number(""), None);
         assert_eq!(parse_number("pass"), None);
         assert_eq!(parse_number("-"), None);
+    }
+
+    #[test]
+    fn chart_kind_keys_round_trip_and_reject_junk() {
+        for k in ChartKind::ALL {
+            assert_eq!(ChartKind::from_key(k.key()), Some(k), "{} must round-trip", k.key());
+        }
+        assert_eq!(ChartKind::from_key("PIE"), Some(ChartKind::Pie), "case-insensitive");
+        assert_eq!(ChartKind::from_key("donut"), Some(ChartKind::Pie), "common alias");
+        // Unknown kinds are rejected so the API can say so instead of silently
+        // picking a chart the caller didn't ask for.
+        assert_eq!(ChartKind::from_key("radar"), None);
+        assert_eq!(ChartKind::from_key(""), None);
+    }
+
+    #[test]
+    fn pie_uses_the_first_series_and_ignores_non_positive() {
+        // A pie divides a whole, so negatives/blanks/zeros have no arc — the
+        // percentages must be of the positive values only.
+        let t = TableData::from_values(vec![
+            vec!["Part".into(), "Share".into(), "Other".into()],
+            vec!["Huge".into(), "800".into(), "1".into()],
+            vec!["Small".into(), "90".into(), "1".into()],
+            vec!["Negative".into(), "-50".into(), "1".into()],
+            vec!["Blank".into(), "".into(), "1".into()],
+        ]);
+        let spec = ChartSpec { kind: ChartKind::Pie, ..ChartSpec::default() };
+        let (labels, series) = t.chart_data(&spec);
+        assert_eq!(labels, vec!["Huge", "Small", "Negative", "Blank"]);
+        // First series is what the pie draws.
+        assert_eq!(series[0].0, "Share");
+        let vals = &series[0].1;
+        let positive: f64 = vals.iter().flatten().filter(|v| **v > 0.0).sum();
+        assert_eq!(positive, 890.0, "only Huge + Small count toward the whole");
+        assert_eq!(vals[3], None, "a blank cell is a gap, not a zero slice");
+        assert_eq!(vals[2], Some(-50.0), "the negative is present but not plottable");
     }
 
     #[test]

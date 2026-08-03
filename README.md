@@ -41,7 +41,7 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   rows and columns (right-click the row/column handles), per-cell **background
   and font colors**, an optional header row, and **CSV/XLSX import & export**
   (XLSX export keeps your colors). The copy button copies the table as CSV. Turn one
-  into a **chart** (bar, line or scatter) from the table's toolbar — the cells stay
+  into a **chart** (bar, line, scatter or **pie**) from the table's toolbar — the cells stay
   the data, so editing one redraws the chart, and you can keep the grid visible
   underneath. Non-numeric cells are gaps, not zeros, so a blank never plots as a
   measured 0.
