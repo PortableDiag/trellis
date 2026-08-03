@@ -85,6 +85,9 @@ pub enum ApiRequest {
     Backlinks(NodeId),
     // The wiki-link graph (linked nodes + directed edges).
     Graph,
+    // Which document this instance has open (and on which port), so an agent
+    // driving several instances can check it has the right one.
+    Instance,
     // Backup + version-history control — handled by the app loop (they need the
     // doc's on-disk path / config), not `process`, which only sees the Document.
     BackupStatus,
@@ -634,6 +637,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             include_done: query_get(query, "all").as_deref() == Some("true"),
         }),
         (Method::Get, ["api", "kanban"]) => Ok(ApiRequest::Kanban),
+        (Method::Get, ["api", "instance"]) => Ok(ApiRequest::Instance),
         (Method::Get, ["api", "backup"]) => Ok(ApiRequest::BackupStatus),
         (Method::Post, ["api", "backup", "run"]) => Ok(ApiRequest::BackupRun),
         (Method::Post, ["api", "ocr"]) => Ok(ApiRequest::OcrAll),
@@ -1501,7 +1505,8 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         // Backup requests are intercepted and answered by the app loop (they need
         // the backup config + document file). This is only reached if that
         // interception is ever missed — report it rather than silently no-op.
-        ApiRequest::BackupStatus
+        ApiRequest::Instance
+        | ApiRequest::BackupStatus
         | ApiRequest::BackupRun
         | ApiRequest::HistoryList
         | ApiRequest::HistoryRestore(_)
@@ -1683,8 +1688,22 @@ mod tests {
             route(&Method::Get, "/api/search", "q=hello%20world", "").unwrap(),
             ApiRequest::Search(q) if q == "hello world"
         ));
+        assert!(matches!(
+            route(&Method::Get, "/api/instance", "", "").unwrap(),
+            ApiRequest::Instance
+        ));
         assert!(route(&Method::Get, "/api/bogus", "", "").is_err());
         assert!(route(&Method::Get, "/api/nodes/notanumber", "", "").is_err());
+    }
+
+    #[test]
+    fn app_intercepted_routes_report_when_the_app_loop_misses_them() {
+        // `Instance` needs the doc's path + server settings, so `process` only
+        // sees it if the app-loop interception is ever missed.
+        let mut doc = Document::empty();
+        let (dirty, resp) = process(&mut doc, ApiRequest::Instance);
+        assert!(!dirty);
+        assert_eq!(resp.status, 500);
     }
 
     #[test]

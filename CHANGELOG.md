@@ -4,6 +4,39 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.65.0]
+
+### Added
+- **Run separate documents side by side.** Trellis now takes command-line
+  arguments: `trellis [FILE] [--port PORT] [--data-dir DIR]`. `FILE` opens a
+  document (creating it if the path is new), `--port` sets the agent API port for
+  that run, and `--data-dir` gives an instance its **own settings** — API key,
+  port, theme, backup config and autosave slot. Together they let you run one
+  instance per document, each on its own port:
+
+  ```sh
+  trellis ~/work.ron     --port 7373 --data-dir ~/.local/share/trellis-work
+  trellis ~/personal.ron --port 7374 --data-dir ~/.local/share/trellis-personal
+  ```
+
+  Keeping, say, work and personal notes in separate documents gives each its own
+  version history and backups, and means an agent pointed at one can't read or
+  rewrite the other. With no arguments Trellis behaves exactly as before.
+- **The window title shows the open document** (`work.ron — Trellis`), and
+  follows New / Open / Save As — so two instances are tellable apart in the
+  taskbar. It used to always read "Trellis".
+- **`GET /api/instance`** — which document an instance is serving (`document`,
+  `path`, `port`, `lan`, node count, unsaved-changes flag) plus the app version.
+  With one instance per document, the port is how you address a document, so an
+  agent can confirm it's driving the right one before writing. Needs the API key
+  (unlike `/api/health`), since it reveals a file path.
+
+### Fixed
+- **A failed API bind is no longer easy to miss.** If the port is already taken
+  (typically a second instance on the same port) the status bar now says the
+  agent API is off, instead of only the Settings panel showing it — that instance
+  serves no requests, and the mistake used to be silent.
+
 ## [0.64.0]
 
 ### Added

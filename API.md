@@ -12,8 +12,11 @@ document.
   restart). Only enable on trusted networks — never expose to the internet without a
   TLS proxy.
 - **Format:** JSON request and response bodies; `Content-Type: application/json`.
-- **State:** operates on the document currently open in the app. There is no
-  multi-document addressing — whatever the user has open is what you edit.
+- **State:** operates on the document currently open in the app. One instance
+  serves one document, so **the port is how you address a document**: run an
+  instance per document (`trellis ~/work.ron --port 7373 --data-dir …`) and call
+  the port belonging to the one you mean. `GET /api/instance` says which document
+  the instance you're talking to has open — worth checking before you write.
 
 ## Enabling it
 
@@ -21,7 +24,12 @@ The API is **off until a key is set**. In the app: **Tools → Settings → Agen
 click **Generate** (or type a key), and **Copy** it. The key and port persist
 across restarts. Changing the key takes effect immediately; changing the port
 needs an app restart. If the port is busy, the Settings panel shows the bind
-error and the API stays down.
+error, the status bar says the API is off, and no request is served.
+
+Launching with `--port <PORT>` overrides the saved port for that run, and
+`--data-dir <DIR>` gives an instance its own key/port/settings — that pairing is
+what lets several instances (one per document) serve different ports at once.
+See `trellis --help`.
 
 ## Authentication
 
@@ -90,6 +98,19 @@ underline. Use `\n` for line breaks.
 ```
 GET /api/health        → 200 {"status":"ok","app":"trellis"}   (no auth)
 ```
+
+### Instance
+Which document *this* instance is serving. With one instance per document (each
+on its own port), call this first to confirm you're driving the right one.
+```
+GET /api/instance
+  → 200 {"app":"trellis","version":"0.65.0","document":"work.ron",
+         "path":"/home/you/work.ron","port":7373,"lan":false,
+         "nodes":42,"unsaved_changes":false}
+```
+`document` is the file name (`"untitled"` for a never-saved document) and `path`
+is its full path, or `null` when untitled. `nodes` is the document's node count.
+Unlike `/api/health` this needs the key, since it reveals a file path.
 
 ### Read
 ```
@@ -487,6 +508,11 @@ All errors return `{"error":"<message>"}` with the status code:
 ```sh
 KEY=<your key>
 API=http://127.0.0.1:7373/api
+
+# Confirm which document this port is serving before writing to it — with an
+# instance per document (work on 7373, personal on 7374), the port is the address.
+curl -s -H "X-API-Key: $KEY" $API/instance
+# → {"app":"trellis","document":"work.ron","path":"/home/you/work.ron","port":7373,…}
 
 # See the whole tree
 curl -s -H "X-API-Key: $KEY" $API/tree

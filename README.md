@@ -203,6 +203,35 @@ from the main cluster, and click or drag on it to jump there without zooming out
 cargo run --release
 ```
 
+### Command line
+
+```
+trellis [FILE] [-p|--port PORT] [-d|--data-dir DIR]
+```
+
+`FILE` is the document to open (a path that doesn't exist yet starts a new
+document saved there). `--port` sets the agent API port for that run, and
+`--data-dir` gives the instance its **own settings** — API key, port, theme,
+backup config and autosave slot — under that directory. `trellis --help` for the
+full text; with no arguments Trellis reopens the last document as before.
+
+### Separate documents, side by side
+
+One instance serves one document, so run **an instance per document** and give
+each its own port and data directory:
+
+```sh
+trellis ~/work.ron     --port 7373 --data-dir ~/.local/share/trellis-work
+trellis ~/personal.ron --port 7374 --data-dir ~/.local/share/trellis-personal
+```
+
+They keep separate settings, separate version history and separate backups, and
+the window title shows which document each one has open.
+For agents, **the port is the document's address** — `GET /api/instance` reports
+which document a port is serving, so a script can check before it writes. Keeping
+work and personal notes in different documents also means an agent pointed at one
+can't read or rewrite the other.
+
 Requires a recent stable Rust toolchain. Tests: `cargo test` (binary crate — use
 `cargo test --bin trellis` to test a single target). Middle-click paste and the
 X11 PRIMARY-selection features need `xclip` or `xsel` installed. **OCR** (right-click

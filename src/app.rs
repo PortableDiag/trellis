@@ -549,6 +549,33 @@ fn kanban_card_ui(
     }
 }
 
+/// Command-line startup overrides (see `main`). Each field falls back to the
+/// saved setting when `None`, so a bare `trellis` behaves exactly as before.
+#[derive(Default)]
+pub struct Startup {
+    /// Document to open instead of the one from the last session.
+    pub doc: Option<PathBuf>,
+    /// Agent-API port for this run, overriding the saved one.
+    pub port: Option<u16>,
+    /// This instance's private settings/autosave directory.
+    pub data_dir: Option<PathBuf>,
+}
+
+/// The open document's file name, or `untitled` — what identifies an instance to
+/// a human (window title) and to an agent (`GET /api/instance`).
+pub fn doc_display_name(path: Option<&std::path::Path>) -> String {
+    path.and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "untitled".to_string())
+}
+
+/// Window/taskbar title for a document. Leads with the file name so two
+/// instances (e.g. work and personal) are distinguishable in a window list,
+/// where the trailing app name is usually what gets truncated away.
+pub fn window_title(path: Option<&std::path::Path>) -> String {
+    format!("{} — Trellis", doc_display_name(path))
+}
+
 pub struct TrellisApp {
     doc: Document,
     selected: Option<NodeId>,
@@ -562,6 +589,9 @@ pub struct TrellisApp {
     doc_path: Option<PathBuf>,
     /// Fallback autosave location used when the document is untitled.
     autosave_path: PathBuf,
+    /// Last title pushed to the window manager, so we only send a viewport
+    /// command when the open document actually changes (see `sync_window_title`).
+    window_title: String,
     dialog_parent: Option<DialogParent>,
     /// Full-screen image viewer, opened by double-clicking an image card image.
     lightbox: Option<Lightbox>,
@@ -701,23 +731,48 @@ pub struct TrellisApp {
 }
 
 impl TrellisApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         setup_fonts(&cc.egui_ctx);
-        let autosave_path = default_autosave_path();
+        // With `--data-dir` the instance keeps its autosave slot beside its own
+        // settings (eframe writes `app.ron` under `<dir>/trellis/`).
+        let autosave_path = match &startup.data_dir {
+            Some(d) => d.join("trellis").join("autosave.ron"),
+            None => default_autosave_path(),
+        };
 
-        // Reopen the document from the last session if possible; otherwise fall
-        // back to the autosave slot, then to a fresh welcome document.
-        let last_path = cc
-            .storage
-            .and_then(|s| s.get_string(LAST_DOC_KEY))
-            .map(PathBuf::from);
+        // Which document to open: an explicit command-line path wins, else the
+        // one from the last session, else the autosave slot, else a fresh
+        // welcome document.
+        let mut status = "Ready".to_string();
         let mut doc_path: Option<PathBuf> = None;
         let mut doc: Option<Document> = None;
-        if let Some(p) = &last_path {
-            if let Ok(d) = read_document(p) {
-                doc = Some(d);
+        if let Some(p) = &startup.doc {
+            if !p.exists() {
+                // A path that isn't there yet means "start a document here".
+                doc = Some(Document::default());
                 doc_path = Some(p.clone());
+                status = format!("New document — saves to {}", p.display());
+            } else {
+                match read_document(p) {
+                    Ok(d) => {
+                        doc = Some(d);
+                        doc_path = Some(p.clone());
+                    }
+                    // It exists but won't load. Leave `doc_path` unset so an
+                    // autosave can never write an empty document over whatever
+                    // is really in that file.
+                    Err(e) => status = format!("Could not open {}: {e}", p.display()),
+                }
+            }
+        } else if let Some(p) = cc
+            .storage
+            .and_then(|s| s.get_string(LAST_DOC_KEY))
+            .map(PathBuf::from)
+        {
+            if let Ok(d) = read_document(&p) {
+                doc = Some(d);
+                doc_path = Some(p);
             }
         }
         let doc = doc
@@ -776,10 +831,15 @@ impl TrellisApp {
             .storage
             .and_then(|s| s.get_string(API_KEY_KEY))
             .unwrap_or_default();
-        let api_port = cc
-            .storage
-            .and_then(|s| s.get_string(API_PORT_KEY))
-            .and_then(|s| s.parse().ok())
+        // `--port` wins for this run (and is then persisted like any setting), so
+        // a launcher pins an instance's port regardless of what was saved.
+        let api_port = startup
+            .port
+            .or_else(|| {
+                cc.storage
+                    .and_then(|s| s.get_string(API_PORT_KEY))
+                    .and_then(|s| s.parse().ok())
+            })
             .unwrap_or(DEFAULT_API_PORT);
         let api_lan = cc
             .storage
@@ -804,6 +864,12 @@ impl TrellisApp {
             Ok(server) => (Some(server), api_status_line(api_lan, api_port)),
             Err(e) => (None, format!("Failed to start on port {api_port}: {e}")),
         };
+        // A failed bind (usually a second instance on the same port) leaves this
+        // instance without an API — say so in the status bar, not just in
+        // Settings, so agent calls aren't silently answered by the other one.
+        if api_server.is_none() {
+            status = format!("Agent API off — port {api_port} is unavailable");
+        }
 
         Self {
             doc,
@@ -814,6 +880,8 @@ impl TrellisApp {
             renaming: None,
             doc_path,
             autosave_path,
+            // Empty so the first frame always pushes the real title.
+            window_title: String::new(),
             dialog_parent: None,
             lightbox: None,
             dirty: false,
@@ -822,7 +890,7 @@ impl TrellisApp {
             saving: false,
             save_tx,
             save_rx,
-            status: "Ready".to_string(),
+            status,
             backup_cfg,
             show_history: false,
             show_backup: false,
@@ -1112,6 +1180,17 @@ impl TrellisApp {
         }
     }
 
+    /// Show the open document in the window/taskbar title, so several instances
+    /// (work / personal) are tellable apart. Only sends a viewport command when
+    /// the title actually changes — it's a window-manager round-trip.
+    fn sync_window_title(&mut self, ctx: &egui::Context) {
+        let want = window_title(self.doc_path.as_deref());
+        if want != self.window_title {
+            self.window_title = want.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(want));
+        }
+    }
+
     fn pump_api(&mut self) {
         let mut cmds = Vec::new();
         if let Some(rx) = &self.api_rx {
@@ -1130,6 +1209,10 @@ impl TrellisApp {
                 let _ = cmd.resp.send(resp);
                 continue;
             }
+            if let Some(resp) = self.handle_api_instance(&cmd.req) {
+                let _ = cmd.resp.send(resp);
+                continue;
+            }
             let (changed, resp) = api::process(&mut self.doc, cmd.req);
             if changed {
                 self.mark_dirty();
@@ -1141,6 +1224,27 @@ impl TrellisApp {
                 }
             }
             let _ = cmd.resp.send(resp);
+        }
+    }
+
+    /// Answer `GET /api/instance` — which document this instance has open, and
+    /// on which port. With several instances running (one per document), an
+    /// agent uses this to confirm it is driving the one it means to before it
+    /// writes anything. Needs the doc path + server settings, so it's answered
+    /// here rather than in `api::process`.
+    fn handle_api_instance(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
+        match req {
+            api::ApiRequest::Instance => Some(api::ApiResponse::ok(serde_json::json!({
+                "app": "trellis",
+                "version": env!("CARGO_PKG_VERSION"),
+                "document": doc_display_name(self.doc_path.as_deref()),
+                "path": self.doc_path.as_ref().map(|p| p.display().to_string()),
+                "port": self.api_port,
+                "lan": self.api_lan,
+                "nodes": self.doc.nodes.len(),
+                "unsaved_changes": self.dirty,
+            }))),
+            _ => None,
         }
     }
 
@@ -3324,6 +3428,7 @@ impl TrellisApp {
                 ui.collapsing("Endpoints", |ui| {
                     for line in [
                         "GET    /api/health                        (no auth)",
+                        "GET    /api/instance   → which document this port serves",
                         "GET    /api/tree",
                         "GET    /api/nodes",
                         "POST   /api/nodes               {parent?, title}",
@@ -4251,6 +4356,9 @@ impl eframe::App for TrellisApp {
         if let (Ok(w), Ok(d)) = (frame.window_handle(), frame.display_handle()) {
             self.dialog_parent = Some(DialogParent { window: w.as_raw(), display: d.as_raw() });
         }
+
+        // Keep the window title on the open document (New/Open/Save As change it).
+        self.sync_window_title(ctx);
 
         // Apply any API requests from the server thread first.
         self.pump_api();
