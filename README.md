@@ -261,6 +261,8 @@ to render inline text-color spans; edit it there, not the crates.io copy.
 
 - [API.md](API.md) — the localhost agent HTTP API.
 - [web-clipper/README.md](web-clipper/README.md) — the Chrome/Edge clipper extension.
+- [docs/VR-PROPOSAL.md](docs/VR-PROPOSAL.md) — proposal for a VR client (separate
+  side project; talks to the agent API rather than embedding the desktop app).
 - [CHANGELOG.md](CHANGELOG.md) — version history.
 - `trellis --help` — command-line arguments (document, port, data directory).
 
