@@ -152,10 +152,13 @@ from the main cluster, and click or drag on it to jump there without zooming out
 - **Find cards** (View → Find cards) — a cross-tree query panel: pick a tag and/or
   a property (+ value) from dropdowns, optionally add text; results link back to
   their basket. No syntax to remember.
-- The **Agenda** can be **filtered to one project** (the dropdown at the top),
+- The **Agenda** and the **Kanban board** can each be **filtered to one project**
+  (the dropdown at the top),
   and every row is colour-coded by project — the project's own colour tag when it
   has one, otherwise a stable colour picked for it — so a long list groups by
-  project at a glance. The filter is remembered between launches.
+  project at a glance. Kanban cards are colour-coded the same way. Each view
+  remembers its own filter between launches — they answer different questions, so
+  you can scope them differently.
 - Both the **Agenda** and the **Kanban board** show each task's **full basket
   path** (`Super Weapon News › Open Items`), not just the basket name — project
   folders reuse names like "Open Items", so the bare name can't tell you which

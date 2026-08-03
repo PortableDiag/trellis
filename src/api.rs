@@ -82,7 +82,7 @@ pub enum ApiRequest {
     QueryCards { tag: Option<String>, key: Option<String>, value: Option<String>, text: Option<String> },
     Tasks { include_done: bool, project: Option<NodeId> },
     // Cards grouped by `status::` value — the Kanban board's columns.
-    Kanban,
+    Kanban { project: Option<NodeId> },
     // Cards that [[link]] to a node.
     Backlinks(NodeId),
     // The wiki-link graph (linked nodes + directed edges).
@@ -687,7 +687,14 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
                 None => None,
             },
         }),
-        (Method::Get, ["api", "kanban"]) => Ok(ApiRequest::Kanban),
+        (Method::Get, ["api", "kanban"]) => Ok(ApiRequest::Kanban {
+            project: match query_get(query, "project") {
+                Some(v) => Some(
+                    v.parse().map_err(|_| (400, format!("bad project node id: {v}")))?,
+                ),
+                None => None,
+            },
+        }),
         (Method::Get, ["api", "instance"]) => Ok(ApiRequest::Instance),
         (Method::Get, ["api", "backup"]) => Ok(ApiRequest::BackupStatus),
         (Method::Post, ["api", "backup", "run"]) => Ok(ApiRequest::BackupRun),
@@ -1594,11 +1601,25 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .collect();
             (false, ApiResponse::ok(json!({ "today_days": today, "count": tasks.len(), "tasks": tasks })))
         }
-        ApiRequest::Kanban => {
+        ApiRequest::Kanban { project } => {
             let today = today_days();
+            if let Some(p) = project {
+                if !doc.nodes.contains_key(&p) {
+                    return (false, ApiResponse::err(404, "project node not found"));
+                }
+            }
             let columns: Vec<Value> = doc
                 .cards_by_status()
                 .into_iter()
+                // Same semantics as /api/tasks?project= — any node, not just a root.
+                .map(|(status, cards)| {
+                    let cards: Vec<_> = cards
+                        .into_iter()
+                        .filter(|c| project.map_or(true, |p| doc.is_under(c.node, p)))
+                        .collect();
+                    (status, cards)
+                })
+                .filter(|(_, cards)| !cards.is_empty())
                 .map(|(status, cards)| {
                     let cards: Vec<Value> = cards
                         .into_iter()
@@ -1607,6 +1628,8 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                                 "node": kc.node,
                                 "node_title": kc.node_title,
                                 "node_path": kc.node_path,
+                                "project": kc.root,
+                                "project_title": kc.root_title,
                                 "card": kc.card,
                                 "title": kc.title,
                                 "due": kc.due,

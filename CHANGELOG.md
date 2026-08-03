@@ -4,6 +4,16 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.71.0]
+
+### Added
+- **The Kanban board can be filtered by project too**, with the same dropdown and
+  × as the Agenda, and its cards are colour-coded by project the same way. Each
+  view remembers its **own** filter — they answer different questions, so scoping
+  the board to one project doesn't narrow your agenda.
+- **`GET /api/kanban?project=<node id>`**, matching `/api/tasks?project=`; kanban
+  cards also carry `project` and `project_title`.
+
 ## [0.70.0]
 
 ### Added

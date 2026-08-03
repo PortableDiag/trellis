@@ -2197,12 +2197,19 @@ impl Document {
                 };
                 let due = props.iter().find(|(k, _)| k == "due").map(|(_, v)| v.clone());
                 let tags = extract_tags(&format!("{} {}", card.title, searchable_body(card)));
+                let root = self.root_of(node.id);
                 m.entry(status.to_lowercase()).or_default().push(KanbanCard {
                     node: node.id,
                     card: card.id,
                     title,
                     node_title: node.title.clone(),
                     node_path: self.node_path(node.id),
+                    root,
+                    root_title: self
+                        .nodes
+                        .get(&root)
+                        .map(|n| n.title.clone())
+                        .unwrap_or_default(),
                     color: card.color,
                     due,
                     tags,
@@ -2669,6 +2676,9 @@ pub struct KanbanCard {
     pub node_title: String,
     /// Root-to-basket breadcrumb (see `TaskItem::node_path`).
     pub node_path: String,
+    /// Top-level ancestor — the project this card belongs to.
+    pub root: NodeId,
+    pub root_title: String,
     /// The card's accent color `[r,g,b]` (shown as the card's border on the board).
     pub color: [u8; 3],
     /// The `due::` value if the card has one (e.g. `2026-08-15`).

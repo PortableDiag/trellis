@@ -434,7 +434,9 @@ Each card carries its title, basket (`node_title`), full basket path
 accent `color`. Read-only; change a card's column with the card `property`
 endpoint (`POST …/cards/{cid}/property {key:"status", value:"done"}`).
 ```
-GET /api/kanban → 200 {"today_days":N,"columns":[{"status":"doing","count":2,"cards":[{node,node_title,node_path,card,title,due,tags,color}, …]}, …]}
+GET /api/kanban → 200 {"today_days":N,"columns":[{"status":"doing","count":2,"cards":[{node,node_title,node_path,project,project_title,card,title,due,tags,color}, …]}, …]}
+GET /api/kanban?project=<node id>   only cards under that node (same filter as /api/tasks)
+  | 400 (bad id)   | 404 (node not found)
 ```
 
 ### OCR

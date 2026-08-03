@@ -72,6 +72,7 @@ const MINIMAP_KEY: &str = "minimap";
 const THEME_KEY: &str = "theme";
 const AUTOSAVE_KEY: &str = "autosave";
 const AGENDA_PROJECT_KEY: &str = "agenda_project";
+const KANBAN_PROJECT_KEY: &str = "kanban_project";
 const BACKUP_KEY: &str = "backup";
 /// How long the document must be idle (no further changes) before an autosave
 /// fires — so continuous editing (e.g. dragging a card) never saves mid-gesture.
@@ -511,6 +512,7 @@ fn kanban_card_ui(
     ui: &mut egui::Ui,
     kc: &crate::model::KanbanCard,
     today: i64,
+    pcolor: egui::Color32,
     jump: &mut Option<(NodeId, CardId)>,
 ) {
     let accent = egui::Color32::from_rgb(kc.color[0], kc.color[1], kc.color[2]);
@@ -543,7 +545,31 @@ fn kanban_card_ui(
                             }
                         });
                     }
-                    ui.small(egui::RichText::new(&kc.node_path).weak());
+                    // Project half in its own colour so a mixed board still
+                    // groups by project at a glance (see the Agenda).
+                    let mut job = egui::text::LayoutJob::default();
+                    let small = egui::TextStyle::Small.resolve(ui.style());
+                    let (proj, rest) = match kc.node_path.split_once(" › ") {
+                        Some((a, b)) => (a.to_string(), format!(" › {b}")),
+                        None => (kc.node_path.clone(), String::new()),
+                    };
+                    job.append(
+                        &proj,
+                        0.0,
+                        egui::TextFormat { font_id: small.clone(), color: pcolor, ..Default::default() },
+                    );
+                    if !rest.is_empty() {
+                        job.append(
+                            &rest,
+                            0.0,
+                            egui::TextFormat {
+                                font_id: small,
+                                color: ui.visuals().weak_text_color(),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    ui.label(job);
                 });
         },
     );
@@ -710,6 +736,9 @@ pub struct TrellisApp {
     /// `None` = every project. Persisted, since it's a working context you'd
     /// rather not reset on every launch.
     agenda_project: Option<NodeId>,
+    /// The same filter for the Kanban board, kept separate on purpose: the two
+    /// views answer different questions and you may want different scopes.
+    kanban_project: Option<NodeId>,
     /// Backlinks panel: cards that `[[link]]` to the selected node.
     backlinks_open: bool,
     /// Kanban board window: cards grouped by `status::`, drag between columns.
@@ -982,6 +1011,10 @@ impl TrellisApp {
             agenda_project: cc
                 .storage
                 .and_then(|st| st.get_string(AGENDA_PROJECT_KEY))
+                .and_then(|v| v.parse().ok()),
+            kanban_project: cc
+                .storage
+                .and_then(|st| st.get_string(KANBAN_PROJECT_KEY))
                 .and_then(|v| v.parse().ok()),
             backlinks_open: false,
             kanban_open: false,
@@ -3713,7 +3746,7 @@ impl TrellisApp {
                         "GET    /api/properties[?key=<k>&value=<v>]   (keys / matching cards)",
                         "GET    /api/query?tag=&key=&value=&text=  (combined card query)",
                         "GET    /api/tasks[?all=true][&project=<id>]  (due:: agenda, bucketed)",
-                        "GET    /api/kanban                        (cards grouped by status:: → columns)",
+                        "GET    /api/kanban[?project=<id>]         (cards grouped by status:: → columns)",
                         "POST   /api/ocr                           (OCR all un-OCR'd images)",
                         "GET    /api/export?format=markdown|html|json|pdf|png|gif",
                         "GET    /api/wait?rev=<n>                  (long-poll for changes)",
@@ -4565,7 +4598,30 @@ impl TrellisApp {
     /// Drag a card to another column to rewrite its `status`. Click to jump.
     fn kanban_window(&mut self, ctx: &egui::Context) {
         let mut open = self.kanban_open;
-        let board = self.doc.cards_by_status();
+        let mut board = self.doc.cards_by_status();
+        // Projects present on the board, in tree order so the menu reads like
+        // the left panel.
+        let mut projects: Vec<(NodeId, String)> = Vec::new();
+        for cards in board.values() {
+            for c in cards {
+                if !projects.iter().any(|(id, _)| *id == c.root) {
+                    projects.push((c.root, c.root_title.clone()));
+                }
+            }
+        }
+        projects.sort_by_key(|(id, _)| {
+            self.doc.roots.iter().position(|r| r == id).unwrap_or(usize::MAX)
+        });
+        // A stored project that's gone must not blank the board.
+        if self.kanban_project.is_some_and(|p| !projects.iter().any(|(id, _)| *id == p)) {
+            self.kanban_project = None;
+        }
+        if let Some(p) = self.kanban_project {
+            for cards in board.values_mut() {
+                cards.retain(|c| c.root == p);
+            }
+            board.retain(|_, cards| !cards.is_empty());
+        }
         // Standard columns first, then any other statuses in use.
         let mut cols: Vec<String> = ["todo", "doing", "done"].iter().map(|s| s.to_string()).collect();
         for k in board.keys() {
@@ -4578,6 +4634,18 @@ impl TrellisApp {
         }
         let today = crate::api::today_days();
         let mut show_done = self.kanban_show_done;
+        let mut project_pick = self.kanban_project;
+        // Colours resolved up front: the window closure can't borrow `self`.
+        let pcolors: std::collections::HashMap<NodeId, egui::Color32> = projects
+            .iter()
+            .map(|(id, _)| (*id, project_color(&self.doc, *id)))
+            .chain(
+                board
+                    .values()
+                    .flatten()
+                    .map(|c| (c.root, project_color(&self.doc, c.root))),
+            )
+            .collect();
         let mut jump: Option<(NodeId, CardId)> = None;
         let mut moves: Vec<(NodeId, CardId, String)> = Vec::new();
         egui::Window::new("Kanban board")
@@ -4589,6 +4657,35 @@ impl TrellisApp {
                     ui.small("Cards with a status:: property. Drag a card between columns to change its status.");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.checkbox(&mut show_done, "Show done");
+                        ui.separator();
+                        if project_pick.is_some() && ui.small_button("×").on_hover_text("Show every project").clicked() {
+                            project_pick = None;
+                        }
+                        let current = project_pick
+                            .and_then(|p| projects.iter().find(|(id, _)| *id == p))
+                            .map(|(_, t)| t.clone())
+                            .unwrap_or_else(|| "All projects".to_string());
+                        egui::ComboBox::from_id_salt("kanban_project")
+                            .selected_text(current)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(project_pick.is_none(), "All projects").clicked() {
+                                    project_pick = None;
+                                }
+                                for (id, title) in &projects {
+                                    let on = project_pick == Some(*id);
+                                    ui.horizontal(|ui| {
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(10.0, 10.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().circle_filled(rect.center(), 4.0, pcolors[id]);
+                                        if ui.selectable_label(on, title).clicked() {
+                                            project_pick = Some(*id);
+                                        }
+                                    });
+                                }
+                            });
+                        ui.label("Project");
                     });
                 });
                 if board.is_empty() {
@@ -4628,7 +4725,8 @@ impl TrellisApp {
                                                 .auto_shrink([false, false])
                                                 .show(ui, |ui| {
                                                     for kc in cards {
-                                                        kanban_card_ui(ui, kc, today, &mut jump);
+                                                        let pc = pcolors.get(&kc.root).copied().unwrap_or(egui::Color32::GRAY);
+                                                        kanban_card_ui(ui, kc, today, pc, &mut jump);
                                                     }
                                                 });
                                         });
@@ -4644,6 +4742,7 @@ impl TrellisApp {
             });
         self.kanban_open = open;
         self.kanban_show_done = show_done;
+        self.kanban_project = project_pick;
         for (n, c, status) in moves {
             if self.doc.set_card_property(n, c, "status", &status) {
                 self.mark_dirty();
@@ -5053,6 +5152,10 @@ impl eframe::App for TrellisApp {
         storage.set_string(
             AGENDA_PROJECT_KEY,
             self.agenda_project.map(|n| n.to_string()).unwrap_or_default(),
+        );
+        storage.set_string(
+            KANBAN_PROJECT_KEY,
+            self.kanban_project.map(|n| n.to_string()).unwrap_or_default(),
         );
         storage.set_string(BACKUP_KEY, self.backup_cfg.to_json());
         if let Ok(s) = serde_json::to_string(&self.templates) {
