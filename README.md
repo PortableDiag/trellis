@@ -85,11 +85,15 @@ from the main cluster, and click or drag on it to jump there without zooming out
   get the same via `"fit": true` on card create/update.
 - **Templates** — right-click a card → **Save as template** to reuse a card you make often
   (e.g. a *Today's Todos* checklist); right-click the canvas → **Insert template** to drop a
-  fresh copy at the click point. Edit a master card and right-click → **Update template** to
-  re-snapshot that template *in place* (keeps its name), so a dedicated Templates node becomes
-  a maintainable template library. Templates persist across restarts. They're stored with the
-  app's settings rather than in the document, so each instance (see
-  [Separate documents](#separate-documents-side-by-side)) has its **own** template list.
+  fresh copy at the click point. Saving a template also puts a **master card** for it in a
+  root-level **Templates** basket (created the first time), so your templates are something
+  you can see and edit rather than an invisible setting: tweak the master, right-click →
+  **Update template**, and every later copy you stamp uses the new version. Deleting a
+  template removes its master too, and **Tools → Rebuild Templates basket** fills in masters
+  for templates saved before the basket existed. Templates persist across restarts; they're
+  stored with the app's settings rather than in the document, so each instance (see
+  [Separate documents](#separate-documents-side-by-side)) has its **own** template list and
+  its own Templates basket.
 
 **Documents & interop**
 - **Drag & drop** text/Markdown or image files onto a basket to create the

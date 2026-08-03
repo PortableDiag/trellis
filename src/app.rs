@@ -7,6 +7,7 @@ use crate::model::{CardId, CardKind, ChecklistItem, Document, NodeId};
 use crate::tree::{self, TreeAction};
 use crate::api::{self, ApiCommand};
 use egui_commonmark::CommonMarkCache;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
@@ -549,6 +550,38 @@ fn kanban_card_ui(
     }
 }
 
+/// Title of the basket that holds template master cards. Created on demand the
+/// first time a template is registered, and reused thereafter.
+const TEMPLATES_NODE_TITLE: &str = "Templates";
+
+/// Where a template's master card lives, so deleting or re-snapshotting a
+/// template can find it again.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct MasterRef {
+    pub node: NodeId,
+    pub card: CardId,
+}
+
+/// A registered template: the card snapshot the app stamps copies from, plus the
+/// master card in the **Templates** basket that it was taken from.
+///
+/// The snapshot is the authority — inserts always stamp *it*, never the master —
+/// but the master is what you edit to change a template, via "Update template".
+/// `master` is `None` for templates registered before the Templates basket
+/// existed (and for any whose master has since been deleted); **Rebuild
+/// Templates basket** stamps those back in.
+///
+/// `card` is flattened so this serializes exactly like the bare `CardExport` the
+/// old config held — an existing `card_templates` value loads unchanged, with
+/// `master` defaulting to `None`.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Template {
+    #[serde(flatten)]
+    pub card: crate::model::CardExport,
+    #[serde(default)]
+    pub master: Option<MasterRef>,
+}
+
 /// Command-line startup overrides (see `main`). Each field falls back to the
 /// saved setting when `None`, so a bare `trellis` behaves exactly as before.
 #[derive(Default)]
@@ -688,7 +721,7 @@ pub struct TrellisApp {
     /// A pending multi-shot basket (overview + per-card) visual export.
     basket_shot: Option<BasketShot>,
     /// Saved reusable card templates (persist in app config).
-    templates: Vec<crate::model::CardExport>,
+    templates: Vec<Template>,
     /// `bytes://` URIs of text-card inline images already registered with egui
     /// this session (so each is uploaded once, not every frame).
     inline_sent: std::collections::HashSet<String>,
@@ -1227,6 +1260,159 @@ impl TrellisApp {
         }
     }
 
+    /// The root-level **Templates** basket, created if it isn't there yet. This
+    /// is what makes a saved template something you can see and edit: every
+    /// registered template keeps its master card here.
+    ///
+    /// Matches an existing root node by title (case-insensitively) so a Templates
+    /// basket someone made by hand is adopted rather than duplicated.
+    fn templates_node(&mut self) -> NodeId {
+        let existing = self.doc.roots.iter().copied().find(|id| {
+            self.doc
+                .nodes
+                .get(id)
+                .is_some_and(|n| n.title.trim().eq_ignore_ascii_case(TEMPLATES_NODE_TITLE))
+        });
+        if let Some(id) = existing {
+            return id;
+        }
+        let id = self.doc.add_node(None, TEMPLATES_NODE_TITLE.to_string());
+        self.mark_dirty();
+        id
+    }
+
+    /// Is this master reference still pointing at a card that exists?
+    fn master_alive(&self, m: Option<MasterRef>) -> Option<MasterRef> {
+        let m = m?;
+        self.doc.card(m.node, m.card).is_some().then_some(m)
+    }
+
+    /// Stamp a template's master card into the Templates basket, laid out in a
+    /// tidy grid so a library of them stays readable.
+    fn stamp_master(&mut self, exp: &crate::model::CardExport) -> Option<MasterRef> {
+        let node = self.templates_node();
+        let n = self.doc.nodes.get(&node).map(|n| n.cards.len()).unwrap_or(0);
+        let pos = egui::pos2(40.0 + (n % 4) as f32 * 340.0, 40.0 + (n / 4) as f32 * 260.0);
+        let cid = self.doc.add_card_from_export(node, pos, exp.clone())?;
+        self.mark_dirty();
+        Some(MasterRef { node, card: cid })
+    }
+
+    /// Register a card as template `title`, stamping its master into the
+    /// Templates basket. Shared by the UI action and the API so both behave the
+    /// same. Returns `(index, name)`.
+    ///
+    /// If the source card already lives in the Templates basket it becomes the
+    /// master as-is — registering from a master must not clone it.
+    fn register_template(
+        &mut self,
+        node: NodeId,
+        card: CardId,
+        title: Option<&str>,
+    ) -> Option<(usize, String)> {
+        let json = self.doc.export_card_json(node, card)?;
+        let mut exp = crate::model::parse_card_export(&json)?;
+        if let Some(t) = title {
+            if !t.trim().is_empty() {
+                exp.title = t.to_string();
+            }
+        }
+        let name = if exp.title.trim().is_empty() {
+            exp.kind.label().to_string()
+        } else {
+            exp.title.clone()
+        };
+        let tnode = self.templates_node();
+        let master = if node == tnode {
+            Some(MasterRef { node, card })
+        } else {
+            self.stamp_master(&exp)
+        };
+        let index = self.templates.len();
+        self.templates.push(Template { card: exp, master });
+        Some((index, name))
+    }
+
+    /// Re-snapshot template `index` from a card, keeping the slot's index and
+    /// (unless renamed) its name, then bring the master card in the Templates
+    /// basket back in line so the basket always shows what inserts will stamp.
+    fn update_template(
+        &mut self,
+        index: usize,
+        node: NodeId,
+        card: CardId,
+        title: Option<&str>,
+    ) -> Option<String> {
+        if index >= self.templates.len() {
+            return None;
+        }
+        let json = self.doc.export_card_json(node, card)?;
+        let mut exp = crate::model::parse_card_export(&json)?;
+        exp.title = match title {
+            Some(t) if !t.trim().is_empty() => t.to_string(),
+            _ => self.templates[index].card.title.clone(),
+        };
+        let name = exp.title.clone();
+        let old = self.master_alive(self.templates[index].master);
+        self.templates[index].card = exp.clone();
+
+        // Updating *from* the master means it's already current — leave it be
+        // (re-stamping would only churn its id). Otherwise replace it in place,
+        // keeping its slot on the canvas.
+        if old.is_some_and(|m| m.node == node && m.card == card) {
+            return Some(name);
+        }
+        let keep_pos = old.and_then(|m| self.doc.card(m.node, m.card).map(|c| c.pos));
+        if let Some(m) = old {
+            self.doc.remove_card(m.node, m.card);
+        }
+        let master = match keep_pos {
+            Some(p) => {
+                let tnode = old.map(|m| m.node).unwrap_or_else(|| self.templates_node());
+                self.doc
+                    .add_card_from_export(tnode, p, exp)
+                    .map(|cid| MasterRef { node: tnode, card: cid })
+            }
+            None => self.stamp_master(&exp),
+        };
+        self.templates[index].master = master;
+        self.mark_dirty();
+        Some(name)
+    }
+
+    /// Remove template `index` and its master card. Returns the name.
+    fn delete_template(&mut self, index: usize) -> Option<String> {
+        if index >= self.templates.len() {
+            return None;
+        }
+        let t = self.templates.remove(index);
+        if let Some(m) = self.master_alive(t.master) {
+            self.doc.remove_card(m.node, m.card);
+            self.mark_dirty();
+        }
+        Some(t.card.title)
+    }
+
+    /// Stamp a master card for every template that hasn't got a live one, so a
+    /// library registered before the Templates basket existed becomes visible
+    /// and editable. Returns `(templates node, stamped, already present)`.
+    fn rebuild_templates_node(&mut self) -> (NodeId, usize, usize) {
+        let node = self.templates_node();
+        let (mut made, mut had) = (0, 0);
+        for i in 0..self.templates.len() {
+            if self.master_alive(self.templates[i].master).is_some() {
+                had += 1;
+                continue;
+            }
+            let exp = self.templates[i].card.clone();
+            self.templates[i].master = self.stamp_master(&exp);
+            if self.templates[i].master.is_some() {
+                made += 1;
+            }
+        }
+        (node, made, had)
+    }
+
     /// Answer `GET /api/instance` — which document this instance has open, and
     /// on which port. With several instances running (one per document), an
     /// agent uses this to confirm it is driving the one it means to before it
@@ -1341,7 +1527,14 @@ impl TrellisApp {
                     .iter()
                     .enumerate()
                     .map(|(i, t)| {
-                        serde_json::json!({ "index": i, "title": t.title, "kind": t.kind.label() })
+                        let m = self.master_alive(t.master);
+                        serde_json::json!({
+                            "index": i,
+                            "title": t.card.title,
+                            "kind": t.card.kind.label(),
+                            "master_node": m.map(|m| m.node),
+                            "master_card": m.map(|m| m.card),
+                        })
                     })
                     .collect();
                 Some(api::ApiResponse::ok(
@@ -1352,30 +1545,38 @@ impl TrellisApp {
             // right-click "Save as template"). Build the card however you like
             // first (e.g. a table with headers + cell colors), then register it.
             api::ApiRequest::TemplateRegister { node, card, title } => {
-                let Some(json) = self.doc.export_card_json(*node, *card) else {
+                if self.doc.card(*node, *card).is_none() {
                     return Some(api::ApiResponse::err(404, "node or card not found"));
-                };
-                let Some(mut exp) = crate::model::parse_card_export(&json) else {
-                    return Some(api::ApiResponse::err(500, "could not build a template from that card"));
-                };
-                if let Some(t) = title {
-                    if !t.trim().is_empty() {
-                        exp.title = t.clone();
-                    }
                 }
-                let name = if exp.title.trim().is_empty() {
-                    exp.kind.label().to_string()
-                } else {
-                    exp.title.clone()
-                };
-                let index = self.templates.len();
-                self.templates.push(exp);
-                Some(api::ApiResponse::ok(serde_json::json!({ "index": index, "title": name })))
+                match self.register_template(*node, *card, title.as_deref()) {
+                    Some((index, name)) => {
+                        let m = self.templates[index].master;
+                        Some(api::ApiResponse::ok(serde_json::json!({
+                            "index": index,
+                            "title": name,
+                            "master_node": m.map(|m| m.node),
+                            "master_card": m.map(|m| m.card),
+                        })))
+                    }
+                    None => Some(api::ApiResponse::err(500, "could not build a template from that card")),
+                }
+            }
+            // Give every template a master card in the Templates basket. For a
+            // library registered before that basket existed, this is what makes
+            // it visible and editable.
+            api::ApiRequest::TemplateRebuild => {
+                let (node, made, had) = self.rebuild_templates_node();
+                Some(api::ApiResponse::ok(serde_json::json!({
+                    "node": node,
+                    "stamped": made,
+                    "already_present": had,
+                    "templates": self.templates.len(),
+                })))
             }
             // Stamp a saved template into a basket as a new card (mirrors "Insert
             // template"). Returns the created card.
             api::ApiRequest::TemplateInsert { index, node, pos } => {
-                let Some(exp) = self.templates.get(*index).cloned() else {
+                let Some(exp) = self.templates.get(*index).map(|t| t.card.clone()) else {
                     return Some(api::ApiResponse::err(404, "no template at that index"));
                 };
                 if !self.doc.nodes.contains_key(node) {
@@ -1402,28 +1603,29 @@ impl TrellisApp {
                 if *index >= self.templates.len() {
                     return Some(api::ApiResponse::err(404, "no template at that index"));
                 }
-                let Some(json) = self.doc.export_card_json(*node, *card) else {
+                if self.doc.card(*node, *card).is_none() {
                     return Some(api::ApiResponse::err(404, "node or card not found"));
-                };
-                let Some(mut exp) = crate::model::parse_card_export(&json) else {
-                    return Some(api::ApiResponse::err(500, "could not build a template from that card"));
-                };
-                exp.title = match title {
-                    Some(t) if !t.trim().is_empty() => t.clone(),
-                    _ => self.templates[*index].title.clone(), // keep the existing name
-                };
-                let name = exp.title.clone();
-                self.templates[*index] = exp;
-                Some(api::ApiResponse::ok(serde_json::json!({ "updated": index, "title": name })))
+                }
+                match self.update_template(*index, *node, *card, title.as_deref()) {
+                    Some(name) => {
+                        let m = self.templates[*index].master;
+                        Some(api::ApiResponse::ok(serde_json::json!({
+                            "updated": index,
+                            "title": name,
+                            "master_node": m.map(|m| m.node),
+                            "master_card": m.map(|m| m.card),
+                        })))
+                    }
+                    None => Some(api::ApiResponse::err(500, "could not build a template from that card")),
+                }
             }
             api::ApiRequest::TemplateDelete(index) => {
-                if *index >= self.templates.len() {
-                    return Some(api::ApiResponse::err(404, "no template at that index"));
+                match self.delete_template(*index) {
+                    Some(title) => Some(api::ApiResponse::ok(
+                        serde_json::json!({ "deleted": index, "title": title }),
+                    )),
+                    None => Some(api::ApiResponse::err(404, "no template at that index")),
                 }
-                let t = self.templates.remove(*index);
-                Some(api::ApiResponse::ok(
-                    serde_json::json!({ "deleted": index, "title": t.title }),
-                ))
             }
             _ => None,
         }
@@ -2095,20 +2297,13 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::SaveAsTemplate(cid) => {
-                    if let Some(json) = self.doc.export_card_json(node, cid) {
-                        if let Some(exp) = crate::model::parse_card_export(&json) {
-                            let name = if exp.title.trim().is_empty() {
-                                exp.kind.label().to_string()
-                            } else {
-                                exp.title.clone()
-                            };
-                            self.templates.push(exp);
-                            self.status = format!("Saved template \"{name}\"");
-                        }
+                    if let Some((_, name)) = self.register_template(node, cid, None) {
+                        self.status =
+                            format!("Saved template \"{name}\" — master card in {TEMPLATES_NODE_TITLE}");
                     }
                 }
                 CanvasAction::InsertTemplate(idx, pos) => {
-                    if let Some(exp) = self.templates.get(idx).cloned() {
+                    if let Some(exp) = self.templates.get(idx).map(|t| t.card.clone()) {
                         let name = exp.title.clone();
                         if self.doc.add_card_from_export(node, pos, exp).is_some() {
                             self.status = format!("Inserted template \"{name}\"");
@@ -2116,22 +2311,13 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::UpdateTemplate(idx, cid) => {
-                    if idx < self.templates.len() {
-                        if let Some(json) = self.doc.export_card_json(node, cid) {
-                            if let Some(mut exp) = crate::model::parse_card_export(&json) {
-                                // Keep the template's existing name.
-                                exp.title = self.templates[idx].title.clone();
-                                let name = exp.title.clone();
-                                self.templates[idx] = exp;
-                                self.status = format!("Updated template \"{name}\"");
-                            }
-                        }
+                    if let Some(name) = self.update_template(idx, node, cid, None) {
+                        self.status = format!("Updated template \"{name}\"");
                     }
                 }
                 CanvasAction::DeleteTemplate(idx) => {
-                    if idx < self.templates.len() {
-                        let t = self.templates.remove(idx);
-                        self.status = format!("Deleted template \"{}\"", t.title);
+                    if let Some(name) = self.delete_template(idx) {
+                        self.status = format!("Deleted template \"{name}\" and its master card");
                     }
                 }
                 CanvasAction::RaiseCard(cid) => self.doc.raise_card(node, cid),
@@ -3291,6 +3477,28 @@ impl TrellisApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    if ui
+                        .add_enabled(
+                            !self.templates.is_empty(),
+                            egui::Button::new("Rebuild Templates basket"),
+                        )
+                        .on_hover_text(
+                            "Give every saved template a master card in the root-level Templates \
+                             basket (creating it if needed), so you can see and edit them. Only \
+                             stamps the ones that haven't got a master — safe to run twice.",
+                        )
+                        .clicked()
+                    {
+                        let (node, made, had) = self.rebuild_templates_node();
+                        self.selected = Some(node);
+                        self.status = if made == 0 {
+                            format!("Templates basket already complete ({had} master cards)")
+                        } else {
+                            format!("Stamped {made} master card(s) into Templates ({had} already there)")
+                        };
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Version history…").clicked() {
                         self.show_history = true;
                         ui.close_menu();
@@ -3450,7 +3658,7 @@ impl TrellisApp {
                         "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, pos?, size?, fit?, image_base64?, inline_images?}",
                         "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, size?, items?, …}",
                         "DELETE /api/nodes/{id}/cards/{cid}",
-                        "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to}",
+                        "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
                         "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
                         "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE …/dock)",
                         "POST   /api/nodes/{id}/cards/{cid}/group {group}           (remove: DELETE …/group)",
@@ -3473,10 +3681,11 @@ impl TrellisApp {
                         "GET    /api/backup                        (status)",
                         "POST   /api/backup/run                    (back up now)",
                         "GET    /api/templates                     (saved card templates)",
-                        "POST   /api/templates          {node, card, title?}   (save a card as a template)",
+                        "POST   /api/templates          {node, card, title?}   (save a card as a template + master)",
                         "POST   /api/templates/{i}/insert {node, pos?}         (stamp it into a basket)",
                         "POST   /api/templates/{i}/update {node, card, title?} (re-snapshot in place from a card)",
-                        "DELETE /api/templates/{i}",
+                        "DELETE /api/templates/{i}                             (also deletes its master card)",
+                        "POST   /api/templates/rebuild                         (give every template a master card)",
                         "",
                         "Full reference: API.md in the source repo.",
                     ] {
@@ -4580,7 +4789,7 @@ impl eframe::App for TrellisApp {
                         }
                     }
                     let template_names: Vec<String> =
-                        self.templates.iter().map(|t| t.title.clone()).collect();
+                        self.templates.iter().map(|t| t.card.title.clone()).collect();
                     let mut env = Env {
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
@@ -5011,6 +5220,34 @@ fn default_autosave_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Templates saved before the Templates basket existed are stored as bare
+    /// `CardExport` objects. They must keep loading — a format break here would
+    /// silently empty someone's template library.
+    #[test]
+    fn old_config_templates_load_without_a_master() {
+        let old = r#"[{"format":"trellis-card","version":1,"title":"Local/Prod verify grid",
+                       "body":"","color":[68,68,68],"size":[400.0,240.0],"kind":"Text"}]"#;
+        let ts: Vec<Template> = serde_json::from_str(old).expect("old config must still parse");
+        assert_eq!(ts.len(), 1);
+        assert_eq!(ts[0].card.title, "Local/Prod verify grid");
+        assert!(ts[0].master.is_none(), "no master until one is stamped");
+
+        // And a round-trip with a master keeps both halves.
+        let with = Template {
+            card: ts[0].card.clone(),
+            master: Some(MasterRef { node: 7, card: 12 }),
+        };
+        let json = serde_json::to_string(&vec![with]).unwrap();
+        let back: Vec<Template> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back[0].card.title, "Local/Prod verify grid");
+        let m = back[0].master.expect("master survives a round-trip");
+        assert_eq!((m.node, m.card), (7, 12));
+        // The flattened card fields stay at the top level, so an old build reading
+        // this config still finds a valid CardExport.
+        assert!(json.contains("\"format\":\"trellis-card\""));
+        assert!(crate::model::parse_card_export(&serde_json::to_string(&back[0]).unwrap()).is_some());
+    }
 
     #[test]
     fn download_name_keeps_stored_name_and_extension() {

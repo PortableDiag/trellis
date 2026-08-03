@@ -1191,6 +1191,44 @@ impl Document {
         true
     }
 
+    /// Move a card to a **different** basket, keeping its content, size and
+    /// colors. Returns the card's id in its new home, or `None` if either node
+    /// or the card is unknown.
+    ///
+    /// Group membership and docking are dropped: both reference ids that are
+    /// local to the old basket, so carrying them over would point at the wrong
+    /// group (or a card that isn't there). Anything docked *to* this card in the
+    /// old basket is detached for the same reason. `pos` places it on the target
+    /// canvas; without one it keeps its current coordinates.
+    pub fn move_card_to_node(
+        &mut self,
+        from: NodeId,
+        card: CardId,
+        to: NodeId,
+        pos: Option<egui::Pos2>,
+    ) -> Option<CardId> {
+        if from == to || !self.nodes.contains_key(&to) {
+            return None;
+        }
+        let n = self.nodes.get_mut(&from)?;
+        let idx = n.cards.iter().position(|c| c.id == card)?;
+        let mut c = n.cards.remove(idx);
+        for other in n.cards.iter_mut() {
+            if other.docked_to == Some(card) {
+                other.docked_to = None;
+            }
+        }
+        prune_groups(n);
+        c.group = None;
+        c.docked_to = None;
+        if let Some(p) = pos {
+            c.pos = p;
+        }
+        let id = c.id;
+        self.nodes.get_mut(&to)?.cards.push(c);
+        Some(id)
+    }
+
     /// Index of `card` in its basket's list, or `None` if the node/card is
     /// unknown. Lets callers translate a before/after target into a slot.
     pub fn card_index(&self, node: NodeId, card: CardId) -> Option<usize> {

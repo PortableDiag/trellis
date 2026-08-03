@@ -240,6 +240,18 @@ POST /api/nodes/{id}/cards/{cid}/move  {index:<n>}             absolute 0-based 
 POST /api/nodes/{id}/cards/{cid}/move  {to:"front"|"back"}     front = on top / laid out last
     → 200 {"card":<cid>, "index":<n>}    | 400 (bad/empty placement) | 404 (card not found)
 ```
+Move a card to a **different** basket with `node` (and optionally `pos`), which
+takes precedence over the ordering fields above:
+```
+POST /api/nodes/{id}/cards/{cid}/move  {node:<target id>, pos?:[x,y]}
+    → 200 {"card":<cid>, "node":<target>, "moved":true}
+    | 400 (already in that node) | 404 (card or target node not found)
+```
+The card keeps its content, size and colors; `pos` places it on the target canvas
+(without one it keeps its coordinates). **Group membership and docking are
+dropped** — both reference ids local to the old basket — and anything docked to it
+is detached.
+
 Tip: to lay a basket out in a specific reading order, `move` the cards into that
 order, then `POST …/autosort`.
 
@@ -455,35 +467,59 @@ out a fixed layout (e.g. a Task / Local / Prod verification grid) again and
 again. Templates persist in the app config, so they survive restarts and are
 shared by the UI and the API. Index is a 0-based position in the list.
 
-They live in the app config rather than the document, so a template library is
-**per instance, not per document**: instances started with different
-`--data-dir`s have independent template lists, and one instance's templates are
-invisible to another. (Two instances sharing a data directory would share
-templates — but they'd also fight over the same port and settings, so don't.) To
-reuse a template elsewhere, insert it into a basket in the other instance and
-register it there.
+**Every template has a master card in the root-level `Templates` basket.**
+Registering one stamps its master there (creating the basket the first time), so
+a saved template is something you can *see and edit* rather than an invisible
+config entry. Edit the master, then `update` that slot, and every later insert
+stamps the new version; the basket is kept in step with the stored snapshot.
+Registering a card that already sits in `Templates` adopts that card as the
+master instead of cloning it. Deleting a template removes its master too.
+
+The snapshot in config is the authority — `insert` always stamps *it*, never the
+master — so editing a master changes nothing until you `update`. That is
+deliberate: a stray edit to a master must not silently change every future
+insert.
+
+The config, not the document, is where templates live, so a library is **per
+instance, not per document**: instances started with different `--data-dir`s have
+independent template lists and their own `Templates` basket, and one instance's
+templates are invisible to another. To reuse a template elsewhere, insert it into
+a basket in the other instance and register it there.
 ```
 GET    /api/templates
-  → 200 {"count":N,"templates":[{index, title, kind}, …]}
+  → 200 {"count":N,"templates":[{index, title, kind, master_node, master_card}, …]}
+  master_node/master_card locate the template's master card, or are null if it
+  hasn't got one (see rebuild below).
 
 POST   /api/templates              {node, card, title?}
-  → 200 {"index":<n>,"title":"..."}   | 404 (node/card not found)
-  Snapshot an existing card as a template. Build the card however you like first
-  (e.g. create a table, set its cells/colors), then register it — optional
-  `title` overrides the card's title as the template name.
+  → 200 {"index":<n>,"title":"...","master_node":<id>,"master_card":<cid>}
+  | 404 (node/card not found)
+  Snapshot an existing card as a template, and stamp its master into the
+  `Templates` basket. Build the card however you like first (e.g. create a table,
+  set its cells/colors), then register it — optional `title` overrides the card's
+  title as the template name.
+
+POST   /api/templates/rebuild      → 200 {"node":<id>,"stamped":N,"already_present":M,"templates":T}
+  Give every template that hasn't got a live master card one, creating the
+  `Templates` basket if needed. Use it on a library registered before masters
+  existed; it only touches templates that are missing one, so it's safe to repeat.
+  (Tools → Rebuild Templates basket in the app.)
 
 POST   /api/templates/{index}/insert  {node, pos?}
   → 200 {"node":<id>,"card":{<created card>}}   | 404 (no template / node)
   Stamp the template into a basket as a new card (`pos` defaults to [40,40]).
 
 POST   /api/templates/{index}/update  {node, card, title?}
-  → 200 {"updated":<index>,"title":"..."}   | 404 (no template / node / card)
+  → 200 {"updated":<index>,"title":"...","master_node":<id>,"master_card":<cid>}
+  | 404 (no template / node / card)
   Re-snapshot an existing template slot from a card, in place — the template keeps
-  its index (and its current name unless `title` is given). This is the "template
-  editor" flow: keep a master card in a Templates node, edit it, then update, and
-  every future insert stamps the new version.
+  its index (and its current name unless `title` is given). This is the template
+  editor flow: edit the master in the `Templates` basket, then update, and every
+  future insert stamps the new version. Updating from some *other* card also
+  refreshes the master so the basket keeps showing what inserts will stamp.
 
 DELETE /api/templates/{index}      → 200 {"deleted":<index>,"title":"..."}   | 404
+  Removes the template and its master card.
 ```
 There is no separate "create a template from scratch" body — register from a card
 so the template captures exactly what you'd see on the canvas. Editing a card you
@@ -624,11 +660,21 @@ IDX=$(curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID,\"card\":$CID,\"title\":\"
 #    Then fill/colour its cells (set_cell / set_bg green|red) as you verify each task.
 curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID}" $API/templates/$IDX/insert
 
-# 3b) The "template editor" flow — keep the master card, edit it, then re-snapshot
-#     the SAME template in place (keeps its index + name). Every later insert now
-#     stamps the new version. (Add a column, then update.)
+# 3b) The "template editor" flow. Registering stamped a master card into the
+#     root-level Templates basket — find it, edit it, then re-snapshot the SAME
+#     template in place (keeps its index + name). Every later insert now stamps
+#     the new version. (Add a column, then update.)
+curl -s -H "X-API-Key: $KEY" $API/templates      # master_node / master_card per template
 curl -s -H "X-API-Key: $KEY" -d '{"op":"insert_col","at":3}' $API/nodes/$NID/cards/$CID/table
 curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID,\"card\":$CID}" $API/templates/$IDX/update
+
+# Got templates from before the Templates basket existed? Give them master cards
+# (creates the basket; only fills in what's missing, so it's safe to repeat).
+curl -s -X POST -H "X-API-Key: $KEY" $API/templates/rebuild
+
+# Move a card to another basket (group/dock membership is dropped).
+curl -s -X POST -H "X-API-Key: $KEY" \
+     -d '{"node":965,"pos":[40,40]}' $API/nodes/7/cards/3/move
 
 # List the saved templates, or delete one by index.
 curl -s -H "X-API-Key: $KEY" $API/templates

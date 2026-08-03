@@ -102,6 +102,8 @@ pub enum ApiRequest {
     TemplateInsert { index: usize, node: NodeId, pos: Option<[f32; 2]> },
     // Re-snapshot an existing template slot from a (usually edited) card, in place.
     TemplateUpdate { index: usize, node: NodeId, card: u64, title: Option<String> },
+    // Stamp a master card for every template that lacks a live one.
+    TemplateRebuild,
     TemplateDelete(usize),
 }
 
@@ -148,6 +150,13 @@ pub struct MoveCardInput {
     index: Option<usize>,
     #[serde(default)]
     to: Option<String>,
+    /// Move the card to a **different** basket. Takes precedence over the
+    /// ordering fields (which only make sense within one basket); `pos` places
+    /// it on the target canvas.
+    #[serde(default)]
+    node: Option<NodeId>,
+    #[serde(default)]
+    pos: Option<[f32; 2]>,
 }
 
 /// Where to move a node. Pick ONE placement:
@@ -651,6 +660,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::HistoryRestore(i.file))
         }
         (Method::Get, ["api", "templates"]) => Ok(ApiRequest::TemplateList),
+        (Method::Post, ["api", "templates", "rebuild"]) => Ok(ApiRequest::TemplateRebuild),
         (Method::Post, ["api", "templates"]) => {
             #[derive(Deserialize)]
             struct RegInput {
@@ -1181,6 +1191,24 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let Some(cur) = doc.card_index(node, card) else {
                 return (false, ApiResponse::err(404, "card not found"));
             };
+            // Moving to another basket is its own thing: the card leaves this
+            // node entirely, so the within-basket ordering fields don't apply.
+            if let Some(target) = mv.node {
+                if target == node {
+                    return (false, ApiResponse::err(400, "card is already in that node"));
+                }
+                if !doc.nodes.contains_key(&target) {
+                    return (false, ApiResponse::err(404, "target node not found"));
+                }
+                let p = mv.pos.map(|[x, y]| egui::pos2(x, y));
+                return match doc.move_card_to_node(node, card, target, p) {
+                    Some(id) => (
+                        true,
+                        ApiResponse::ok(json!({ "card": id, "node": target, "moved": true })),
+                    ),
+                    None => (false, ApiResponse::err(500, "could not move the card")),
+                };
+            }
             if mv.before.is_none() && mv.after.is_none() && mv.index.is_none() && mv.to.is_none() {
                 return (
                     false,
@@ -1515,6 +1543,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::TemplateRegister { .. }
         | ApiRequest::TemplateInsert { .. }
         | ApiRequest::TemplateUpdate { .. }
+        | ApiRequest::TemplateRebuild
         | ApiRequest::TemplateDelete(_) => {
             (false, ApiResponse::err(500, "request not handled by the app loop"))
         }

@@ -4,6 +4,40 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.66.0]
+
+### Added
+- **Saved templates now live somewhere you can see them.** A template used to be
+  an invisible entry in the app's settings — you could stamp copies of it, but
+  there was nothing to look at and nothing to edit, so keeping a "master" card
+  around was a convention you had to know about (and every agent invented its own
+  place to put one). Now **saving a template also puts its master card in a
+  root-level `Templates` basket**, created the first time you need it:
+  - Edit the master, then right-click → **Update template**, and every copy you
+    stamp afterwards uses the new version.
+  - Saving a template *from* a card already in `Templates` adopts that card as
+    the master rather than cloning it.
+  - Deleting a template deletes its master card too.
+  - **Tools → Rebuild Templates basket** (`POST /api/templates/rebuild`) gives a
+    master card to every template saved before this existed. It only fills in
+    what's missing, so it's safe to run twice.
+
+  The stored snapshot stays the authority — inserting always stamps *it*, never
+  the master — so editing a master changes nothing until you update. A stray edit
+  must not silently change every future insert.
+- **Move a card to another basket over the API** —
+  `POST /api/nodes/{id}/cards/{cid}/move {node:<target>, pos?:[x,y]}`. Previously
+  `move` could only reorder a card *within* its basket, so relocating one meant
+  rebuilding it by hand (which resets a table's column widths). Group membership
+  and docking are dropped in the move, since both reference ids that only mean
+  something in the old basket.
+
+### Changed
+- `GET /api/templates` reports `master_node` / `master_card` for each template
+  (null when it hasn't got a master), and register/update return them too.
+  Existing saved templates load unchanged — the stored format is backwards- and
+  forwards-compatible.
+
 ## [0.65.1]
 
 ### Changed
