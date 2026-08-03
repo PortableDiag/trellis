@@ -411,17 +411,24 @@ has `status:: done|complete|closed` or (for a checklist) all items are checked.
 `bucket` is relative to today (UTC): `overdue` · `today` · `week` (next 7 days) ·
 `later` · `nodate` (unparseable date). Powers the **View → Agenda** panel.
 ```
-GET /api/tasks           → 200 {"today_days":N,"count":M,"tasks":[{node,node_title,card,title,due,done,bucket}, …]}
+GET /api/tasks           → 200 {"today_days":N,"count":M,"tasks":[{node,node_title,node_path,card,title,due,done,bucket}, …]}
 GET /api/tasks?all=true  → include completed tasks too (default excludes them)
 ```
 
+**`node_path` is the root-to-basket breadcrumb** (`Super Weapon News › Open
+Items`), and it is what you should show or reason about — **`node_title` alone is
+ambiguous**. Basket names like "Open Items" or "Session Handoffs" repeat under
+every project, so the bare title cannot say which project a task belongs to, and
+has already led an agent to attribute a task to the wrong one.
+
 ### Kanban
 Cards grouped by their `status::` value — the **View → Kanban** board's columns.
-Each card carries its title, basket (`node_title`), `due::` date, `#tags`, and
+Each card carries its title, basket (`node_title`), full basket path
+(`node_path`), `due::` date, `#tags`, and
 accent `color`. Read-only; change a card's column with the card `property`
 endpoint (`POST …/cards/{cid}/property {key:"status", value:"done"}`).
 ```
-GET /api/kanban → 200 {"today_days":N,"columns":[{"status":"doing","count":2,"cards":[{node,node_title,card,title,due,tags,color}, …]}, …]}
+GET /api/kanban → 200 {"today_days":N,"columns":[{"status":"doing","count":2,"cards":[{node,node_title,node_path,card,title,due,tags,color}, …]}, …]}
 ```
 
 ### OCR

@@ -2202,6 +2202,7 @@ impl Document {
                     card: card.id,
                     title,
                     node_title: node.title.clone(),
+                    node_path: self.node_path(node.id),
                     color: card.color,
                     due,
                     tags,
@@ -2209,6 +2210,27 @@ impl Document {
             }
         }
         m
+    }
+
+    /// Root-to-node breadcrumb of titles, e.g. `Super Weapon News › Open Items`.
+    ///
+    /// Task and Kanban views need this, not just the parent's title: basket names
+    /// like "Open Items" repeat across projects, and the bare name gives no clue
+    /// which project a task belongs to.
+    pub fn node_path(&self, id: NodeId) -> String {
+        let mut parts = Vec::new();
+        let mut cur = Some(id);
+        while let Some(nid) = cur {
+            match self.nodes.get(&nid) {
+                Some(n) => {
+                    parts.push(n.title.as_str());
+                    cur = n.parent;
+                }
+                None => break,
+            }
+        }
+        parts.reverse();
+        parts.join(" › ")
     }
 
     /// Every property key used across the document with how many cards use it.
@@ -2363,6 +2385,7 @@ impl Document {
                 out.push(TaskItem {
                     node: node.id,
                     node_title: node.title.clone(),
+                    node_path: self.node_path(node.id),
                     card: card.id,
                     title,
                     due: due.clone(),
@@ -2597,6 +2620,9 @@ pub struct SearchHit {
 pub struct TaskItem {
     pub node: NodeId,
     pub node_title: String,
+    /// Root-to-basket breadcrumb, so two projects' "Open Items" are tellable
+    /// apart at a glance.
+    pub node_path: String,
     pub card: CardId,
     pub title: String,
     /// The raw `due` value as written (e.g. `2026-08-15`).
@@ -2612,6 +2638,8 @@ pub struct KanbanCard {
     pub card: CardId,
     pub title: String,
     pub node_title: String,
+    /// Root-to-basket breadcrumb (see `TaskItem::node_path`).
+    pub node_path: String,
     /// The card's accent color `[r,g,b]` (shown as the card's border on the board).
     pub color: [u8; 3],
     /// The `due::` value if the card has one (e.g. `2026-08-15`).
@@ -3582,6 +3610,38 @@ mod tests {
         assert_eq!(parse_number(""), None);
         assert_eq!(parse_number("pass"), None);
         assert_eq!(parse_number("-"), None);
+    }
+
+    #[test]
+    fn tasks_and_kanban_carry_the_full_basket_path() {
+        // Two projects, each with an "Open Items" basket — the case that had an
+        // agent attribute a task to the wrong project.
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "LANAgent".into());
+        let b = doc.add_node(None, "Super Weapon News".into());
+        let a_open = doc.add_node(Some(a), "Open Items".into());
+        let b_open = doc.add_node(Some(b), "Open Items".into());
+        for (n, t) in [(a_open, "ship the agent"), (b_open, "publish the piece")] {
+            let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+            let c = doc.card_mut(n, cid).unwrap();
+            c.title = t.to_string();
+            c.body = "due:: 2026-08-15\nstatus:: doing".to_string();
+        }
+
+        let tasks = doc.tasks();
+        assert_eq!(tasks.len(), 2);
+        // The bare parent title is identical for both — that's the bug.
+        assert_eq!(tasks[0].node_title, tasks[1].node_title);
+        // The path tells them apart, and names the project first.
+        let mut paths: Vec<&str> = tasks.iter().map(|t| t.node_path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["LANAgent › Open Items", "Super Weapon News › Open Items"]);
+
+        let board = doc.cards_by_status();
+        let doing = board.get("doing").expect("both cards are status:: doing");
+        let mut kpaths: Vec<&str> = doing.iter().map(|c| c.node_path.as_str()).collect();
+        kpaths.sort();
+        assert_eq!(kpaths, vec!["LANAgent › Open Items", "Super Weapon News › Open Items"]);
     }
 
     #[test]

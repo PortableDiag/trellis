@@ -1567,6 +1567,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     json!({
                         "node": t.node,
                         "node_title": t.node_title,
+                        "node_path": t.node_path,
                         "card": t.card,
                         "title": t.title,
                         "due": t.due,
@@ -1589,6 +1590,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                             json!({
                                 "node": kc.node,
                                 "node_title": kc.node_title,
+                                "node_path": kc.node_path,
                                 "card": kc.card,
                                 "title": kc.title,
                                 "due": kc.due,

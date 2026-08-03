@@ -542,7 +542,7 @@ fn kanban_card_ui(
                             }
                         });
                     }
-                    ui.small(egui::RichText::new(&kc.node_title).weak());
+                    ui.small(egui::RichText::new(&kc.node_path).weak());
                 });
         },
     );
@@ -4238,7 +4238,10 @@ impl TrellisApp {
                         if ui.add(egui::Label::new(title).sense(egui::Sense::click())).clicked() || row.clicked() {
                             jump = Some((t.node, t.card));
                         }
-                        ui.small(egui::RichText::new(&t.node_title).weak());
+                        // Full breadcrumb, not just the parent: "Open Items"
+                        // exists under more than one project, and the bare name
+                        // has had agents attribute a task to the wrong one.
+                        ui.small(egui::RichText::new(&t.node_path).weak());
                     }
                 }
             });

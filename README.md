@@ -152,6 +152,10 @@ from the main cluster, and click or drag on it to jump there without zooming out
 - **Find cards** (View → Find cards) — a cross-tree query panel: pick a tag and/or
   a property (+ value) from dropdowns, optionally add text; results link back to
   their basket. No syntax to remember.
+- Both the **Agenda** and the **Kanban board** show each task's **full basket
+  path** (`Super Weapon News › Open Items`), not just the basket name — project
+  folders reuse names like "Open Items", so the bare name can't tell you which
+  project a task belongs to.
 - **Task agenda** (View → Agenda) — every card with a `due:: <date>` becomes a
   task, grouped **Overdue / Today / This week / Later** across all baskets. Click
   a task to jump **straight to that card** — the basket recenters on it and it

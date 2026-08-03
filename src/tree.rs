@@ -4,19 +4,7 @@ use crate::model::{Document, NodeId};
 
 /// Root-to-node breadcrumb of titles, e.g. `HOUSE › ATTIC › VELUX WINDOW`.
 pub(crate) fn node_path(doc: &Document, id: NodeId) -> String {
-    let mut parts = Vec::new();
-    let mut cur = Some(id);
-    while let Some(nid) = cur {
-        match doc.nodes.get(&nid) {
-            Some(n) => {
-                parts.push(n.title.clone());
-                cur = n.parent;
-            }
-            None => break,
-        }
-    }
-    parts.reverse();
-    parts.join(" › ")
+    doc.node_path(id)
 }
 
 /// Actions the tree UI requests; applied by the app after the immutable walk so

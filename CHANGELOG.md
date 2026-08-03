@@ -4,6 +4,23 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.69.0]
+
+### Fixed
+- **The Agenda and Kanban board now show each task's full basket path.** They
+  showed only the basket's own name, and project folders reuse names — with an
+  "Open Items" under two different projects, a task read simply as "Open Items"
+  with nothing to say which project it belonged to. That is not hypothetical: it
+  led an agent to treat another project's task as its own, and someone had
+  already worked around it by renaming a basket "LANAgent Open Items" by hand.
+  Rows now read `Super Weapon News › Open Items`.
+- **`GET /api/tasks` and `GET /api/kanban` gained `node_path`** alongside
+  `node_title`, so anything reading the API can attribute a task correctly.
+  `node_title` is unchanged, so existing clients keep working — but `node_path`
+  is the one to show.
+- The Android app's Agenda and Kanban show the path too, falling back to the
+  basket name when talking to an older desktop.
+
 ## [0.68.0]
 
 ### Added
