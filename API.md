@@ -128,6 +128,12 @@ GET /api/nodes/{id}
 GET /api/nodes/{id}/cards
   → 200 {"cards":[<card>…]}                                      | 404
 
+GET /api/nodes/{id}/cards/{cid}
+  → 200 {<card>}                                                 | 404
+        one card on its own — the read counterpart of PATCH/DELETE on this same
+        path, so re-reading a card you just wrote doesn't mean pulling the whole
+        basket back. Same object as an entry in the list above.
+
 GET /api/search?q=<text>
   → 200 {"hits":[ {node,card,node_title,snippet} ]}                   (case-insensitive)
 ```
@@ -666,6 +672,9 @@ curl -s -H "X-API-Key: $KEY" "$API/search?q=agenda"
 
 # Rename / retag a node
 curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"title":"Renamed","color":[59,130,246]}' $API/nodes/$NID
+
+# Read back the one card you just wrote (rather than the whole basket)
+curl -s -H "X-API-Key: $KEY" $API/nodes/$NID/cards/$CID
 
 # Edit a card body
 curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"body":"updated text"}' $API/nodes/$NID/cards/1

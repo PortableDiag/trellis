@@ -3724,8 +3724,12 @@ impl TrellisApp {
                             format!("curl -H 'X-API-Key: {k}' {a}/instance"),
                         ),
                         (
-                            "The tree, then one basket",
-                            format!("curl -H 'X-API-Key: {k}' {a}/tree\ncurl -H 'X-API-Key: {k}' {a}/nodes/1"),
+                            "The tree, then one basket, then one card",
+                            format!(
+                                "curl -H 'X-API-Key: {k}' {a}/tree\n\
+                                 curl -H 'X-API-Key: {k}' {a}/nodes/1\n\
+                                 curl -H 'X-API-Key: {k}' {a}/nodes/1/cards/1"
+                            ),
                         ),
                         (
                             "Add a card (fit sizes it to its content)",
@@ -3796,6 +3800,7 @@ impl TrellisApp {
                         "GET    /api/nodes/{id}/backlinks          (cards that [[link]] here)",
                         "GET    /api/graph                         (wiki-link nodes + edges)",
                         "GET    /api/nodes/{id}/cards",
+                        "GET    /api/nodes/{id}/cards/{cid}        (one card, without the whole basket)",
                         "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, size?, fit?, image_base64?, inline_images?}",
                         "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, size?, items?, …}",
                         "DELETE /api/nodes/{id}/cards/{cid}",

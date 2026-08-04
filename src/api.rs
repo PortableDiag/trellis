@@ -33,6 +33,10 @@ pub enum ApiRequest {
     ListNodes,
     GetNode(NodeId),
     ListCards(NodeId),
+    /// One card on its own — the read counterpart of PATCH/DELETE on the same
+    /// path. Without it, re-reading a card you just wrote means pulling the
+    /// whole basket back.
+    GetCard { node: NodeId, card: u64 },
     CreateNode { parent: Option<NodeId>, title: String },
     UpdateNode { id: NodeId, title: Option<String>, color: Option<[u8; 3]>, bg: Option<[u8; 3]> },
     DeleteNode(NodeId),
@@ -573,6 +577,9 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Get, ["api", "nodes", id, "backlinks"]) => Ok(ApiRequest::Backlinks(pid(id)?)),
         (Method::Get, ["api", "nodes", id, "cards"]) => Ok(ApiRequest::ListCards(pid(id)?)),
+        (Method::Get, ["api", "nodes", nid, "cards", cid]) => {
+            Ok(ApiRequest::GetCard { node: pid(nid)?, card: pid(cid)? })
+        }
         (Method::Post, ["api", "nodes", id, "cards"]) => {
             let input: AddCardInput = parse(body)?;
             Ok(ApiRequest::AddCard { node: pid(id)?, input })
@@ -953,6 +960,10 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 (false, ApiResponse::ok(json!({ "cards": cards })))
             }
             None => (false, ApiResponse::err(404, "node not found")),
+        },
+        ApiRequest::GetCard { node, card } => match doc.card(node, card) {
+            Some(c) => (false, ApiResponse::ok(card_json(c))),
+            None => (false, ApiResponse::err(404, "card not found")),
         },
         ApiRequest::CreateNode { parent, title } => {
             if let Some(p) = parent {
@@ -1897,6 +1908,15 @@ mod tests {
             ApiRequest::DeleteCard { node: 5, card: 9 }
         ));
         assert!(matches!(
+            route(&Method::Get, "/api/nodes/5/cards", "", "").unwrap(),
+            ApiRequest::ListCards(5)
+        ));
+        // The single-card read must not be shadowed by the list route above it.
+        assert!(matches!(
+            route(&Method::Get, "/api/nodes/5/cards/9", "", "").unwrap(),
+            ApiRequest::GetCard { node: 5, card: 9 }
+        ));
+        assert!(matches!(
             route(&Method::Get, "/api/search", "q=hello%20world", "").unwrap(),
             ApiRequest::Search(q) if q == "hello world"
         ));
@@ -2165,6 +2185,33 @@ mod tests {
         let op: TableOpInput = serde_json::from_str(r#"{"op":"bogus"}"#).unwrap();
         let (_d, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
         assert_eq!(resp.status, 400);
+    }
+
+    #[test]
+    fn get_one_card_returns_it_and_404s_for_a_stranger() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(nid, cid).unwrap().title = "just this one".into();
+
+        let (dirty, resp) = process(&mut doc, ApiRequest::GetCard { node: nid, card: cid });
+        assert!(!dirty, "a read must never mark the document dirty");
+        assert_eq!(resp.status, 200);
+        let got: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(got["title"], "just this one");
+        assert_eq!(got["id"], cid);
+
+        // Same shape as the card in the basket listing — one card, not a wrapper.
+        let (_d, listed) = process(&mut doc, ApiRequest::ListCards(nid));
+        let listed: Value = serde_json::from_str(&listed.body).unwrap();
+        assert_eq!(listed["cards"][0], got);
+
+        // A card id that isn't in this node is a 404, not someone else's card.
+        let other = doc.add_node(None, "other".into());
+        let (_d, resp) = process(&mut doc, ApiRequest::GetCard { node: other, card: cid });
+        assert_eq!(resp.status, 404);
+        let (_d, resp) = process(&mut doc, ApiRequest::GetCard { node: nid, card: 9999 });
+        assert_eq!(resp.status, 404);
     }
 
     #[test]

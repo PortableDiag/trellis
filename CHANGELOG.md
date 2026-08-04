@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.73.1]
+
+### Added
+- **`GET /api/nodes/{id}/cards/{cid}` — read one card.** The path already
+  accepted PATCH and DELETE, but not GET, so an agent that wanted to check a
+  card it had just written had to fetch the entire basket and filter it. It
+  returns the same card object that appears in the basket listing. Reported by
+  an agent working over the API.
+
 ## [0.73.0]
 
 ### Added
