@@ -308,8 +308,22 @@ POST /api/nodes/{id}/cards/{cid}/table  {op, …}
 | `remove_row` | `at` | delete row `at` (never below 1 row) |
 | `insert_col` | `at` | insert a blank column at index `at` |
 | `remove_col` | `at` | delete column `at` (never below 1 col) |
-| `set_col_width` | `col`, `width` | set a column's pixel width |
+| `set_col_width` | `col`, `width` | set a column's pixel width (28–600) |
+| `autofit_cols` | `col`? | size columns to their content — every column, or just `col` |
 | `set_header` | `header` | set the header-row flag (bool) |
+
+Columns are **110px** until something changes them, and cell text does not wrap —
+so a table built from `rows` clips anything longer than that. **`autofit_cols`
+after filling a table** and the columns size themselves to their longest cell
+(bounded at 600px, so one runaway cell can't produce an unusable card). Note that
+`"fit": true` on a table card sizes the card's *frame* around the widths the
+columns already have; it does not widen the columns. Fit the columns first, then
+the card:
+
+```bash
+curl -s -H "X-API-Key: $KEY" -d '{"op":"autofit_cols"}' $API/nodes/$NID/cards/1/table
+curl -s -H "X-API-Key: $KEY" -X PATCH -d '{"fit":true}' $API/nodes/$NID/cards/1
+```
 
 ### Sketch editing
 Draw on a `sketch` card programmatically. One operation per request.
@@ -724,6 +738,19 @@ curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID}" $API/templates/$IDX/insert
 curl -s -H "X-API-Key: $KEY" $API/templates      # master_node / master_card per template
 curl -s -H "X-API-Key: $KEY" -d '{"op":"insert_col","at":3}' $API/nodes/$NID/cards/$CID/table
 curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID,\"card\":$CID}" $API/templates/$IDX/update
+
+# Build a readable table: fill it, size the columns to the text, then the card
+# to the columns. Without the autofit every column stays 110px wide and the
+# long cells are clipped, because cell text does not wrap.
+CID=$(curl -s -H "X-API-Key: $KEY" -d '{"kind":"table","title":"Deploy verification",
+      "rows":[["Host","Check","Result"],
+              ["ALICE","crypto heartbeat","clean, no fatal errors since 12:53"],
+              ["GATEWAY","memory","last OOM cycling was mid-June"]]}' \
+      $API/nodes/$NID/cards | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -H "X-API-Key: $KEY" -d '{"op":"autofit_cols"}' $API/nodes/$NID/cards/$CID/table
+curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"fit":true}' $API/nodes/$NID/cards/$CID
+# Just one column (the others keep whatever width you gave them):
+curl -s -H "X-API-Key: $KEY" -d '{"op":"autofit_cols","col":2}' $API/nodes/$NID/cards/$CID/table
 
 # Chart a table: make the populated table and chart it in two calls.
 CID=$(curl -s -H "X-API-Key: $KEY" -d '{"kind":"table","title":"Quarterly revenue",

@@ -179,8 +179,67 @@ impl Default for ChartSpec {
 }
 
 pub const TABLE_DEFAULT_COL_W: f32 = 110.0;
+/// Narrowest and widest a column may be set to, by drag, by `set_col_width`, or
+/// by autofit.
+pub const TABLE_MIN_COL_W: f32 = 28.0;
+pub const TABLE_MAX_COL_W: f32 = 600.0;
+/// Table cells render at the plain body text style — a table ignores the card's
+/// `font_scale`, unlike a text or code card.
+const TABLE_FONT_PX: f32 = 12.5;
+
+/// Roughly how wide `s` renders in the proportional body font, in pixels.
+///
+/// A character *count* can't do this job: `WWWWW` is about three times the width
+/// of `iiiii`, so a flat average sized a column of capitals too narrow and
+/// clipped it — which is the exact failure this whole feature exists to remove.
+/// So each character contributes its own approximate advance, as a fraction of
+/// the font size. It errs generous: a column a few pixels roomier than needed
+/// reads fine, one a few pixels short does not.
+fn cell_text_width(s: &str) -> f32 {
+    let ems: f32 = s
+        .chars()
+        .map(|c| match c {
+            'i' | 'l' | 'j' | 'I' | '.' | ',' | ':' | ';' | '\'' | '|' | '!' | '`' => 0.32,
+            ' ' | 'f' | 'r' | 't' | '(' | ')' | '[' | ']' | '-' => 0.42,
+            'm' | 'w' | 'M' | 'W' | '@' | '%' => 1.02,
+            'A'..='Z' => 0.78,
+            '0'..='9' => 0.62,
+            // Ordinary lowercase. Erring a little high matters most here: the
+            // shortfall is per character, so it only shows up on the longest
+            // string in the column — exactly the one that must not clip.
+            _ => 0.62,
+        })
+        .sum();
+    ems * TABLE_FONT_PX
+}
 
 impl TableData {
+    /// The width column `c` needs for its longest cell to render without being
+    /// clipped.
+    ///
+    /// An estimate, like [`Card::fit_size`] — the API worker has no egui font
+    /// context to measure with — so it deliberately errs *wide*: a column a few
+    /// pixels too generous is merely roomy, while one a few pixels short clips
+    /// the text, which is the whole problem this solves. Cell text renders at
+    /// the plain body font (a table ignores the card's `font_scale`, unlike a
+    /// text or code card) and is inset 4px on each side, drawn with
+    /// `layout_no_wrap` — so the width a cell needs is its text plus that
+    /// padding, with no wrapping to fall back on.
+    pub fn autofit_width(&self, c: usize) -> f32 {
+        const CELL_PAD: f32 = 14.0; // the 4px inset each side, plus slack
+        // Never narrower than this: a one-character column shrunk to the hard
+        // minimum reads as a rendering fault rather than a narrow column.
+        const MIN_READABLE: f32 = 48.0;
+
+        let widest = self
+            .rows
+            .iter()
+            .filter_map(|r| r.get(c))
+            .map(|cell| cell_text_width(&cell.text))
+            .fold(0.0_f32, f32::max);
+        (widest + CELL_PAD).clamp(MIN_READABLE, TABLE_MAX_COL_W)
+    }
+
     /// A fresh `rows` x `cols` empty table.
     pub fn empty(rows: usize, cols: usize) -> Self {
         TableData {
@@ -1001,7 +1060,33 @@ impl Document {
             let cols = t.n_cols();
             t.col_widths.resize(cols, TABLE_DEFAULT_COL_W);
         }
-        t.col_widths[c] = w.clamp(28.0, 600.0);
+        t.col_widths[c] = w.clamp(TABLE_MIN_COL_W, TABLE_MAX_COL_W);
+        true
+    }
+
+    /// Size columns to their content: `Some(c)` fits one column, `None` fits
+    /// every column. Returns false only if the card isn't a table (or `c` is out
+    /// of range) — an empty table is a no-op, not a failure.
+    pub fn table_autofit_cols(&mut self, node: NodeId, card: CardId, col: Option<usize>) -> bool {
+        let Some(t) = self.table_mut(node, card) else { return false };
+        let cols = t.n_cols();
+        if let Some(c) = col {
+            if c >= cols {
+                return false;
+            }
+        }
+        if t.col_widths.len() < cols {
+            t.col_widths.resize(cols, TABLE_DEFAULT_COL_W);
+        }
+        // Measure first, then write: `autofit_width` reads the rows while
+        // `col_widths` needs the mutable borrow.
+        let widths: Vec<(usize, f32)> = (0..cols)
+            .filter(|c| col.is_none() || col == Some(*c))
+            .map(|c| (c, t.autofit_width(c)))
+            .collect();
+        for (c, w) in widths {
+            t.col_widths[c] = w;
+        }
         true
     }
 
@@ -3804,6 +3889,71 @@ mod tests {
         let md = doc.export_markdown();
         assert!(md.contains("| Name | Qty |"));
         assert!(md.contains("| --- | --- |"));
+    }
+
+    #[test]
+    fn autofit_cols_sizes_columns_to_their_longest_cell() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let c = doc
+            .add_card(
+                n,
+                egui::pos2(0.0, 0.0),
+                CardKind::Table {
+                    table: TableData::from_values(vec![
+                        vec!["Check".into(), "Notes".into()],
+                        vec![
+                            "DNS".into(),
+                            "a long note that would clip badly at the default width".into(),
+                        ],
+                    ]),
+                },
+            )
+            .unwrap();
+
+        // A fresh table has no explicit widths at all: every column renders at
+        // the default, which is exactly the situation this op fixes.
+        let CardKind::Table { table } = &doc.nodes[&n].cards[0].kind else { panic!() };
+        assert!(table.col_widths.is_empty());
+        assert_eq!(table.col_width(1), TABLE_DEFAULT_COL_W);
+
+        assert!(doc.table_autofit_cols(n, c, None));
+        let CardKind::Table { table } = &doc.nodes[&n].cards[0].kind else { panic!() };
+        // The wordy column grows; the short one doesn't grow past it.
+        assert!(
+            table.col_width(1) > TABLE_DEFAULT_COL_W,
+            "wide column should widen, got {}",
+            table.col_width(1)
+        );
+        assert!(table.col_width(0) < table.col_width(1));
+
+        // Width is measured per glyph, not per character: the same number of
+        // characters needs far more room in capitals than in narrow lowercase.
+        // A flat average clipped "GATEWAY" and "WWWWW MMMMM QQQQQ" on screen.
+        assert!(
+            cell_text_width("WWWWW") > cell_text_width("iiiii") * 2.0,
+            "wide glyphs must not be averaged away"
+        );
+        assert!(cell_text_width("GATEWAY") + 12.0 < 110.0, "sanity: still a narrow column");
+
+        // Bounded: a pathological cell can't produce an unusable card.
+        doc.table_set_cell(n, c, 1, 1, "x".repeat(500));
+        doc.table_autofit_cols(n, c, None);
+        let CardKind::Table { table } = &doc.nodes[&n].cards[0].kind else { panic!() };
+        assert_eq!(table.col_width(1), TABLE_MAX_COL_W);
+
+        // `col` fits just that column and leaves the others alone.
+        doc.table_set_col_width(n, c, 0, 300.0);
+        assert!(doc.table_autofit_cols(n, c, Some(1)));
+        let CardKind::Table { table } = &doc.nodes[&n].cards[0].kind else { panic!() };
+        assert_eq!(table.col_width(0), 300.0, "untargeted column must not move");
+
+        // Out of range is a failure, not a silent no-op.
+        assert!(!doc.table_autofit_cols(n, c, Some(9)));
+
+        // Not a table at all.
+        let t = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        assert!(!doc.table_autofit_cols(n, t, None));
     }
 
     #[test]

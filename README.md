@@ -190,7 +190,8 @@ from the main cluster, and click or drag on it to jump there without zooming out
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN
   access** in Settings for phones/other devices) with full parity to the app:
   add/query/edit/remove nodes and cards, move/recolor/resize, convert a card's
-  kind, edit tables cell-by-cell (colors, headers, rows/cols), upload images
+  kind, edit tables cell-by-cell (colors, headers, rows/cols, **autofit column
+  widths**), upload images
   (incl. inline images in text cards), build groups, join/leave and dock cards,
   **reorder and reparent nodes** (`/nodes/{id}/move`), **reorder cards** within a
   basket (`/cards/{cid}/move`), **expand/collapse** subtrees, query the tree by

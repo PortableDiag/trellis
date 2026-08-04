@@ -362,7 +362,8 @@ struct AddImageInput {
 #[derive(Deserialize)]
 pub struct TableOpInput {
     /// `set_cell` | `set_bg` | `set_fg` | `insert_row` | `remove_row` |
-    /// `insert_col` | `remove_col` | `set_col_width` | `set_header`.
+    /// `insert_col` | `remove_col` | `set_col_width` | `autofit_cols` |
+    /// `set_header`.
     op: String,
     #[serde(default)]
     row: Option<usize>,
@@ -1451,6 +1452,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 "set_col_width" => {
                     doc.table_set_col_width(node, card, op.col.unwrap_or(0), op.width.unwrap_or(110.0))
                 }
+                // No `col` = every column, which is the usual case: a table built
+                // by an agent has every column at the 110px default.
+                "autofit_cols" => doc.table_autofit_cols(node, card, op.col),
                 "set_header" => doc.table_set_header(node, card, op.header.unwrap_or(true)),
                 other => {
                     return (false, ApiResponse::err(400, &format!("unknown table op: {other}")));
@@ -1852,7 +1856,6 @@ mod tests {
         serde_json::from_str::<Value>(&resp.body).unwrap()["id"].as_u64().unwrap()
     }
 
-    #[test]
     /// The bug this guards: `today_days()` used to divide the UTC clock, so from
     /// 17:00 PDT until midnight it returned tomorrow's date and a task due
     /// tomorrow was bucketed "today".
@@ -1882,6 +1885,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn routes_parse() {
         assert!(matches!(route(&Method::Get, "/api/tree", "", "").unwrap(), ApiRequest::Tree));
         assert!(matches!(
@@ -2161,6 +2165,40 @@ mod tests {
         let op: TableOpInput = serde_json::from_str(r#"{"op":"bogus"}"#).unwrap();
         let (_d, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
         assert_eq!(resp.status, 400);
+    }
+
+    #[test]
+    fn autofit_cols_via_api_widens_the_wordy_column() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc
+            .add_card(nid, egui::pos2(0.0, 0.0), CardKind::Table {
+                table: crate::model::TableData::from_values(vec![
+                    vec!["Host".into(), "Result".into()],
+                    vec!["ALICE".into(), "a verdict far too long for 110 pixels".into()],
+                ]),
+            })
+            .unwrap();
+
+        let op: TableOpInput = serde_json::from_str(r#"{"op":"autofit_cols"}"#).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        let CardKind::Table { table } = &doc.nodes[&nid].cards[0].kind else { panic!() };
+        assert!(table.col_width(1) > crate::model::TABLE_DEFAULT_COL_W);
+        let fitted = table.col_width(1);
+
+        // An out-of-range `col` is a 400, like the other indexed ops.
+        let op: TableOpInput = serde_json::from_str(r#"{"op":"autofit_cols","col":7}"#).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
+        assert!(!dirty);
+        assert_eq!(resp.status, 400);
+
+        // Idempotent: fitting again on unchanged content changes nothing.
+        let op: TableOpInput = serde_json::from_str(r#"{"op":"autofit_cols"}"#).unwrap();
+        let (_d, _r) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
+        let CardKind::Table { table } = &doc.nodes[&nid].cards[0].kind else { panic!() };
+        assert_eq!(table.col_width(1), fitted);
     }
 
     #[test]

@@ -3749,6 +3749,13 @@ impl TrellisApp {
                             ),
                         ),
                         (
+                            "Make that table readable (columns are 110px and don't wrap)",
+                            format!(
+                                "curl -H 'X-API-Key: {k}' -d '{{\"op\":\"autofit_cols\"}}' {a}/nodes/1/cards/1/table\n\
+                                 curl -X PATCH -H 'X-API-Key: {k}' -d '{{\"fit\":true}}' {a}/nodes/1/cards/1   # then the frame"
+                            ),
+                        ),
+                        (
                             "Chart that table (bar | line | scatter | pie)",
                             format!(
                                 "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"bar\"}}' {a}/nodes/1/cards/1/chart\n\
@@ -3796,7 +3803,7 @@ impl TrellisApp {
                         "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
                         "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE …/dock)",
                         "POST   /api/nodes/{id}/cards/{cid}/group {group}           (remove: DELETE …/group)",
-                        "POST   /api/nodes/{id}/cards/{cid}/table {op, …}           (set_cell / insert_row / …)",
+                        "POST   /api/nodes/{id}/cards/{cid}/table {op, …}           (set_cell / insert_row / set_col_width / autofit_cols {col?} …)",
                         "POST   /api/nodes/{id}/cards/{cid}/chart {kind, label_col?, value_cols?, show_table?}  (bar|line|scatter|pie; DELETE …/chart = plain grid)",
                         "POST   /api/nodes/{id}/cards/{cid}/sketch {op, …}          (add_stroke / undo / clear)",
                         "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}    (GET / DELETE …/images/{idx})",

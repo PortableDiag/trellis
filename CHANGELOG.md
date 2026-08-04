@@ -4,6 +4,20 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.73.0]
+
+### Added
+- **`autofit_cols` — tables built over the API are readable now.** Columns are
+  110px until something changes them and cell text doesn't wrap, so a table an
+  agent filled in with `rows` clipped every long cell, and the only fix was
+  guessing a pixel width per column by hand. `POST
+  /api/nodes/{id}/cards/{cid}/table {"op":"autofit_cols"}` sizes every column to
+  its longest cell — or just one with `{"op":"autofit_cols","col":2}`. Widths are
+  bounded at 600px, so a single runaway cell can't produce an unusable card.
+  Note the order: `autofit_cols` sizes the **columns**, then `"fit": true` on the
+  card sizes the **frame** around them (`fit` on its own never widened a column,
+  which is why "always pass fit" still gave you narrow columns).
+
 ## [0.72.0]
 
 ### Added
