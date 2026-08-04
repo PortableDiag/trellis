@@ -201,7 +201,9 @@ from the main cluster, and click or drag on it to jump there without zooming out
   the instant anything changes. An instance serves one document, so **the port
   addresses the document** — `GET /api/instance` reports which one is open, and
   edits are autosaved a couple of seconds later without anyone pressing Save.
-  Enable it in **Tools → Settings**; see [API.md](API.md).
+  Enable it in **Tools → Settings**, where **Examples** gives you copy-paste
+  `curl` commands already filled in with this instance's host, port and key; see
+  [API.md](API.md).
 - **Web clipper** — a small Chrome/Edge extension (`web-clipper/`) clips the
   current page or your text selection into a Trellis basket over the LAN API.
 - **Companion mobile app** — a native Android viewer/capture app talks to the

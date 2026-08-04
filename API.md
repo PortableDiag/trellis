@@ -75,6 +75,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `items` | checklist | `[{ "done": bool, "text": string }]` |
 | `image_name`, `image_names`, `bytes` | image | first/all image names + total byte count (read); set image bytes via the images sub-resource (below) |
 | `rows`, `header` | table | `rows` set: `[["a","b"],…]` bulk-replaces cell text (colors reset); get: cells as `{text,bg,fg}`. `header` (bool) toggles the header row. Fine-grained edits (cell colors, widths, row/col ops) use the table sub-resource (below) |
+| `chart` | table | how the table is drawn as a chart (`{kind,label_col,value_cols,show_table}`), or `null` for a plain grid. Set via the chart sub-resource (below) |
 | `strokes` | sketch | read: `[{color:[r,g,b], width, points:[[x,y],…]}, …]`. Edit via the sketch sub-resource (below) |
 
 **Group** — a labeled container that a set of cards belong to; drawn as a box you

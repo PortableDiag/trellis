@@ -4,6 +4,20 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.72.0]
+
+### Added
+- **Worked examples in the app** — **Tools → Settings → Agent API → Examples** is
+  a new section of copy-paste `curl` commands, filled in with *this* instance's
+  host, port and key: what document am I talking to, read the tree, add a card,
+  add a task that lands in the Agenda and Kanban, build a populated table in one
+  call, chart it, filter tasks to one project, and long-poll for changes. The
+  endpoint list says what exists; these say how to drive it.
+
+### Changed
+- API.md's Card data model now lists the table card's **`chart`** field, which was
+  documented in the Charts section but missing from the field table.
+
 ## [0.71.1]
 
 ### Fixed

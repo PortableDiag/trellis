@@ -3713,6 +3713,67 @@ impl TrellisApp {
                     port
                 ));
                 ui.add_space(4.0);
+                // Copy-paste starters with this instance's real host/port/key —
+                // the endpoint list says what exists, these say how to drive it.
+                ui.collapsing("Examples", |ui| {
+                    let k = if self.api_key.is_empty() { "<key>" } else { &self.api_key };
+                    let a = format!("http://{host}:{port}/api");
+                    for (what, cmd) in [
+                        (
+                            "Which document is this?",
+                            format!("curl -H 'X-API-Key: {k}' {a}/instance"),
+                        ),
+                        (
+                            "The tree, then one basket",
+                            format!("curl -H 'X-API-Key: {k}' {a}/tree\ncurl -H 'X-API-Key: {k}' {a}/nodes/1"),
+                        ),
+                        (
+                            "Add a card (fit sizes it to its content)",
+                            format!(
+                                "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"text\",\"title\":\"Note\",\
+                                 \"body\":\"Hello\",\"fit\":true}}' \\\n     {a}/nodes/1/cards"
+                            ),
+                        ),
+                        (
+                            "A task — lands in the Agenda and Kanban",
+                            format!(
+                                "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"text\",\"title\":\"Ship it\",\
+                                 \"body\":\"due:: 2026-08-15\\nstatus:: todo\",\"fit\":true}}' \\\n     {a}/nodes/1/cards"
+                            ),
+                        ),
+                        (
+                            "A table, populated in one call",
+                            format!(
+                                "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"table\",\"title\":\"Revenue\",\
+                                 \"rows\":[[\"Quarter\",\"Revenue\"],[\"Q1\",\"1200\"],[\"Q2\",\"1850\"]]}}' \\\n     {a}/nodes/1/cards"
+                            ),
+                        ),
+                        (
+                            "Chart that table (bar | line | scatter | pie)",
+                            format!(
+                                "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"bar\"}}' {a}/nodes/1/cards/1/chart\n\
+                                 curl -X DELETE -H 'X-API-Key: {k}' {a}/nodes/1/cards/1/chart   # back to a grid"
+                            ),
+                        ),
+                        (
+                            "Just this project's tasks",
+                            format!("curl -H 'X-API-Key: {k}' '{a}/tasks?project=1'"),
+                        ),
+                        (
+                            "Wake the moment anything changes",
+                            format!("curl -H 'X-API-Key: {k}' '{a}/wait?rev=0'"),
+                        ),
+                    ] {
+                        ui.small(egui::RichText::new(what).strong());
+                        ui.code(cmd);
+                        ui.add_space(4.0);
+                    }
+                    ui.small(
+                        egui::RichText::new("Node/card ids above are placeholders — right-click a node or card → Copy → id.")
+                            .weak(),
+                    );
+                });
+                ui.add_space(4.0);
                 ui.collapsing("Endpoints", |ui| {
                     for line in [
                         "GET    /api/health                        (no auth)",
