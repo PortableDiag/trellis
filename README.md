@@ -122,10 +122,14 @@ from the main cluster, and click or drag on it to jump there without zooming out
   Backup settings are per instance and back up the document that instance has
   open, so configure them once per document.
 - **Version history** (**Tools → Version history**) — automatic timestamped
-  snapshots taken as you save (kept up to 25, a few minutes apart, in a hidden
-  `.<name>.history/` folder beside the document, so each document has its own);
-  browse and **Restore** an older version. A local safety net, separate from
-  Backup. Edits made over the agent API are snapshotted the same way.
+  snapshots taken as you save (in a hidden `.<name>.history/` folder beside the
+  document, so each document has its own); browse and **Restore** an older
+  version. A local safety net, separate from Backup. Edits made over the agent
+  API are snapshotted the same way. **How many to keep and how far apart** are
+  in **Settings → Version history** (25 snapshots, 3 minutes apart by default) —
+  each one is a full copy of the document, so a large document is happier with
+  fewer, spaced wider. No snapshot is taken when you close the app, which keeps
+  closing quick; the document itself is saved either way.
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document

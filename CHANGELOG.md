@@ -4,6 +4,44 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.74.0]
+
+> **One-way format change.** Documents saved by this version store image bytes
+> as base64. Older builds can't read that, so a document saved here won't open
+> in 0.73.x or earlier. This version reads *both* forms, so upgrading needs
+> nothing — but keep a backup if you might roll back. Your version-history
+> snapshots and existing basket exports are unaffected and still load.
+
+### Changed
+- **Documents with images are much smaller and save far faster.** Image bytes
+  were stored the way serde writes a `Vec<u8>` — a decimal list, `[137,80,78,…]`
+  — costing about 3.5 characters per byte. On a real document, 16 MB of
+  screenshots occupied **56 MB of a 60 MB document**, and gzip then spent
+  seconds undoing that bloat on every single save. Images are now stored as
+  **base64** (1.33× instead of 3.5×). Measured on that document: **20.4 MB →
+  16.1 MB on disk (21% smaller), and compression dropped from 5.1 s to 0.6 s
+  (9× faster)**. Loading, saving, autosave, backups and history snapshots all
+  get proportionally cheaper.
+- Old documents load unchanged and are converted the next time they're saved;
+  no migration step and nothing to click.
+
+### Fixed
+- **Closing the app no longer appears to hang on a large document.** The save on
+  exit is deliberately synchronous, and it was also writing a version-history
+  snapshot — a full read *and* write of the document, on top of the save that
+  had just happened. That's now skipped on exit: the document is still saved,
+  and history still has the state from before it. Closing a 16 MB document went
+  from multi-second to **~1.2 s**.
+
+### Added
+- **Version-history retention is configurable** — *Tools → Settings → Version
+  history*: how many snapshots to keep (default 25) and the minimum minutes
+  between them (default 3). Both used to be compile-time constants. A snapshot
+  is a complete copy of the document, so a large one wants fewer, spaced wider;
+  the settings panel shows what the current choice costs for *this* document.
+  Values are clamped on load, so a hand-edited config can't switch history off
+  or fill the disk.
+
 ## [0.73.1]
 
 ### Added

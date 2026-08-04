@@ -74,6 +74,8 @@ const AUTOSAVE_KEY: &str = "autosave";
 const AGENDA_PROJECT_KEY: &str = "agenda_project";
 const KANBAN_PROJECT_KEY: &str = "kanban_project";
 const BACKUP_KEY: &str = "backup";
+const HISTORY_KEEP_KEY: &str = "history_keep";
+const HISTORY_GAP_KEY: &str = "history_gap_mins";
 /// How long the document must be idle (no further changes) before an autosave
 /// fires — so continuous editing (e.g. dragging a card) never saves mid-gesture.
 const AUTOSAVE_IDLE: Duration = Duration::from_secs(2);
@@ -695,6 +697,11 @@ pub struct TrellisApp {
     show_history: bool,
     /// Backup settings (destinations, schedule, encryption); persisted as JSON.
     backup_cfg: crate::backup::BackupConfig,
+    /// Version-history retention: how many snapshots to keep, and the minimum
+    /// minutes between them. Settings rather than constants because a snapshot
+    /// is a full copy of the document — a large one wants fewer, spaced wider.
+    history_keep: usize,
+    history_gap_mins: u64,
     show_backup: bool,
     /// A backup is running on a worker thread (one at a time).
     backing_up: bool,
@@ -914,6 +921,20 @@ impl TrellisApp {
             .and_then(|s| s.get_string(BACKUP_KEY))
             .map(|s| crate::backup::BackupConfig::parse(&s))
             .unwrap_or_default();
+        // Clamped on load as well as in the UI: a hand-edited app.ron shouldn't
+        // be able to switch history off or fill the disk.
+        let history_keep = cc
+            .storage
+            .and_then(|s| s.get_string(HISTORY_KEEP_KEY))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(HISTORY_KEEP)
+            .clamp(*HISTORY_KEEP_RANGE.start(), *HISTORY_KEEP_RANGE.end());
+        let history_gap_mins = cc
+            .storage
+            .and_then(|s| s.get_string(HISTORY_GAP_KEY))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(HISTORY_MIN_GAP_SECS / 60)
+            .clamp(*HISTORY_GAP_MINS_RANGE.start(), *HISTORY_GAP_MINS_RANGE.end());
 
         // Agent API: load config, then start the localhost server. It binds
         // regardless of key so toggling the key in Settings works live; requests
@@ -983,6 +1004,8 @@ impl TrellisApp {
             save_rx,
             status,
             backup_cfg,
+            history_keep,
+            history_gap_mins,
             show_history: false,
             show_backup: false,
             backing_up: false,
@@ -1721,14 +1744,29 @@ impl TrellisApp {
         self.doc_path.clone().unwrap_or_else(|| self.autosave_path.clone())
     }
 
+    /// Take a version-history snapshot using this instance's retention
+    /// settings. Thin wrapper so both save paths honour the same values.
+    fn write_history_snapshot(&self, path: &std::path::Path) {
+        write_history_snapshot(path, self.history_keep, self.history_gap_mins * 60);
+    }
+
     /// Synchronous save — only for `on_exit`, where a background thread would be
     /// killed before it finished. Interactive/auto saves use `spawn_save` so the
     /// serialize + gzip + write never blocks the UI thread (they can take seconds
     /// on a large document).
-    fn write_to(&mut self, path: PathBuf) {
+    ///
+    /// `snapshot = false` skips the version-history copy, and that is what exit
+    /// passes. A snapshot costs a full read + write of the document *on top of*
+    /// the save that just happened, and on a large document that is the whole
+    /// reason closing the window appears to hang. It loses almost nothing: the
+    /// document has just been written, and history exists to go *back*, so the
+    /// state before this save is already in the previous snapshot.
+    fn write_to(&mut self, path: PathBuf, snapshot: bool) {
         match serialize_and_write(&self.doc, &path) {
             Ok(_) => {
-                write_history_snapshot(&path);
+                if snapshot {
+                    self.write_history_snapshot(&path);
+                }
                 self.dirty = false;
                 self.last_change = None;
                 self.status = format!("Saved → {}", path.display());
@@ -1749,10 +1787,12 @@ impl TrellisApp {
         let doc = self.doc.clone();
         let tx = self.save_tx.clone();
         let ctx = self.egui_ctx.clone();
+        // Copied out before the move: the worker can't borrow `self`.
+        let (keep, gap_secs) = (self.history_keep, self.history_gap_mins * 60);
         std::thread::spawn(move || {
             let res = serialize_and_write(&doc, &path);
             if res.is_ok() {
-                write_history_snapshot(&path);
+                write_history_snapshot(&path, keep, gap_secs);
             }
             let _ = tx.send((path, res, snapshot));
             ctx.request_repaint();
@@ -3676,6 +3716,61 @@ impl TrellisApp {
                     );
 
                 ui.add_space(10.0);
+                ui.heading("Version history");
+                ui.small(
+                    egui::RichText::new(
+                        "Each snapshot is a complete copy of the document, so these settings \
+                         trade disk space and save time against how far back you can go. On a \
+                         large document (lots of images) keep fewer, spaced further apart.",
+                    )
+                    .weak(),
+                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.history_keep)
+                            .range(HISTORY_KEEP_RANGE)
+                            .speed(0.25),
+                    );
+                    ui.label("snapshots kept");
+                });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.history_gap_mins)
+                            .range(HISTORY_GAP_MINS_RANGE)
+                            .speed(0.5),
+                    );
+                    ui.label("minutes between snapshots")
+                        .on_hover_text(
+                            "A burst of edits saves repeatedly; without a gap that would churn \
+                             through the whole history in a minute.",
+                        );
+                });
+                // Concrete numbers beat abstract settings: show what this costs
+                // for THIS document, using the size it actually is on disk.
+                if let Some(sz) = self
+                    .doc_path
+                    .as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len())
+                {
+                    ui.small(
+                        egui::RichText::new(format!(
+                            "This document is {:.1} MB, so history can reach about {:.1} MB.",
+                            sz as f64 / 1e6,
+                            (sz as f64 / 1e6) * self.history_keep as f64
+                        ))
+                        .weak(),
+                    );
+                }
+                ui.small(
+                    egui::RichText::new(
+                        "No snapshot is taken when you close the app — the document is saved \
+                         either way, and skipping it keeps closing quick on a big document.",
+                    )
+                    .weak(),
+                );
+
+                ui.add_space(10.0);
                 ui.heading("Canvas");
                 ui.checkbox(
                     &mut self.zoom_enabled,
@@ -5231,6 +5326,8 @@ impl eframe::App for TrellisApp {
             self.kanban_project.map(|n| n.to_string()).unwrap_or_default(),
         );
         storage.set_string(BACKUP_KEY, self.backup_cfg.to_json());
+        storage.set_string(HISTORY_KEEP_KEY, self.history_keep.to_string());
+        storage.set_string(HISTORY_GAP_KEY, self.history_gap_mins.to_string());
         if let Ok(s) = serde_json::to_string(&self.templates) {
             storage.set_string(TEMPLATES_KEY, s);
         }
@@ -5238,8 +5335,10 @@ impl eframe::App for TrellisApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Best-effort autosave to the working file (or the autosave slot).
+        // No history snapshot here — see `write_to_inner`. This save blocks the
+        // window from closing, so it stays as short as it can be.
         let path = self.target_path();
-        self.write_to(path);
+        self.write_to(path, false);
     }
 }
 
@@ -5407,10 +5506,16 @@ fn serialize_doc(doc: &Document) -> Result<Vec<u8>, String> {
     enc.finish().map_err(|e| e.to_string())
 }
 
-/// How many version snapshots to keep, and the minimum gap between them so a
-/// burst of autosaves doesn't churn through the whole history in a minute.
+/// Defaults for how many version snapshots to keep, and the minimum gap between
+/// them so a burst of autosaves doesn't churn through the whole history in a
+/// minute. Both are settings (Tools → Settings → Version history) because the
+/// right values depend on the document: a snapshot is a full copy, so a large
+/// document wants fewer of them, spaced further apart.
 const HISTORY_KEEP: usize = 25;
 const HISTORY_MIN_GAP_SECS: u64 = 180;
+/// Bounds for the settings, so a typo can't disable history or fill the disk.
+const HISTORY_KEEP_RANGE: std::ops::RangeInclusive<usize> = 1..=100;
+const HISTORY_GAP_MINS_RANGE: std::ops::RangeInclusive<u64> = 1..=1440;
 
 /// The hidden sibling directory that holds a document's version snapshots, e.g.
 /// `Notes.ron` → `.Notes.ron.history/`. `None` for a pathless document.
@@ -5438,12 +5543,12 @@ fn history_snapshots(doc_path: &std::path::Path) -> Vec<(PathBuf, String)> {
 /// After a successful save, drop a timestamped snapshot into the history dir
 /// (unless the newest one is younger than the min gap), then prune to the cap.
 /// Runs on whatever thread saved; failures are best-effort and ignored.
-fn write_history_snapshot(doc_path: &std::path::Path) {
+fn write_history_snapshot(doc_path: &std::path::Path, keep: usize, min_gap_secs: u64) {
     let Some(dir) = history_dir(doc_path) else { return };
     let snaps = history_snapshots(doc_path);
     if let Some((newest, _)) = snaps.first() {
         if let Ok(age) = newest.metadata().and_then(|m| m.modified()).and_then(|t| t.elapsed().map_err(std::io::Error::other)) {
-            if age.as_secs() < HISTORY_MIN_GAP_SECS {
+            if age.as_secs() < min_gap_secs {
                 return;
             }
         }
@@ -5454,9 +5559,10 @@ fn write_history_snapshot(doc_path: &std::path::Path) {
     }
     let stamp = crate::backup::stamp(std::time::SystemTime::now());
     let _ = std::fs::write(dir.join(format!("{stamp}.ron.gz")), &bytes);
-    // Prune oldest beyond the cap.
+    // Prune oldest beyond the cap. `max(1)` so a bad setting can never delete
+    // every snapshot including the one just written.
     let snaps = history_snapshots(doc_path);
-    for (path, _) in snaps.into_iter().skip(HISTORY_KEEP) {
+    for (path, _) in snaps.into_iter().skip(keep.max(1)) {
         let _ = std::fs::remove_file(path);
     }
 }

@@ -424,10 +424,65 @@ pub fn xlsx_to_values(bytes: &[u8]) -> Result<Vec<Vec<String>>, String> {
         .collect())
 }
 
+/// How image bytes are stored in a saved document.
+///
+/// Serde's default for `Vec<u8>` is a sequence, which RON writes as a decimal
+/// list — `data:[137,80,78,71,…]` — so every byte costs about 3.5 characters.
+/// On a document with real screenshots in it that dominates everything else: a
+/// 16 MB set of images was occupying 56 MB of a 60 MB document, and gzip then
+/// spent seconds undoing the bloat on every save.
+///
+/// Written as **base64** (1.33× instead of 3.5×). Read as *either*, so every
+/// document, template, basket export and history snapshot written before this
+/// change still loads untouched — the decimal form is simply the other arm of
+/// the visitor.
+mod image_bytes {
+    use base64::Engine as _;
+    use serde::de::{Error as DeError, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(v))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Vec<u8>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("image bytes: base64 text, or a list of byte values")
+            }
+            /// Current form.
+            fn visit_str<E: DeError>(self, s: &str) -> Result<Vec<u8>, E> {
+                base64::engine::general_purpose::STANDARD.decode(s).map_err(E::custom)
+            }
+            /// Pre-base64 documents: a decimal array.
+            fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Vec<u8>, A::Error> {
+                let mut out = Vec::with_capacity(a.size_hint().unwrap_or(0));
+                while let Some(b) = a.next_element::<u8>()? {
+                    out.push(b);
+                }
+                Ok(out)
+            }
+            /// A self-describing format that carries real bytes (not RON/JSON,
+            /// but cheap to accept and it keeps the visitor total).
+            fn visit_bytes<E: DeError>(self, b: &[u8]) -> Result<Vec<u8>, E> {
+                Ok(b.to_vec())
+            }
+            fn visit_byte_buf<E: DeError>(self, b: Vec<u8>) -> Result<Vec<u8>, E> {
+                Ok(b)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
 /// One additional image of an Image card. The first image lives in the
 /// variant's `data`/`name` fields so pre-multi-image documents load unchanged.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ImageEntry {
+    #[serde(with = "image_bytes")]
     pub data: Vec<u8>,
     pub name: String,
 }
@@ -456,6 +511,7 @@ pub enum CardKind {
     /// Image bytes embedded directly in the document for portability. `data`/
     /// `name` hold the first image; `extra` any further ones (shown as a grid).
     Image {
+        #[serde(with = "image_bytes")]
         data: Vec<u8>,
         name: String,
         #[serde(default)]
@@ -3889,6 +3945,62 @@ mod tests {
         let md = doc.export_markdown();
         assert!(md.contains("| Name | Qty |"));
         assert!(md.contains("| --- | --- |"));
+    }
+
+    #[test]
+    fn image_bytes_write_as_base64_and_still_read_the_old_decimal_form() {
+        // A pre-base64 card: image bytes as a decimal array, which is what every
+        // document, template and history snapshot on disk today contains. This
+        // must keep loading byte-for-byte or people lose their screenshots.
+        let legacy = r#"(
+            id: 1, pos: (x: 0.0, y: 0.0), size: (x: 10.0, y: 10.0),
+            title: "", body: "", color: (1, 2, 3),
+            kind: Image(data: [137, 80, 78, 71, 13, 10, 26, 10], name: "old.png"),
+        )"#;
+        let card: Card = ron::from_str(legacy).expect("decimal image bytes still load");
+        let imgs = card.kind.images();
+        assert_eq!(imgs[0].0, &[137, 80, 78, 71, 13, 10, 26, 10]);
+
+        // Re-saving that card writes base64 — and that reloads identically.
+        let out = ron::ser::to_string(&card).unwrap();
+        assert!(out.contains("iVBORw0KGgo="), "expected base64, got: {out}");
+        assert!(!out.contains("137, 80"), "decimal array should be gone: {out}");
+        let back: Card = ron::from_str(&out).expect("base64 image bytes load");
+        assert_eq!(back.kind.images()[0].0, &[137, 80, 78, 71, 13, 10, 26, 10]);
+
+        // Multi-image cards keep both arms too (`extra` is a Vec<ImageEntry>).
+        let multi = r#"(
+            id: 2, pos: (x: 0.0, y: 0.0), size: (x: 10.0, y: 10.0),
+            title: "", body: "", color: (1, 2, 3),
+            kind: Image(data: [1, 2], name: "a.png",
+                        extra: [(data: [3, 4], name: "b.png")], ocr: ""),
+        )"#;
+        let card: Card = ron::from_str(multi).expect("legacy multi-image loads");
+        let round: Card = ron::from_str(&ron::ser::to_string(&card).unwrap()).unwrap();
+        let imgs = round.kind.images();
+        assert_eq!(imgs.len(), 2);
+        assert_eq!(imgs[0].0, &[1, 2]);
+        assert_eq!(imgs[1].0, &[3, 4]);
+
+        // The point of the exercise: base64 is far smaller than the decimal form.
+        let big = Card::new(
+            3,
+            egui::pos2(0.0, 0.0),
+            CardKind::Image {
+                data: (0u8..=255).cycle().take(60_000).collect(),
+                name: "big.png".into(),
+                extra: Vec::new(),
+                ocr: String::new(),
+            },
+        );
+        let encoded = ron::ser::to_string(&big).unwrap();
+        assert!(
+            encoded.len() < 60_000 * 2,
+            "60k bytes should serialize near 80k chars, got {}",
+            encoded.len()
+        );
+        let back: Card = ron::from_str(&encoded).unwrap();
+        assert_eq!(back.kind.images()[0].0.len(), 60_000);
     }
 
     #[test]
