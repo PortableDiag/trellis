@@ -756,11 +756,19 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
 }
 
 /// Today as days since the Unix epoch (UTC), for bucketing due dates.
+/// Today as days since 1970-01-01, **in the machine's local timezone**.
+///
+/// `due:: 2026-08-15` is a calendar date the user wrote while looking at their
+/// own calendar, so "today" has to be their calendar's today. Dividing the UTC
+/// clock by 86,400 made the agenda jump a day early every evening west of
+/// Greenwich — at 17:00 PDT it is already tomorrow in UTC, so a task due
+/// tomorrow was bucketed as due today.
 pub fn today_days() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| (d.as_secs() / 86_400) as i64)
-        .unwrap_or(0)
+    // Format the local date and run it through the very same parser that reads
+    // `due::`, so "today" and a due date can never disagree about what a
+    // calendar day is.
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    crate::model::parse_ymd(&today).unwrap_or(0)
 }
 
 /// Which agenda bucket a due date falls in, relative to `today` (both in days).
@@ -1845,6 +1853,35 @@ mod tests {
     }
 
     #[test]
+    /// The bug this guards: `today_days()` used to divide the UTC clock, so from
+    /// 17:00 PDT until midnight it returned tomorrow's date and a task due
+    /// tomorrow was bucketed "today".
+    #[test]
+    fn today_is_the_local_calendar_day_not_the_utc_one() {
+        let local = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            today_days(),
+            crate::model::parse_ymd(&local).unwrap(),
+            "today must equal the local calendar date parsed the same way due:: is"
+        );
+
+        // A task due on the local calendar's tomorrow must never read as today.
+        let today = today_days();
+        assert_eq!(task_bucket(Some(today), today), "today");
+        assert_eq!(task_bucket(Some(today + 1), today), "week");
+        assert_eq!(task_bucket(Some(today - 1), today), "overdue");
+
+        // And it must track the local date even when UTC has already rolled over.
+        let utc_days = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_secs() / 86_400) as i64)
+            .unwrap();
+        assert!(
+            (today - utc_days).abs() <= 1,
+            "local and UTC days differ by at most one"
+        );
+    }
+
     fn routes_parse() {
         assert!(matches!(route(&Method::Get, "/api/tree", "", "").unwrap(), ApiRequest::Tree));
         assert!(matches!(

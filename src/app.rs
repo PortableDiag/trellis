@@ -5311,16 +5311,18 @@ fn subseq_score(q: &str, text: &str) -> Option<i32> {
 
 /// Turn a snapshot filename `20260730-142530.ron.gz` into `2026-07-30 14:25:30`.
 /// Falls back to the raw name if it isn't in the expected shape.
+/// Snapshot/backup filenames are stamped in **UTC** (monotonic, and immune to
+/// the hour that repeats at a DST fall-back), but a timestamp shown to a human
+/// should be their own clock — otherwise a snapshot taken at 09:20 reads back as
+/// 16:20. Convert for display only; the filename is untouched.
 fn format_stamp(name: &str) -> String {
     let s = name.split('.').next().unwrap_or(name); // strip .ron.gz
-    let b = s.as_bytes();
-    if b.len() == 15 && b[8] == b'-' && s.is_char_boundary(15) {
-        format!(
-            "{}-{}-{} {}:{}:{}",
-            &s[0..4], &s[4..6], &s[6..8], &s[9..11], &s[11..13], &s[13..15]
-        )
-    } else {
-        name.to_string()
+    match chrono::NaiveDateTime::parse_from_str(s, "%Y%m%d-%H%M%S") {
+        Ok(naive) => chrono::TimeZone::from_utc_datetime(&chrono::Utc, &naive)
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        Err(_) => name.to_string(),
     }
 }
 
@@ -5502,7 +5504,15 @@ mod tests {
 
     #[test]
     fn format_stamp_is_human_readable() {
-        assert_eq!(format_stamp("20260730-142530.ron.gz"), "2026-07-30 14:25:30");
+        // Stamps are UTC on disk and shown in local time, so the expectation is
+        // computed the same way rather than hard-coded to one machine's zone.
+        let naive =
+            chrono::NaiveDateTime::parse_from_str("20260730-142530", "%Y%m%d-%H%M%S").unwrap();
+        let want = chrono::TimeZone::from_utc_datetime(&chrono::Utc, &naive)
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        assert_eq!(format_stamp("20260730-142530.ron.gz"), want);
         assert_eq!(format_stamp("weird-name"), "weird-name");
     }
 

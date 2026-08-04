@@ -4,6 +4,23 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.71.1]
+
+### Fixed
+- **The agenda was a day ahead in the evening.** "Today" was computed from the
+  UTC clock, but a `due::` date is a calendar date you wrote looking at your own
+  calendar. West of Greenwich the two disagree for part of every day — in
+  California, from 5pm until midnight UTC is already tomorrow, so a task due
+  tomorrow showed under **Today** and today's showed as **Overdue**. Today is now
+  the machine's *local* calendar day, run through the same parser that reads
+  `due::` so the two can't disagree. This fixes the Agenda, the Kanban board's
+  overdue highlighting, and `today_days` in the API (so the phone app inherits it).
+- **Version-history timestamps are shown in local time.** Snapshots are stamped
+  in UTC on disk — deliberately, since that stays monotonic and avoids the hour
+  that repeats at a DST fall-back — but the list showed that raw, so a snapshot
+  taken at 09:20 read back as 16:20. Filenames are unchanged; only the display
+  converts.
+
 ## [0.71.0]
 
 ### Added
