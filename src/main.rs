@@ -197,6 +197,21 @@ mod tests {
         parse_argv(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
 
+    // `--data-dir` anchors a *relative* path against the cwd, so a test that
+    // wants the value passed through untouched has to hand it an absolute one —
+    // and the platforms disagree about what that means. On Windows a path needs
+    // a drive letter: `/d/work` is merely root-relative, and gets the current
+    // drive prepended (`D:/d/work`), which is correct and exactly what an
+    // earlier Unix-shaped assertion here mistook for a bug.
+    #[cfg(windows)]
+    const ABS_WORK: &str = r"C:\d\work";
+    #[cfg(windows)]
+    const ABS_PERSONAL: &str = r"C:\d\personal";
+    #[cfg(not(windows))]
+    const ABS_WORK: &str = "/d/work";
+    #[cfg(not(windows))]
+    const ABS_PERSONAL: &str = "/d/personal";
+
     #[test]
     fn bare_launch_overrides_nothing() {
         let a = args(&[]).unwrap();
@@ -205,15 +220,15 @@ mod tests {
 
     #[test]
     fn parses_document_port_and_data_dir_in_both_spellings() {
-        let a = args(&["/n/work.ron", "--port", "7391", "--data-dir", "/d/work"]).unwrap();
+        let a = args(&["/n/work.ron", "--port", "7391", "--data-dir", ABS_WORK]).unwrap();
         assert_eq!(a.doc, Some(PathBuf::from("/n/work.ron")));
         assert_eq!(a.port, Some(7391));
-        assert_eq!(a.data_dir, Some(PathBuf::from("/d/work")));
+        assert_eq!(a.data_dir, Some(PathBuf::from(ABS_WORK)));
 
-        let b = args(&["--port=7392", "-d", "/d/personal", "/n/personal.ron"]).unwrap();
+        let b = args(&["--port=7392", "-d", ABS_PERSONAL, "/n/personal.ron"]).unwrap();
         assert_eq!(b.doc, Some(PathBuf::from("/n/personal.ron")));
         assert_eq!(b.port, Some(7392));
-        assert_eq!(b.data_dir, Some(PathBuf::from("/d/personal")));
+        assert_eq!(b.data_dir, Some(PathBuf::from(ABS_PERSONAL)));
     }
 
     #[test]

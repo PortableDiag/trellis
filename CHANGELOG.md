@@ -4,6 +4,18 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.75.1]
+
+### Fixed
+- **The Windows binary is published again.** 0.75.0 built and passed 109 of its
+  110 tests on Windows, but one test asserted a Unix-shaped path — `/d/work`
+  isn't an absolute path on Windows, where absolute means a drive letter, so
+  `--data-dir /d/work` correctly became `D:/d/work` and the test called that a
+  failure. The app was right and the test was wrong; the test now uses a path
+  that is genuinely absolute on the platform it's running on. Nothing about how
+  Trellis behaves changed — but the failing test stopped the Windows build being
+  attached to the 0.75.0 release, so that release has Linux and macOS only.
+
 ## [0.75.0]
 
 ### Added
