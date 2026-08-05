@@ -65,6 +65,8 @@ const API_PORT_KEY: &str = "api_port";
 const API_LAN_KEY: &str = "api_lan";
 const TEMPLATES_KEY: &str = "card_templates";
 const GRANTS_KEY: &str = "plugin_grants";
+const MIRROR_MODE_KEY: &str = "mirror_policy";
+const MIRROR_DIRS_KEY: &str = "mirror_dirs";
 const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
@@ -855,12 +857,22 @@ pub struct TrellisApp {
     /// The `--data-dir` this instance was launched with, so the plugins folder
     /// can be re-derived after startup.
     startup_data_dir: Option<PathBuf>,
+    /// How much of the filesystem agents may mirror into a card. The UI's own
+    /// file picker is never restricted by this — see `model::MirrorPolicy`.
+    mirror_policy: crate::model::MirrorPolicy,
+    mirror_dirs: Vec<String>,
     /// Finished runs, newest last, for the Plugins window's log pane.
     plugin_log: Vec<crate::plugins::RunResult>,
     plugin_rx: Receiver<crate::plugins::RunResult>,
     plugin_tx: Sender<crate::plugins::RunResult>,
     /// Plugins currently running, so the UI can say so and not start a second.
     plugin_running: std::collections::HashSet<String>,
+    /// Last run time per scheduled plugin, and the change-log sequence each
+    /// on-change plugin has already been told about.
+    plugin_last_run: std::collections::HashMap<String, Instant>,
+    plugin_seen_seq: std::collections::HashMap<String, u64>,
+    /// Revision at the last observed change, for the on-change debounce.
+    plugin_change_at: Option<(u64, Instant)>,
     /// OCR results from background tesseract threads: (node, card, text-or-error).
     ocr_tx: Sender<(NodeId, CardId, Result<String, String>)>,
     ocr_rx: Receiver<(NodeId, CardId, Result<String, String>)>,
@@ -1170,10 +1182,21 @@ impl TrellisApp {
             plugin_errors,
             show_plugins: false,
             startup_data_dir: startup.data_dir.clone(),
+            mirror_policy: crate::model::MirrorPolicy::from_key(
+                &cc.storage.and_then(|s| s.get_string(MIRROR_MODE_KEY)).unwrap_or_default(),
+            ),
+            mirror_dirs: cc
+                .storage
+                .and_then(|s| s.get_string(MIRROR_DIRS_KEY))
+                .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+                .unwrap_or_default(),
             plugin_log: Vec::new(),
             plugin_rx,
             plugin_tx,
             plugin_running: std::collections::HashSet::new(),
+            plugin_last_run: std::collections::HashMap::new(),
+            plugin_seen_seq: std::collections::HashMap::new(),
+            plugin_change_at: None,
             ocr_tx,
             ocr_rx,
             snip_tx,
@@ -1666,6 +1689,110 @@ impl TrellisApp {
     }
 
     /// Collect finished plugin runs.
+    /// Fire the time- and change-driven triggers.
+    ///
+    /// Both are polled from `update()` rather than driven by their own threads,
+    /// so a plugin can never be launched while the document is mid-edit — the
+    /// app loop is the only place that knows the document is at rest.
+    ///
+    /// Nothing fires while Trellis is closed. That is a real limitation and it
+    /// is stated in the Plugins window rather than hidden: a schedule people
+    /// think is reliable, but silently isn't, is worse than no schedule.
+    fn pump_plugin_triggers(&mut self) {
+        use crate::plugins::Trigger;
+        let now = Instant::now();
+        // An idle window stops calling update(), which would silently stop the
+        // clock for every timed trigger — the same trap the file-mirror poll hit.
+        if self.plugins.iter().any(|p| {
+            p.manifest.triggers.contains(&Trigger::Schedule)
+                && self.is_approved(&p.manifest.name)
+        }) {
+            self.egui_ctx.request_repaint_after(Duration::from_secs(20));
+        }
+
+        // --- schedule ---
+        let due: Vec<usize> = self
+            .plugins
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.manifest.triggers.contains(&Trigger::Schedule)
+                    && self.is_approved(&p.manifest.name)
+                    && !self.plugin_running.contains(&p.manifest.name)
+            })
+            .filter(|(_, p)| {
+                let every = Duration::from_secs(p.manifest.interval_mins.max(1) * 60);
+                match self.plugin_last_run.get(&p.manifest.name) {
+                    Some(t) => now.duration_since(*t) >= every,
+                    // Not on launch: opening the app shouldn't kick off every
+                    // scheduled plugin at once.
+                    None => false,
+                }
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for i in due {
+            let name = self.plugins[i].manifest.name.clone();
+            self.plugin_last_run.insert(name, now);
+            self.run_plugin(i, vec![("TRELLIS_TRIGGER".into(), "schedule".into())]);
+        }
+        // Seed the clock so the first interval is measured from launch.
+        for p in &self.plugins {
+            if p.manifest.triggers.contains(&Trigger::Schedule) {
+                self.plugin_last_run.entry(p.manifest.name.clone()).or_insert(now);
+            }
+        }
+
+        // --- on change ---
+        let watchers: Vec<usize> = self
+            .plugins
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.manifest.triggers.contains(&Trigger::OnChange)
+                    && self.is_approved(&p.manifest.name)
+                    && !self.plugin_running.contains(&p.manifest.name)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if watchers.is_empty() {
+            return;
+        }
+        let rev = self.doc_revision.load(Ordering::Relaxed);
+        match self.plugin_change_at {
+            Some((seen, _)) if seen == rev => {}
+            // The revision moved: restart the quiet period rather than firing,
+            // so a burst of typing is one run at the end and not one per frame.
+            _ => self.plugin_change_at = Some((rev, now)),
+        }
+        let Some((at_rev, since)) = self.plugin_change_at else { return };
+        for i in watchers {
+            let p = &self.plugins[i];
+            let quiet = Duration::from_secs(p.manifest.debounce_secs.max(1));
+            if now.duration_since(since) < quiet {
+                // Make sure we wake to fire it; an idle window otherwise wouldn't.
+                self.egui_ctx.request_repaint_after(quiet);
+                continue;
+            }
+            let name = p.manifest.name.clone();
+            let seen = self.plugin_seen_seq.get(&name).copied().unwrap_or(0);
+            if seen >= at_rev {
+                continue;
+            }
+            self.plugin_seen_seq.insert(name, at_rev);
+            // The plugin is told where to resume from, so it reads exactly the
+            // changes it hasn't seen out of /api/changes rather than guessing.
+            self.run_plugin(
+                i,
+                vec![
+                    ("TRELLIS_TRIGGER".into(), "change".into()),
+                    ("TRELLIS_SINCE".into(), seen.to_string()),
+                    ("TRELLIS_REV".into(), at_rev.to_string()),
+                ],
+            );
+        }
+    }
+
     fn pump_plugins(&mut self) {
         let done: Vec<_> = std::iter::from_fn(|| self.plugin_rx.try_recv().ok()).collect();
         for r in done {
@@ -1739,6 +1866,17 @@ impl TrellisApp {
             // Same reason as `fit_request`: the request is consumed below, and
             // reading the document *now* catches the pre-change state — a
             // deleted card's title can't be looked up after it's gone.
+            // `source` is the one field an API request can use to reach outside
+            // the document, so it is checked here rather than in `process`,
+            // which has no access to the setting.
+            if let Some(path) = api::source_request(&cmd.req) {
+                if let Err(e) =
+                    crate::model::mirror_allowed(&path, self.mirror_policy, &self.mirror_dirs)
+                {
+                    let _ = cmd.resp.send(api::ApiResponse::err(403, &e));
+                    continue;
+                }
+            }
             let change = api::change_of(&cmd.req, &self.doc);
             let (changed, resp) = api::process(&mut self.doc, cmd.req);
             if let Some((node, card)) = fit_target {
@@ -4410,8 +4548,21 @@ impl TrellisApp {
                                 egui::Color32::from_rgb(230, 160, 60)
                             }),
                         );
-                        let where_from: Vec<&str> =
-                            p.manifest.triggers.iter().map(|t| t.label()).collect();
+                        let where_from: Vec<String> = p
+                            .manifest
+                            .triggers
+                            .iter()
+                            .map(|t| match t {
+                                crate::plugins::Trigger::Schedule => {
+                                    format!("every {} min", p.manifest.interval_mins.max(1))
+                                }
+                                crate::plugins::Trigger::OnChange => format!(
+                                    "when the document changes (after {}s quiet)",
+                                    p.manifest.debounce_secs.max(1)
+                                ),
+                                other => other.label().to_string(),
+                            })
+                            .collect();
                         ui.label(
                             egui::RichText::new(format!("Runs from: {}", where_from.join(", ")))
                                 .weak()
@@ -4459,6 +4610,19 @@ impl TrellisApp {
                 }
 
                 ui.separator();
+                if self.plugins.iter().any(|p| {
+                    p.manifest.triggers.contains(&crate::plugins::Trigger::Schedule)
+                        || p.manifest.triggers.contains(&crate::plugins::Trigger::OnChange)
+                }) {
+                    ui.label(
+                        egui::RichText::new(
+                            "Scheduled and on-change plugins only run while Trellis is open — \
+                             it is a desktop app, not a service.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
                 ui.horizontal(|ui| {
                     if ui.button("Rescan").clicked() {
                         rescan = true;
@@ -4695,6 +4859,48 @@ impl TrellisApp {
                         if ui.button("Copy").clicked() {
                             ui.ctx().copy_text(self.api_key.clone());
                         }
+                    });
+                    ui.end_row();
+
+                    ui.label("Files agents may mirror");
+                    ui.vertical(|ui| {
+                        use crate::model::MirrorPolicy as MP;
+                        let mut p = self.mirror_policy;
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut p, MP::SafeDefault, "Anywhere but credentials");
+                            ui.selectable_value(&mut p, MP::OnlyDirs, "Only these folders");
+                            ui.selectable_value(&mut p, MP::Anywhere, "Anywhere");
+                        });
+                        if p != self.mirror_policy {
+                            self.mirror_policy = p;
+                        }
+                        if self.mirror_policy == MP::OnlyDirs {
+                            let mut text = self.mirror_dirs.join("\n");
+                            if ui
+                                .add(
+                                    egui::TextEdit::multiline(&mut text)
+                                        .desired_rows(3)
+                                        .desired_width(320.0)
+                                        .hint_text("/home/you/projects\n/srv/docs"),
+                                )
+                                .changed()
+                            {
+                                self.mirror_dirs = text
+                                    .lines()
+                                    .map(|l| l.trim().to_string())
+                                    .filter(|l| !l.is_empty())
+                                    .collect();
+                            }
+                        }
+                        ui.label(
+                            egui::RichText::new(
+                                "Only limits the API. Your own File → Mirror a file… is never \
+                                 restricted. Without a limit, anything holding the API key can \
+                                 point a card at a file and read it back.",
+                            )
+                            .weak()
+                            .small(),
+                        );
                     });
                     ui.end_row();
 
@@ -6042,6 +6248,7 @@ impl eframe::App for TrellisApp {
         self.pump_ocr();
         // Turn finished region-snips into image cards.
         self.pump_plugins();
+        self.pump_plugin_triggers();
         self.pump_sources(false);
         self.pump_snip();
 
@@ -6396,6 +6603,8 @@ impl eframe::App for TrellisApp {
         if let Ok(s) = serde_json::to_string(&self.templates) {
             storage.set_string(TEMPLATES_KEY, s);
         }
+        storage.set_string(MIRROR_MODE_KEY, self.mirror_policy.key().to_string());
+        storage.set_string(MIRROR_DIRS_KEY, self.mirror_dirs.join("\n"));
         if let Ok(g) = self.grants.lock() {
             if let Ok(s) = serde_json::to_string(&*g) {
                 storage.set_string(GRANTS_KEY, s);

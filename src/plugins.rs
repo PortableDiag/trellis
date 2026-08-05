@@ -73,6 +73,15 @@ pub enum Trigger {
     Manual,
     /// Right-click a basket → *name*, invoked with that node's id.
     NodeMenu,
+    /// Every `interval_mins` while Trellis is open. Nothing fires while it is
+    /// closed — this is a desktop app, not a service, and pretending otherwise
+    /// would make a schedule people rely on quietly unreliable.
+    Schedule,
+    /// When the document changes. Reads the change log, so the plugin is told
+    /// *what* moved rather than merely that something did — that is the whole
+    /// reason the log was built. Debounced, or a burst of typing would launch a
+    /// process per keystroke.
+    OnChange,
 }
 
 impl Trigger {
@@ -80,6 +89,8 @@ impl Trigger {
         match self {
             Trigger::Manual => "Tools → Plugins",
             Trigger::NodeMenu => "right-click a basket",
+            Trigger::Schedule => "on a schedule",
+            Trigger::OnChange => "when the document changes",
         }
     }
 }
@@ -110,6 +121,22 @@ pub struct Manifest {
     /// What it says it needs. The user approves this, not a token.
     #[serde(default)]
     pub scope: Scope,
+    /// Minutes between runs for a `schedule` trigger. Floored at 1 — a plugin
+    /// asking for zero would spawn continuously.
+    #[serde(default = "default_interval")]
+    pub interval_mins: u64,
+    /// Seconds of quiet before an `on-change` trigger fires. Without a debounce
+    /// every keystroke is a process launch.
+    #[serde(default = "default_debounce")]
+    pub debounce_secs: u64,
+}
+
+fn default_interval() -> u64 {
+    60
+}
+
+fn default_debounce() -> u64 {
+    10
 }
 
 fn default_triggers() -> Vec<Trigger> {

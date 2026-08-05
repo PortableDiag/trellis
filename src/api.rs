@@ -186,6 +186,21 @@ pub fn is_scope_neutral(req: &ApiRequest) -> bool {
     matches!(req, ApiRequest::Health | ApiRequest::Instance | ApiRequest::Tree | ApiRequest::ListNodes)
 }
 
+/// The file a request is asking a card to mirror, if any.
+///
+/// Split out so the app loop can check it against the mirror policy before the
+/// request is applied — `process` cannot, since the setting lives in the app.
+pub fn source_request(req: &ApiRequest) -> Option<String> {
+    let s = match req {
+        ApiRequest::AddCard { input, .. } => input.source.clone(),
+        ApiRequest::UpdateCard { patch, .. } => patch.source.clone(),
+        _ => None,
+    }?;
+    // Detaching (`""`) reaches no file, so it is always allowed.
+    let s = s.trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
 /// Describe what a request is about to change, for the change log.
 ///
 /// Called **before** `process` consumes the request, for the same reason
@@ -2509,6 +2524,57 @@ mod tests {
         assert!(!is_scope_neutral(&ApiRequest::Tasks { include_done: true, project: None }));
         assert!(!is_scope_neutral(&ApiRequest::Kanban { project: None }));
         assert!(!is_scope_neutral(&ApiRequest::Graph));
+    }
+
+
+    /// Agents must keep working by default — blocking them outright would defeat
+    /// the point of the feature. Only credential-shaped paths are refused.
+    #[test]
+    fn the_default_mirror_policy_allows_agents_but_not_credentials() {
+        use crate::model::{mirror_allowed, MirrorPolicy};
+        let d: Vec<String> = vec![];
+        assert!(mirror_allowed("/srv/app/README.md", MirrorPolicy::SafeDefault, &d).is_ok());
+        assert!(mirror_allowed("/var/log/app.log", MirrorPolicy::SafeDefault, &d).is_ok());
+        for bad in ["/home/u/.ssh/id_rsa", "/home/u/.aws/credentials", "/home/u/key.pem",
+                    "/etc/shadow", "/home/u/.git-credentials"] {
+            assert!(mirror_allowed(bad, MirrorPolicy::SafeDefault, &d).is_err(), "{bad} allowed");
+        }
+        // "Anywhere" means anywhere, including those.
+        assert!(mirror_allowed("/home/u/.ssh/id_rsa", MirrorPolicy::Anywhere, &d).is_ok());
+    }
+
+    /// A directory list must survive `..` — a textual prefix check would let
+    /// `/allowed/../../etc/shadow` through, making the setting decorative.
+    #[test]
+    fn a_directory_list_is_resolved_not_string_matched() {
+        use crate::model::{mirror_allowed, MirrorPolicy};
+        let tmp = std::env::temp_dir();
+        let root = tmp.join(format!("trellis-mirror-{}", std::process::id()));
+        let inside = root.join("ok.md");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&inside, "x").unwrap();
+        let dirs = vec![root.to_string_lossy().to_string()];
+
+        assert!(mirror_allowed(&inside.to_string_lossy(), MirrorPolicy::OnlyDirs, &dirs).is_ok());
+        let escape = root.join("..").join("..").join("etc").join("shadow");
+        assert!(
+            mirror_allowed(&escape.to_string_lossy(), MirrorPolicy::OnlyDirs, &dirs).is_err(),
+            "traversal escaped the allow-list"
+        );
+        assert!(mirror_allowed("/somewhere/else.md", MirrorPolicy::OnlyDirs, &dirs).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Only a request that actually names a file is checked; detaching reaches
+    /// no file and must not be refused.
+    #[test]
+    fn only_a_real_source_is_policy_checked() {
+        let mk = |json: &str| -> ApiRequest {
+            ApiRequest::UpdateCard { node: 1, card: 1, patch: serde_json::from_str(json).unwrap() }
+        };
+        assert_eq!(source_request(&mk(r#"{"source":"/srv/a.md"}"#)), Some("/srv/a.md".into()));
+        assert_eq!(source_request(&mk(r#"{"source":""}"#)), None, "detach reaches no file");
+        assert_eq!(source_request(&mk(r#"{"body":"x"}"#)), None);
     }
 
     #[test]

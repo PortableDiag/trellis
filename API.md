@@ -636,6 +636,12 @@ stays authoritative and Trellis holds a cache of it.
   It recovers on its own when the file comes back.
 - Only text and code cards mirror. There is no write-back: edit the file.
 
+> **What agents may mirror is limited.** By default a card can mirror any file
+> *except* credential paths (`.ssh`, `.aws`, `.gnupg`, `*.pem`, …); a refused
+> `source` returns **403**. *Settings → Agent API → Files agents may mirror*
+> narrows it to a folder list or removes the limit. The app's own file picker is
+> never restricted.
+>
 > **Read this before enabling LAN access.** A caller who can create cards can
 > point one at **any file this user can read**, and then fetch its contents back
 > through `GET /api/nodes/{id}/cards/{cid}` or `GET /api/export`. The API is

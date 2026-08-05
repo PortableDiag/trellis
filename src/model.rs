@@ -970,6 +970,88 @@ fn default_true() -> bool {
 /// of taking the app down with it.
 pub const SOURCE_MAX_BYTES: u64 = 1_048_576;
 
+
+/// Paths an agent is refused by default, matched case-insensitively anywhere in
+/// the resolved path.
+///
+/// Not a security boundary — a determined caller with the API key has other
+/// avenues — but it removes the one-line disaster: a leaked key pointing a card
+/// at a private key and reading it back through `GET .../cards/{cid}`.
+pub const MIRROR_DENY: &[&str] = &[
+    "/.ssh/", "/.gnupg/", "/.aws/", "/.config/gcloud/", "/.kube/", "/.docker/config.json",
+    "/.netrc", "/.pgpass", "/.npmrc", "/.pypirc", "/.git-credentials",
+    "/etc/shadow", "/etc/passwd", "/etc/sudoers",
+    "id_rsa", "id_ed25519", "id_ecdsa", ".pem", ".p12", ".pfx", ".keystore", "credentials.json",
+];
+
+/// How much of the filesystem **agents** may mirror. The user's own file dialog
+/// is never governed by this: someone at the machine already has the filesystem,
+/// so restricting them would be theatre. What this bounds is the API — otherwise
+/// anything holding the key can point a card at a file and read it straight back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MirrorPolicy {
+    /// Anywhere except the credential paths in [`MIRROR_DENY`]. The default:
+    /// linking a README or a log is exactly what this feature is for, so
+    /// blocking agents wholesale would defeat it.
+    SafeDefault,
+    /// Only inside the listed directories.
+    OnlyDirs,
+    /// No restriction at all.
+    Anywhere,
+}
+
+impl MirrorPolicy {
+    pub fn from_key(s: &str) -> Self {
+        match s {
+            "dirs" => MirrorPolicy::OnlyDirs,
+            "any" => MirrorPolicy::Anywhere,
+            _ => MirrorPolicy::SafeDefault,
+        }
+    }
+    pub fn key(&self) -> &'static str {
+        match self {
+            MirrorPolicy::SafeDefault => "safe",
+            MirrorPolicy::OnlyDirs => "dirs",
+            MirrorPolicy::Anywhere => "any",
+        }
+    }
+}
+
+/// Whether an **agent** may mirror `path`.
+///
+/// Symlinks and `..` are resolved **before** comparing. Without that any list is
+/// decorative — `/allowed/../../etc/shadow` would pass a textual prefix check.
+pub fn mirror_allowed(path: &str, policy: MirrorPolicy, dirs: &[String]) -> Result<(), String> {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    match policy {
+        MirrorPolicy::Anywhere => Ok(()),
+        MirrorPolicy::SafeDefault => {
+            let hay = real.to_string_lossy().to_ascii_lowercase();
+            match MIRROR_DENY.iter().find(|d| hay.contains(&d.to_ascii_lowercase())) {
+                Some(hit) => Err(format!(
+                    "{path} looks like a credential file ({hit}). Agents can mirror \
+                     anything else; change this in Settings → Agent API."
+                )),
+                None => Ok(()),
+            }
+        }
+        MirrorPolicy::OnlyDirs => {
+            let ok = dirs.iter().filter(|d| !d.trim().is_empty()).any(|d| {
+                let dir = std::fs::canonicalize(d).unwrap_or_else(|_| std::path::PathBuf::from(d));
+                real.starts_with(&dir)
+            });
+            if ok {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{path} is outside the directories agents may mirror \
+                     (Settings → Agent API)."
+                ))
+            }
+        }
+    }
+}
+
 /// Read a file for a pointer card: its text and modification time.
 ///
 /// Binary files are refused rather than rendered as mojibake — the check is

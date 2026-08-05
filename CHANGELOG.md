@@ -4,6 +4,33 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.81.0]
+
+### Added
+- **Plugins can run on a schedule, or when the document changes.** A manifest
+  declares `"triggers": ["schedule"]` with `interval_mins`, or `["on-change"]`
+  with `debounce_secs`. An on-change plugin is handed `TRELLIS_SINCE` and
+  `TRELLIS_REV`, so it reads exactly the entries it hasn't seen out of
+  `GET /api/changes` — which is what that log was built for.
+
+  Changes are **debounced**: a burst of edits is one run at the end, not one per
+  keystroke. Measured: six rapid changes produced a single run covering all of
+  them. Both triggers only run **while Trellis is open** — it is a desktop app,
+  not a service — and the Plugins window says so rather than leaving you to find
+  out.
+
+- **A limit on what agents may mirror into a card** (*Settings → Agent API →
+  Files agents may mirror*). v0.78.0 let anything holding the API key point a
+  card at any file you can read and fetch it back, widening a leaked key from
+  "all your notes" to "every file on the machine".
+
+  The default is **anywhere except credential paths** — `.ssh`, `.aws`, `.gnupg`,
+  `*.pem`, `.git-credentials` and similar — so an agent linking a README or a log
+  still just works, which is the point of the feature. You can narrow it to a
+  list of folders, or turn it off entirely. **Your own file picker is never
+  restricted**: someone at the machine already has the filesystem. Paths are
+  resolved before checking, so `..` can't step outside a folder list.
+
 ## [0.80.0]
 
 ### Added
