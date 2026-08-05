@@ -4,6 +4,40 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.76.0]
+
+### Added
+- **`GET /api/changes` — what changed, not just that something did.** The only
+  change signal was a revision counter: `/api/wait` told a client the document
+  was different and nothing else, so the one correct response was to re-fetch
+  everything and diff it. That's fine for a small reader and hopeless for sync,
+  collaboration, or a plugin that wants to fire when a card gets `status:: done`.
+
+  Each entry says **who** (a person in the app, or an agent), **what** (node /
+  card / group), **which operation** (created / updated / deleted / moved),
+  **which fields** (`["body","color"]`, `table.set_cell`, `images.add`, …) and,
+  for a `key:: value` change, **the key and value** — so a client can decide
+  whether it cares without fetching anything. Deletes carry the title, captured
+  before the thing was deleted.
+
+  Pair it with the long-poll: wait for a revision, ask what happened since the
+  one you last handled, re-read only what's named. `/api/wait` now also returns
+  an `epoch`, which changes when the app restarts — the log is in memory, so a
+  sequence number from a previous run is meaningless and a client that sees a new
+  epoch should re-read. `truncated: true` says entries you needed have rotated
+  away (the last 5000 are kept).
+
+  An entry records *that* something changed, never the old and new values —
+  you re-read the entity named. That's what makes the log impossible to desync
+  from, and it's why a card drag is **one** `moved` entry rather than one per
+  frame: consecutive identical changes collapse, which loses nothing when there's
+  no content in the entry to lose. (Measured: one drag wrote eight entries before
+  collapsing, and typing would have written one per keystroke.)
+
+  This is the shared foundation for plugin `on-change` triggers, "an agent
+  replied" notifications, sorting baskets by latest change, and any hosted sync —
+  each of which was independently blocked on it.
+
 ## [0.75.1]
 
 ### Fixed

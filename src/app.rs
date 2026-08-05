@@ -834,6 +834,10 @@ pub struct TrellisApp {
     api_server: Option<Arc<tiny_http::Server>>,
     /// Document-change counter shared with the API's `/api/wait` long-poll.
     doc_revision: Arc<AtomicU64>,
+    /// What changed, not merely that something did. Shared with the API server
+    /// thread, which serves `/api/changes`. In memory only — see changelog.rs
+    /// for why it deliberately isn't part of the document.
+    changes: Arc<Mutex<crate::changelog::ChangeLog>>,
     /// OCR results from background tesseract threads: (node, card, text-or-error).
     ocr_tx: Sender<(NodeId, CardId, Result<String, String>)>,
     ocr_rx: Receiver<(NodeId, CardId, Result<String, String>)>,
@@ -1002,6 +1006,10 @@ impl TrellisApp {
         let api_shared_key = Arc::new(Mutex::new(api_key.clone()));
         let (api_tx, api_rx) = std::sync::mpsc::channel::<ApiCommand>();
         let doc_revision = Arc::new(AtomicU64::new(0));
+        let changes = Arc::new(Mutex::new(crate::changelog::ChangeLog::new(
+            crate::changelog::DEFAULT_CAP,
+            crate::changelog::new_epoch(),
+        )));
         let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
         let (snip_tx, snip_rx) = std::sync::mpsc::channel();
         let (save_tx, save_rx) = std::sync::mpsc::channel();
@@ -1013,6 +1021,7 @@ impl TrellisApp {
             api_tx.clone(),
             Arc::clone(&api_shared_key),
             Arc::clone(&doc_revision),
+            Arc::clone(&changes),
         ) {
             Ok(server) => (Some(server), api_status_line(api_lan, api_port)),
             Err(e) => (None, format!("Failed to start on port {api_port}: {e}")),
@@ -1112,6 +1121,7 @@ impl TrellisApp {
             api_tx,
             api_server,
             doc_revision,
+            changes,
             ocr_tx,
             ocr_rx,
             snip_tx,
@@ -1160,7 +1170,7 @@ impl TrellisApp {
                 self.redo.push((nid, cur.clone()));
                 self.doc.nodes.insert(nid, node);
                 self.selected = Some(nid);
-                self.mark_dirty();
+                self.note_node(nid, crate::changelog::Op::Updated, "undo");
                 self.undo_coalesce = None;
                 self.status = "Undo".to_string();
                 return;
@@ -1175,7 +1185,7 @@ impl TrellisApp {
                 self.undo.push((nid, cur.clone()));
                 self.doc.nodes.insert(nid, node);
                 self.selected = Some(nid);
-                self.mark_dirty();
+                self.note_node(nid, crate::changelog::Op::Updated, "redo");
                 self.undo_coalesce = None;
                 self.status = "Redo".to_string();
                 return;
@@ -1208,6 +1218,43 @@ impl TrellisApp {
         self.doc_revision.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Mark the document changed **and say what changed**.
+    ///
+    /// Prefer this over bare `mark_dirty` at every call site that knows what it
+    /// just did. The two are deliberately one call: a change recorded under a
+    /// different revision than the one `/api/wait` reports would let a client ask
+    /// for changes "since" a revision whose entry it had already been given, or
+    /// miss one entirely.
+    fn note(&mut self, change: crate::changelog::Change) {
+        self.mark_dirty();
+        let seq = self.doc_revision.load(Ordering::Relaxed);
+        if let Ok(mut log) = self.changes.lock() {
+            log.push(seq, change);
+        }
+    }
+
+    /// Record a UI-originated change to a card, looking its title up for the log.
+    fn note_card(&mut self, node: NodeId, card: CardId, op: crate::changelog::Op, field: &str) {
+        use crate::changelog::{Actor, Change, Entity};
+        let title = self.doc.card(node, card).map(|c| c.title.clone()).unwrap_or_default();
+        let mut c = Change::new(Actor::Ui, Entity::Card, op, card).in_node(node).titled(title);
+        if !field.is_empty() {
+            c = c.field(field);
+        }
+        self.note(c);
+    }
+
+    /// Record a UI-originated change to a node.
+    fn note_node(&mut self, node: NodeId, op: crate::changelog::Op, field: &str) {
+        use crate::changelog::{Actor, Change, Entity};
+        let title = self.doc.nodes.get(&node).map(|n| n.title.clone()).unwrap_or_default();
+        let mut c = Change::new(Actor::Ui, Entity::Node, op, node).titled(title);
+        if !field.is_empty() {
+            c = c.field(field);
+        }
+        self.note(c);
+    }
+
     /// Stop and rebind the API server on the current port/LAN setting, so a LAN
     /// toggle takes effect immediately without relaunching the app. The accept
     /// thread only blocks in `incoming_requests()`, so `unblock()` frees the
@@ -1225,6 +1272,7 @@ impl TrellisApp {
                 self.api_tx.clone(),
                 Arc::clone(&self.api_shared_key),
                 Arc::clone(&self.doc_revision),
+                Arc::clone(&self.changes),
             ) {
                 Ok(server) => {
                     result = Ok(server);
@@ -1256,7 +1304,7 @@ impl TrellisApp {
                 Ok(text) => {
                     let words = text.split_whitespace().count();
                     if self.doc.set_card_ocr(node, card, text) {
-                        self.mark_dirty();
+                        self.note_card(node, card, crate::changelog::Op::Updated, "ocr");
                         self.status = format!("OCR done — {words} words, now searchable");
                     }
                 }
@@ -1336,7 +1384,7 @@ impl TrellisApp {
                     if let Some(cid) = self.doc.add_card(node, egui::pos2(40.0, 40.0), kind) {
                         self.doc.add_image(node, cid, bytes, "snip.png".to_string());
                         self.selected = Some(node);
-                        self.mark_dirty();
+                        self.note_card(node, cid, crate::changelog::Op::Created, "snip");
                         self.status = "Snip added as an image card".into();
                     }
                 }
@@ -1383,6 +1431,10 @@ impl TrellisApp {
             // Note the target before the request is consumed, then re-measure
             // below with the real fonts — we're on the UI thread here.
             let fit_target = api::fit_request(&cmd.req);
+            // Same reason as `fit_request`: the request is consumed below, and
+            // reading the document *now* catches the pre-change state — a
+            // deleted card's title can't be looked up after it's gone.
+            let change = api::change_of(&cmd.req, &self.doc);
             let (changed, resp) = api::process(&mut self.doc, cmd.req);
             if let Some((node, card)) = fit_target {
                 // On create the id only exists now, in the response.
@@ -1396,7 +1448,31 @@ impl TrellisApp {
                 }
             }
             if changed {
-                self.mark_dirty();
+                match change {
+                    Some(mut c) => {
+                        // A created entity had no id when the request was
+                        // described; the response is where it first exists.
+                        if c.id == 0 {
+                            if let Some(id) = serde_json::from_str::<serde_json::Value>(&resp.body)
+                                .ok()
+                                .and_then(|v| v["id"].as_u64())
+                            {
+                                c.id = id;
+                            }
+                        }
+                        self.note(c);
+                    }
+                    // `process` reports a change we couldn't describe. Record it
+                    // as an undescribed document change rather than dropping it:
+                    // a client that misses an edit entirely is far worse off than
+                    // one told to re-read.
+                    None => self.note(crate::changelog::Change::new(
+                        crate::changelog::Actor::Api,
+                        crate::changelog::Entity::Document,
+                        crate::changelog::Op::Updated,
+                        0,
+                    )),
+                }
                 // A deleted node may have been the selection.
                 if let Some(sel) = self.selected {
                     if !self.doc.nodes.contains_key(&sel) {
@@ -1425,7 +1501,7 @@ impl TrellisApp {
             return id;
         }
         let id = self.doc.add_node(None, TEMPLATES_NODE_TITLE.to_string());
-        self.mark_dirty();
+        self.note_node(id, crate::changelog::Op::Created, "");
         id
     }
 
@@ -1442,7 +1518,7 @@ impl TrellisApp {
         let n = self.doc.nodes.get(&node).map(|n| n.cards.len()).unwrap_or(0);
         let pos = egui::pos2(40.0 + (n % 4) as f32 * 340.0, 40.0 + (n / 4) as f32 * 260.0);
         let cid = self.doc.add_card_from_export(node, pos, exp.clone())?;
-        self.mark_dirty();
+        self.note_card(node, cid, crate::changelog::Op::Created, "template.master");
         Some(MasterRef { node, card: cid })
     }
 
@@ -1524,7 +1600,10 @@ impl TrellisApp {
             None => self.stamp_master(&exp),
         };
         self.templates[index].master = master;
-        self.mark_dirty();
+        match master {
+            Some(m) => self.note_card(m.node, m.card, crate::changelog::Op::Updated, "template.master"),
+            None => self.mark_dirty(),
+        }
         Some(name)
     }
 
@@ -1536,7 +1615,7 @@ impl TrellisApp {
         let t = self.templates.remove(index);
         if let Some(m) = self.master_alive(t.master) {
             self.doc.remove_card(m.node, m.card);
-            self.mark_dirty();
+            self.note_card(m.node, m.card, crate::changelog::Op::Deleted, "template.master");
         }
         Some(t.card.title)
     }
@@ -1658,7 +1737,17 @@ impl TrellisApp {
                         self.selected = self.doc.roots.first().copied();
                         self.views.clear();
                         self.reset_history();
-                        self.mark_dirty();
+                        // Everything a client knew is now potentially wrong, and
+                        // there is no per-entity way to say so.
+                        self.note(
+                            crate::changelog::Change::new(
+                                crate::changelog::Actor::Api,
+                                crate::changelog::Entity::Document,
+                                crate::changelog::Op::Updated,
+                                0,
+                            )
+                            .field("history.restore"),
+                        );
                         Some(api::ApiResponse::ok(serde_json::json!({ "restored": true })))
                     }
                     Err(e) => Some(api::ApiResponse::err(500, &format!("restore failed: {e}"))),
@@ -1744,7 +1833,19 @@ impl TrellisApp {
                     .unwrap_or_else(|| egui::pos2(40.0, 40.0));
                 match self.doc.add_card_from_export(*node, p, exp) {
                     Some(cid) => {
-                        self.mark_dirty();
+                        let title =
+                            self.doc.card(*node, cid).map(|c| c.title.clone()).unwrap_or_default();
+                        self.note(
+                            crate::changelog::Change::new(
+                                crate::changelog::Actor::Api,
+                                crate::changelog::Entity::Card,
+                                crate::changelog::Op::Created,
+                                cid,
+                            )
+                            .in_node(*node)
+                            .titled(title)
+                            .field("template.insert"),
+                        );
                         let card = self.doc.card(*node, cid).map(api::card_json);
                         Some(api::ApiResponse::ok(
                             serde_json::json!({ "node": node, "card": card }),
@@ -2161,21 +2262,169 @@ impl TrellisApp {
 
     // --- action application -------------------------------------------------
 
-    fn apply_tree(&mut self, actions: Vec<TreeAction>) {
-        // Selection and the reorder-mode toggle aren't document edits.
-        if actions.iter().any(|a| {
-            !matches!(
-                a,
-                TreeAction::Select(_)
-                    | TreeAction::ToggleReorder
-                    | TreeAction::ExportBasket(..)
-                    | TreeAction::ExportBasketPdf(_)
-                    | TreeAction::ExportBasketPng(_)
-                    | TreeAction::ImportBasket(_)
-            )
-        }) {
-            self.mark_dirty();
+    /// Push described changes, filling in the ids of anything created.
+    ///
+    /// A create is described before it exists, so it arrives here with `id == 0`
+    /// and takes the next id that appeared while the actions were applied.
+    fn flush_notes(
+        &mut self,
+        pending: &mut Vec<crate::changelog::Change>,
+        mut next_new_id: impl FnMut() -> Option<u64>,
+    ) {
+        for mut c in pending.drain(..) {
+            if c.id == 0 {
+                if let Some(id) = next_new_id() {
+                    c.id = id;
+                }
+            }
+            self.note(c);
         }
+    }
+
+    /// What a tree action is about to change, or `None` if it isn't a document
+    /// edit at all.
+    ///
+    /// **`None` must mean exactly "does not dirty the document"** — this replaced
+    /// a blanket `matches!` guard that decided the same thing, so a variant that
+    /// wrongly returns `None` here stops its edit being saved, not merely logged.
+    fn describe_tree(&self, a: &TreeAction) -> Option<crate::changelog::Change> {
+        use crate::changelog::{Actor::Ui, Change, Entity::Node, Op};
+        let title = |id: &NodeId| self.doc.nodes.get(id).map(|n| n.title.clone()).unwrap_or_default();
+        let ch = |op, id| Change::new(Ui, Node, op, id);
+        Some(match a {
+            // View state, or a file dialog that records its own result.
+            TreeAction::Select(_)
+            | TreeAction::ToggleReorder
+            | TreeAction::ExportBasket(..)
+            | TreeAction::ExportBasketPdf(_)
+            | TreeAction::ExportBasketPng(_)
+            | TreeAction::ImportBasket(_) => return None,
+
+            TreeAction::AddRoot => ch(Op::Created, 0),
+            TreeAction::AddChild(p) => ch(Op::Created, 0).field(&format!("parent={p}")),
+            TreeAction::AddSibling(s) => ch(Op::Created, 0).field(&format!("sibling={s}")),
+            TreeAction::Remove(id) => ch(Op::Deleted, *id).titled(title(id)),
+            TreeAction::Rename(id, t) => ch(Op::Updated, *id).titled(t.clone()).field("title"),
+            TreeAction::ToggleExpand(id) => ch(Op::Updated, *id).titled(title(id)).field("expanded"),
+            TreeAction::SetSubtreeExpanded(id, _) => {
+                ch(Op::Updated, *id).titled(title(id)).field("expanded.subtree")
+            }
+            TreeAction::SetColor(id, _) => ch(Op::Updated, *id).titled(title(id)).field("color"),
+            TreeAction::SetBg(id, _) => ch(Op::Updated, *id).titled(title(id)).field("bg"),
+            TreeAction::MoveUp(id)
+            | TreeAction::MoveDown(id)
+            | TreeAction::MoveToTop(id)
+            | TreeAction::MoveToBottom(id)
+            | TreeAction::Indent(id)
+            | TreeAction::Outdent(id) => ch(Op::Moved, *id).titled(title(id)),
+            TreeAction::Reorder { moved, .. } => ch(Op::Moved, *moved).titled(title(moved)),
+        })
+    }
+
+    /// What a canvas action is about to change. Same contract as
+    /// [`Self::describe_tree`]: `None` means "not a document edit".
+    fn describe_canvas(
+        &self,
+        a: &CanvasAction,
+        node: NodeId,
+    ) -> Option<crate::changelog::Change> {
+        use crate::changelog::{Actor::Ui, Change, Entity, Op};
+        let title = |id: &CardId| self.doc.card(node, *id).map(|c| c.title.clone()).unwrap_or_default();
+        let card = |op, id: CardId| Change::new(Ui, Entity::Card, op, id).in_node(node);
+        let group = |op, id: crate::model::GroupId| Change::new(Ui, Entity::Group, op, id).in_node(node);
+        let upd = |id: &CardId, f: &str| card(Op::Updated, *id).titled(title(id)).field(f);
+        Some(match a {
+            // Pure view/clipboard/export, plus the template actions, which record
+            // themselves where the library is actually touched.
+            CanvasAction::ResetView
+            | CanvasAction::CopyCard(_)
+            | CanvasAction::SaveImage(..)
+            | CanvasAction::SaveAllImages(_)
+            | CanvasAction::ExportCardPng(_)
+            | CanvasAction::ExportCardMarkdown(_)
+            | CanvasAction::ExportCardPdf(_)
+            | CanvasAction::ExportCardHtml(_)
+            | CanvasAction::ExportCardText(_)
+            | CanvasAction::ExportCardSvg(_)
+            | CanvasAction::ExportCardJson(_)
+            | CanvasAction::TableExportCsv(_)
+            | CanvasAction::TableExportXlsx(_)
+            | CanvasAction::ToggleSelect(_)
+            | CanvasAction::ClearSelection
+            | CanvasAction::ToggleDockMode
+            | CanvasAction::ToggleSnapMode
+            | CanvasAction::SaveAsTemplate(_)
+            | CanvasAction::UpdateTemplate(..)
+            | CanvasAction::DeleteTemplate(_) => return None,
+
+            // Created — the id doesn't exist yet; `flush_notes` fills it in.
+            CanvasAction::AddCard(kind, _) => card(Op::Created, 0).field(kind.label()),
+            CanvasAction::PasteCard(_) => card(Op::Created, 0).field("paste"),
+            CanvasAction::ImportCard(_) => card(Op::Created, 0).field("import"),
+            CanvasAction::InsertTemplate(..) => card(Op::Created, 0).field("template.insert"),
+            CanvasAction::Duplicate(c) => card(Op::Created, 0).field(&format!("duplicate={c}")),
+            CanvasAction::DropFiles(..) => card(Op::Created, 0).field("drop"),
+
+            CanvasAction::Remove(c) => card(Op::Deleted, *c).titled(title(c)),
+            CanvasAction::MoveCard(c, _) => card(Op::Moved, *c).titled(title(c)).field("pos"),
+            CanvasAction::RaiseCard(c) => card(Op::Moved, *c).titled(title(c)).field("order"),
+            CanvasAction::ResizeCard(c, _) => upd(c, "size"),
+            CanvasAction::FitCard(c) => upd(c, "size"),
+            CanvasAction::SetTitle(c, _) => upd(c, "title"),
+            CanvasAction::SetBody(c, _) => upd(c, "body"),
+            CanvasAction::SetLang(c, _) => upd(c, "lang"),
+            CanvasAction::SetColor(c, _) => upd(c, "color"),
+            CanvasAction::SetFontScale(c, _) => upd(c, "font_scale"),
+            CanvasAction::SetEditing(c, _) => upd(c, "editing"),
+            CanvasAction::ChecklistToggle(c, _) => upd(c, "items.toggle"),
+            CanvasAction::ChecklistSetText(c, ..) => upd(c, "items.text"),
+            CanvasAction::ChecklistAdd(c) => upd(c, "items.add"),
+            CanvasAction::ChecklistRemove(c, _) => upd(c, "items.remove"),
+            CanvasAction::ChecklistMove(c, ..) => upd(c, "items.move"),
+            CanvasAction::SketchAddStroke(c, _) => upd(c, "sketch.add_stroke"),
+            CanvasAction::SketchUndo(c) => upd(c, "sketch.undo"),
+            CanvasAction::SketchClear(c) => upd(c, "sketch.clear"),
+            CanvasAction::LoadImage(c) => upd(c, "images.add"),
+            CanvasAction::InsertInlineImage(c, _) => upd(c, "inline_images"),
+            CanvasAction::RemoveImage(c, _) => upd(c, "images.remove"),
+            CanvasAction::OcrCard(c) => upd(c, "ocr"),
+            CanvasAction::OpenLightbox(c, _) => upd(c, "lightbox"),
+            CanvasAction::TableSetCell(c, ..) => upd(c, "table.set_cell"),
+            CanvasAction::TableSetBg(c, ..) => upd(c, "table.set_bg"),
+            CanvasAction::TableSetFg(c, ..) => upd(c, "table.set_fg"),
+            CanvasAction::TableInsertRow(c, _) => upd(c, "table.insert_row"),
+            CanvasAction::TableRemoveRow(c, _) => upd(c, "table.remove_row"),
+            CanvasAction::TableInsertCol(c, _) => upd(c, "table.insert_col"),
+            CanvasAction::TableRemoveCol(c, _) => upd(c, "table.remove_col"),
+            CanvasAction::TableSetColWidth(c, ..) => upd(c, "table.set_col_width"),
+            CanvasAction::TableToggleHeader(c) => upd(c, "table.set_header"),
+            CanvasAction::TableSetChart(c, spec) => {
+                upd(c, if spec.is_some() { "chart" } else { "chart.clear" })
+            }
+            CanvasAction::TableImport(c) => upd(c, "rows"),
+            CanvasAction::DockCard(c, _) => upd(c, "dock"),
+            CanvasAction::DetachCard(c) => upd(c, "dock"),
+
+            CanvasAction::GroupSelected => group(Op::Created, 0).field("group"),
+            CanvasAction::Ungroup(g) => group(Op::Deleted, *g),
+            CanvasAction::RaiseGroup(g) => group(Op::Moved, *g).field("order"),
+            CanvasAction::MoveGroup(g, _) => group(Op::Moved, *g).field("pos"),
+            CanvasAction::SetGroupTitle(g, t) => group(Op::Updated, *g).titled(t.clone()).field("title"),
+            CanvasAction::SetGroupColor(g, _) => group(Op::Updated, *g).field("color"),
+        })
+    }
+
+    fn apply_tree(&mut self, actions: Vec<TreeAction>) {
+        // Describe the edits *before* applying them, so a removed node's title is
+        // still there to record, then push the entries afterwards so a client
+        // never sees a change announced before it has happened.
+        let mut pending: Vec<crate::changelog::Change> = actions
+            .iter()
+            .filter_map(|a| self.describe_tree(a))
+            .collect();
+        let known: std::collections::HashSet<NodeId> =
+            if pending.iter().any(|c| c.id == 0) { self.doc.nodes.keys().copied().collect() }
+            else { std::collections::HashSet::new() };
         for a in actions {
             match a {
                 TreeAction::Select(id) => self.selected = Some(id),
@@ -2242,6 +2491,11 @@ impl TrellisApp {
                 TreeAction::ImportBasket(id) => self.import_basket(id),
             }
         }
+        let mut fresh: Vec<NodeId> =
+            self.doc.nodes.keys().copied().filter(|id| !known.contains(id)).collect();
+        fresh.sort_unstable(); // ids ascend with creation order; HashMap order does not
+        let mut fresh = fresh.into_iter();
+        self.flush_notes(&mut pending, move || fresh.next());
     }
 
     /// A filesystem-safe base filename from a node's title.
@@ -2408,34 +2662,23 @@ impl TrellisApp {
         actions: Vec<CanvasAction>,
         pointer_down: bool,
     ) {
-        // ResetView only nudges the (unsaved) pan, so it must not dirty the doc.
-        if actions.iter().any(|a| {
-            !matches!(
-                a,
-                CanvasAction::ResetView
-                    | CanvasAction::CopyCard(_)
-                    | CanvasAction::SaveImage(..)
-                    | CanvasAction::SaveAllImages(_)
-                    | CanvasAction::ExportCardPng(_)
-                    | CanvasAction::ExportCardMarkdown(_)
-                    | CanvasAction::ExportCardPdf(_)
-                    | CanvasAction::ExportCardHtml(_)
-                    | CanvasAction::ExportCardText(_)
-                    | CanvasAction::ExportCardSvg(_)
-                    | CanvasAction::ExportCardJson(_)
-                    | CanvasAction::TableExportCsv(_)
-                    | CanvasAction::TableExportXlsx(_)
-                    | CanvasAction::ToggleSelect(_)
-                    | CanvasAction::ClearSelection
-                    | CanvasAction::ToggleDockMode
-                    | CanvasAction::ToggleSnapMode
-                    | CanvasAction::SaveAsTemplate(_)
-                    | CanvasAction::UpdateTemplate(..)
-                    | CanvasAction::DeleteTemplate(_)
-            )
-        }) {
-            self.mark_dirty();
-        }
+        // Described before the loop (a removed card's title has to be read while
+        // it still exists) and recorded after it (so nothing is announced before
+        // it is true). Actions that only touch view state describe to `None` and
+        // therefore don't dirty the document — which is what the old blanket
+        // `matches!` guard was for.
+        let mut pending: Vec<crate::changelog::Change> = actions
+            .iter()
+            .filter_map(|a| self.describe_canvas(a, node))
+            .collect();
+        // Creating actions can't know the new id yet, so note which cards exist
+        // now and fill the blanks in from the difference afterwards. A basket
+        // holds ~10 cards, so this is nothing.
+        let known: std::collections::HashSet<CardId> = if pending.iter().any(|c| c.id == 0) {
+            self.doc.nodes.get(&node).map(|n| n.cards.iter().map(|c| c.id).collect()).unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
         // Undo: snapshot the node *before* mutating it. A discrete edit is its
         // own step; a held drag (same coalesce tag while the button is down)
         // collapses into one. Text/selection/view actions don't snapshot — egui
@@ -2618,44 +2861,28 @@ impl TrellisApp {
                     self.insert_inline_image_into(node, cid, at)
                 }
                 CanvasAction::TableSetCell(cid, r, c, text) => {
-                    if self.doc.table_set_cell(node, cid, r, c, text) {
-                        self.mark_dirty();
-                    }
+                    let _ = self.doc.table_set_cell(node, cid, r, c, text);
                 }
                 CanvasAction::TableSetBg(cid, r, c, bg) => {
-                    if self.doc.table_set_bg(node, cid, r, c, bg) {
-                        self.mark_dirty();
-                    }
+                    let _ = self.doc.table_set_bg(node, cid, r, c, bg);
                 }
                 CanvasAction::TableSetFg(cid, r, c, fg) => {
-                    if self.doc.table_set_fg(node, cid, r, c, fg) {
-                        self.mark_dirty();
-                    }
+                    let _ = self.doc.table_set_fg(node, cid, r, c, fg);
                 }
                 CanvasAction::TableInsertRow(cid, at) => {
-                    if self.doc.table_insert_row(node, cid, at) {
-                        self.mark_dirty();
-                    }
+                    let _ = self.doc.table_insert_row(node, cid, at);
                 }
                 CanvasAction::TableRemoveRow(cid, at) => {
-                    if self.doc.table_remove_row(node, cid, at) {
-                        self.mark_dirty();
-                    }
+                    let _ = self.doc.table_remove_row(node, cid, at);
                 }
                 CanvasAction::TableInsertCol(cid, at) => {
-                    if self.doc.table_insert_col(node, cid, at) {
-                        self.mark_dirty();
-                    }
+                    let _ = self.doc.table_insert_col(node, cid, at);
                 }
                 CanvasAction::TableRemoveCol(cid, at) => {
-                    if self.doc.table_remove_col(node, cid, at) {
-                        self.mark_dirty();
-                    }
+                    let _ = self.doc.table_remove_col(node, cid, at);
                 }
                 CanvasAction::TableSetColWidth(cid, c, w) => {
-                    if self.doc.table_set_col_width(node, cid, c, w) {
-                        self.mark_dirty();
-                    }
+                    let _ = self.doc.table_set_col_width(node, cid, c, w);
                 }
                 CanvasAction::TableSetChart(cid, spec) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {
@@ -2665,9 +2892,7 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::TableToggleHeader(cid) => {
-                    if self.doc.table_toggle_header(node, cid) {
-                        self.mark_dirty();
-                    }
+                    let _ = self.doc.table_toggle_header(node, cid);
                 }
                 CanvasAction::TableImport(cid) => self.table_import(node, cid),
                 CanvasAction::TableExportCsv(cid) => self.table_export(node, cid, false),
@@ -2675,7 +2900,6 @@ impl TrellisApp {
                 CanvasAction::RemoveImage(cid, idx) => {
                     if self.doc.remove_image(node, cid, idx) {
                         self.tex_cache.forget(cid);
-                        self.mark_dirty();
                     }
                 }
                 CanvasAction::OcrCard(cid) => {
@@ -2760,6 +2984,14 @@ impl TrellisApp {
                 }
             }
         }
+        let mut fresh = self
+            .doc
+            .nodes
+            .get(&node)
+            .map(|n| n.cards.iter().map(|c| c.id).filter(|id| !known.contains(id)).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter();
+        self.flush_notes(&mut pending, move || fresh.next());
     }
 
     /// Import a CSV/XLSX file into a table card (replaces its contents).
@@ -4128,6 +4360,10 @@ impl TrellisApp {
                             "Wake the moment anything changes",
                             format!("curl -H 'X-API-Key: {k}' '{a}/wait?rev=0'"),
                         ),
+                        (
+                            "…then ask what actually changed (re-read only that)",
+                            format!("curl -H 'X-API-Key: {k}' '{a}/changes?since=0'"),
+                        ),
                     ] {
                         ui.small(egui::RichText::new(what).strong());
                         ui.code(cmd);
@@ -4176,7 +4412,8 @@ impl TrellisApp {
                         "GET    /api/kanban[?project=<id>]         (cards grouped by status:: → columns)",
                         "POST   /api/ocr                           (OCR all un-OCR'd images)",
                         "GET    /api/export?format=markdown|html|json|pdf|png|gif",
-                        "GET    /api/wait?rev=<n>                  (long-poll for changes)",
+                        "GET    /api/wait?rev=<n>                  (long-poll: that something changed, + epoch)",
+                        "GET    /api/changes?since=<seq>[&limit=<n>]  (what changed: actor/entity/op/fields/property)",
                         "GET    /api/history                       (version snapshots + keep / min_gap_mins retention)",
                         "POST   /api/history/restore     {file}    (restore a snapshot)",
                         "GET    /api/backup                        (status)",
@@ -5172,7 +5409,22 @@ impl TrellisApp {
         self.kanban_project = project_pick;
         for (n, c, status) in moves {
             if self.doc.set_card_property(n, c, "status", &status) {
-                self.mark_dirty();
+                // Carries the key and value, exactly as the API path does, so a
+                // client can't tell whether a status move came from the board or
+                // from an agent — and shouldn't have to.
+                let title = self.doc.card(n, c).map(|k| k.title.clone()).unwrap_or_default();
+                self.note(
+                    crate::changelog::Change::new(
+                        crate::changelog::Actor::Ui,
+                        crate::changelog::Entity::Card,
+                        crate::changelog::Op::Updated,
+                        c,
+                    )
+                    .in_node(n)
+                    .titled(title)
+                    .field("property")
+                    .property("status", status.clone()),
+                );
             }
         }
         if let Some((node, card)) = jump {

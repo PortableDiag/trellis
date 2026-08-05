@@ -615,14 +615,60 @@ was never taken. A lone value between two gaps still shows, as a dot.
 Be woken the instant the document changes, instead of polling on a timer.
 ```
 GET /api/wait?rev=<n>
-  → 200 {"rev":<current>,"changed":true}    (as soon as the revision differs from n)
-  → 200 {"rev":<current>,"changed":false}   (after ~25s with no change; just re-request)
+  → 200 {"rev":<current>,"changed":true,"epoch":<n>}   (as soon as the revision differs from n)
+  → 200 {"rev":<current>,"changed":false,"epoch":<n>}  (after ~25s with no change; just re-request)
 ```
 The server holds the request open until the document's change counter differs from
 `rev` (any add/edit/move/remove, from the app or another agent), or ~25 s elapse.
 Loop it, passing back the `rev` you last received, to react immediately. Start with
 `rev=0` to get the current revision on the first call. Requests are handled
 concurrently, so an open `/wait` never blocks your other calls.
+
+### What changed (the change log)
+`/api/wait` tells you *that* the document moved. This tells you **what** moved, so
+you can re-read one card instead of the whole document.
+```
+GET /api/changes?since=<seq>&limit=<n>
+  → 200 {"epoch":…, "rev":…, "since":…, "count":N, "retained":M,
+         "oldest":<seq|null>, "truncated":false, "changes":[ … ]}
+```
+Pair it with the long-poll: wait for a `rev`, then ask what happened since the
+`seq` you last processed. `limit` defaults to 500 (max 5000).
+
+Each entry:
+
+| field | meaning |
+|---|---|
+| `seq` | the revision this change belongs to — the same number `/api/wait` returns |
+| `ts` | unix seconds (the document itself stores no timestamps) |
+| `actor` | `ui` (a person in the app) or `api` (an agent) |
+| `entity` | `node` · `card` · `group` · `document` |
+| `op` | `created` · `updated` · `deleted` · `moved` |
+| `id` | the node/card/group id. Card ids are document-global |
+| `node` | the owning basket, for a card or group |
+| `title` | its title at the time — present even for a delete, when it can no longer be looked up |
+| `fields` | which parts changed: `["body","color"]`, `table.set_cell`, `images.add`, … |
+| `property` | `["status","done"]` — only for a `key:: value` change |
+
+Absent fields are omitted rather than sent as null.
+
+```jsonc
+{"seq":4,"ts":1785950176,"actor":"api","entity":"card","op":"updated","id":2,
+ "node":62,"title":"Deploy checklist","fields":["property"],
+ "property":["status","done"]}
+```
+
+**Three things to get right:**
+
+- **`epoch` changes when the app restarts.** The log is in memory, so a stored
+  `seq` from a previous run means nothing. Different `epoch` than you last saw →
+  re-read what you care about and start again from that run's `rev`.
+- **`truncated: true`** means entries you needed have already rotated away (the
+  log keeps the last 5000). Incremental catch-up is impossible; re-read.
+- **An entry says what changed, never the old and new values.** Re-fetch the
+  entity named. That is what makes the log impossible to desync from — there is
+  no patch to misapply — and it is why consecutive identical changes collapse
+  into one entry (a card drag is *one* `moved`, not one per frame).
 
 ## Errors
 
@@ -793,6 +839,22 @@ curl -s -X POST -H "X-API-Key: $KEY" $API/templates/rebuild
 # Move a card to another basket (group/dock membership is dropped).
 curl -s -X POST -H "X-API-Key: $KEY" \
      -d '{"node":965,"pos":[40,40]}' $API/nodes/7/cards/3/move
+
+# React to what changes: long-poll for a revision, then ask what moved. Loop it,
+# carrying `rev` into the next wait and `seq` into the next changes call.
+curl -s -H "$K" "$B/wait?rev=$REV"
+#   → {"rev":41,"changed":true,"epoch":6424652370349836957}
+curl -s -H "$K" "$B/changes?since=$SEQ"
+#   → {"epoch":…,"rev":41,"count":1,"truncated":false,"changes":[
+#        {"seq":41,"ts":1785950176,"actor":"ui","entity":"card","op":"updated",
+#         "id":4821,"node":62,"title":"Deploy checklist","fields":["property"],
+#         "property":["status","done"]}]}
+# Re-read only what's named — one card, not the document. If `epoch` differs from
+# last time (the app restarted) or `truncated` is true, re-read and start over.
+
+# Everything an agent did, this session:
+curl -s -H "$K" "$B/changes?since=0&limit=5000" \
+  | python3 -c 'import json,sys;[print(c["seq"],c["op"],c["entity"],c["id"],c.get("fields",[])) for c in json.load(sys.stdin)["changes"] if c["actor"]=="api"]'
 
 # List the saved templates, or delete one by index.
 curl -s -H "X-API-Key: $KEY" $API/templates

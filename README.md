@@ -204,8 +204,11 @@ from the main cluster, and click or drag on it to jump there without zooming out
   `#tags` / `key:: value` properties / due-date **agenda** (`/tasks`) / **Kanban**
   columns (`/kanban`) / wiki-link **graph**, register · insert · **update**
   reusable card **templates**, trigger a **backup**, and export the document
-  (incl. PDF/PNG) — so agents can collaborate on the same notes. **Live updates:** `GET /api/wait` long-polls so clients react
-  the instant anything changes. An instance serves one document, so **the port
+  (incl. PDF/PNG) — so agents can collaborate on the same notes. **Live updates:**
+  `GET /api/wait` long-polls so clients react the instant anything changes, and
+  `GET /api/changes` says **what** changed — which card, who changed it, which
+  fields, and the `key:: value` if a property moved — so a client re-reads one
+  card instead of the whole document. An instance serves one document, so **the port
   addresses the document** — `GET /api/instance` reports which one is open, and
   edits are autosaved a couple of seconds later without anyone pressing Save.
   Enable it in **Tools → Settings**, where **Examples** gives you copy-paste

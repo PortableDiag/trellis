@@ -15,6 +15,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::mpsc::{Sender, SyncSender};
+use crate::changelog::{Change, ChangeLog};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -134,6 +135,147 @@ pub fn fit_request(req: &ApiRequest) -> Option<(NodeId, Option<u64>)> {
     }
 }
 
+/// Describe what a request is about to change, for the change log.
+///
+/// Called **before** `process` consumes the request, for the same reason
+/// [`fit_request`] is: the request is gone afterwards. Reading the document here
+/// also catches the pre-change state — a delete's title cannot be looked up once
+/// the thing is deleted.
+///
+/// A created entity's id does not exist yet, so those come back with `id == 0`
+/// and the caller fills it in from the response body (again, as `fit` does).
+/// Returns `None` for reads and for the app-intercepted routes, which record
+/// their own changes where they are actually handled.
+pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
+    use crate::changelog::{Actor::Api, Entity as E, Op};
+    let node_title = |id: &NodeId| doc.nodes.get(id).map(|n| n.title.clone()).unwrap_or_default();
+    let card_title = |n: &NodeId, c: &u64| doc.card(*n, *c).map(|c| c.title.clone()).unwrap_or_default();
+    let ch = |e, op, id| Change::new(Api, e, op, id);
+
+    Some(match req {
+        ApiRequest::CreateNode { title, .. } => ch(E::Node, Op::Created, 0).titled(title.clone()),
+        ApiRequest::UpdateNode { id, title, color, bg } => {
+            let mut c = ch(E::Node, Op::Updated, *id)
+                .titled(title.clone().unwrap_or_else(|| node_title(id)));
+            if title.is_some() {
+                c = c.field("title");
+            }
+            if color.is_some() {
+                c = c.field("color");
+            }
+            if bg.is_some() {
+                c = c.field("bg");
+            }
+            c
+        }
+        ApiRequest::DeleteNode(id) => ch(E::Node, Op::Deleted, *id).titled(node_title(id)),
+        ApiRequest::MoveNode { id, .. } => ch(E::Node, Op::Moved, *id).titled(node_title(id)),
+        ApiRequest::SetExpanded { id, .. } => {
+            ch(E::Node, Op::Updated, *id).titled(node_title(id)).field("expanded")
+        }
+        ApiRequest::Autosort(id) => {
+            // Moves every card in the basket, so it is reported against the
+            // basket rather than as N separate card moves.
+            ch(E::Node, Op::Updated, *id).titled(node_title(id)).field("autosort")
+        }
+
+        ApiRequest::AddCard { node, input } => {
+            ch(E::Card, Op::Created, 0).in_node(*node).titled(input.title.clone())
+        }
+        ApiRequest::UpdateCard { node, card, patch } => {
+            let mut c = ch(E::Card, Op::Updated, *card)
+                .in_node(*node)
+                .titled(patch.title.clone().unwrap_or_else(|| card_title(node, card)));
+            for (present, name) in [
+                (patch.title.is_some(), "title"),
+                (patch.body.is_some(), "body"),
+                (patch.color.is_some(), "color"),
+                (patch.lang.is_some(), "lang"),
+                (patch.pos.is_some(), "pos"),
+                (patch.size.is_some(), "size"),
+                (patch.items.is_some(), "items"),
+                (patch.rows.is_some(), "rows"),
+                (patch.kind.is_some(), "kind"),
+                (patch.header.is_some(), "header"),
+                (patch.font_scale.is_some(), "font_scale"),
+                (patch.inline_images.is_some(), "inline_images"),
+            ] {
+                if present {
+                    c = c.field(name);
+                }
+            }
+            c
+        }
+        ApiRequest::DeleteCard { node, card } => {
+            ch(E::Card, Op::Deleted, *card).in_node(*node).titled(card_title(node, card))
+        }
+        ApiRequest::MoveCard { node, card, mv } => {
+            // A cross-basket move is reported against the basket it came *from*;
+            // the target is named as a field so a client knows to refresh both.
+            let c = ch(E::Card, Op::Moved, *card).in_node(*node).titled(card_title(node, card));
+            match mv.target_node() {
+                Some(to) => c.field(&format!("node={to}")),
+                None => c.field("order"),
+            }
+        }
+        // The one entry that carries content, because "fire when a card gets
+        // `status:: done`" is the whole point of on-change triggers.
+        ApiRequest::SetCardProperty { node, card, key, value } => {
+            ch(E::Card, Op::Updated, *card)
+                .in_node(*node)
+                .titled(card_title(node, card))
+                .field("property")
+                .property(key.clone(), value.clone())
+        }
+        ApiRequest::DockCard { node, card, .. } | ApiRequest::DetachCard { node, card } => {
+            ch(E::Card, Op::Updated, *card).in_node(*node).titled(card_title(node, card)).field("dock")
+        }
+        ApiRequest::SetCardGroup { node, card, .. } => {
+            ch(E::Card, Op::Updated, *card).in_node(*node).titled(card_title(node, card)).field("group")
+        }
+        // The sub-operation is named in the field (`table.add_row`) rather than
+        // in a separate column: self-describing, and no extra key on every entry.
+        ApiRequest::TableOp { node, card, op } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field(&format!("table.{}", op.name())),
+        ApiRequest::SketchOp { node, card, op } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field(&format!("sketch.{}", op.name())),
+        ApiRequest::SetChart { node, card, spec } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field(if spec.is_some() { "chart" } else { "chart.clear" }),
+        ApiRequest::AddImage { node, card, .. } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field("images.add"),
+        ApiRequest::RemoveImage { node, card, .. } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field("images.remove"),
+
+        ApiRequest::CreateGroup { node, title, .. } => ch(E::Group, Op::Created, 0)
+            .in_node(*node)
+            .titled(title.clone().unwrap_or_default()),
+        ApiRequest::UpdateGroup { node, group, title, color } => {
+            let mut c = ch(E::Group, Op::Updated, *group).in_node(*node);
+            if let Some(t) = title {
+                c = c.titled(t.clone()).field("title");
+            }
+            if color.is_some() {
+                c = c.field("color");
+            }
+            c
+        }
+        ApiRequest::DeleteGroup { node, group } => ch(E::Group, Op::Deleted, *group).in_node(*node),
+
+        // Reads change nothing; app-intercepted routes log where they're handled.
+        _ => return None,
+    })
+}
+
 pub struct ApiResponse {
     pub status: u16,
     pub body: String,
@@ -184,6 +326,13 @@ pub struct MoveCardInput {
     node: Option<NodeId>,
     #[serde(default)]
     pos: Option<[f32; 2]>,
+}
+
+impl MoveCardInput {
+    /// The basket a card is being moved *to*, when this is a cross-basket move.
+    pub fn target_node(&self) -> Option<NodeId> {
+        self.node
+    }
 }
 
 /// Body of `POST /api/nodes/{id}/cards/{cid}/chart` — how to draw a table card
@@ -408,6 +557,13 @@ pub struct TableOpInput {
     color: Value,
 }
 
+impl TableOpInput {
+    /// The sub-operation's name, for the change log's `table.<op>` field.
+    pub fn name(&self) -> &str {
+        &self.op
+    }
+}
+
 /// One edit to a Sketch card. `op` is `add_stroke` | `undo` | `clear`.
 #[derive(Deserialize)]
 pub struct SketchOpInput {
@@ -420,6 +576,13 @@ pub struct SketchOpInput {
     /// Stroke points `[[x,y], …]` in the card's local coordinates.
     #[serde(default)]
     points: Option<Vec<[f32; 2]>>,
+}
+
+impl SketchOpInput {
+    /// The sub-operation's name, for the change log's `sketch.<op>` field.
+    pub fn name(&self) -> &str {
+        &self.op
+    }
 }
 
 // --- server thread ----------------------------------------------------------
@@ -439,6 +602,7 @@ pub fn serve(
     tx: Sender<ApiCommand>,
     key: Arc<Mutex<String>>,
     revision: Arc<AtomicU64>,
+    changes: Arc<Mutex<ChangeLog>>,
 ) -> Result<Arc<tiny_http::Server>, String> {
     // `lan` binds all interfaces so other devices on the network can reach the
     // API (still key-gated); otherwise localhost-only.
@@ -453,9 +617,10 @@ pub fn serve(
                 let tx = tx.clone();
                 let key = Arc::clone(&key);
                 let revision = Arc::clone(&revision);
+                let changes = Arc::clone(&changes);
                 std::thread::spawn(move || {
                     let mut request = request;
-                    let resp = handle(&mut request, &ctx, &tx, &key, &revision);
+                    let resp = handle(&mut request, &ctx, &tx, &key, &revision, &changes);
                     let header = tiny_http::Header::from_bytes(
                         &b"Content-Type"[..],
                         &b"application/json"[..],
@@ -490,6 +655,7 @@ fn handle(
     tx: &Sender<ApiCommand>,
     key: &Arc<Mutex<String>>,
     revision: &Arc<AtomicU64>,
+    changes: &Arc<Mutex<ChangeLog>>,
 ) -> ApiResponse {
     let method = request.method().clone();
     let raw_url = request.url().to_string();
@@ -528,14 +694,44 @@ fn handle(
         let start = Instant::now();
         loop {
             let cur = revision.load(Ordering::Relaxed);
+            // `epoch` rides along so a client that reconnects after a restart
+            // can tell its stored `rev` is meaningless. Added, never replacing
+            // the existing fields, so older clients are unaffected.
+            let epoch = changes.lock().map(|c| c.epoch()).unwrap_or(0);
             if cur != since {
-                return ApiResponse::ok(json!({ "rev": cur, "changed": true }));
+                return ApiResponse::ok(json!({ "rev": cur, "changed": true, "epoch": epoch }));
             }
             if start.elapsed() > Duration::from_secs(25) {
-                return ApiResponse::ok(json!({ "rev": cur, "changed": false }));
+                return ApiResponse::ok(json!({ "rev": cur, "changed": false, "epoch": epoch }));
             }
             std::thread::sleep(Duration::from_millis(200));
         }
+    }
+
+    // Served straight off the shared log: it never touches the Document, so
+    // unlike the app-intercepted routes it needs no UI-thread round-trip, and it
+    // still answers while the UI is busy with a long save.
+    if method == Method::Get && path == "/api/changes" {
+        let since = query_get(&query, "since").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let limit = query_get(&query, "limit")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(500)
+            .clamp(1, 5000);
+        let cur = revision.load(Ordering::Relaxed);
+        let Ok(log) = changes.lock() else {
+            return ApiResponse::err(500, "change log unavailable");
+        };
+        let (list, truncated) = log.since(since, limit);
+        return ApiResponse::ok(json!({
+            "epoch": log.epoch(),
+            "rev": cur,
+            "since": since,
+            "count": list.len(),
+            "retained": log.len(),
+            "oldest": log.oldest(),
+            "truncated": truncated,
+            "changes": list,
+        }));
     }
 
     let mut body = String::new();
@@ -1915,6 +2111,80 @@ mod tests {
             (today - utc_days).abs() <= 1,
             "local and UTC days differ by at most one"
         );
+    }
+
+    /// A property change is the entry a plugin trigger is built on, so the key
+    /// and value have to survive into the log — that is the one piece of content
+    /// an entry carries.
+    #[test]
+    fn a_property_change_records_its_key_and_value() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "Project".into());
+        let c = doc.add_card(n, emath::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().title = "Ship it".into();
+
+        let req = ApiRequest::SetCardProperty {
+            node: n,
+            card: c,
+            key: "status".into(),
+            value: "done".into(),
+        };
+        let ch = change_of(&req, &doc).expect("a property set is a change");
+        assert_eq!(ch.property, Some(("status".into(), "done".into())));
+        assert_eq!(ch.fields, vec!["property"]);
+        assert_eq!(ch.node, Some(n));
+        assert_eq!(ch.title.as_deref(), Some("Ship it"));
+    }
+
+    /// The description is taken before `process` runs precisely so a delete can
+    /// still name what it deleted — afterwards there is nothing left to look up.
+    #[test]
+    fn a_delete_is_described_while_the_card_still_exists() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "Basket".into());
+        let c = doc.add_card(n, emath::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().title = "Doomed".into();
+
+        let req = ApiRequest::DeleteCard { node: n, card: c };
+        let ch = change_of(&req, &doc).unwrap();
+        assert_eq!(ch.title.as_deref(), Some("Doomed"));
+
+        // And once it's gone, the same description would be nameless — which is
+        // the whole reason for the ordering.
+        let (_changed, _resp) = process(&mut doc, ApiRequest::DeleteCard { node: n, card: c });
+        let after = change_of(&ApiRequest::DeleteCard { node: n, card: c }, &doc).unwrap();
+        assert_eq!(after.title, None);
+    }
+
+    /// Only the fields actually sent are reported, so a client watching card text
+    /// can ignore a recolour without fetching anything.
+    #[test]
+    fn an_update_reports_only_the_fields_it_was_given() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "Basket".into());
+        let c = doc.add_card(n, emath::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"body":"new text","color":"red"}"#).unwrap();
+        let ch = change_of(&ApiRequest::UpdateCard { node: n, card: c, patch }, &doc).unwrap();
+        assert_eq!(ch.fields, vec!["body", "color"]);
+        assert!(!ch.fields.contains(&"title".to_string()));
+    }
+
+    /// Reads must never enter the log — a `GET` that recorded a change would wake
+    /// every long-polling client for nothing.
+    #[test]
+    fn reads_are_not_changes() {
+        let doc = Document::default();
+        for req in [
+            ApiRequest::Tree,
+            ApiRequest::ListNodes,
+            ApiRequest::Search("x".into()),
+            ApiRequest::Tags,
+            ApiRequest::Graph,
+            ApiRequest::Kanban { project: None },
+        ] {
+            assert!(change_of(&req, &doc).is_none(), "a read recorded a change");
+        }
     }
 
     #[test]

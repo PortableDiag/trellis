@@ -9,6 +9,7 @@ mod api;
 mod app;
 mod backup;
 mod canvas;
+mod changelog;
 mod deps;
 mod images;
 mod model;
