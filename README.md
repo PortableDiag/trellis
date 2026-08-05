@@ -232,11 +232,45 @@ from the main cluster, and click or drag on it to jump there without zooming out
 | Ctrl+`+` / `-` / `0` | Zoom in / out / reset |
 | Ctrl+scroll | Zoom (toggle in Settings; on by default) |
 
+## Download
+
+Every [release](https://github.com/PortableDiag/trellis/releases) attaches a
+ready-to-run build. There is nothing to install alongside it — the fonts and
+icon are compiled in.
+
+| Platform | File |
+|---|---|
+| Linux (x86_64) | `trellis-<version>-linux-x86_64` |
+| Windows (x86_64) | `trellis-<version>-windows-x86_64.exe` |
+| macOS (Apple silicon **and** Intel) | `Trellis-<version>-macos-universal.app.zip`, or the bare `trellis-<version>-macos-universal` for the command line |
+
+**The Windows and macOS builds are unsigned**, because signing them means paying
+Microsoft and Apple for certificates. That is visible the first time you run one:
+
+- **Windows** — SmartScreen shows "Windows protected your PC". *More info* →
+  *Run anyway*.
+- **macOS** — Gatekeeper refuses to open it at all. Right-click the app →
+  **Open** (which offers the choice the double-click doesn't), or run
+  `xattr -d com.apple.quarantine /Applications/Trellis.app` once.
+
+On Linux, `chmod +x` the file and run it.
+
 ## Build & run
 
 ```sh
 cargo run --release
 ```
+
+Any recent stable Rust toolchain, on any of the three platforms. Building on a
+fresh Linux box also wants the X11/Wayland headers egui links against:
+
+```sh
+sudo apt install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+                 libxkbcommon-dev libwayland-dev
+```
+
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml)
+on native runners for each platform, triggered by pushing a `vX.Y.Z` tag.
 
 ### Command line
 
@@ -267,16 +301,30 @@ which document a port is serving, so a script can check before it writes. Keepin
 work and personal notes in different documents also means an agent pointed at one
 can't read or rewrite the other.
 
-Requires a recent stable Rust toolchain. Tests: `cargo test` (binary crate — use
-`cargo test --bin trellis` to test a single target). Middle-click paste and the
-X11 PRIMARY-selection features need `xclip` or `xsel` installed. **OCR** (right-click
-an image card → Extract text) needs the `tesseract` CLI (`tesseract-ocr`) installed.
+Tests: `cargo test` (binary crate — use `cargo test --bin trellis` to test a
+single target).
 
-**Backup** external tools (only for the features you use): **Network (SFTP)**
-destinations need `scp` (usually preinstalled), **Cloud** destinations need
-`rclone` (`rclone config` a remote first), and **encryption** needs `gpg`. Disk
-destinations need nothing extra. A missing tool is reported as a backup error —
-it never crashes the app.
+### Optional external tools
+
+A handful of features shell out to a command-line tool. **None of them is
+required** — a missing tool disables exactly one feature and nothing else, and
+never crashes the app.
+
+**Tools → Requirements…** lists all of them with what each one enables and
+whether it's installed, and gets you the missing ones: it runs the install for
+you where the platform has a package manager it can drive (**winget** on
+Windows, **Homebrew** on macOS), and hands you the exact command otherwise —
+installing on Linux needs a root password, which the app deliberately doesn't
+ask for.
+
+| Tool | Enables |
+|---|---|
+| `tesseract` | OCR — extract text from image cards so scans and screenshots are searchable |
+| `gpg` | Encrypted backups (AES-256) |
+| `rclone` | Cloud backup destinations (S3, Drive, Dropbox, B2…) |
+| `scp` | SFTP backup destinations — ships with macOS, Linux and Windows 10+ |
+| `xclip` / `xsel` | Linux only: middle-click paste and the X11 primary selection |
+| `maim` / `scrot` / `spectacle` / … | Linux only: **Snip to card**. macOS and Windows use the region capture built into the OS |
 
 The markdown renderer (`egui_commonmark`) is vendored under `vendor/` and patched
 to render inline text-color spans; edit it there, not the crates.io copy.

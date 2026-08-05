@@ -1,0 +1,221 @@
+name: Release
+
+# Build Trellis for Linux, Windows and macOS and attach the binaries to the
+# GitHub release for a `vX.Y.Z` tag.
+#
+# Why CI rather than cross-compiling locally: a macOS build needs Apple's SDK
+# (which is not redistributable, so cross-compiling it from Linux means osxcross
+# and a licence question), and neither a Windows nor a macOS binary produced on
+# Linux can be *run* by the machine that produced it. Native runners build and
+# smoke-test each one on its own platform.
+#
+# `workflow_dispatch` builds everything and uploads the binaries as workflow
+# artifacts without touching a release, so the matrix can be exercised without
+# spending a version number.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # Make sure the release exists before any builder tries to upload to it.
+  # Three matrix jobs finish at different times, and having each one create the
+  # release on demand is a race that ends with two of them failing.
+  prepare:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the release if it isn't there yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists — uploading into it."
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Binaries are attached below. See CHANGELOG.md for what changed."
+          fi
+
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # `always()` so a manual (non-tag) run still builds, since `prepare` is
+    # skipped there and a skipped dependency would otherwise skip this too.
+    needs: [prepare]
+    if: always() && (needs.prepare.result == 'success' || github.ref_type != 'tag')
+    strategy:
+      # One platform failing should not cancel the others — when something
+      # breaks, it's useful to know whether it broke everywhere or in one place.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (x86_64)
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: Windows (x86_64)
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macOS (universal)
+            os: macos-latest
+            target: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the version
+        shell: bash
+        run: |
+          # For a tag build the tag is the truth; for a manual run fall back to
+          # Cargo.toml so the artifacts are still named something meaningful.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      # egui/winit's X11 and Wayland backends need these headers. rfd talks to
+      # the XDG desktop portal over D-Bus rather than linking GTK, so there is
+      # no libgtk-3-dev here.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libssl-dev
+
+      - name: Install the Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+          # The macOS artifact is universal, so the other arch is needed too.
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            rustup target add x86_64-apple-darwin
+          fi
+
+      - name: Build
+        shell: bash
+        env:
+          # Statically link the MSVC runtime so the .exe needs no Visual C++
+          # redistributable installed — otherwise a clean Windows fails to start
+          # it with a missing-DLL dialog that says nothing useful.
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: |
+          cargo build --release --bin trellis --target ${{ matrix.target }}
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cargo build --release --bin trellis --target x86_64-apple-darwin
+          fi
+
+      - name: Test
+        shell: bash
+        # Cross-arch tests can't run, so this is the host target only. On macOS
+        # that's arm64, which is the half of the universal binary the runner can
+        # actually execute.
+        run: cargo test --release --target ${{ matrix.target }}
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/trellis \
+             dist/trellis-${VERSION}-linux-x86_64
+          chmod +x dist/trellis-${VERSION}-linux-x86_64
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/trellis.exe \
+             dist/trellis-${VERSION}-windows-x86_64.exe
+
+      # A bare Unix binary double-clicked in Finder opens a Terminal window
+      # instead of the app, and has no icon or proper name in the Dock. So macOS
+      # gets a real .app bundle. The loose binary ships too, for anyone running
+      # it from a shell with arguments.
+      - name: Package (macOS universal + .app)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/trellis-${VERSION}-macos-universal \
+            target/aarch64-apple-darwin/release/trellis \
+            target/x86_64-apple-darwin/release/trellis
+          lipo -info dist/trellis-${VERSION}-macos-universal
+
+          APP="dist/Trellis.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp dist/trellis-${VERSION}-macos-universal "$APP/Contents/MacOS/trellis"
+          chmod +x "$APP/Contents/MacOS/trellis"
+
+          # icon.png is 256x256; iconutil wants a full iconset, so scale it into
+          # the sizes macOS asks for at different Dock/Finder scales.
+          ICONSET=trellis.iconset
+          mkdir -p "$ICONSET"
+          for s in 16 32 128 256; do
+            sips -z $s $s assets/icon.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+            d=$((s * 2))
+            sips -z $d $d assets/icon.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/trellis.icns"
+
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Trellis</string>
+            <key>CFBundleDisplayName</key><string>Trellis</string>
+            <key>CFBundleIdentifier</key><string>dev.trellis.Trellis</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleExecutable</key><string>trellis</string>
+            <key>CFBundleIconFile</key><string>trellis</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+
+          # `ditto` keeps the bundle structure intact through the zip, which
+          # plain `zip` does not reliably do for .app directories.
+          ditto -c -k --keepParent "$APP" \
+            "dist/Trellis-${VERSION}-macos-universal.app.zip"
+          rm -rf "$APP" "$ICONSET"
+
+      - name: Smoke-test the binary
+        shell: bash
+        # It can't be launched (no display on the runner), but --version proves
+        # it links, loads and runs its argument parsing — which is what catches
+        # a missing runtime library.
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./dist/trellis-${VERSION}-windows-x86_64.exe --version
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            chmod +x dist/trellis-${VERSION}-macos-universal
+            ./dist/trellis-${VERSION}-macos-universal --version
+          else
+            ./dist/trellis-${VERSION}-linux-x86_64 --version
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trellis-${{ matrix.target }}
+          path: dist/*
+
+      - name: Attach to the release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber

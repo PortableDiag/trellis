@@ -9,6 +9,7 @@ mod api;
 mod app;
 mod backup;
 mod canvas;
+mod deps;
 mod images;
 mod model;
 mod tree;
@@ -65,16 +66,29 @@ fn main() -> eframe::Result<()> {
 
     // Point this instance's settings at its own directory *before* eframe reads
     // them, so two instances don't clobber each other's port/key/theme/backup
-    // config. eframe resolves its storage through XDG_DATA_HOME on Linux/BSD
-    // (`<dir>/trellis/app.ron`); on macOS/Windows it uses fixed OS locations, so
-    // there only the autosave slot moves.
-    if let Some(dir) = &args.data_dir {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("trellis: could not create data dir {}: {e}", dir.display());
-            std::process::exit(2);
+    // config and template library.
+    //
+    // This used to be done by setting XDG_DATA_HOME, which eframe honours **only
+    // on Linux/BSD** — on macOS it reads $HOME/Library/Application Support and on
+    // Windows the Roaming AppData known-folder, neither of which takes an
+    // environment override. So `--data-dir` silently moved nothing but the
+    // autosave slot there, and two instances shared one API key and port:
+    // one-instance-per-document did not actually work off Linux.
+    //
+    // `persistence_path` names the settings file outright, on every platform.
+    // The path deliberately reproduces the layout XDG_DATA_HOME produced
+    // (`<dir>/trellis/app.ron`), so existing Linux instances keep their settings
+    // with nothing to migrate.
+    let persistence_path = match &args.data_dir {
+        Some(dir) => {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("trellis: could not create data dir {}: {e}", dir.display());
+                std::process::exit(2);
+            }
+            Some(dir.join("trellis").join("app.ron"))
         }
-        std::env::set_var("XDG_DATA_HOME", dir);
-    }
+        None => None,
+    };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -84,6 +98,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1200.0, 780.0])
             .with_min_inner_size([720.0, 460.0])
             .with_icon(load_icon()),
+        persistence_path,
         ..Default::default()
     };
 
@@ -134,8 +149,9 @@ fn parse_argv(argv: &[String]) -> Result<Args, String> {
             "-d" | "--data-dir" => {
                 let v = value_for(argv, &mut i, inline, &flag)?;
                 let dir = PathBuf::from(v);
-                // eframe ignores a relative XDG_DATA_HOME, so anchor it now —
-                // and the app would otherwise resolve it against its own cwd.
+                // Anchor a relative path now, against the shell's cwd — the app
+                // would otherwise resolve it against its own, which is not the
+                // same thing once it's launched from a menu or a shortcut.
                 out.data_dir = Some(if dir.is_absolute() {
                     dir
                 } else {
@@ -202,8 +218,9 @@ mod tests {
 
     #[test]
     fn relative_data_dir_is_made_absolute() {
-        // eframe ignores a relative XDG_DATA_HOME, so a relative --data-dir must
-        // be anchored at parse time or the instance silently shares settings.
+        // A relative --data-dir must be anchored at parse time, or the settings
+        // file lands somewhere that depends on how the app happened to be
+        // launched — and two instances can silently share one.
         let a = args(&["-d", "sub/dir"]).unwrap();
         assert!(a.data_dir.as_ref().unwrap().is_absolute());
         assert!(a.data_dir.unwrap().ends_with("sub/dir"));

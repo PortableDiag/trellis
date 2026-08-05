@@ -2234,7 +2234,7 @@ fn chart_ui(
                     // lone one draws a dot. A single reading between two gaps has
                     // no segment to belong to, and dropping it would hide real
                     // data — it must still show.
-                    let mut flush = |plot_ui: &mut egui_plot::PlotUi,
+                    let flush = |plot_ui: &mut egui_plot::PlotUi,
                                      run: &mut Vec<[f64; 2]>,
                                      first: &mut bool| {
                         if run.len() > 1 {

@@ -849,6 +849,18 @@ pub struct TrellisApp {
     api_status: String,
     show_settings: bool,
 
+    /// The external-tools window. Its probe of PATH is cached in
+    /// `req_scan` — hitting the filesystem for every tool on every frame would
+    /// be wasteful, and a tool the user just installed only needs to appear when
+    /// they ask for it.
+    show_requirements: bool,
+    /// (label, enables, url, present, builtin, install) per tool, as of the
+    /// last scan.
+    req_scan: Vec<(String, String, String, bool, bool, crate::deps::Install)>,
+    /// Set when an install command was started, to explain the console window
+    /// that just appeared and that the list won't update by itself.
+    req_note: String,
+
     /// Per-node undo/redo history. Each entry snapshots one node before a canvas
     /// edit (moves, autosort, add/remove, etc.); a whole drag coalesces into one.
     undo: Vec<(NodeId, crate::model::Node)>,
@@ -1110,6 +1122,9 @@ impl TrellisApp {
             api_lan,
             api_status,
             show_settings: false,
+            show_requirements: false,
+            req_scan: Vec::new(),
+            req_note: String::new(),
             undo: Vec::new(),
             redo: Vec::new(),
             undo_coalesce: None,
@@ -3689,6 +3704,10 @@ impl TrellisApp {
                         self.show_backup = true;
                         ui.close_menu();
                     }
+                    if ui.button("Requirements…").clicked() {
+                        self.show_requirements = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Settings…").clicked() {
                         self.show_settings = true;
                         ui.close_menu();
@@ -3702,6 +3721,177 @@ impl TrellisApp {
                 });
             });
         });
+    }
+
+    /// Re-probe PATH for every optional tool. Cheap enough to run on opening the
+    /// window and on Re-check, far too expensive to run per frame.
+    fn scan_requirements(&mut self) {
+        let mgr = crate::deps::manager();
+        self.req_scan = crate::deps::all()
+            .into_iter()
+            .map(|d| {
+                let present = d.present();
+                (
+                    d.label.to_string(),
+                    d.enables.to_string(),
+                    d.url.to_string(),
+                    present,
+                    d.builtin_here,
+                    d.install(mgr),
+                )
+            })
+            .collect();
+    }
+
+    /// **Tools → Requirements…** — every optional external tool, whether it's
+    /// here, what it buys, and a button that actually gets it.
+    ///
+    /// Trellis works with none of these installed, so this is a shopping list
+    /// rather than a blocker. The point is that "install tesseract-ocr" is not
+    /// an instruction a user can follow on Windows: the package name, the
+    /// manager, and whether one exists at all are different everywhere, so the
+    /// app works it out and either runs the install or hands over the exact
+    /// command.
+    fn requirements_window(&mut self, ctx: &egui::Context) {
+        if self.req_scan.is_empty() {
+            self.scan_requirements();
+        }
+        let mgr = crate::deps::manager();
+        let mut open = self.show_requirements;
+        let mut rescan = false;
+        egui::Window::new("Requirements")
+            .open(&mut open)
+            .default_width(560.0)
+            .vscroll(true)
+            .show(ctx, |ui| {
+                ui.label(
+                    "Trellis runs without any of these. Each one switches on a \
+                     single extra feature — a missing tool disables that feature \
+                     and nothing else.",
+                );
+                match mgr {
+                    crate::deps::Manager::None => {
+                        ui.label(
+                            egui::RichText::new(
+                                "No package manager found, so these link to their download pages.",
+                            )
+                            .weak(),
+                        );
+                    }
+                    m => {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Package manager: {}",
+                                match m {
+                                    crate::deps::Manager::Winget => "winget",
+                                    crate::deps::Manager::Brew => "Homebrew",
+                                    crate::deps::Manager::Apt => "apt",
+                                    crate::deps::Manager::Dnf => "dnf",
+                                    crate::deps::Manager::Pacman => "pacman",
+                                    crate::deps::Manager::Zypper => "zypper",
+                                    crate::deps::Manager::None => "",
+                                }
+                            ))
+                            .weak(),
+                        );
+                    }
+                }
+                ui.separator();
+
+                let mut note: Option<String> = None;
+                for (label, enables, url, present, builtin, install) in &self.req_scan {
+                    ui.horizontal(|ui| {
+                        // Colour *and* a word: a tick alone is unreadable to
+                        // anyone who can't separate the two greens.
+                        if *present {
+                            ui.colored_label(egui::Color32::from_rgb(80, 190, 110), "✔ Installed");
+                        } else {
+                            ui.colored_label(egui::Color32::from_rgb(230, 160, 60), "✘ Missing");
+                        }
+                        ui.strong(label);
+                    });
+                    ui.indent(label, |ui| {
+                        ui.label(egui::RichText::new(enables).weak());
+                        if !*present && *builtin {
+                            // Worth saying out loud: this one normally ships
+                            // with the OS, so its absence means it was removed
+                            // or switched off rather than never installed —
+                            // which points at a different fix.
+                            ui.label(
+                                egui::RichText::new(
+                                    "Normally comes with the system — it may be an optional \
+                                     component that isn't switched on.",
+                                )
+                                .weak()
+                                .italics(),
+                            );
+                        }
+                        if !*present {
+                            ui.horizontal_wrapped(|ui| match install {
+                                crate::deps::Install::Run { label, bin, args } => {
+                                    if ui.button(label).clicked() {
+                                        note = Some(match crate::deps::run_install(bin, args) {
+                                            Ok(()) => format!(
+                                                "Installing in a new window. Re-check when it \
+                                                 finishes."
+                                            ),
+                                            Err(e) => e,
+                                        });
+                                    }
+                                    if ui.button("Download page").clicked() {
+                                        let _ = crate::deps::open_url(url);
+                                    }
+                                }
+                                crate::deps::Install::Copy { label, cmd } => {
+                                    ui.label(format!("{label}:"));
+                                    ui.code(cmd);
+                                    if ui.button("Copy").clicked() {
+                                        ui.output_mut(|o| o.copied_text = cmd.clone());
+                                        note = Some("Command copied to the clipboard".into());
+                                    }
+                                    if ui.button("Download page").clicked() {
+                                        let _ = crate::deps::open_url(url);
+                                    }
+                                }
+                                crate::deps::Install::Link => {
+                                    if ui.button("Download page").clicked() {
+                                        let _ = crate::deps::open_url(url);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(6.0);
+                }
+
+                if let Some(n) = note {
+                    self.req_note = n;
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Re-check")
+                        .on_hover_text("Probe PATH again — use this after installing something")
+                        .clicked()
+                    {
+                        rescan = true;
+                        self.req_note.clear();
+                    }
+                    if !self.req_note.is_empty() {
+                        ui.label(egui::RichText::new(&self.req_note).weak());
+                    }
+                });
+            });
+        if rescan {
+            self.scan_requirements();
+        }
+        self.show_requirements = open;
+        if !open {
+            // Drop the cache so reopening re-probes — the user has very likely
+            // been off installing something in between.
+            self.req_scan.clear();
+            self.req_note.clear();
+        }
     }
 
     fn settings_window(&mut self, ctx: &egui::Context) {
@@ -5367,6 +5557,9 @@ impl eframe::App for TrellisApp {
         if self.show_history {
             self.history_window(ctx);
         }
+        if self.show_requirements {
+            self.requirements_window(ctx);
+        }
 
         self.lightbox_ui(ctx);
     }
@@ -5438,13 +5631,47 @@ fn setup_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// A random API key (48 hex chars from the OS RNG, falling back to a weak
-/// time/pid mix if `/dev/urandom` is unavailable).
-/// Capture a user-selected screen region to PNG bytes, trying the region-select
-/// screenshot tools commonly present on Linux desktops in turn. An empty `Vec`
-/// means the user cancelled the selection.
+/// A random API key: 48 hex chars from the OS CSPRNG.
+///
+/// This used to read `/dev/urandom` directly, which does not exist on Windows or
+/// on a sandboxed macOS process — the open failed and it fell back to a
+/// `pid + nanoseconds` string. That is not a secret: both halves are guessable
+/// to within a small range by anything that can see the process, and the key is
+/// the only thing standing between a caller and the whole document. `getrandom`
+/// asks each OS for its own CSPRNG (`getrandom(2)`, `BCryptGenRandom`,
+/// `SecRandomCopyBytes`), so there is no weak path left to fall back to.
+/// Capture a user-selected screen region to PNG bytes. An empty `Vec` means the
+/// user cancelled the selection.
+///
+/// Every platform has a region-select capture; none of them agree on how to ask
+/// for it. macOS and Windows both have one built in, so only Linux needs a tool
+/// installed — see `deps::all()`.
+///
+/// **The result is judged by the file, not the exit code.** The capture tools
+/// disagree about cancellation: maim and scrot exit non-zero, `screencapture`
+/// exits *zero* and simply writes nothing, and the Windows path can't see the
+/// child's outcome at all. A file that exists and is non-empty is a capture;
+/// anything else after a clean run is a cancel.
 fn capture_region() -> Result<Vec<u8>, String> {
     let out = std::env::temp_dir().join(format!("trellis-snip-{}.png", std::process::id()));
+    // A leftover from a previous cancel would otherwise be returned as if it
+    // were this capture — the same screenshot appearing twice.
+    let _ = std::fs::remove_file(&out);
+
+    let ran = capture_region_into(&out);
+    let bytes = std::fs::read(&out).ok().filter(|b| !b.is_empty());
+    let _ = std::fs::remove_file(&out);
+
+    match (ran, bytes) {
+        (_, Some(b)) => Ok(b),
+        (Ok(()), None) => Ok(Vec::new()), // ran, no image — cancelled
+        (Err(e), None) => Err(e),
+    }
+}
+
+/// Drive the platform's interactive region capture, writing a PNG to `out`.
+#[cfg(target_os = "linux")]
+fn capture_region_into(out: &std::path::Path) -> Result<(), String> {
     let path = out.to_string_lossy().to_string();
     // (binary, args) — each does interactive region select and writes `path`.
     let candidates: [(&str, Vec<&str>); 5] = [
@@ -5454,23 +5681,67 @@ fn capture_region() -> Result<Vec<u8>, String> {
         ("scrot", vec!["-s", &path]),
         ("import", vec![&path]), // ImageMagick: click-drag a region
     ];
-    let mut tried = Vec::new();
     for (bin, args) in candidates {
-        match std::process::Command::new(bin).args(&args).status() {
-            Ok(status) => {
-                if !status.success() {
-                    // Non-zero usually means the user pressed Esc to cancel.
-                    let _ = std::fs::remove_file(&out);
-                    return Ok(Vec::new());
-                }
-                let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
-                let _ = std::fs::remove_file(&out);
-                return Ok(bytes);
-            }
-            Err(_) => tried.push(bin),
+        if std::process::Command::new(bin).args(&args).status().is_ok() {
+            return Ok(());
         }
     }
-    Err(format!("no screenshot tool found (tried {}); install one, e.g. maim or scrot", tried.join(", ")))
+    Err(crate::deps::get("snip")
+        .map(|d| crate::deps::missing_msg(&d))
+        .unwrap_or_else(|| "no screenshot tool found".into()))
+}
+
+/// macOS ships this: `-i` is the familiar crosshair-drag, Esc cancels.
+#[cfg(target_os = "macos")]
+fn capture_region_into(out: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new("screencapture")
+        .arg("-i")
+        .arg(out)
+        .status()
+        .map(|_| ())
+        .map_err(|e| format!("could not run screencapture ({e})"))
+}
+
+/// Windows has the Snipping Tool overlay (the Win+Shift+S one) but it only ever
+/// delivers to the clipboard — there is no "write a region to this file" flag.
+/// So: open the overlay, wait for an image to land on the clipboard, and save
+/// that. PowerShell does the whole thing because reading a clipboard *bitmap*
+/// from Rust would mean a new dependency for this one feature.
+///
+/// The clipboard is cleared first so a picture that was already on it can't be
+/// mistaken for the capture. That is not as destructive as it sounds: a
+/// successful snip overwrites the clipboard anyway, so this only costs the user
+/// their clipboard in the case where they cancel.
+///
+/// `powershell.exe` (5.1) rather than `pwsh`, because it is always present and
+/// defaults to the single-threaded apartment the clipboard API requires; `-STA`
+/// is passed anyway so it stays correct if the default ever changes.
+#[cfg(target_os = "windows")]
+fn capture_region_into(out: &std::path::Path) -> Result<(), String> {
+    // PowerShell single-quoted strings escape a quote by doubling it.
+    let path = out.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+         [Windows.Forms.Clipboard]::Clear(); \
+         Start-Process 'ms-screenclip:'; \
+         $deadline = (Get-Date).AddSeconds(120); \
+         while ((Get-Date) -lt $deadline) {{ \
+           Start-Sleep -Milliseconds 250; \
+           $img = [Windows.Forms.Clipboard]::GetImage(); \
+           if ($img) {{ \
+             $img.Save('{path}', [System.Drawing.Imaging.ImageFormat]::Png); \
+             exit 0 \
+           }} \
+         }}; \
+         exit 1"
+    );
+    std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", &script])
+        .status()
+        .map(|_| ())
+        .map_err(|e| {
+            format!("could not start the Snipping Tool overlay via PowerShell ({e})")
+        })
 }
 
 /// Run tesseract OCR over each image's bytes and return the combined text.
@@ -5492,7 +5763,13 @@ fn ocr_images(images: &[Vec<u8>]) -> Result<String, String> {
                 out.push('\n');
             }
             Ok(o) => return Err(format!("tesseract error: {}", String::from_utf8_lossy(&o.stderr).trim())),
-            Err(e) => return Err(format!("tesseract not found ({e}); install tesseract-ocr")),
+            // Name the tool *and* where to get it — "install tesseract-ocr" is
+            // the package name on exactly one platform and helps nobody else.
+            Err(_) => {
+                return Err(crate::deps::get("tesseract")
+                    .map(|d| crate::deps::missing_msg(&d))
+                    .unwrap_or_else(|| "tesseract is not installed".into()))
+            }
         }
     }
     Ok(out.trim().to_string())
@@ -5692,18 +5969,12 @@ fn local_ip() -> Option<String> {
 
 fn generate_key() -> String {
     let mut buf = [0u8; 24];
-    let ok = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
-        .is_ok();
-    if ok {
-        buf.iter().map(|b| format!("{b:02x}")).collect()
-    } else {
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("trellis-{}-{:x}", std::process::id(), t)
-    }
+    // Failing here means the OS has no entropy source at all. There is no
+    // sensible weaker key to fall back to, so refuse rather than quietly hand
+    // out a guessable one — the API is off until a key exists, which is the
+    // safe direction to fail in.
+    getrandom::fill(&mut buf).expect("OS random number generator unavailable");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn default_autosave_path() -> PathBuf {

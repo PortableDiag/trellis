@@ -1,6 +1,6 @@
 [package]
 name = "trellis"
-version = "0.74.3"
+version = "0.75.0"
 edition = "2021"
 description = "A hierarchical, spatial note-taking app: a tree of free-form canvases"
 license = "MIT"
@@ -39,6 +39,9 @@ rust_xlsxwriter = "0.79"
 printpdf = "0.7"
 ab_glyph = "0.2"
 flate2 = "1"
+# The agent API key comes from the OS CSPRNG. Reading /dev/urandom directly
+# worked only on Unix; this asks each platform for its own generator.
+getrandom = "0.3"
 
 [profile.release]
 opt-level = 3
