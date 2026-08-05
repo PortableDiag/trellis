@@ -4,6 +4,26 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.77.0]
+
+### Added
+- **Nodes and cards now record when they last changed** (`touched`, unix seconds,
+  on both). Nothing in a Trellis document carried a timestamp before, so "show me
+  the basket I was last working in" had no answer that survived closing the app —
+  v0.76.0's change log knows, but it lives in memory and starts empty every run.
+
+  **Editing a card stamps its basket too**, which is the point: work in a basket
+  is editing its cards, not renaming it. A card that has never been edited reports
+  no time rather than a made-up one, and the field isn't written at all until
+  something changes — an untouched document gains no bytes.
+
+  Readable in **both** directions: an older build ignores the field, so unlike the
+  v0.74.0 image-storage change this is not one-way. Exposed on `GET
+  /api/nodes/{id}` and every card object.
+
+  This is the last piece "sort baskets by latest change" was waiting on; the
+  sorting itself is still to come.
+
 ## [0.76.0]
 
 ### Added

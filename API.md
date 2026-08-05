@@ -56,6 +56,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `children` | array of ids | ordered |
 | `color` | `[r,g,b]` or null | 0–255 each; tag dot in the tree |
 | `groups` | array | card containers in this basket (see [Groups](#groups)) |
+| `touched` | integer or null | unix seconds when this basket last changed — **including any edit to a card in it**, which is what makes "the basket I last worked in" answerable. `null` = unchanged since the field existed |
 
 **Card** — `kind` is one of `text`, `code`, `checklist`, `table`, `image`, `sketch`.
 | field | applies to | notes |
@@ -77,6 +78,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `rows`, `header` | table | `rows` set: `[["a","b"],…]` bulk-replaces cell text (colors reset); get: cells as `{text,bg,fg}`. `header` (bool) toggles the header row. Fine-grained edits (cell colors, widths, row/col ops) use the table sub-resource (below) |
 | `chart` | table | how the table is drawn as a chart (`{kind,label_col,value_cols,show_table}`), or `null` for a plain grid. Set via the chart sub-resource (below) |
 | `strokes` | sketch | read: `[{color:[r,g,b], width, points:[[x,y],…]}, …]`. Edit via the sketch sub-resource (below) |
+| `touched` | all | unix seconds when this card last changed (read-only; omitted entirely if it never has). The document's only timestamp — unlike `/api/changes` it survives a restart |
 
 **Group** — a labeled container that a set of cards belong to; drawn as a box you
 can drag by its header. Membership lives on each card's `group` field.
@@ -657,6 +659,10 @@ Absent fields are omitted rather than sent as null.
  "node":62,"title":"Deploy checklist","fields":["property"],
  "property":["status","done"]}
 ```
+
+The log is per-session. For "when did this last change" **across** restarts, read
+`touched` on the node or card instead — the two are stamped together, from the
+same place, so they cannot disagree.
 
 **Three things to get right:**
 

@@ -1227,9 +1227,54 @@ impl TrellisApp {
     /// miss one entirely.
     fn note(&mut self, change: crate::changelog::Change) {
         self.mark_dirty();
+        self.stamp_touched(&change);
         let seq = self.doc_revision.load(Ordering::Relaxed);
         if let Ok(mut log) = self.changes.lock() {
             log.push(seq, change);
+        }
+    }
+
+    /// Record *when* an entity last changed, on the entity itself.
+    ///
+    /// The change log answers "what changed" only within a session — it lives in
+    /// memory. Sorting baskets by recent activity has to survive a restart, so
+    /// the time is also written into the document. This is the single place it is
+    /// set, so it cannot drift from what the log says.
+    ///
+    /// **A card's change also stamps its basket.** That is the whole point: "sort
+    /// baskets by latest change" means the basket someone last *worked in*, and
+    /// work in a basket is editing its cards, not renaming it.
+    fn stamp_touched(&mut self, change: &crate::changelog::Change) {
+        use crate::changelog::Entity;
+        let ts = Some(crate::changelog::now_secs());
+        match change.entity {
+            Entity::Card => {
+                if let Some(node) = change.node {
+                    // A deleted card is already gone — only the basket is left to
+                    // stamp, which is correct: deleting from it *is* activity.
+                    if let Some(c) = self.doc.card_mut(node, change.id) {
+                        c.touched = ts;
+                    }
+                    if let Some(n) = self.doc.nodes.get_mut(&node) {
+                        n.touched = ts;
+                    }
+                }
+            }
+            Entity::Node => {
+                if let Some(n) = self.doc.nodes.get_mut(&change.id) {
+                    n.touched = ts;
+                }
+            }
+            // A group lives in a basket and has no identity outside it.
+            Entity::Group => {
+                if let Some(node) = change.node {
+                    if let Some(n) = self.doc.nodes.get_mut(&node) {
+                        n.touched = ts;
+                    }
+                }
+            }
+            // Whole-document events (a history restore) name no entity.
+            Entity::Document => {}
         }
     }
 

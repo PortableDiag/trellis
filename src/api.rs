@@ -1947,6 +1947,7 @@ fn node_json(n: &crate::model::Node) -> Value {
         "expanded": n.expanded,
         "color": n.color,
         "bg": n.bg,
+        "touched": n.touched,
         "groups": groups_json(n),
         "cards": n.cards.iter().map(card_json).collect::<Vec<_>>(),
     })
@@ -2011,6 +2012,11 @@ pub(crate) fn card_json(c: &Card) -> Value {
         "docked_to": c.docked_to,
         "font_scale": c.font_scale,
     });
+    // Only when there is one: a card never edited since this existed reports no
+    // time rather than a made-up one.
+    if let Some(t) = c.touched {
+        v["touched"] = json!(t);
+    }
     let props = c.properties();
     if !props.is_empty() {
         v["properties"] = json!(props
@@ -2168,6 +2174,50 @@ mod tests {
         let ch = change_of(&ApiRequest::UpdateCard { node: n, card: c, patch }, &doc).unwrap();
         assert_eq!(ch.fields, vec!["body", "color"]);
         assert!(!ch.fields.contains(&"title".to_string()));
+    }
+
+    /// A card's edit has to stamp its **basket** too, or "sort baskets by latest
+    /// change" would only ever notice renames — and work in a basket is editing
+    /// its cards.
+    #[test]
+    fn touched_is_absent_until_something_changes_then_covers_card_and_basket() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "Basket".into());
+        let c = doc.add_card(n, emath::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        assert_eq!(doc.card(n, c).unwrap().touched, None, "never edited");
+        assert_eq!(doc.nodes[&n].touched, None);
+
+        // `stamp_touched` lives in the app loop, so mimic what it writes.
+        let now = crate::changelog::now_secs();
+        doc.card_mut(n, c).unwrap().touched = Some(now);
+        doc.nodes.get_mut(&n).unwrap().touched = Some(now);
+
+        let v = card_json(doc.card(n, c).unwrap());
+        assert_eq!(v["touched"], now);
+        assert_eq!(doc.nodes[&n].touched, Some(now), "the basket counts as worked in");
+    }
+
+    /// The field must be optional in *both* directions: a document written before
+    /// it existed still loads, and a document carrying it still loads in a build
+    /// that doesn't know the field. Nothing here sets `deny_unknown_fields`, and
+    /// this pins that — unlike the v0.74.0 image change, this is not one-way.
+    #[test]
+    fn documents_round_trip_with_and_without_touched() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "Basket".into());
+        let c = doc.add_card(n, emath::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        // Untouched: the field must not even be written.
+        let ron = ron::ser::to_string(&doc).unwrap();
+        assert!(!ron.contains("touched"), "an unedited document gains no bytes");
+        let back: Document = ron::from_str(&ron).unwrap();
+        assert_eq!(back.card(n, c).unwrap().touched, None);
+
+        doc.card_mut(n, c).unwrap().touched = Some(1_785_950_176);
+        let ron = ron::ser::to_string(&doc).unwrap();
+        assert!(ron.contains("touched"));
+        let back: Document = ron::from_str(&ron).unwrap();
+        assert_eq!(back.card(n, c).unwrap().touched, Some(1_785_950_176));
     }
 
     /// Reads must never enter the log — a `GET` that recorded a change would wake

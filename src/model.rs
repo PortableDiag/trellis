@@ -578,6 +578,18 @@ pub struct Card {
     /// RGB accent used for the card's title bar.
     pub color: [u8; 3],
     pub kind: CardKind,
+    /// When this was last changed, in unix seconds — the only timestamp Trellis
+    /// stores. Nothing in the document carried a "when" before, so sorting by
+    /// recent activity was impossible; the in-memory change log answers it within
+    /// a session but is gone on restart.
+    ///
+    /// `None` means "not changed since this was added" — every card in a document
+    /// written before this existed reads as `None` rather than pretending to a
+    /// time nobody recorded. Old builds ignore the field (nothing here sets
+    /// `deny_unknown_fields`), so unlike the v0.74.0 storage change this is
+    /// readable in both directions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touched: Option<u64>,
     /// Membership in a labeled group container. `None` = ungrouped.
     #[serde(default)]
     pub group: Option<GroupId>,
@@ -618,6 +630,8 @@ impl Card {
         Self {
             id,
             pos,
+            // A brand-new card has never been *changed*; the first edit stamps it.
+            touched: None,
             size: egui::vec2(240.0, 160.0),
             title: String::new(),
             body: String::new(),
@@ -906,6 +920,18 @@ pub struct Node {
     /// (the black grid canvas).
     #[serde(default)]
     pub bg: Option<[u8; 3]>,
+    /// When this was last changed, in unix seconds — the only timestamp Trellis
+    /// stores. Nothing in the document carried a "when" before, so sorting by
+    /// recent activity was impossible; the in-memory change log answers it within
+    /// a session but is gone on restart.
+    ///
+    /// `None` means "not changed since this was added" — every card in a document
+    /// written before this existed reads as `None` rather than pretending to a
+    /// time nobody recorded. Old builds ignore the field (nothing here sets
+    /// `deny_unknown_fields`), so unlike the v0.74.0 storage change this is
+    /// readable in both directions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touched: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -1303,6 +1329,7 @@ impl Document {
             id,
             Node {
                 id,
+                touched: None,
                 title,
                 parent,
                 children: Vec::new(),
@@ -1333,6 +1360,7 @@ impl Document {
             new_id,
             Node {
                 id: new_id,
+                touched: None,
                 title,
                 parent,
                 children: Vec::new(),
