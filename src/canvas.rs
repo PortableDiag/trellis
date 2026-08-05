@@ -213,6 +213,10 @@ pub enum CanvasAction {
     SetGroupTitle(GroupId, String),
     SetGroupColor(GroupId, [u8; 3]),
     // Docking (stick a card onto another).
+    /// Choose a file for this card to mirror (opens a file dialog).
+    PickSource(CardId),
+    /// Stop mirroring: keep the text, drop the link.
+    ClearSource(CardId),
     DockCard(CardId, CardId),
     DetachCard(CardId),
     ToggleDockMode,
@@ -1008,13 +1012,39 @@ fn card_ui(
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
         ));
         scale_fonts(&mut child, zoom);
-        let label = if card.editing { "view" } else { "edit" };
-        if child
-            .add(egui::Button::new(label).frame(false).small())
-            .on_hover_text(if card.editing { "Preview" } else { "Edit" })
-            .clicked()
-        {
-            actions.push(CanvasAction::SetEditing(card.id, !card.editing));
+        if card.source.is_some() {
+            // A mirrored body is the file's, so there is nothing to edit here.
+            // Say which file rather than just disabling the button — an unlabelled
+            // missing control is a puzzle.
+            let err = card.source_error.is_some();
+            child.add(
+                egui::Label::new(
+                    egui::RichText::new(if err { "⚠ file" } else { "🔗 file" })
+                        .small()
+                        .color(if err {
+                            egui::Color32::from_rgb(230, 160, 60)
+                        } else {
+                            child.visuals().weak_text_color()
+                        }),
+                )
+                .selectable(false),
+            )
+            .on_hover_text(match &card.source_error {
+                Some(e) => format!("Mirroring {}\n\n{e}", card.source.as_deref().unwrap_or("")),
+                None => format!(
+                    "Mirroring {}\nRead-only — edit the file instead.",
+                    card.source.as_deref().unwrap_or("")
+                ),
+            });
+        } else {
+            let label = if card.editing { "view" } else { "edit" };
+            if child
+                .add(egui::Button::new(label).frame(false).small())
+                .on_hover_text(if card.editing { "Preview" } else { "Edit" })
+                .clicked()
+            {
+                actions.push(CanvasAction::SetEditing(card.id, !card.editing));
+            }
         }
     }
 
@@ -1110,7 +1140,10 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
     ui.set_width(ui.available_width());
     match &card.kind {
         CardKind::Text => {
-            if card.editing {
+            // `source.is_none()`: a mirrored body belongs to the file, so the
+            // editor must not open even if `editing` was set before the file was
+            // attached — otherwise typing goes straight into the next refresh.
+            if card.editing && card.source.is_none() {
                 let edit_id = ui.make_persistent_id(("card_md_edit", card.id));
 
                 let title_resp = title_field(ui, card, actions);
@@ -1300,7 +1333,7 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
             }
         }
         CardKind::Code { lang } => {
-            if card.editing {
+            if card.editing && card.source.is_none() {
                 ui.horizontal(|ui| {
                     ui.label("lang:");
                     let lang_id = ui.make_persistent_id(("card_lang_edit", card.id));
@@ -1701,7 +1734,7 @@ fn card_menu(
     templates: &[String],
     actions: &mut Vec<CanvasAction>,
 ) {
-    if supports_edit(&card.kind) {
+    if supports_edit(&card.kind) && card.source.is_none() {
         let label = if card.editing { "Preview" } else { "Edit" };
         if ui.button(label).clicked() {
             actions.push(CanvasAction::SetEditing(card.id, !card.editing));
@@ -1720,6 +1753,34 @@ fn card_menu(
     {
         actions.push(CanvasAction::FitCard(card.id));
         ui.close_menu();
+    }
+    if matches!(card.kind, CardKind::Text | CardKind::Code { .. }) {
+        match card.source.is_some() {
+            false => {
+                if ui
+                    .button("Mirror a file…")
+                    .on_hover_text(
+                        "Show a file's contents in this card, kept up to date while \
+                         the document is open. The card becomes read-only — edit the \
+                         file itself.",
+                    )
+                    .clicked()
+                {
+                    actions.push(CanvasAction::PickSource(card.id));
+                    ui.close_menu();
+                }
+            }
+            true => {
+                if ui
+                    .button("Stop mirroring")
+                    .on_hover_text("Keep the text that's here and make the card editable again")
+                    .clicked()
+                {
+                    actions.push(CanvasAction::ClearSource(card.id));
+                    ui.close_menu();
+                }
+            }
+        }
     }
     if ui
         .button("Save as template")

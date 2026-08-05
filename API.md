@@ -79,6 +79,8 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `chart` | table | how the table is drawn as a chart (`{kind,label_col,value_cols,show_table}`), or `null` for a plain grid. Set via the chart sub-resource (below) |
 | `strokes` | sketch | read: `[{color:[r,g,b], width, points:[[x,y],…]}, …]`. Edit via the sketch sub-resource (below) |
 | `touched` | all | unix seconds when this card last changed (read-only; omitted entirely if it never has). The document's only timestamp — unlike `/api/changes` it survives a restart |
+| `source` | text, code | a file this card **mirrors**: `body` becomes a read-only live copy, refreshed while the document is open. Omitted when the card isn't mirroring |
+| `source_error` | text, code | why the last read failed (`null` when fine). Only present alongside `source` |
 
 **Group** — a labeled container that a set of cards belong to; drawn as a box you
 can drag by its header. Membership lives on each card's `group` field.
@@ -151,7 +153,7 @@ for a search hit that matched a **node title** rather than a card.
 POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
-POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, rows?, header?, pos?, size?, color?, font_scale?, fit?, image_base64?, inline_images?}
+POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, rows?, header?, pos?, size?, color?, font_scale?, fit?, image_base64?, inline_images?, source?}
   → 201 {"id":<new>}   | 404 if node doesn't exist
 ```
 `kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
@@ -181,7 +183,7 @@ PATCH /api/nodes/{id}              {title?, color?, bg?}
         color: tag color; bg: basket background color — both setting only
         (can't clear via API; use the app's Default to reset)
 
-PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, fit?, lang?, pos?, size?, items?, rows?, header?, inline_images?}
+PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, fit?, lang?, pos?, size?, items?, rows?, header?, inline_images?, source?}
   → 200 {<updated card>}   | 404
 ```
 Every field is optional; only those present are changed. `pos`/`size` are
@@ -613,6 +615,35 @@ isn't a number is a **gap**, not a zero: a line breaks across it and a bar is
 omitted, because plotting a blank status cell as 0 would invent a reading that
 was never taken. A lone value between two gaps still shows, as a dot.
 
+### Mirror a file (`source`)
+Point a **text** or **code** card at a file and its body becomes a **read-only
+live copy**, re-read while the document is open (checked every ~3 s; only files
+whose modification time changed are re-read).
+```
+POST  /api/nodes/{id}/cards        {kind:"text", title:"README", source:"/srv/app/README.md"}
+PATCH /api/nodes/{id}/cards/{cid}  {source:"/srv/app/README.md"}   attach or re-point
+PATCH /api/nodes/{id}/cards/{cid}  {source:""}                     detach, keeping the text
+```
+The mirrored text is stored in the document like any other body, so it is
+searchable, carries `#tags` and `key:: value`, and exports normally — the file
+stays authoritative and Trellis holds a cache of it.
+
+- **`body` is read-only while `source` is set.** `PATCH {"body":…}` returns
+  **409** rather than accepting an edit the next refresh would overwrite. Detach
+  first with `{"source":""}` — which keeps the text that was there.
+- **A failed read keeps the last good text** and reports why in `source_error`
+  (missing file, unmounted disk, a directory, not UTF-8, or over the 1 MB limit).
+  It recovers on its own when the file comes back.
+- Only text and code cards mirror. There is no write-back: edit the file.
+
+> **Read this before enabling LAN access.** A caller who can create cards can
+> point one at **any file this user can read**, and then fetch its contents back
+> through `GET /api/nodes/{id}/cards/{cid}` or `GET /api/export`. The API is
+> key-gated, so this is not a way past authentication — but it does widen what a
+> leaked key is worth from "all your notes" to "any file on the machine". A
+> directory allow-list is on the roadmap; until then, treat the API key as
+> equivalent to filesystem read access.
+
 ### Live updates (long-poll)
 Be woken the instant the document changes, instead of polling on a timer.
 ```
@@ -845,6 +876,16 @@ curl -s -X POST -H "X-API-Key: $KEY" $API/templates/rebuild
 # Move a card to another basket (group/dock membership is dropped).
 curl -s -X POST -H "X-API-Key: $KEY" \
      -d '{"node":965,"pos":[40,40]}' $API/nodes/7/cards/3/move
+
+# Mirror a file into a card: point it at the file, and the body tracks it.
+CID=$(curl -s -X POST -H "$K" -H 'Content-Type: application/json' \
+  -d '{"kind":"text","title":"README","source":"/srv/app/README.md","fit":true}' \
+  "$B/nodes/$NODE/cards" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+# Read it back — `source` and `source_error` tell you whether the mirror is healthy.
+curl -s -H "$K" "$B/nodes/$NODE/cards/$CID"
+# The body is the file's, so editing it is refused (409) until you detach:
+curl -s -X PATCH -H "$K" -H 'Content-Type: application/json' -d '{"source":""}' \
+  "$B/nodes/$NODE/cards/$CID"
 
 # React to what changes: long-poll for a revision, then ask what moved. Loop it,
 # carrying `rev` into the next wait and `seq` into the next changes call.

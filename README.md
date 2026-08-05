@@ -110,6 +110,14 @@ from the main cluster, and click or drag on it to jump there without zooming out
   it never freezes the UI. Files are **gzip-compressed** (RON format, `.ron`;
   image-heavy documents shrink dramatically) and older plain-text `.ron` files
   still open.
+- **Mirror a file in a card** — right-click a text or code card → **Mirror a
+  file…** to show a file's contents live, refreshed while the document is open.
+  Useful for a README, a config or a spec you want *beside* your notes rather
+  than copied into them: the file stays authoritative and the card is read-only
+  until you **Stop mirroring** (which keeps the text). The mirrored text is
+  searchable and exports like any other card. Agents get the same via `source`
+  on card create/PATCH. *Note: a card can mirror any file you can read, so treat
+  the API key as equivalent to filesystem read access — see [API.md](API.md).*
 - **Snip to card** (Tools → Snip to card) — capture a screen region straight
   into an image card in the current basket. **OCR all images** (Tools) extracts
   text from every image card that lacks it, making old scans searchable.

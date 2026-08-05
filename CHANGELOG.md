@@ -4,6 +4,35 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.78.0]
+
+### Added
+- **Mirror a file in a card.** Right-click a text or code card → **Mirror a
+  file…**, and its body becomes a **read-only live copy** of that file, kept up
+  to date while the document is open. Point one at a README, a config, a spec —
+  the file stays the single source of truth and Trellis shows it in context,
+  next to your notes about it. **Stop mirroring** keeps the text and hands the
+  card back to you.
+
+  The mirrored text is stored like any other body, so it is searchable, carries
+  `#tags` and `key:: value`, and exports normally. Over the API: `source` on card
+  create/PATCH, `{"source":""}` to detach. Editing a mirrored body is **refused**
+  (409) rather than silently overwritten by the next refresh.
+
+  A failed read keeps the last good text and says why (`source_error`) — a
+  mirror that empties itself because a disk was unmounted is worse than a stale
+  one — and it recovers on its own when the file comes back. Files are re-read
+  only when their modification time changes; only text and code cards can
+  mirror, up to 1 MB, UTF-8 only.
+
+  Not a log tailer: it polls every ~3 s and shows the file from the top.
+
+  > **Worth knowing before you enable LAN access.** A caller who can create cards
+  > can point one at any file you can read, then fetch it back through the API.
+  > The API is key-gated so this is not a way past authentication, but it widens
+  > what a leaked key is worth from "all your notes" to "any file on this
+  > machine". A directory allow-list is on the roadmap.
+
 ## [0.77.0]
 
 ### Added

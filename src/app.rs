@@ -715,6 +715,11 @@ pub struct TrellisApp {
     autosave: bool,
     /// When the document last changed, for the autosave idle-debounce.
     last_change: Option<Instant>,
+    /// When pointer cards (`Card::source`) were last checked for changes on
+    /// disk. Polled rather than watched: a `stat` per pointer every few seconds
+    /// costs microseconds, while inotify/FSEvents/ReadDirectoryChangesW is three
+    /// platform implementations and a watcher dependency for the same answer.
+    last_source_poll: Option<Instant>,
     /// A background save is in flight (guards against overlapping saves).
     saving: bool,
     /// Background-save completion channel: (path, result, revision-at-save-start).
@@ -1132,6 +1137,7 @@ impl TrellisApp {
             api_lan,
             api_status,
             show_settings: false,
+            last_source_poll: None,
             show_requirements: false,
             req_scan: Vec::new(),
             req_note: String::new(),
@@ -1412,6 +1418,83 @@ impl TrellisApp {
     }
 
     /// Turn finished snips into image cards in their target basket.
+    /// Re-read pointer cards whose file changed on disk.
+    ///
+    /// Runs on a timer rather than every frame, and `stat`s before reading: the
+    /// common case is "nothing changed", which must cost almost nothing.
+    ///
+    /// Refreshing is **not** recorded as a document change by the user — it is
+    /// recorded as one so clients and autosave see it (the cached body really did
+    /// change), but the file, not Trellis, is the author.
+    fn pump_sources(&mut self, force: bool) {
+        const POLL: Duration = Duration::from_secs(3);
+
+        // Ask for a wake-up while any card mirrors a file. egui only calls
+        // `update` when something requests a repaint, so on an idle window this
+        // poll would otherwise never run — the file changed on disk and the card
+        // sat there stale until the user happened to move the mouse. Requested
+        // before the timer check, or the first early return silences it forever.
+        let any_source =
+            self.doc.nodes.values().any(|n| n.cards.iter().any(|c| c.source.is_some()));
+        if any_source {
+            self.egui_ctx.request_repaint_after(POLL);
+        }
+
+        if !force {
+            match self.last_source_poll {
+                Some(t) if t.elapsed() < POLL => return,
+                _ => {}
+            }
+        }
+        self.last_source_poll = Some(Instant::now());
+        if !any_source {
+            return;
+        }
+
+        // Collect first: reading files while holding a borrow on the document
+        // would mean re-borrowing it mutably per card.
+        let mut stale: Vec<(NodeId, CardId, String)> = Vec::new();
+        for (nid, node) in &self.doc.nodes {
+            for card in &node.cards {
+                let Some(path) = &card.source else { continue };
+                let now = crate::model::source_mtime(path);
+                // Re-read when the file changed, when it has never been read, or
+                // when it is currently in error (so a file that comes back —
+                // an unmounted disk, a file recreated — recovers on its own).
+                let changed = match (now, card.source_mtime) {
+                    (Some(a), Some(b)) => a != b,
+                    _ => true,
+                };
+                if force || changed || card.source_error.is_some() {
+                    stale.push((*nid, card.id, path.clone()));
+                }
+            }
+        }
+
+        for (nid, cid, path) in stale {
+            let result = crate::model::read_source(&path);
+            let Some(card) = self.doc.card_mut(nid, cid) else { continue };
+            let before = (card.body.clone(), card.source_error.clone());
+            match result {
+                Ok((text, mtime)) => {
+                    card.body = text;
+                    card.source_mtime = Some(mtime);
+                    card.source_error = None;
+                }
+                Err(e) => {
+                    // Keep the last good text: a mirror that empties itself
+                    // because a disk was unmounted is worse than a stale one.
+                    card.source_error = Some(e);
+                }
+            }
+            if before != (self.doc.card(nid, cid).map(|c| c.body.clone()).unwrap_or_default(),
+                          self.doc.card(nid, cid).and_then(|c| c.source_error.clone()))
+            {
+                self.note_card(nid, cid, crate::changelog::Op::Updated, "source");
+            }
+        }
+    }
+
     fn pump_snip(&mut self) {
         let done: Vec<_> = std::iter::from_fn(|| self.snip_rx.try_recv().ok()).collect();
         for (node, res) in done {
@@ -2447,6 +2530,8 @@ impl TrellisApp {
                 upd(c, if spec.is_some() { "chart" } else { "chart.clear" })
             }
             CanvasAction::TableImport(c) => upd(c, "rows"),
+            CanvasAction::PickSource(c) => upd(c, "source"),
+            CanvasAction::ClearSource(c) => upd(c, "source"),
             CanvasAction::DockCard(c, _) => upd(c, "dock"),
             CanvasAction::DetachCard(c) => upd(c, "dock"),
 
@@ -3022,6 +3107,28 @@ impl TrellisApp {
                 CanvasAction::MoveGroup(g, delta) => self.doc.move_group(node, g, delta),
                 CanvasAction::SetGroupTitle(g, t) => self.doc.set_group_title(node, g, t),
                 CanvasAction::SetGroupColor(g, c) => self.doc.set_group_color(node, g, c),
+                CanvasAction::PickSource(cid) => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Mirror a file in this card")
+                        .pick_file()
+                    {
+                        if let Some(c) = self.doc.card_mut(node, cid) {
+                            c.source = Some(path.to_string_lossy().to_string());
+                            c.source_mtime = None; // force the next poll to read it
+                            c.source_error = None;
+                            c.editing = false;
+                        }
+                        // Don't wait up to 3s for the timer to notice.
+                        self.pump_sources(true);
+                    }
+                }
+                CanvasAction::ClearSource(cid) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        c.source = None;
+                        c.source_mtime = None;
+                        c.source_error = None;
+                    }
+                }
                 CanvasAction::DockCard(child, anchor) => self.doc.dock_card(node, child, anchor),
                 CanvasAction::DetachCard(cid) => self.doc.detach_card(node, cid),
                 CanvasAction::ResetView => {
@@ -4409,6 +4516,18 @@ impl TrellisApp {
                             "…then ask what actually changed (re-read only that)",
                             format!("curl -H 'X-API-Key: {k}' '{a}/changes?since=0'"),
                         ),
+                        (
+                            "Mirror a file in a card (read-only, tracks the file)",
+                            format!(
+                                "curl -X POST -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                 -d '{{\"kind\":\"text\",\"title\":\"README\",\
+                                 \"source\":\"/srv/app/README.md\",\"fit\":true}}' \\\n  \
+                                 {a}/nodes/1/cards\n\
+                                 # detach later (keeps the text):\n\
+                                 curl -X PATCH -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                 -d '{{\"source\":\"\"}}' {a}/nodes/1/cards/2"
+                            ),
+                        ),
                     ] {
                         ui.small(egui::RichText::new(what).strong());
                         ui.code(cmd);
@@ -4436,8 +4555,9 @@ impl TrellisApp {
                         "GET    /api/graph                         (wiki-link nodes + edges)",
                         "GET    /api/nodes/{id}/cards",
                         "GET    /api/nodes/{id}/cards/{cid}        (one card, without the whole basket)",
-                        "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, size?, fit?, image_base64?, inline_images?}",
-                        "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, size?, items?, …}",
+                        "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, size?, fit?, image_base64?, inline_images?, source?}",
+                        "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, size?, items?, source?, …}",
+                        "         source: mirror a file (body read-only, PATCH body → 409); source:\"\" detaches",
                         "DELETE /api/nodes/{id}/cards/{cid}",
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
                         "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
@@ -5542,6 +5662,7 @@ impl eframe::App for TrellisApp {
         // Apply any finished background OCR results.
         self.pump_ocr();
         // Turn finished region-snips into image cards.
+        self.pump_sources(false);
         self.pump_snip();
 
         // Apply finished background saves.

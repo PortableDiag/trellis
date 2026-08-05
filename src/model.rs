@@ -590,6 +590,26 @@ pub struct Card {
     /// readable in both directions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touched: Option<u64>,
+    /// A file this card mirrors. When set, `body` is a **read-only cache** of
+    /// that file's contents, refreshed while the document is open.
+    ///
+    /// Deliberately a field on an ordinary text/code card rather than a new
+    /// `CardKind`: a new variant costs ~180 exhaustive match arms across the
+    /// model, API, canvas and app, and buys nothing here — a mirrored file is
+    /// still markdown or still code, and should render, search, export, and carry
+    /// `#tags` exactly like any other card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Modification time of `source` when it was last read, so a poll can tell
+    /// whether anything changed without re-reading the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_mtime: Option<u64>,
+    /// Why the last read failed, or `None` if it succeeded. Kept in the document
+    /// so reopening still shows "file not found" rather than silently presenting
+    /// stale content as current. `body` keeps the last good read either way —
+    /// losing the cached text because a disk was unmounted would be worse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_error: Option<String>,
     /// Membership in a labeled group container. `None` = ungrouped.
     #[serde(default)]
     pub group: Option<GroupId>,
@@ -632,6 +652,9 @@ impl Card {
             pos,
             // A brand-new card has never been *changed*; the first edit stamps it.
             touched: None,
+            source: None,
+            source_mtime: None,
+            source_error: None,
             size: egui::vec2(240.0, 160.0),
             title: String::new(),
             body: String::new(),
@@ -936,6 +959,56 @@ pub struct Node {
 
 fn default_true() -> bool {
     true
+}
+
+
+/// Largest file a pointer card will mirror.
+///
+/// The body is held in memory, rendered as markdown, indexed by search and
+/// written into the document, so this is a practical ceiling rather than a
+/// security boundary — pointing a card at a 2 GB log should fail cleanly instead
+/// of taking the app down with it.
+pub const SOURCE_MAX_BYTES: u64 = 1_048_576;
+
+/// Read a file for a pointer card: its text and modification time.
+///
+/// Binary files are refused rather than rendered as mojibake — the check is
+/// simply whether it is valid UTF-8, which is also what makes the result safe to
+/// put in a `String`.
+pub fn read_source(path: &str) -> Result<(String, u64), String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    if meta.is_dir() {
+        return Err(format!("{path} is a directory"));
+    }
+    if meta.len() > SOURCE_MAX_BYTES {
+        return Err(format!(
+            "{path} is {} KB — the limit is {} KB",
+            meta.len() / 1024,
+            SOURCE_MAX_BYTES / 1024
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let text = String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8 text"))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok((text, mtime))
+}
+
+/// The modification time of a pointer's file, for deciding whether to re-read.
+/// A `stat` is cheap enough to run over every pointer card on a timer; reading
+/// the file is not.
+pub fn source_mtime(path: &str) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 /// Font used by the PDF/image exporters (also embedded in the PDF).

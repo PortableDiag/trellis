@@ -199,6 +199,7 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
                 (patch.header.is_some(), "header"),
                 (patch.font_scale.is_some(), "font_scale"),
                 (patch.inline_images.is_some(), "inline_images"),
+                (patch.source.is_some(), "source"),
             ] {
                 if present {
                     c = c.field(name);
@@ -436,6 +437,9 @@ pub struct AddCardInput {
     /// cards aren't unreadable little squares. No effect on image cards.
     #[serde(default)]
     fit: bool,
+    /// Mirror a file: the body becomes a read-only live copy of it.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 fn default_kind() -> String {
@@ -493,6 +497,11 @@ pub struct UpdateCardInput {
     /// No effect on image cards.
     #[serde(default)]
     fit: bool,
+    /// Mirror a file: the card's body becomes a **read-only** live copy of it,
+    /// refreshed while the document is open. Send `""` to detach (the last
+    /// content stays, and the card becomes editable again).
+    #[serde(default)]
+    source: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1336,6 +1345,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         c.title = input.title;
                         c.body = input.body;
                         c.editing = false;
+                        // The body is filled in by the app's refresh pass; the
+                        // request only names the file.
+                        c.source = input.source.filter(|s| !s.trim().is_empty());
                         if let Some(col) = input.color {
                             c.color = col;
                         }
@@ -1383,7 +1395,33 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     c.title = t;
                 }
                 if let Some(b) = patch.body {
+                    // A mirrored body belongs to the file. Silently accepting an
+                    // edit that the next refresh overwrites would look like data
+                    // loss, so it's refused rather than ignored.
+                    if c.source.is_some() {
+                        return (
+                            false,
+                            ApiResponse::err(
+                                409,
+                                "this card mirrors a file — its body is read-only. \
+                                 Send \"source\": \"\" to detach it first.",
+                            ),
+                        );
+                    }
                     c.body = b;
+                }
+                if let Some(s) = patch.source {
+                    let s = s.trim().to_string();
+                    if s.is_empty() {
+                        // Detach: keep the text that's there, drop the link.
+                        c.source = None;
+                        c.source_mtime = None;
+                        c.source_error = None;
+                    } else {
+                        c.source = Some(s);
+                        // Force the next poll to read it.
+                        c.source_mtime = None;
+                    }
                 }
                 if let Some(col) = patch.color {
                     c.color = col;
@@ -2017,6 +2055,10 @@ pub(crate) fn card_json(c: &Card) -> Value {
     if let Some(t) = c.touched {
         v["touched"] = json!(t);
     }
+    if let Some(s) = &c.source {
+        v["source"] = json!(s);
+        v["source_error"] = json!(c.source_error);
+    }
     let props = c.properties();
     if !props.is_empty() {
         v["properties"] = json!(props
@@ -2218,6 +2260,98 @@ mod tests {
         assert!(ron.contains("touched"));
         let back: Document = ron::from_str(&ron).unwrap();
         assert_eq!(back.card(n, c).unwrap().touched, Some(1_785_950_176));
+    }
+
+
+    /// A mirrored body belongs to the file. Accepting a body edit that the next
+    /// refresh silently overwrites would look exactly like data loss, so it is
+    /// refused with a code the caller can act on.
+    #[test]
+    fn editing_a_mirrored_body_is_refused_not_ignored() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "Basket".into());
+        let c = doc.add_card(n, emath::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().source = Some("/tmp/whatever.md".into());
+        doc.card_mut(n, c).unwrap().body = "from the file".into();
+
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"body":"my edit"}"#).unwrap();
+        let (changed, resp) = process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        assert_eq!(resp.status, 409);
+        assert!(!changed);
+        assert_eq!(doc.card(n, c).unwrap().body, "from the file", "left alone");
+    }
+
+    /// Detaching keeps the text that was mirrored — the point is to capture a
+    /// snapshot, not to empty the card.
+    #[test]
+    fn detaching_a_source_keeps_the_text_and_reopens_editing() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "Basket".into());
+        let c = doc.add_card(n, emath::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        {
+            let card = doc.card_mut(n, c).unwrap();
+            card.source = Some("/tmp/whatever.md".into());
+            card.source_mtime = Some(123);
+            card.source_error = Some("gone".into());
+            card.body = "mirrored text".into();
+        }
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"source":""}"#).unwrap();
+        let (changed, resp) = process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        assert_eq!(resp.status, 200);
+        assert!(changed);
+        let card = doc.card(n, c).unwrap();
+        assert_eq!(card.source, None);
+        assert_eq!(card.source_mtime, None);
+        assert_eq!(card.source_error, None, "a stale error must not outlive the link");
+        assert_eq!(card.body, "mirrored text", "the snapshot stays");
+
+        // …and a body edit is accepted again.
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"body":"mine now"}"#).unwrap();
+        let (_c, resp) = process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        assert_eq!(resp.status, 200);
+        assert_eq!(doc.card(n, c).unwrap().body, "mine now");
+    }
+
+    #[test]
+    fn source_is_reported_on_read_only_when_set() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "Basket".into());
+        let c = doc.add_card(n, emath::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        assert!(card_json(doc.card(n, c).unwrap()).get("source").is_none());
+
+        doc.card_mut(n, c).unwrap().source = Some("/tmp/notes.md".into());
+        doc.card_mut(n, c).unwrap().source_error = Some("no such file".into());
+        let v = card_json(doc.card(n, c).unwrap());
+        assert_eq!(v["source"], "/tmp/notes.md");
+        assert_eq!(v["source_error"], "no such file", "a broken mirror says so");
+    }
+
+    /// The reader must refuse what it can't render rather than producing mojibake
+    /// or loading a huge file into a card body.
+    #[test]
+    fn the_source_reader_refuses_directories_binaries_and_huge_files() {
+        use crate::model::read_source;
+        let dir = std::env::temp_dir().join(format!("trellis-src-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(read_source(&dir.to_string_lossy()).unwrap_err().contains("directory"));
+        assert!(read_source("/definitely/not/here.md").is_err());
+
+        let bin = dir.join("bin");
+        std::fs::write(&bin, [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        assert!(read_source(&bin.to_string_lossy()).unwrap_err().contains("UTF-8"));
+
+        let big = dir.join("big");
+        std::fs::write(&big, vec![b'x'; (crate::model::SOURCE_MAX_BYTES + 1) as usize]).unwrap();
+        assert!(read_source(&big.to_string_lossy()).unwrap_err().contains("limit"));
+
+        let ok = dir.join("ok.md");
+        std::fs::write(&ok, "# hello").unwrap();
+        let (text, mtime) = read_source(&ok.to_string_lossy()).unwrap();
+        assert_eq!(text, "# hello");
+        assert!(mtime > 0, "a real mtime, so a poll can tell when it changes");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Reads must never enter the log — a `GET` that recorded a change would wake
