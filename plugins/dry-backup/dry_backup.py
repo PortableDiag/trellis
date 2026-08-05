@@ -26,6 +26,7 @@ Exit non-zero on failure.
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -109,17 +110,41 @@ def dry(key, op, **body):
     return out.get("data", {})
 
 
-def check_import_report(data, what):
+def check_import_report(data, what, expected):
     """A 200 from `create` does not mean every item landed.
 
-    The importer reports per-item outcomes inside `data.report`; trusting the
-    status code alone would report a successful backup that silently dropped
-    rows. Fail loudly instead.
+    Per the JSON CRUD guide there are **two** places a create can fail without
+    the status code saying so, and both have to be checked:
+
+    - `data.errors` — identifier-resolution problems caught *before* the import
+      is delegated (a bad type, folder or field name).
+    - `data.report` — the importer's line-by-line log, which carries
+      `Error for type/folder/field: …` lines and a closing `Imported Items: N`.
+
+    Counting `Imported Items` against what was sent is the part that actually
+    protects a backup: a partial import otherwise looks identical to a complete
+    one, and this tool's whole promise is that what it says it copied, it copied.
     """
+    errors = data.get("errors") or []
+    if errors:
+        die(f"Dry could not resolve identifiers for {what}: {errors[:3]}")
+
     report = data.get("report") or []
-    bad = [line for line in report if "Error" in line or "error for" in line.lower()]
+    bad = [line for line in report if "error" in line.lower()]
     if bad:
         die(f"Dry reported failures importing {what}: {' | '.join(bad[:3])}")
+
+    imported = None
+    for line in report:
+        m = re.search(r"Imported Items:\s*(\d+)", line)
+        if m:
+            imported = int(m.group(1))
+    if imported is None:
+        die(f"Dry did not report how many {what} it imported — refusing to "
+            f"claim success. Report: {report[:4]}")
+    if imported != expected:
+        die(f"Dry imported {imported} of {expected} {what} — the rest were "
+            f"silently dropped. Report: {report[:4]}")
     return report
 
 
@@ -250,7 +275,7 @@ def main():
         for i in range(0, len(items), PAGE):
             batch = items[i:i + PAGE]
             data = dry(key, "create", space=space, items=batch)
-            check_import_report(data, label)
+            check_import_report(data, label, len(batch))
             sent += len(batch)
             print(f"  sent {len(batch)} {label} ({i + len(batch)}/{len(items)})")
 
