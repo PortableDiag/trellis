@@ -218,4 +218,18 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          # Confirm each file is actually on the release rather than trusting the
+          # upload's exit code. A release that reports success while carrying no
+          # binaries looks exactly like a finished build until someone tries to
+          # download one — and the tag has already been pushed by then.
+          for f in dist/*; do
+            name=$(basename "$f")
+            if ! gh release view "${GITHUB_REF_NAME}" --json assets \
+                 -q '.assets[].name' | grep -qxF "$name"; then
+              echo "::error::$name did not appear on release ${GITHUB_REF_NAME}"
+              exit 1
+            fi
+            echo "attached: $name"
+          done
