@@ -1335,7 +1335,22 @@ impl TrellisApp {
                 let _ = cmd.resp.send(resp);
                 continue;
             }
+            // `fit` in the request is applied by `process` from an estimate.
+            // Note the target before the request is consumed, then re-measure
+            // below with the real fonts — we're on the UI thread here.
+            let fit_target = api::fit_request(&cmd.req);
             let (changed, resp) = api::process(&mut self.doc, cmd.req);
+            if let Some((node, card)) = fit_target {
+                // On create the id only exists now, in the response.
+                let card = card.or_else(|| {
+                    serde_json::from_str::<serde_json::Value>(&resp.body)
+                        .ok()
+                        .and_then(|v| v["id"].as_u64())
+                });
+                if let Some(card) = card {
+                    self.refit_card_precise(node, card);
+                }
+            }
             if changed {
                 self.mark_dirty();
                 // A deleted node may have been the selection.
@@ -1742,6 +1757,22 @@ impl TrellisApp {
 
     fn target_path(&self) -> PathBuf {
         self.doc_path.clone().unwrap_or_else(|| self.autosave_path.clone())
+    }
+
+    /// Re-size a card with the real font metrics, the way the right-click
+    /// "Fit to content" does.
+    ///
+    /// The API's `fit` is applied inside `api::process`, which can only estimate
+    /// (no font context). For Text cards that estimate runs tall, so an
+    /// API-created card carried a strip of blank card under its text that
+    /// vanished the moment you used the menu action. Same measurement for both
+    /// paths now.
+    fn refit_card_precise(&mut self, node: NodeId, card: CardId) {
+        let Some(c) = self.doc.card(node, card) else { return };
+        let Some(size) = fit_card_size(&self.egui_ctx, c) else { return };
+        if let Some(c) = self.doc.card_mut(node, card) {
+            c.size = size;
+        }
     }
 
     /// Take a version-history snapshot using this instance's retention
@@ -5646,6 +5677,57 @@ fn default_autosave_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gap under an API-created card: `Card::fit_size` has no font context so
+    /// it *estimates* the wrapped height, and estimates tall. The right-click
+    /// "Fit to content" measures the real galley and comes out shorter — which is
+    /// why using the menu action on an API-created card visibly shrank it.
+    ///
+    /// `pump_api` now re-measures with `fit_card_size` after `api::process`, so
+    /// both paths land on the same height. This pins the two facts that matter:
+    /// the precise height is never taller than the estimate (a taller one would
+    /// clip text), and for wrapping prose it is actually *shorter*, i.e. the gap
+    /// this fixes was real.
+    #[test]
+    fn precise_fit_is_never_taller_than_the_estimate_and_closes_the_gap() {
+        let ctx = egui::Context::default();
+        // Fonts are lazily built on the first frame; lay out inside one.
+        let _ = ctx.run(Default::default(), |_| {});
+
+        let body = "This is a paragraph of ordinary prose that wraps across several \
+                    lines inside the card.\n\n- a bullet\n- another bullet\n- a third one";
+        let mut card = crate::model::Card::new(
+            1,
+            egui::pos2(0.0, 0.0),
+            crate::model::CardKind::Text,
+        );
+        card.title = "Fit check".into();
+        card.body = body.into();
+
+        let estimate = card.fit_size().expect("text cards have an estimate");
+        let precise = fit_card_size(&ctx, &card).expect("text cards can be measured");
+
+        assert_eq!(precise.x, estimate.x, "width comes from the estimate either way");
+        assert!(
+            precise.y <= estimate.y,
+            "precise {} must not exceed the estimate {} (taller would clip)",
+            precise.y,
+            estimate.y
+        );
+        assert!(
+            precise.y < estimate.y,
+            "wrapping prose should measure shorter than the estimate — otherwise \
+             there was no gap to fix and this regression test proves nothing"
+        );
+
+        // A non-text card has no galley to measure; it keeps the estimate.
+        let table = crate::model::Card::new(
+            2,
+            egui::pos2(0.0, 0.0),
+            crate::model::CardKind::Table { table: crate::model::TableData::empty(2, 2) },
+        );
+        assert_eq!(fit_card_size(&ctx, &table), table.fit_size());
+    }
 
     /// Templates saved before the Templates basket existed are stored as bare
     /// `CardExport` objects. They must keep loading — a format break here would

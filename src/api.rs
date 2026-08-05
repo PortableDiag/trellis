@@ -46,6 +46,8 @@ pub enum ApiRequest {
     SetExpanded { id: NodeId, expanded: bool, recursive: bool },
     AddCard { node: NodeId, input: AddCardInput },
     UpdateCard { node: NodeId, card: u64, patch: UpdateCardInput },
+    // ↑ Both accept `fit`. `process` applies `Card::fit_size`, which is only an
+    // estimate; the app re-fits precisely afterwards — see `fit_request`.
     DeleteCard { node: NodeId, card: u64 },
     // Reorder a card within its basket (draw / autosort order).
     MoveCard { node: NodeId, card: u64, mv: MoveCardInput },
@@ -111,6 +113,25 @@ pub enum ApiRequest {
     // Stamp a master card for every template that lacks a live one.
     TemplateRebuild,
     TemplateDelete(usize),
+}
+
+/// Which card a request asked to size to its content, if any.
+///
+/// `process` applies [`crate::model::Card::fit_size`], which is an estimate: it
+/// has no font context, so for a Text card it guesses the wrapped height and
+/// guesses tall, leaving a strip of empty card under the text. The app loop runs
+/// on the UI thread where the real fonts *are* available, so after `process` it
+/// re-measures — which is what the right-click "Fit to content" has always done.
+/// This is how the two paths are kept from disagreeing.
+///
+/// `None` for the card id on `AddCard`: it doesn't exist until `process` has run,
+/// so the caller reads the new id out of the response.
+pub fn fit_request(req: &ApiRequest) -> Option<(NodeId, Option<u64>)> {
+    match req {
+        ApiRequest::AddCard { node, input } if input.fit => Some((*node, None)),
+        ApiRequest::UpdateCard { node, card, patch } if patch.fit => Some((*node, Some(*card))),
+        _ => None,
+    }
 }
 
 pub struct ApiResponse {

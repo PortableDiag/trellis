@@ -4,6 +4,19 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.74.1]
+
+### Fixed
+- **`"fit": true` over the API left a strip of empty card under the text**, which
+  disappeared the moment you used right-click → *Fit to content* on the same
+  card. Two different measurements were in play: the menu action lays out the
+  real text with egui's fonts, while the API path could only *estimate* the
+  wrapped height — and it estimated tall. The estimate exists because
+  `Card::fit_size` has to stay font-free, but API requests are applied on the UI
+  thread, where the real fonts *are* available, so the card is now re-measured
+  the same way the menu action does. Both paths give the same size; agent-created
+  cards no longer arrive with a gap.
+
 ## [0.74.0]
 
 > **One-way format change.** Documents saved by this version store image bytes

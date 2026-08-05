@@ -166,7 +166,11 @@ text card's body**: pass an array of base64 file bytes, then reference each in
 they export as data URIs in HTML/Markdown and show on the card's PDF page.
 **`fit: true`** sizes the card to fit its content (overrides `size`), so a card
 comes out readable instead of a tiny square — recommended for agent-created
-cards. No effect on image cards.
+cards. No effect on image cards. Since 0.74.1 it measures text with the real
+fonts, so it gives exactly the size the app's right-click → *Fit to content*
+does; before that it estimated, and estimated tall, leaving a gap under the
+text. Note it sizes to the **title bar** too, so a long title widens the card
+even when the body is short.
 
 ### Update
 ```
