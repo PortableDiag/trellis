@@ -478,7 +478,11 @@ UI-only, since it needs a human to select the region on screen.)
 Browse the automatic save-time snapshots and restore one (replaces the current
 document in memory — save to keep it). Snapshots live in `.<name>.history/`.
 ```
-GET  /api/history                 → 200 {"count":N,"snapshots":[{file,when,bytes}, …]}   (newest first)
+GET  /api/history                 → 200 {"count":N, "keep":N, "min_gap_mins":N,
+                                          "snapshots":[{file,when,bytes}, …]}   (newest first)
+     keep / min_gap_mins are the retention settings (Settings → Version history):
+     how many snapshots are kept and the minimum gap between them. Read-only here —
+     they are set in the app, like the backup schedule.
 POST /api/history/restore  {file} → 200 {"restored":true}   | 400 bad name | 404 not found
 ```
 
@@ -676,6 +680,9 @@ curl -s -H "X-API-Key: $KEY" "$API/search?q=agenda"
 
 # Rename / retag a node
 curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"title":"Renamed","color":[59,130,246]}' $API/nodes/$NID
+
+# Version history: list the snapshots and see the retention that governs them
+curl -s -H "X-API-Key: $KEY" $API/history        # {count, keep, min_gap_mins, snapshots:[…]}
 
 # Read back the one card you just wrote (rather than the whole basket)
 curl -s -H "X-API-Key: $KEY" $API/nodes/$NID/cards/$CID

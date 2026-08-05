@@ -1613,7 +1613,16 @@ impl TrellisApp {
                         })
                     })
                     .collect();
-                Some(api::ApiResponse::ok(serde_json::json!({ "count": snaps.len(), "snapshots": snaps })))
+                // Retention is reported alongside the list, the same way
+                // `GET /api/backup` reports its schedule: settings are written in
+                // the app, but an agent should be able to see what governs the
+                // snapshots it's looking at (and why an expected one is gone).
+                Some(api::ApiResponse::ok(serde_json::json!({
+                    "count": snaps.len(),
+                    "keep": self.history_keep,
+                    "min_gap_mins": self.history_gap_mins,
+                    "snapshots": snaps,
+                })))
             }
             api::ApiRequest::HistoryRestore(file) => {
                 // Guard against path traversal: accept a bare snapshot filename only.
@@ -3978,7 +3987,7 @@ impl TrellisApp {
                         "POST   /api/ocr                           (OCR all un-OCR'd images)",
                         "GET    /api/export?format=markdown|html|json|pdf|png|gif",
                         "GET    /api/wait?rev=<n>                  (long-poll for changes)",
-                        "GET    /api/history                       (version snapshots)",
+                        "GET    /api/history                       (version snapshots + keep / min_gap_mins retention)",
                         "POST   /api/history/restore     {file}    (restore a snapshot)",
                         "GET    /api/backup                        (status)",
                         "POST   /api/backup/run                    (back up now)",

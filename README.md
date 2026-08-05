@@ -86,7 +86,9 @@ from the main cluster, and click or drag on it to jump there without zooming out
   its content, then lays the whole basket out in a tidy, non-overlapping grid.
 - **Fit to content** — right-click a card → **Fit to content** resizes just that card
   so its text/items/table are fully readable (no more unreadable little squares). Agents
-  get the same via `"fit": true` on card create/update.
+  get the same via `"fit": true` on card create/update, and it gives the identical
+  size either way. Text is measured as it actually renders — a Markdown heading is
+  taller than body text, and a long note is sized to fit rather than cut off.
 - **Templates** — right-click a card → **Save as template** to reuse a card you make often
   (e.g. a *Today's Todos* checklist); right-click the canvas → **Insert template** to drop a
   fresh copy at the click point. Saving a template also puts a **master card** for it in a

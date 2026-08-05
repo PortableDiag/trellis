@@ -4,6 +4,15 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.74.3]
+
+### Added
+- **`GET /api/history` reports the retention settings** — `keep` and
+  `min_gap_mins` alongside the snapshot list, so an agent can see what governs
+  the snapshots it's looking at (and why an expected one is no longer there).
+  Read-only, matching how `GET /api/backup` reports its schedule; both are set
+  in the app.
+
 ## [0.74.2]
 
 ### Fixed
