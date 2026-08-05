@@ -226,6 +226,19 @@ from the main cluster, and click or drag on it to jump there without zooming out
   Enable it in **Tools → Settings**, where **Examples** gives you copy-paste
   `curl` commands already filled in with this instance's host, port and key; see
   [API.md](API.md).
+- **Plugins** (**Tools → Plugins…**) — third-party integrations that are *not*
+  Trellis code. A plugin is a separate program Trellis launches, which talks back
+  over the same agent API; because it runs out-of-process, one that crashes can't
+  damage your document. Each plugin **declares what access it needs** and Trellis
+  states it in plain words — *"wants to read your whole Personal.ron document"* —
+  before you approve it. You approve a **scope**, once: Trellis mints and stores
+  the token itself, so there is no credential to copy, paste or rotate, and
+  **Revoke** stops it working immediately. A read-only plugin is enforced as
+  read-only by the API, not merely asked to behave. Plugins run from Tools →
+  Plugins or from a basket's right-click menu, and live per instance (see
+  [Separate documents](#separate-documents-side-by-side)). Worked example:
+  [`plugins/dry-backup/`](plugins/dry-backup/README.md), which copies a document
+  into a [Dry](https://dry.ai) space and can be re-run without duplicating.
 - **Web clipper** — a small Chrome/Edge extension (`web-clipper/`) clips the
   current page or your text selection into a Trellis basket over the LAN API.
 - **Companion mobile app** — a native Android viewer/capture app talks to the
@@ -348,6 +361,8 @@ to render inline text-color spans; edit it there, not the crates.io copy.
 
 - [API.md](API.md) — the localhost agent HTTP API.
 - [web-clipper/README.md](web-clipper/README.md) — the Chrome/Edge clipper extension.
+- [plugins/dry-backup/README.md](plugins/dry-backup/README.md) — the Dry backup
+  plugin, and the plugin contract it demonstrates.
 - [docs/VR-PROPOSAL.md](docs/VR-PROPOSAL.md) — proposal for a VR client (separate
   side project; talks to the agent API rather than embedding the desktop app).
 - [CHANGELOG.md](CHANGELOG.md) — version history.

@@ -4,6 +4,33 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.80.0]
+
+### Added
+- **Plugins** (*Tools → Plugins…*) — third-party integrations that aren't Trellis
+  code. A plugin is a separate program Trellis launches, which talks back over the
+  same API an agent uses. Out-of-process on purpose: a plugin that crashes is a
+  non-zero exit code in a log pane, not a lost document — and it means there's no
+  second data API to keep in sync with the first.
+
+  **You approve a scope, once, in plain words.** A plugin declares what it needs
+  and Trellis states it as a sentence — *"wants to read your whole Personal.ron
+  document"* — before anything runs. Trellis then mints and stores the token
+  itself; you never see, copy or rotate a credential, and **Revoke** kills it
+  immediately. **The scope is enforced, not trusted**: a read-only plugin is
+  refused on any write by the API before the request reaches your document, and a
+  plugin confined to one basket is refused outside it.
+
+  Plugins run from Tools → Plugins or from a basket's right-click menu, and live
+  per instance, so approving one for personal notes doesn't approve it for work.
+
+- **A Dry backup plugin** (`plugins/dry-backup/`) — copies a document's baskets
+  and cards into a [Dry](https://dry.ai) space. One-way and **safe to re-run**:
+  items are keyed by their Trellis id, so a second run updates rather than
+  duplicating, and nothing is ever deleted from Dry. Run it on the whole document
+  or right-click a single basket. It asks only for read access — and gets only
+  read access.
+
 ## [0.79.0]
 
 ### Fixed

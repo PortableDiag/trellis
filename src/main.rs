@@ -13,6 +13,7 @@ mod changelog;
 mod deps;
 mod images;
 mod model;
+mod plugins;
 mod tree;
 
 use std::path::PathBuf;

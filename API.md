@@ -707,6 +707,25 @@ same place, so they cannot disagree.
   no patch to misapply — and it is why consecutive identical changes collapse
   into one entry (a card drag is *one* `moved`, not one per frame).
 
+## Plugin tokens
+
+Besides the instance key, the API accepts **tokens minted for approved plugins**
+(*Tools → Plugins…*). They are ordinary credentials — same `X-API-Key` header —
+but **scoped**, and the scope is enforced here rather than trusted:
+
+- A **read-only** plugin's token is refused on anything but `GET`, with
+  `403 {"error":"plugin '<name>' has read-only access to this document"}`. This is
+  checked before the request reaches the document.
+- A plugin confined to a **subtree** may only act on that node and its
+  descendants. A request that names no node is **refused** rather than allowed
+  through, except for the structural reads it needs to orient itself
+  (`/api/health`, `/api/instance`, `/api/tree`, `/api/nodes` — titles and shape,
+  never card content). `403 {"error":"outside the basket this plugin was given
+  access to"}`.
+
+Plugin tokens are prefixed `plug_` so they're tellable from the instance key at a
+glance. Revoking a plugin deletes its token and takes effect immediately.
+
 ## Errors
 
 All errors return `{"error":"<message>"}` with the status code:

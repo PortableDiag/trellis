@@ -25,6 +25,10 @@ use tiny_http::Method;
 pub struct ApiCommand {
     pub req: ApiRequest,
     pub resp: SyncSender<ApiResponse>,
+    /// The plugin scope this request arrived under, or `None` for the instance's
+    /// own key. The subtree half of a scope needs the document to resolve
+    /// ancestry, so it is checked in the app loop rather than on this thread.
+    pub scope: Option<crate::plugins::Scope>,
 }
 
 /// A parsed, validated API request. Document access happens on the UI thread.
@@ -133,6 +137,53 @@ pub fn fit_request(req: &ApiRequest) -> Option<(NodeId, Option<u64>)> {
         ApiRequest::UpdateCard { node, card, patch } if patch.fit => Some((*node, Some(*card))),
         _ => None,
     }
+}
+
+
+/// The node a request acts on, for enforcing a subtree-scoped plugin token.
+///
+/// `None` means the request either names no node (a whole-document read like
+/// `/api/tree` or `/api/export`) or names one indirectly. **A subtree-scoped
+/// token is refused for those** rather than allowed through — a scope that
+/// silently stops applying at the edges is not a scope.
+pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
+    match req {
+        ApiRequest::GetNode(id)
+        | ApiRequest::UpdateNode { id, .. }
+        | ApiRequest::DeleteNode(id)
+        | ApiRequest::MoveNode { id, .. }
+        | ApiRequest::SetExpanded { id, .. }
+        | ApiRequest::Backlinks(id)
+        | ApiRequest::ListCards(id)
+        | ApiRequest::ListGroups(id)
+        | ApiRequest::Autosort(id) => Some(*id),
+        ApiRequest::GetCard { node, .. }
+        | ApiRequest::AddCard { node, .. }
+        | ApiRequest::UpdateCard { node, .. }
+        | ApiRequest::DeleteCard { node, .. }
+        | ApiRequest::MoveCard { node, .. }
+        | ApiRequest::SetCardProperty { node, .. }
+        | ApiRequest::DockCard { node, .. }
+        | ApiRequest::DetachCard { node, .. }
+        | ApiRequest::SetCardGroup { node, .. }
+        | ApiRequest::TableOp { node, .. }
+        | ApiRequest::SketchOp { node, .. }
+        | ApiRequest::SetChart { node, .. }
+        | ApiRequest::AddImage { node, .. }
+        | ApiRequest::RemoveImage { node, .. }
+        | ApiRequest::GetImage { node, .. }
+        | ApiRequest::CreateGroup { node, .. }
+        | ApiRequest::UpdateGroup { node, .. }
+        | ApiRequest::DeleteGroup { node, .. } => Some(*node),
+        ApiRequest::CreateNode { parent, .. } => *parent,
+        _ => None,
+    }
+}
+
+/// Whether a request is harmless for a subtree-scoped token even though it names
+/// no node: the instance-level reads a plugin needs to orient itself.
+pub fn is_scope_neutral(req: &ApiRequest) -> bool {
+    matches!(req, ApiRequest::Health | ApiRequest::Instance | ApiRequest::Tree | ApiRequest::ListNodes)
 }
 
 /// Describe what a request is about to change, for the change log.
@@ -612,6 +663,7 @@ pub fn serve(
     key: Arc<Mutex<String>>,
     revision: Arc<AtomicU64>,
     changes: Arc<Mutex<ChangeLog>>,
+    grants: Arc<Mutex<Vec<crate::plugins::Grant>>>,
 ) -> Result<Arc<tiny_http::Server>, String> {
     // `lan` binds all interfaces so other devices on the network can reach the
     // API (still key-gated); otherwise localhost-only.
@@ -627,9 +679,11 @@ pub fn serve(
                 let key = Arc::clone(&key);
                 let revision = Arc::clone(&revision);
                 let changes = Arc::clone(&changes);
+                let grants = Arc::clone(&grants);
                 std::thread::spawn(move || {
                     let mut request = request;
-                    let resp = handle(&mut request, &ctx, &tx, &key, &revision, &changes);
+                    let resp =
+                        handle(&mut request, &ctx, &tx, &key, &revision, &changes, &grants);
                     let header = tiny_http::Header::from_bytes(
                         &b"Content-Type"[..],
                         &b"application/json"[..],
@@ -665,6 +719,7 @@ fn handle(
     key: &Arc<Mutex<String>>,
     revision: &Arc<AtomicU64>,
     changes: &Arc<Mutex<ChangeLog>>,
+    grants: &Arc<Mutex<Vec<crate::plugins::Grant>>>,
 ) -> ApiResponse {
     let method = request.method().clone();
     let raw_url = request.url().to_string();
@@ -680,15 +735,44 @@ fn handle(
         return ApiResponse { status: 204, body: String::new() };
     }
 
-    // Everything but health requires the configured key.
+    // Everything but health requires a credential: the instance's own key, or a
+    // token minted for a plugin. A plugin token carries a scope, and the half of
+    // it that can be judged without the document — read-only — is enforced right
+    // here, before the request is ever queued for the app.
     let is_health = method == Method::Get && path == "/api/health";
+    let mut scope: Option<crate::plugins::Scope> = None;
     if !is_health {
         let configured = key.lock().map(|k| k.clone()).unwrap_or_default();
         if configured.is_empty() {
             return ApiResponse::err(403, "API disabled: set a key in Settings");
         }
-        if request_key(request).as_deref() != Some(configured.as_str()) {
-            return ApiResponse::err(401, "missing or invalid API key");
+        let presented = request_key(request);
+        match presented.as_deref() {
+            Some(k) if k == configured => {} // the instance key: unrestricted
+            Some(k) => {
+                let grant = grants.lock().ok().and_then(|g| {
+                    g.iter().find(|g: &&crate::plugins::Grant| g.token == k).cloned()
+                });
+                match grant {
+                    Some(g) => {
+                        // GET and the CORS preflight are reads; everything else
+                        // changes something.
+                        let is_read = method == Method::Get;
+                        if !g.scope.allows_method(is_read) {
+                            return ApiResponse::err(
+                                403,
+                                &format!(
+                                    "plugin '{}' has read-only access to this document",
+                                    g.plugin
+                                ),
+                            );
+                        }
+                        scope = Some(g.scope);
+                    }
+                    None => return ApiResponse::err(401, "missing or invalid API key"),
+                }
+            }
+            None => return ApiResponse::err(401, "missing or invalid API key"),
         }
     }
 
@@ -752,7 +836,7 @@ fn handle(
     };
 
     let (rtx, rrx) = std::sync::mpsc::sync_channel::<ApiResponse>(1);
-    if tx.send(ApiCommand { req, resp: rtx }).is_err() {
+    if tx.send(ApiCommand { req, resp: rtx, scope }).is_err() {
         return ApiResponse::err(503, "app not accepting requests");
     }
     ctx.request_repaint(); // wake the UI thread to process the command
@@ -2369,6 +2453,62 @@ mod tests {
         ] {
             assert!(change_of(&req, &doc).is_none(), "a read recorded a change");
         }
+    }
+
+
+    /// A read-only plugin token must be refused on anything that writes. This is
+    /// checked on the API thread, before the request is queued, so it holds even
+    /// if the app loop is busy.
+    #[test]
+    fn scope_gates_writes_by_method_not_by_route() {
+        use crate::plugins::Scope;
+        let ro = Scope { read_only: true, subtree: None };
+        assert!(ro.allows_method(true), "GET is fine");
+        assert!(!ro.allows_method(false), "anything else is not");
+        // An unrestricted grant writes.
+        assert!(Scope::default().allows_method(false));
+    }
+
+    /// Every request that names a node must be attributable to one, or a subtree
+    /// scope has holes. Anything not attributable has to be explicitly declared
+    /// harmless instead of defaulting to allowed.
+    #[test]
+    fn every_node_bearing_request_reports_its_target() {
+        let cases: Vec<(ApiRequest, Option<NodeId>)> = vec![
+            (ApiRequest::GetNode(7), Some(7)),
+            (ApiRequest::DeleteNode(7), Some(7)),
+            (ApiRequest::ListCards(9), Some(9)),
+            (ApiRequest::GetCard { node: 3, card: 1 }, Some(3)),
+            (ApiRequest::DeleteCard { node: 3, card: 1 }, Some(3)),
+            (ApiRequest::SetCardProperty { node: 4, card: 1, key: "k".into(), value: "v".into() }, Some(4)),
+            (ApiRequest::Autosort(5), Some(5)),
+            (ApiRequest::CreateNode { parent: Some(2), title: "x".into() }, Some(2)),
+            // A root-level create belongs to no subtree, so it must not resolve.
+            (ApiRequest::CreateNode { parent: None, title: "x".into() }, None),
+            (ApiRequest::Export("markdown".into()), None),
+            (ApiRequest::Search("x".into()), None),
+        ];
+        for (req, want) in cases {
+            assert_eq!(target_node(&req), want, "wrong target for a scoped request");
+        }
+    }
+
+    /// The reads a confined plugin needs to find its own basket — and nothing
+    /// that would leak content from outside it. `/api/tree` and `/api/nodes`
+    /// return titles and structure only, never card bodies.
+    #[test]
+    fn only_structural_reads_are_scope_neutral() {
+        assert!(is_scope_neutral(&ApiRequest::Instance));
+        assert!(is_scope_neutral(&ApiRequest::Tree));
+        assert!(is_scope_neutral(&ApiRequest::ListNodes));
+        // These read card *content* across the whole document, so a confined
+        // token must not get them for free.
+        assert!(!is_scope_neutral(&ApiRequest::Search("secret".into())));
+        assert!(!is_scope_neutral(&ApiRequest::Export("markdown".into())));
+        assert!(!is_scope_neutral(&ApiRequest::Tags));
+        assert!(!is_scope_neutral(&ApiRequest::Tasks { include_done: true, project: None }));
+        assert!(!is_scope_neutral(&ApiRequest::Kanban { project: None }));
+        assert!(!is_scope_neutral(&ApiRequest::Graph));
     }
 
     #[test]

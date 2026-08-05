@@ -64,6 +64,7 @@ const API_KEY_KEY: &str = "api_key";
 const API_PORT_KEY: &str = "api_port";
 const API_LAN_KEY: &str = "api_lan";
 const TEMPLATES_KEY: &str = "card_templates";
+const GRANTS_KEY: &str = "plugin_grants";
 const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
@@ -843,6 +844,23 @@ pub struct TrellisApp {
     /// thread, which serves `/api/changes`. In memory only — see changelog.rs
     /// for why it deliberately isn't part of the document.
     changes: Arc<Mutex<crate::changelog::ChangeLog>>,
+    /// Tokens minted for approved plugins, shared with the API thread so it can
+    /// authenticate them. Persisted in config, so approval survives a restart
+    /// and revoking is real rather than cosmetic.
+    grants: Arc<Mutex<Vec<crate::plugins::Grant>>>,
+    /// Plugins found on disk this session, and any manifests that wouldn't parse.
+    plugins: Vec<crate::plugins::Plugin>,
+    plugin_errors: Vec<String>,
+    show_plugins: bool,
+    /// The `--data-dir` this instance was launched with, so the plugins folder
+    /// can be re-derived after startup.
+    startup_data_dir: Option<PathBuf>,
+    /// Finished runs, newest last, for the Plugins window's log pane.
+    plugin_log: Vec<crate::plugins::RunResult>,
+    plugin_rx: Receiver<crate::plugins::RunResult>,
+    plugin_tx: Sender<crate::plugins::RunResult>,
+    /// Plugins currently running, so the UI can say so and not start a second.
+    plugin_running: std::collections::HashSet<String>,
     /// OCR results from background tesseract threads: (node, card, text-or-error).
     ocr_tx: Sender<(NodeId, CardId, Result<String, String>)>,
     ocr_rx: Receiver<(NodeId, CardId, Result<String, String>)>,
@@ -1015,6 +1033,25 @@ impl TrellisApp {
             crate::changelog::DEFAULT_CAP,
             crate::changelog::new_epoch(),
         )));
+        // Approvals persist: a plugin the user allowed stays allowed until they
+        // revoke it, and a token that survives a restart is what makes revoking
+        // meaningful rather than "it stops working when you close the app".
+        let stored_grants: Vec<crate::plugins::Grant> = cc
+            .storage
+            .and_then(|s| s.get_string(GRANTS_KEY))
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let grants = Arc::new(Mutex::new(stored_grants));
+        let plugins_root = crate::plugins::plugins_dir(startup.data_dir.as_deref());
+        let (plugins, plugin_errors) = match &plugins_root {
+            Some(d) => {
+                // Created on demand so there is somewhere obvious to drop one.
+                let _ = std::fs::create_dir_all(d);
+                crate::plugins::scan(d)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        let (plugin_tx, plugin_rx) = std::sync::mpsc::channel();
         let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
         let (snip_tx, snip_rx) = std::sync::mpsc::channel();
         let (save_tx, save_rx) = std::sync::mpsc::channel();
@@ -1027,6 +1064,7 @@ impl TrellisApp {
             Arc::clone(&api_shared_key),
             Arc::clone(&doc_revision),
             Arc::clone(&changes),
+            Arc::clone(&grants),
         ) {
             Ok(server) => (Some(server), api_status_line(api_lan, api_port)),
             Err(e) => (None, format!("Failed to start on port {api_port}: {e}")),
@@ -1127,6 +1165,15 @@ impl TrellisApp {
             api_server,
             doc_revision,
             changes,
+            grants,
+            plugins,
+            plugin_errors,
+            show_plugins: false,
+            startup_data_dir: startup.data_dir.clone(),
+            plugin_log: Vec::new(),
+            plugin_rx,
+            plugin_tx,
+            plugin_running: std::collections::HashSet::new(),
             ocr_tx,
             ocr_rx,
             snip_tx,
@@ -1324,6 +1371,7 @@ impl TrellisApp {
                 Arc::clone(&self.api_shared_key),
                 Arc::clone(&self.doc_revision),
                 Arc::clone(&self.changes),
+                Arc::clone(&self.grants),
             ) {
                 Ok(server) => {
                     result = Ok(server);
@@ -1533,6 +1581,114 @@ impl TrellisApp {
         }
     }
 
+    /// Whether `node` is `root` or a descendant of it.
+    ///
+    /// Walks parents rather than descending, so the cost is the depth of one
+    /// node, not the size of the subtree. The hop limit is a cycle guard: the
+    /// tree should never contain one, but an auth check must terminate whatever
+    /// the document says.
+    fn node_is_within(&self, node: NodeId, root: NodeId) -> bool {
+        let mut cur = Some(node);
+        for _ in 0..10_000 {
+            match cur {
+                Some(id) if id == root => return true,
+                Some(id) => cur = self.doc.nodes.get(&id).and_then(|n| n.parent),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// The token for a plugin, minting one the first time it is approved.
+    ///
+    /// The user approves a *scope*; this is the plumbing behind that approval and
+    /// is deliberately never shown to them. Re-approving after a manifest change
+    /// re-mints, so a plugin cannot widen its own access by editing its manifest
+    /// and keeping the token it was granted under the old one.
+    fn grant_for(&mut self, p: &crate::plugins::Plugin) -> String {
+        let name = p.manifest.name.clone();
+        let want = p.manifest.scope.clone();
+        let mut g = match self.grants.lock() {
+            Ok(g) => g,
+            Err(_) => return String::new(),
+        };
+        if let Some(existing) = g.iter_mut().find(|g| g.plugin == name) {
+            if existing.scope == want {
+                return existing.token.clone();
+            }
+            // The manifest asks for something different than was approved.
+            existing.scope = want;
+            existing.token = crate::plugins::mint_token();
+            return existing.token.clone();
+        }
+        let token = crate::plugins::mint_token();
+        g.push(crate::plugins::Grant { plugin: name, token: token.clone(), scope: want });
+        token
+    }
+
+    fn is_approved(&self, name: &str) -> bool {
+        self.grants.lock().map(|g| g.iter().any(|g| g.plugin == name)).unwrap_or(false)
+    }
+
+    fn revoke(&mut self, name: &str) {
+        if let Ok(mut g) = self.grants.lock() {
+            g.retain(|g| g.plugin != name);
+        }
+    }
+
+    /// Launch a plugin on a worker thread.
+    ///
+    /// Never on the UI thread: a plugin can take minutes, and blocking here
+    /// would freeze the window *and* stall autosave. The result comes back
+    /// through `plugin_rx`.
+    fn run_plugin(&mut self, idx: usize, ctx: Vec<(String, String)>) {
+        let Some(p) = self.plugins.get(idx).cloned() else { return };
+        if !self.is_approved(&p.manifest.name) {
+            self.status = format!("{} isn't approved yet — Tools → Plugins", p.manifest.title);
+            return;
+        }
+        if !self.plugin_running.insert(p.manifest.name.clone()) {
+            self.status = format!("{} is already running", p.manifest.title);
+            return;
+        }
+        let token = self.grant_for(&p);
+        // Always loopback: a plugin runs on this machine, so the LAN setting is
+        // irrelevant to it and 127.0.0.1 works whether or not LAN is enabled.
+        let base = format!("http://127.0.0.1:{}/api", self.api_port);
+        self.status = format!("Running {}…", p.manifest.title);
+        let tx = self.plugin_tx.clone();
+        let egui_ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let r = crate::plugins::run(&p, &token, &base, &ctx);
+            let _ = tx.send(r);
+            egui_ctx.request_repaint();
+        });
+    }
+
+    /// Collect finished plugin runs.
+    fn pump_plugins(&mut self) {
+        let done: Vec<_> = std::iter::from_fn(|| self.plugin_rx.try_recv().ok()).collect();
+        for r in done {
+            self.plugin_running.remove(&r.plugin);
+            self.status = if r.ok { r.summary.clone() } else { format!("Plugin failed: {}", r.summary) };
+            self.plugin_log.push(r);
+            // Keep the pane bounded; a chatty plugin shouldn't grow forever.
+            if self.plugin_log.len() > 50 {
+                self.plugin_log.remove(0);
+            }
+        }
+    }
+
+    /// Plugins offering a given trigger, as (index, title).
+    fn plugins_for(&self, t: crate::plugins::Trigger) -> Vec<(usize, String)> {
+        self.plugins
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.manifest.triggers.contains(&t) && self.is_approved(&p.manifest.name))
+            .map(|(i, p)| (i, p.manifest.title.clone()))
+            .collect()
+    }
+
     fn pump_api(&mut self) {
         let mut cmds = Vec::new();
         if let Some(rx) = &self.api_rx {
@@ -1554,6 +1710,27 @@ impl TrellisApp {
             if let Some(resp) = self.handle_api_instance(&cmd.req) {
                 let _ = cmd.resp.send(resp);
                 continue;
+            }
+            // The other half of a plugin's scope. Confining a token to a subtree
+            // needs the tree to resolve ancestry, which only exists here — the
+            // API thread has no document. A request that names no node is
+            // **refused** rather than waved through: a scope that quietly stops
+            // applying at the edges is not a scope. The few instance-level reads
+            // a plugin needs to orient itself are listed explicitly.
+            if let Some(scope) = &cmd.scope {
+                if let Some(root) = scope.subtree {
+                    let allowed = match api::target_node(&cmd.req) {
+                        Some(n) => self.node_is_within(n, root),
+                        None => api::is_scope_neutral(&cmd.req),
+                    };
+                    if !allowed {
+                        let _ = cmd.resp.send(api::ApiResponse::err(
+                            403,
+                            "outside the basket this plugin was given access to",
+                        ));
+                        continue;
+                    }
+                }
             }
             // `fit` in the request is applied by `process` from an estimate.
             // Note the target before the request is consumed, then re-measure
@@ -2426,7 +2603,10 @@ impl TrellisApp {
             | TreeAction::ExportBasket(..)
             | TreeAction::ExportBasketPdf(_)
             | TreeAction::ExportBasketPng(_)
-            | TreeAction::ImportBasket(_) => return None,
+            | TreeAction::ImportBasket(_)
+            // Running a plugin changes nothing by itself; whatever it does over
+            // the API is recorded there, under its own token.
+            | TreeAction::RunPlugin(..) => return None,
 
             TreeAction::AddRoot => ch(Op::Created, 0),
             TreeAction::AddChild(p) => ch(Op::Created, 0).field(&format!("parent={p}")),
@@ -2619,6 +2799,19 @@ impl TrellisApp {
                 TreeAction::ExportBasketPdf(id) => self.begin_basket_shot(id, BasketFmt::Pdf),
                 TreeAction::ExportBasketPng(id) => self.begin_basket_shot(id, BasketFmt::Png),
                 TreeAction::ImportBasket(id) => self.import_basket(id),
+                TreeAction::RunPlugin(id, idx) => {
+                    // The node is handed over in the environment, so the plugin
+                    // knows which basket it was invoked on.
+                    let title =
+                        self.doc.nodes.get(&id).map(|n| n.title.clone()).unwrap_or_default();
+                    self.run_plugin(
+                        idx,
+                        vec![
+                            ("TRELLIS_NODE".to_string(), id.to_string()),
+                            ("TRELLIS_NODE_TITLE".to_string(), title),
+                        ],
+                    );
+                }
             }
         }
         let mut fresh: Vec<NodeId> =
@@ -4088,6 +4281,10 @@ impl TrellisApp {
                         self.show_backup = true;
                         ui.close_menu();
                     }
+                    if ui.button("Plugins…").clicked() {
+                        self.show_plugins = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Requirements…").clicked() {
                         self.show_requirements = true;
                         ui.close_menu();
@@ -4136,6 +4333,188 @@ impl TrellisApp {
     /// manager, and whether one exists at all are different everywhere, so the
     /// app works it out and either runs the install or hands over the exact
     /// command.
+    /// **Tools → Plugins…** — what is installed, what each one is allowed to do,
+    /// and the approval that grants it.
+    ///
+    /// The approval prompt states the scope as a sentence, because that is the
+    /// entire basis on which someone decides whether to trust a plugin. A token
+    /// is minted behind it and never shown: making people handle a credential per
+    /// plugin would be worse than the single shared key this replaces.
+    fn plugins_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_plugins;
+        let doc_title = self
+            .doc_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "document".into());
+        let mut to_run: Option<usize> = None;
+        let mut to_approve: Option<usize> = None;
+        let mut to_revoke: Option<String> = None;
+        let mut rescan = false;
+
+        egui::Window::new("Plugins")
+            .open(&mut open)
+            .default_width(600.0)
+            .vscroll(true)
+            .show(ctx, |ui| {
+                ui.label(
+                    "Plugins are separate programs that Trellis runs. They talk to \
+                     it over the same API an agent uses — so a plugin that crashes \
+                     cannot damage your document.",
+                );
+                if let Some(d) = crate::plugins::plugins_dir(self.startup_data_dir.as_deref()) {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Installed in:").weak());
+                        ui.label(egui::RichText::new(d.display().to_string()).weak().monospace());
+                    });
+                }
+                ui.separator();
+
+                if self.plugins.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "No plugins installed. A plugin is a folder containing a \
+                             plugin.json and something to run.",
+                        )
+                        .weak(),
+                    );
+                }
+
+                for (i, p) in self.plugins.iter().enumerate() {
+                    let approved = self.is_approved(&p.manifest.name);
+                    let running = self.plugin_running.contains(&p.manifest.name);
+                    ui.horizontal(|ui| {
+                        ui.strong(&p.manifest.title);
+                        if !p.manifest.version.is_empty() {
+                            ui.label(egui::RichText::new(format!("v{}", p.manifest.version)).weak());
+                        }
+                        if running {
+                            ui.spinner();
+                            ui.label(egui::RichText::new("running…").weak());
+                        }
+                    });
+                    ui.indent(&p.manifest.name, |ui| {
+                        if !p.manifest.description.is_empty() {
+                            ui.label(egui::RichText::new(&p.manifest.description).weak());
+                        }
+                        // The permission, as a sentence.
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Wants to {}.",
+                                p.manifest.scope.describe(&doc_title)
+                            ))
+                            .color(if p.manifest.scope.read_only {
+                                ui.visuals().weak_text_color()
+                            } else {
+                                egui::Color32::from_rgb(230, 160, 60)
+                            }),
+                        );
+                        let where_from: Vec<&str> =
+                            p.manifest.triggers.iter().map(|t| t.label()).collect();
+                        ui.label(
+                            egui::RichText::new(format!("Runs from: {}", where_from.join(", ")))
+                                .weak()
+                                .small(),
+                        );
+                        ui.horizontal(|ui| {
+                            if approved {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(80, 190, 110),
+                                    "✔ Approved",
+                                );
+                                if ui
+                                    .add_enabled(!running, egui::Button::new("Run now"))
+                                    .clicked()
+                                {
+                                    to_run = Some(i);
+                                }
+                                if ui
+                                    .button("Revoke")
+                                    .on_hover_text(
+                                        "Delete its token. It stops working immediately.",
+                                    )
+                                    .clicked()
+                                {
+                                    to_revoke = Some(p.manifest.name.clone());
+                                }
+                            } else if ui
+                                .button("Approve…")
+                                .on_hover_text("Grant exactly the access described above")
+                                .clicked()
+                            {
+                                to_approve = Some(i);
+                            }
+                        });
+                    });
+                    ui.add_space(8.0);
+                }
+
+                if !self.plugin_errors.is_empty() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Could not be loaded:").strong());
+                    for e in &self.plugin_errors {
+                        ui.label(egui::RichText::new(e).weak().small());
+                    }
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Rescan").clicked() {
+                        rescan = true;
+                    }
+                });
+
+                if !self.plugin_log.is_empty() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Recent runs").strong());
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                        for r in self.plugin_log.iter().rev() {
+                            ui.horizontal(|ui| {
+                                if r.ok {
+                                    ui.colored_label(egui::Color32::from_rgb(80, 190, 110), "✔");
+                                } else {
+                                    ui.colored_label(egui::Color32::from_rgb(230, 100, 100), "✘");
+                                }
+                                ui.label(&r.summary);
+                            });
+                            if !r.output.trim().is_empty() {
+                                ui.collapsing(format!("output — {}", r.plugin), |ui| {
+                                    ui.code(&r.output);
+                                });
+                            }
+                        }
+                    });
+                }
+            });
+
+        if let Some(i) = to_approve {
+            if let Some(p) = self.plugins.get(i).cloned() {
+                let t = self.grant_for(&p);
+                self.status = if t.is_empty() {
+                    format!("Could not approve {}", p.manifest.title)
+                } else {
+                    format!("{} approved — it can {}", p.manifest.title, p.manifest.scope.describe(&doc_title))
+                };
+            }
+        }
+        if let Some(name) = to_revoke {
+            self.revoke(&name);
+            self.status = format!("Revoked {name} — its token no longer works");
+        }
+        if let Some(i) = to_run {
+            self.run_plugin(i, Vec::new());
+        }
+        if rescan {
+            if let Some(d) = crate::plugins::plugins_dir(self.startup_data_dir.as_deref()) {
+                let (p, e) = crate::plugins::scan(&d);
+                self.plugins = p;
+                self.plugin_errors = e;
+            }
+        }
+        self.show_plugins = open;
+    }
+
     fn requirements_window(&mut self, ctx: &egui::Context) {
         if self.req_scan.is_empty() {
             self.scan_requirements();
@@ -5662,6 +6041,7 @@ impl eframe::App for TrellisApp {
         // Apply any finished background OCR results.
         self.pump_ocr();
         // Turn finished region-snips into image cards.
+        self.pump_plugins();
         self.pump_sources(false);
         self.pump_snip();
 
@@ -5825,6 +6205,7 @@ impl eframe::App for TrellisApp {
             .default_width(240.0)
             .show(ctx, |ui| {
                 let scroll_to = self.scroll_to.take();
+                let node_plugins = self.plugins_for(crate::plugins::Trigger::NodeMenu);
                 let actions = tree::ui(
                     ui,
                     &self.doc,
@@ -5832,6 +6213,7 @@ impl eframe::App for TrellisApp {
                     &mut self.renaming,
                     self.reorder_mode,
                     scroll_to,
+                    &node_plugins,
                 );
                 self.apply_tree(actions);
             });
@@ -5978,6 +6360,9 @@ impl eframe::App for TrellisApp {
         if self.show_requirements {
             self.requirements_window(ctx);
         }
+        if self.show_plugins {
+            self.plugins_window(ctx);
+        }
 
         self.lightbox_ui(ctx);
     }
@@ -6010,6 +6395,11 @@ impl eframe::App for TrellisApp {
         storage.set_string(HISTORY_GAP_KEY, self.history_gap_mins.to_string());
         if let Ok(s) = serde_json::to_string(&self.templates) {
             storage.set_string(TEMPLATES_KEY, s);
+        }
+        if let Ok(g) = self.grants.lock() {
+            if let Ok(s) = serde_json::to_string(&*g) {
+                storage.set_string(GRANTS_KEY, s);
+            }
         }
     }
 

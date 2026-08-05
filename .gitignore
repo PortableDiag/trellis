@@ -5,3 +5,6 @@
 
 # Dev session reports are private — never commit them to this public repo.
 docs/SESSION-*.md
+
+# A plugin's own credentials live beside it and must never be committed.
+plugins/*/config.json

@@ -49,6 +49,8 @@ pub enum TreeAction {
     Reorder { moved: NodeId, target: NodeId, before: bool },
     /// Toggle reorder mode (nodes draggable) on/off.
     ToggleReorder,
+    /// Run the plugin at this index against this node.
+    RunPlugin(NodeId, usize),
 }
 
 /// `renaming` holds the node currently being renamed inline and its edit buffer.
@@ -59,6 +61,10 @@ pub fn ui(
     renaming: &mut Option<(NodeId, String)>,
     reorder_mode: bool,
     scroll_to: Option<NodeId>,
+    // Approved plugins that asked to appear here, as (index, title). Only
+    // approved ones are passed in — an unapproved plugin must not be one click
+    // away from running.
+    node_plugins: &[(usize, String)],
 ) -> Vec<TreeAction> {
     let mut actions = Vec::new();
 
@@ -84,7 +90,7 @@ pub fn ui(
         .show(ui, |ui| {
             let roots = doc.roots.clone();
             for root in roots {
-                node_ui(ui, doc, root, selected, renaming, reorder_mode, scroll_to, 0, &mut actions);
+                node_ui(ui, doc, root, selected, renaming, reorder_mode, scroll_to, 0, node_plugins, &mut actions);
             }
             ui.add_space(8.0);
         });
@@ -102,6 +108,7 @@ fn node_ui(
     reorder_mode: bool,
     scroll_to: Option<NodeId>,
     depth: usize,
+    node_plugins: &[(usize, String)],
     actions: &mut Vec<TreeAction>,
 ) {
     let Some(node) = doc.nodes.get(&id) else { return };
@@ -201,6 +208,17 @@ fn node_ui(
                 *renaming = Some((id, node.title.clone()));
             }
             resp.context_menu(|ui| {
+                if !node_plugins.is_empty() {
+                    ui.menu_button("Plugins", |ui| {
+                        for (idx, title) in node_plugins {
+                            if ui.button(title).clicked() {
+                                actions.push(TreeAction::RunPlugin(id, *idx));
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    ui.separator();
+                }
                 if ui.button("Rename").clicked() {
                     *renaming = Some((id, node.title.clone()));
                     ui.close_menu();
@@ -349,7 +367,7 @@ fn node_ui(
     if node.expanded {
         let children = node.children.clone();
         for child in children {
-            node_ui(ui, doc, child, selected, renaming, reorder_mode, scroll_to, depth + 1, actions);
+            node_ui(ui, doc, child, selected, renaming, reorder_mode, scroll_to, depth + 1, node_plugins, actions);
         }
     }
 }
