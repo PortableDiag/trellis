@@ -772,29 +772,32 @@ That delivers backup, sharing, and read access from any device — which is most
 what was actually asked for — without paying for the editor or accepting the
 risk of two-way sync. Phase 3 pays for itself on the desktop alone.
 
-Phase 5 is the moment the project roughly triples in size. It should be started
-only after using phases 1–4 for a few weeks and finding that read-only genuinely
-is not enough. It may turn out that it is.
+Phase 5 is the moment the project roughly triples in size, and it is **not
+optional**: the brief is full parity in features and capabilities with the
+desktop app, and editing is not a feature you can leave out of a note-taking
+app. The phasing above is therefore about *order of delivery*, not about scope
+— phases 1–4 are what makes the project useful while phase 5 is being built,
+not a place to stop.
+
+What genuinely will not reach parity is a short, specific list — WYSIWYG card
+export, screen capture, the X11 primary selection, native file dialogs (§9) —
+and those are limits of the browser, not decisions.
 
 ---
 
 ## 13. Decisions that are yours, not mine
 
-1. **Is web *editing* actually wanted?** The desktop stays the favourite way to
-   work. If read + share is enough, this is a 6-week project instead of a
-   6-month one. **This is the highest-leverage question in the document** and it
-   should be answered before Phase 1, not after Phase 4.
-2. **Encryption at rest / E2EE.** My recommendation is no encryption, a trusted
+1. **Encryption at rest / E2EE.** My recommendation is no encryption, a trusted
    VPS, and **subtree-scoped sync so sensitive baskets never leave the machine**
    (§10). But the notes are yours and the threat model is yours.
-3. **Multi-user, or just you plus share links?** Real accounts for collaborators
+2. **Multi-user, or just you plus share links?** Real accounts for collaborators
    add meaningful auth and permission complexity. Share links alone may cover it.
-4. **Money.** VPS ~$10–20/mo, domain ~$15/yr. Server-side WYSIWYG card export
+3. **Money.** VPS ~$10–20/mo, domain ~$15/yr. Server-side WYSIWYG card export
    needs a bigger box. Nothing else costs anything.
-5. **Does the sync agent live in the desktop app or as the first plugin?** I
+4. **Does the sync agent live in the desktop app or as the first plugin?** I
    recommend the plugin — it is exactly the shape the plugin framework is being
    designed for, and it keeps sync churn out of a stable codebase.
-6. **Domain name.** Unchosen. Nothing depends on it until Phase 2, when share
+5. **Domain name.** Unchosen. Nothing depends on it until Phase 2, when share
    links start being handed to other people and the name becomes permanent.
 
 ## 14. Open questions
