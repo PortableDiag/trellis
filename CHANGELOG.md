@@ -4,6 +4,24 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.79.0]
+
+### Fixed
+- **Tables are workable with select-and-middle-click again.** Table cells used a
+  plain text field, so the ordinary X11 way of moving text around — select it,
+  middle-click to paste — did nothing to or from a table, even though every
+  other editor in Trellis has supported it for versions. Cells are now wired the
+  same as the card body: **selecting text in a cell offers it to other apps**,
+  and **middle-click pastes at the cursor**.
+
+### Added
+- **Right-click a table cell → Copy cell / Copy row / Copy column.** When a card
+  isn't in edit mode its cells are painted, not editable, so there was no way to
+  get a value out short of opening the editor or exporting the whole table. All
+  three copy to the clipboard **and** the primary selection, so either paste
+  works; rows go out tab-separated and columns newline-separated, which is what a
+  spreadsheet expects.
+
 ## [0.78.0]
 
 ### Added

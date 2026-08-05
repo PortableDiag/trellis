@@ -2522,8 +2522,13 @@ fn table_ui(
             }
             for (c, cell) in row.iter().enumerate() {
                 let w = cw(c);
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(w, row_h), egui::Sense::hover());
+                // The cell senses clicks when the card *isn't* being edited, so
+                // right-click can offer to copy it. Sensing them in edit mode
+                // instead would steal them from the text editor that sits here.
+                let (rect, cell_resp) = ui.allocate_exact_size(
+                    egui::vec2(w, row_h),
+                    if card.editing { egui::Sense::hover() } else { egui::Sense::click() },
+                );
                 // Cell background: explicit color, else header shading, else a
                 // faint outline so the grid reads as a grid.
                 if let Some([rr, gg, bb]) = cell.bg {
@@ -2540,19 +2545,34 @@ fn table_ui(
                 let fg = cell.fg.map(|[rr, gg, bb]| egui::Color32::from_rgb(rr, gg, bb));
                 if card.editing {
                     let mut text = cell.text.clone();
-                    let mut te = egui::TextEdit::singleline(&mut text)
-                        .frame(false)
-                        .margin(egui::vec2(4.0 * zoom, 3.0 * zoom))
-                        .desired_width(w - 8.0 * zoom);
-                    if let Some(fg) = fg {
-                        te = te.text_color(fg);
-                    }
-                    let resp = ui.put(rect, te);
+                    // Wired for the X11 primary selection exactly like the body
+                    // editor: selecting in a cell offers the text to other apps,
+                    // and middle-click pastes it back. Cells used a bare
+                    // `TextEdit` before, which is why select-and-middle-click —
+                    // the ordinary way to move text around on X11 — did nothing
+                    // to or from a table.
+                    let cell_id = ui.make_persistent_id(("table_cell", id, r, c));
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(rect)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    let (new_text, changed, resp) =
+                        singleline_primary(&mut child, cell_id, &text, |te| {
+                            let te = te
+                                .frame(false)
+                                .margin(egui::vec2(4.0 * zoom, 3.0 * zoom))
+                                .desired_width(w - 8.0 * zoom);
+                            match fg {
+                                Some(fg) => te.text_color(fg),
+                                None => te,
+                            }
+                        });
                     if resp.has_focus() || resp.gained_focus() {
                         ui.data_mut(|d| d.insert_temp(focus_key, (r, c)));
                     }
-                    if resp.changed() {
-                        actions.push(CanvasAction::TableSetCell(id, r, c, text));
+                    if changed {
+                        actions.push(CanvasAction::TableSetCell(id, r, c, new_text));
                     }
                 } else {
                     let clipped = ui.painter_at(rect.shrink2(egui::vec2(4.0 * zoom, 0.0)));
@@ -2577,6 +2597,42 @@ fn table_ui(
                         galley,
                         ui.visuals().text_color(),
                     );
+                    // A card that isn't in edit mode paints its cells, so there
+                    // is no text to select and no way to get a value out.
+                    // Right-click gives one — cell, row or column, to both the
+                    // clipboard and the primary selection, so it can be pasted
+                    // anywhere by either means. Rows and columns go out as TSV,
+                    // which is what a spreadsheet expects on paste.
+                    cell_resp.context_menu(|ui| {
+                        if ui.button("Copy cell").clicked() {
+                            copy_both(ui, &cell.text);
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy row").clicked() {
+                            let row: Vec<String> = table
+                                .rows
+                                .get(r)
+                                .map(|row| row.iter().map(|c| c.text.clone()).collect())
+                                .unwrap_or_default();
+                            copy_both(ui, &row.join("\t"));
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy column").clicked() {
+                            let col: Vec<String> = table
+                                .rows
+                                .iter()
+                                .filter_map(|row| row.get(c).map(|c| c.text.clone()))
+                                .collect();
+                            copy_both(ui, &col.join("\n"));
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new("Edit the card to select text in a cell")
+                                .small()
+                                .weak(),
+                        );
+                    });
                 }
             }
         });

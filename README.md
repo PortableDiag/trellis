@@ -40,7 +40,11 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 - **Table** — a small spreadsheet: inline cell editing, insert/delete/resize
   rows and columns (right-click the row/column handles), per-cell **background
   and font colors**, an optional header row, and **CSV/XLSX import & export**
-  (XLSX export keeps your colors). The copy button copies the table as CSV. Turn one
+  (XLSX export keeps your colors). The copy button copies the table as CSV, and
+  **right-click any cell** to copy that **cell, row or column** — to both the
+  clipboard and the X11 primary selection, so middle-click paste works too.
+  While editing, selecting text in a cell offers it to other apps and
+  middle-click pastes into it, the same as a text card. Turn one
   into a **chart** (bar, line, scatter or **pie**) from the table's toolbar — the cells stay
   the data, so editing one redraws the chart, and you can keep the grid visible
   underneath. Non-numeric cells are gaps, not zeros, so a blank never plots as a
