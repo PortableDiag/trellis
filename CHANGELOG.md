@@ -4,6 +4,21 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.74.2]
+
+### Fixed
+- **"Fit to content" now accounts for markdown headings.** Height was measured
+  with every line at the body font size, but the card renders headings *larger* —
+  so a note full of `##` headings was measured short and its bottom was clipped.
+  Each line is now measured at the size it will actually render at, reading the
+  body and heading sizes from the theme and interpolating H2–H6 the way the
+  CommonMark renderer does. (`#tag` is still not a heading — there has to be a
+  space after the hashes — so tagged cards don't inflate.)
+- **Long cards fit instead of being cut off.** Fit clamped height to 1400px, and
+  a text card has no per-card scroll, so anything longer than that lost its
+  bottom silently rather than simply being tall. The cap is now 6000px: still a
+  guard against one runaway card, but clipping content is the worse failure.
+
 ## [0.74.1]
 
 ### Fixed

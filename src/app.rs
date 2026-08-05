@@ -477,7 +477,6 @@ fn fit_card_size(ctx: &egui::Context, c: &crate::model::Card) -> Option<egui::Ve
     const TITLE_H: f32 = 24.0;
     const PAD: f32 = 6.0;
     const MIN_H: f32 = 90.0;
-    const MAX_H: f32 = 1400.0;
     let fs = if c.font_scale > 0.0 { c.font_scale } else { 1.0 };
     let w = base.x; // keep the estimate's width; only the height was wrong
     let wrap_w = (w - PAD * 2.0).max(1.0);
@@ -485,13 +484,43 @@ fn fit_card_size(ctx: &egui::Context, c: &crate::model::Card) -> Option<egui::Ve
     // markup (`*`, `` ` ``) dropped. Single newlines already break lines in a
     // galley, matching the card's hard-wrap render.
     let text = crate::model::strip_size_markup(&crate::model::strip_inline_markers(&c.body));
-    let font = egui::FontId::proportional(14.0 * fs);
-    let galley = ctx.fonts(|f| f.layout(text, font, egui::Color32::WHITE, wrap_w));
-    let mut content_h = galley.size().y;
+
+    // Read the sizes the renderer will actually use rather than assuming: the
+    // card body draws at TextStyle::Body and headings scale up towards
+    // TextStyle::Heading. Measuring everything at one size under-counts a
+    // heading-heavy card, which is what clipped long notes.
+    let (body_px, heading_px) = {
+        let style = ctx.style();
+        (
+            style.text_styles.get(&egui::TextStyle::Body).map_or(12.5, |f| f.size),
+            style.text_styles.get(&egui::TextStyle::Heading).map_or(18.0, |f| f.size),
+        )
+    };
+
+    // Measure line by line so each heading is laid out at its own size. The card
+    // hard-wraps before rendering, so a line here is a line there.
+    let mut content_h = 0.0;
+    for line in text.lines() {
+        let level = crate::model::heading_level(line);
+        let px = match level {
+            Some(l) => crate::model::heading_font_px(l, body_px, heading_px),
+            None => body_px,
+        } * fs;
+        let galley = ctx.fonts(|f| {
+            f.layout(line.to_owned(), egui::FontId::proportional(px), egui::Color32::WHITE, wrap_w)
+        });
+        content_h += galley.size().y;
+        if level.is_some() {
+            content_h += body_px * fs * 0.5; // the newline the renderer inserts
+        }
+    }
+    if text.lines().next().is_none() {
+        content_h = body_px * fs;
+    }
     for (_iw, ih) in c.inline_image_sizes(wrap_w) {
         content_h += ih + 6.0; // inline images stack under the text
     }
-    let h = (TITLE_H + PAD * 2.0 + content_h).clamp(MIN_H, MAX_H);
+    let h = (TITLE_H + PAD * 2.0 + content_h).clamp(MIN_H, crate::model::FIT_MAX_H);
     Some(egui::vec2(w, h))
 }
 
@@ -5727,6 +5756,51 @@ mod tests {
             crate::model::CardKind::Table { table: crate::model::TableData::empty(2, 2) },
         );
         assert_eq!(fit_card_size(&ctx, &table), table.fit_size());
+    }
+
+    /// Headings render larger than body text, so a card full of them needs more
+    /// height than the same words as prose. Measuring every line at one size is
+    /// what left long notes clipped at the bottom.
+    #[test]
+    fn fit_counts_headings_as_taller_than_body_text() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |_| {});
+
+        let mk = |body: &str| {
+            let mut c = crate::model::Card::new(
+                1,
+                egui::pos2(0.0, 0.0),
+                crate::model::CardKind::Text,
+            );
+            c.title = "T".into();
+            c.body = body.into();
+            c
+        };
+        // Same words, same line count — only the heading markers differ.
+        let headed = mk("## Alpha section\n## Beta section\n## Gamma section");
+        let plain = mk("Alpha section\nBeta section\nGamma section");
+
+        let h_precise = fit_card_size(&ctx, &headed).unwrap().y;
+        let p_precise = fit_card_size(&ctx, &plain).unwrap().y;
+        assert!(
+            h_precise > p_precise,
+            "headings must measure taller: {h_precise} vs {p_precise}"
+        );
+        // The estimate has to agree, since it's the fallback with no font context.
+        assert!(headed.fit_size().unwrap().y > plain.fit_size().unwrap().y);
+
+        // `#tag` is not a heading — no space after the hashes. Tags are used
+        // throughout these notes, so treating them as H1 would inflate every card.
+        assert_eq!(crate::model::heading_level("#trellis #ops"), None);
+        assert_eq!(crate::model::heading_level("## Real heading"), Some(2));
+        assert_eq!(crate::model::heading_level("####### too many"), None);
+
+        // Long notes fit instead of clipping: the old 1400 cap silently cut them.
+        let long = mk(&"A line of prose in a long note.\n".repeat(120));
+        assert!(
+            fit_card_size(&ctx, &long).unwrap().y > 1400.0,
+            "a long card must be allowed past the old cap rather than clipped"
+        );
     }
 
     /// Templates saved before the Templates basket existed are stored as bare

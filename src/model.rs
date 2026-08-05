@@ -178,6 +178,14 @@ impl Default for ChartSpec {
     }
 }
 
+/// Tallest a card may be sized to by "Fit to content" / the API's `fit`.
+///
+/// A guard against one runaway card, not a layout opinion. It used to be 1400,
+/// which a long note exceeds easily — and because a text card has no per-card
+/// scroll, exceeding it meant the bottom was **silently clipped** rather than
+/// merely tall. Clipping content is the worse failure, so the cap is generous.
+pub const FIT_MAX_H: f32 = 6000.0;
+
 pub const TABLE_DEFAULT_COL_W: f32 = 110.0;
 /// Narrowest and widest a column may be set to, by drag, by `set_col_width`, or
 /// by autofit.
@@ -634,7 +642,6 @@ impl Card {
         const MIN_W: f32 = 140.0;
         const MIN_H: f32 = 90.0;
         const MAX_W: f32 = 900.0;
-        const MAX_H: f32 = 1400.0;
         const TEXT_WRAP_W: f32 = 560.0; // cap text width; longer paragraphs wrap
 
         let fs = if self.font_scale > 0.0 { self.font_scale } else { 1.0 };
@@ -668,7 +675,7 @@ impl Card {
             for (_iw, ih) in &imgs {
                 content_h += ih + 6.0; // each inline image stacks under the text
             }
-            let h = (TITLE_H + PAD * 2.0 + content_h).clamp(MIN_H, MAX_H);
+            let h = (TITLE_H + PAD * 2.0 + content_h).clamp(MIN_H, FIT_MAX_H);
             return Some(egui::vec2(w, h));
         }
 
@@ -715,7 +722,7 @@ impl Card {
 
         let w = (content_w + PAD * 2.0).max(title_w);
         let h = TITLE_H + PAD * 2.0 + content_h;
-        Some(egui::vec2(w.clamp(MIN_W, MAX_W), h.clamp(MIN_H, MAX_H)))
+        Some(egui::vec2(w.clamp(MIN_W, MAX_W), h.clamp(MIN_H, FIT_MAX_H)))
     }
 
     /// Display `(width, height)` of each inline image actually referenced by the
@@ -810,14 +817,65 @@ fn image_dimensions(bytes: &[u8]) -> Option<(f32, f32)> {
 /// source line contributes at least one row, plus one more per `wrap_w`-worth of
 /// overflow. Used by the off-thread [`Card::fit_size`] estimate; the interactive
 /// Fit action measures the real galley instead (see `app::fit_card_size`).
-fn wrapped_height(text: &str, char_w: f32, line_h: f32, wrap_w: f32) -> f32 {
-    let cols = (wrap_w / char_w).max(1.0);
-    let mut rows = 0.0f32;
-    for line in text.lines() {
-        let n = line.chars().count() as f32;
-        rows += (n / cols).ceil().max(1.0);
+/// ATX heading level of a line (`# ` → 1 … `###### ` → 6), else `None`.
+///
+/// Used by both height measurements: a heading renders **larger than body text**,
+/// so measuring every line at the body size under-counts a heading-heavy card and
+/// its bottom gets clipped.
+pub(crate) fn heading_level(line: &str) -> Option<u8> {
+    let t = line.trim_start();
+    let hashes = t.bytes().take_while(|b| *b == b'#').count();
+    // CommonMark: 1–6 hashes, and a space must follow (`#tag` is not a heading —
+    // which matters here, since #tags are used throughout).
+    (1..=6).contains(&hashes).then_some(())?;
+    t[hashes..].starts_with(' ').then_some(hashes as u8)
+}
+
+/// The font size the CommonMark renderer uses for a heading of `level`, given the
+/// body and H1 sizes. Mirrors `egui_commonmark_backend`'s `Style::to_richtext`:
+/// H1 is the Heading text style, H2–H6 interpolate down towards body by fixed
+/// factors. Keep in step with `vendor/egui_commonmark_backend/src/misc.rs`.
+pub(crate) fn heading_font_px(level: u8, body_px: f32, heading_px: f32) -> f32 {
+    let diff = heading_px - body_px;
+    match level {
+        1 => heading_px,
+        2 => body_px + diff * 0.835,
+        3 => body_px + diff * 0.668,
+        4 => body_px + diff * 0.501,
+        5 => body_px + diff * 0.334,
+        _ => body_px + diff * 0.167,
     }
-    rows.max(1.0) * line_h
+}
+
+/// Estimated height of `text` wrapped at `wrap_w`, counting heading lines at
+/// their larger rendered size. `char_w`/`line_h` are the *body* metrics; heading
+/// lines scale both by the ratio of their font size to the body's.
+fn wrapped_height(text: &str, char_w: f32, line_h: f32, wrap_w: f32) -> f32 {
+    // Body size the caller's metrics were derived from, so a heading's scale is
+    // relative to it. Matches egui's defaults (Body 12.5 / Heading 18.0).
+    const BODY_PX: f32 = 12.5;
+    const HEAD_PX: f32 = 18.0;
+    let mut total = 0.0f32;
+    let mut rows_any = false;
+    for line in text.lines() {
+        rows_any = true;
+        let scale = match heading_level(line) {
+            Some(l) => heading_font_px(l, BODY_PX, HEAD_PX) / BODY_PX,
+            None => 1.0,
+        };
+        let cols = (wrap_w / (char_w * scale)).max(1.0);
+        let n = line.chars().count() as f32;
+        let rows = (n / cols).ceil().max(1.0);
+        total += rows * line_h * scale;
+        // The renderer forces a newline before every heading.
+        if heading_level(line).is_some() {
+            total += line_h * 0.5;
+        }
+    }
+    if !rows_any {
+        total = line_h;
+    }
+    total.max(line_h)
 }
 
 /// Drop inline markup that occupies no width when rendered — emphasis `*`, code
