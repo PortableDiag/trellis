@@ -4,6 +4,18 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [Unreleased]
+
+### Added
+- **A notifications plugin** (`plugins/notify/`) — a task digest of overdue and
+  due-today cards on a schedule, and a nudge when an agent changes the document,
+  to Telegram. No app change was needed: it is built entirely on the change log
+  (v0.76.0) and the schedule/on-change triggers (v0.81.0), which is what those
+  were for. **With no bot token it prints the message rather than sending it**,
+  so the wording can be checked — and the plugin tested — without a Telegram
+  account. Nothing fires while Trellis is closed; the README says so rather than
+  leaving it to be discovered.
+
 ## [0.81.1]
 
 ### Added

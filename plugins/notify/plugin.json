@@ -1,0 +1,24 @@
+{
+  "name": "notify",
+  "title": "Notifications",
+  "description": "Tells you what the workspace needs without opening it: a digest of overdue and due-today tasks, and a nudge when an agent changes something. Sends to Telegram; with no bot token it prints what it would have sent, so you can see the wording first.",
+  "version": "1.0.0",
+  "command": "python3",
+  "args": ["notify.py"],
+  "triggers": ["manual", "schedule", "on-change"],
+  "interval_mins": 180,
+  "debounce_secs": 60,
+  "scope": { "read_only": true },
+  "config": [
+    { "key": "telegram_token", "label": "Telegram bot token", "secret": true,
+      "help": "From @BotFather. Leave empty to preview messages without sending." },
+    { "key": "telegram_chat_id", "label": "Telegram chat id",
+      "help": "Message your bot once, then open https://api.telegram.org/bot<TOKEN>/getUpdates to find it." },
+    { "key": "digest", "label": "Send task digest (yes/no)",
+      "help": "Overdue and due-today tasks, on the schedule above. Default yes." },
+    { "key": "agent_edits", "label": "Notify on agent edits (yes/no)",
+      "help": "When something changes the document over the API rather than in the app. Default yes." },
+    { "key": "project", "label": "Only this basket id",
+      "help": "Optional. Limits the digest to one project's tasks." }
+  ]
+}
