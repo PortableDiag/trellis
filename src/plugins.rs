@@ -129,6 +129,33 @@ pub struct Manifest {
     /// every keystroke is a process launch.
     #[serde(default = "default_debounce")]
     pub debounce_secs: u64,
+    /// Settings this plugin needs from the user, rendered in the Plugins window
+    /// and saved to `config.json` beside the plugin.
+    ///
+    /// Declared rather than assumed because the alternative is telling people to
+    /// hand-edit a JSON file in a directory they'd have to be told how to find —
+    /// which is not a setting anyone will use. Trellis owns the form; the plugin
+    /// still owns the file, so its credentials never enter Trellis's own config.
+    #[serde(default)]
+    pub config: Vec<ConfigField>,
+}
+
+/// One setting a plugin asks the user for.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ConfigField {
+    /// Key written into `config.json`.
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub help: String,
+    /// Render masked and never log it. A credential shown in plain text in a
+    /// window someone screenshots is a credential leaked.
+    #[serde(default)]
+    pub secret: bool,
+    /// At least one field in a group of alternatives must be filled — used for
+    /// "either of these credentials".
+    #[serde(default)]
+    pub required: bool,
 }
 
 fn default_interval() -> u64 {
@@ -222,6 +249,35 @@ pub fn scan(dir: &Path) -> (Vec<Plugin>, Vec<String>) {
     }
     found.sort_by(|a, b| a.manifest.title.to_lowercase().cmp(&b.manifest.title.to_lowercase()));
     (found, errors)
+}
+
+
+/// Read a plugin's `config.json`, or an empty map if it has none yet.
+pub fn read_config(dir: &Path) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(dir.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Write a plugin's `config.json` with owner-only permissions.
+///
+/// These files hold credentials, so the mode is set explicitly rather than left
+/// to the process umask — a key readable by every account on the machine is a
+/// key leaked, and nothing about writing a settings form suggests otherwise.
+pub fn write_config(
+    dir: &Path,
+    values: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let path = dir.join("config.json");
+    let body = serde_json::to_string_pretty(values).map_err(|e| e.to_string())?;
+    std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// A minted token and the scope it carries. Stored in the app's config, keyed by

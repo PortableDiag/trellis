@@ -13,22 +13,18 @@ the top of **Tools → Plugins…**:
 <data-dir>/trellis/plugins/dry-backup/
 ```
 
-Then create `config.json` **beside `dry_backup.py`**:
+Then open **Tools → Plugins…** and fill in the settings under *Back up to Dry*:
 
-```json
-{
-  "demoAuthKey": "<your Dry access key>",
-  "space": "Trellis backup"
-}
-```
+- **Dry MCP token** — recommended, sent as a Bearer header.
+- **Dry access key** — the alternative, from your Dry profile. **Regenerating it
+  invalidates the old one**, so if the plugin starts failing with "No user exists
+  with that access key", that's why. The MCP token doesn't have this problem.
+- **Dry space name** — optional; defaults to `Trellis backup — <document>.ron`.
 
-`space` is optional; it defaults to `Trellis backup — <document>.ron`. The key is
-self-serve from your Dry profile. **Regenerating it invalidates the old one**, so
-if the plugin starts failing with "No user exists with that access key", that's
-why.
-
-`config.json` is this plugin's own secret, not Trellis's — Trellis never sees it,
-and it is git-ignored.
+Either credential works; fill in one. **Save settings** writes them to
+`config.json` beside this script at mode `600`. That file is this plugin's own
+secret, not Trellis's — Trellis renders the form but the values live with the
+plugin, and it's git-ignored.
 
 Finally, open **Tools → Plugins…** and **Approve** it. The plugin asks only to
 *read* your document; Trellis enforces that, so it cannot change your notes even

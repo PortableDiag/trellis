@@ -75,15 +75,25 @@ def trellis(path):
 
 # --- Dry --------------------------------------------------------------------
 
-def dry(key, op, **body):
+def dry(cred, op, **body):
+    """Call /api/dbcrud with whichever credential the user supplied.
+
+    The endpoint accepts either an `mcpToken` as a Bearer header or a
+    `demoAuthKey` in the body, and resolves the body key first. The MCP token is
+    the one Dry recommends for headless callers, and it survives the user
+    regenerating their profile access key — which would otherwise break this
+    plugin silently until someone edited its config.
+    """
+    kind, value = cred
     payload = dict(body)
-    payload["demoAuthKey"] = key
     payload["op"] = op
+    headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
+    if kind == "mcpToken":
+        headers["Authorization"] = "Bearer " + value
+    else:
+        payload["demoAuthKey"] = value
     req = urllib.request.Request(
-        DRY_API,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
-        method="POST",
+        DRY_API, data=json.dumps(payload).encode(), headers=headers, method="POST"
     )
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
@@ -214,13 +224,18 @@ def node_path(nodes, nid):
 def main():
     key_file = os.path.join(os.environ.get("TRELLIS_PLUGIN_DIR", "."), "config.json")
     if not os.path.isfile(key_file):
-        die(f"no config.json in this plugin's folder. Create {key_file} containing "
-            '{"demoAuthKey": "<your Dry access key>"}')
+        die("not configured yet — open Tools → Plugins and fill in your Dry "
+            "credential under “Back up to Dry”")
     with open(key_file) as f:
         cfg = json.load(f)
-    key = cfg.get("demoAuthKey")
-    if not key:
-        die("config.json has no demoAuthKey")
+    # Prefer the MCP token; fall back to the access key.
+    if (cfg.get("mcpToken") or "").strip():
+        key = ("mcpToken", cfg["mcpToken"].strip())
+    elif (cfg.get("demoAuthKey") or "").strip():
+        key = ("demoAuthKey", cfg["demoAuthKey"].strip())
+    else:
+        die("no Dry credential set — open Tools → Plugins and fill in either the "
+            "MCP token or the access key")
 
     inst = trellis("/instance")
     doc = inst.get("document") or "untitled"

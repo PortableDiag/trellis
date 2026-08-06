@@ -873,6 +873,9 @@ pub struct TrellisApp {
     plugin_seen_seq: std::collections::HashMap<String, u64>,
     /// Revision at the last observed change, for the on-change debounce.
     plugin_change_at: Option<(u64, Instant)>,
+    /// Editable values for each plugin's declared settings, loaded from its own
+    /// config.json and written back on Save.
+    plugin_config: std::collections::HashMap<String, std::collections::BTreeMap<String, String>>,
     /// OCR results from background tesseract threads: (node, card, text-or-error).
     ocr_tx: Sender<(NodeId, CardId, Result<String, String>)>,
     ocr_rx: Receiver<(NodeId, CardId, Result<String, String>)>,
@@ -1197,6 +1200,7 @@ impl TrellisApp {
             plugin_last_run: std::collections::HashMap::new(),
             plugin_seen_seq: std::collections::HashMap::new(),
             plugin_change_at: None,
+            plugin_config: std::collections::HashMap::new(),
             ocr_tx,
             ocr_rx,
             snip_tx,
@@ -4489,6 +4493,7 @@ impl TrellisApp {
         let mut to_run: Option<usize> = None;
         let mut to_approve: Option<usize> = None;
         let mut to_revoke: Option<String> = None;
+        let mut to_save: Option<usize> = None;
         let mut rescan = false;
 
         egui::Window::new("Plugins")
@@ -4568,6 +4573,52 @@ impl TrellisApp {
                                 .weak()
                                 .small(),
                         );
+                        // Settings the plugin asked for. Rendered here because a
+                        // config file in a directory nobody can find is not a
+                        // setting anyone will ever change.
+                        if !p.manifest.config.is_empty() {
+                            let name = p.manifest.name.clone();
+                            let values = self
+                                .plugin_config
+                                .entry(name.clone())
+                                .or_insert_with(|| crate::plugins::read_config(&p.dir));
+                            let mut changed = false;
+                            egui::Grid::new(("plugcfg", &name))
+                                .num_columns(2)
+                                .spacing([8.0, 4.0])
+                                .show(ui, |ui| {
+                                    for f in &p.manifest.config {
+                                        ui.label(&f.label).on_hover_text(&f.help);
+                                        let v = values.entry(f.key.clone()).or_default();
+                                        let w = egui::TextEdit::singleline(v)
+                                            .desired_width(300.0)
+                                            .password(f.secret)
+                                            .hint_text(if f.secret { "paste it here" } else { "" });
+                                        if ui.add(w).changed() {
+                                            changed = true;
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                            let _ = changed;
+                            if ui.button("Save settings").clicked() {
+                                to_save = Some(i);
+                            }
+                            if p.manifest.config.iter().any(|f| f.required)
+                                && !p.manifest.config.iter().any(|f| {
+                                    f.required
+                                        && values.get(&f.key).map(|v| !v.trim().is_empty()).unwrap_or(false)
+                                })
+                            {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Needs at least one of the required settings above.",
+                                    )
+                                    .color(egui::Color32::from_rgb(230, 160, 60))
+                                    .small(),
+                                );
+                            }
+                        }
                         ui.horizontal(|ui| {
                             if approved {
                                 ui.colored_label(
@@ -4662,6 +4713,17 @@ impl TrellisApp {
                 };
             }
         }
+        if let Some(i) = to_save {
+            if let Some(p) = self.plugins.get(i) {
+                let name = p.manifest.name.clone();
+                let dir = p.dir.clone();
+                let vals = self.plugin_config.get(&name).cloned().unwrap_or_default();
+                self.status = match crate::plugins::write_config(&dir, &vals) {
+                    Ok(()) => format!("Saved settings for {name}"),
+                    Err(e) => format!("Could not save {name} settings: {e}"),
+                };
+            }
+        }
         if let Some(name) = to_revoke {
             self.revoke(&name);
             self.status = format!("Revoked {name} — its token no longer works");
@@ -4674,6 +4736,7 @@ impl TrellisApp {
                 let (p, e) = crate::plugins::scan(&d);
                 self.plugins = p;
                 self.plugin_errors = e;
+                self.plugin_config.clear();
             }
         }
         self.show_plugins = open;

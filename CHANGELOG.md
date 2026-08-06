@@ -4,6 +4,22 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.81.1]
+
+### Added
+- **Plugins can ask for their settings in the Plugins window.** A manifest
+  declares a `config` list — key, label, help, and `secret` for anything that
+  shouldn't be shown — and Trellis renders the form, writing the values to that
+  plugin's own `config.json` at mode `600`. Previously a plugin's credentials
+  meant hand-editing a JSON file in a directory you'd have to be told how to
+  find, which is not a setting anyone would ever change. Trellis owns the form;
+  the plugin still owns the file, so a plugin's secrets never enter Trellis's
+  config.
+- **The Dry backup plugin takes either credential** — an **MCP token** (sent as
+  a Bearer header, and what Dry recommends for headless callers) or the profile
+  **access key**. The MCP token is preferred because regenerating your access key
+  in Dry invalidates the old one, which would otherwise break the plugin quietly.
+
 ## [0.81.0]
 
 ### Added
