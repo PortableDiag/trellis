@@ -4,6 +4,21 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.82.0]
+
+### Added
+- **Table edits can be sent as a batch.** `POST …/table` now accepts an **array**
+  of ops as well as a single one, applied in order. Building a styled table is
+  inherently many small edits, and one-per-call made that both slow and easy to
+  get wrong.
+
+  Reported by an agent working over the API: sending a list was rejected with
+  serde's *"invalid type: map, expected a string"* — an error naming neither the
+  array nor the limitation — and because `curl` exits 0 on a 400, the edits were
+  reported as applied when nothing had landed. If one op in a batch fails the
+  response now says **which one and how many already applied**, so a caller can
+  tell what state the table is in rather than guessing.
+
 ## [Unreleased]
 
 ### Added

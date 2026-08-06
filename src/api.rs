@@ -69,7 +69,10 @@ pub enum ApiRequest {
     // Card group membership (join an existing group / leave).
     SetCardGroup { node: NodeId, card: u64, group: Option<GroupId> },
     // Fine-grained table editing (cell colors, header, widths, row/col ops).
-    TableOp { node: NodeId, card: u64, op: TableOpInput },
+    /// One or more table edits, applied in order. A batch because building a
+    /// styled table is inherently many small ops, and one-per-call made that
+    /// both slow and easy to get wrong.
+    TableOp { node: NodeId, card: u64, ops: Vec<TableOpInput> },
     // Draw a table card as a chart, or turn the chart off.
     SetChart { node: NodeId, card: u64, spec: Option<ChartInput> },
     // Sketch editing (add stroke / undo / clear).
@@ -302,10 +305,13 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
         }
         // The sub-operation is named in the field (`table.add_row`) rather than
         // in a separate column: self-describing, and no extra key on every entry.
-        ApiRequest::TableOp { node, card, op } => ch(E::Card, Op::Updated, *card)
-            .in_node(*node)
-            .titled(card_title(node, card))
-            .field(&format!("table.{}", op.name())),
+        ApiRequest::TableOp { node, card, ops } => {
+            let mut c = ch(E::Card, Op::Updated, *card).in_node(*node).titled(card_title(node, card));
+            for op in ops {
+                c = c.field(&format!("table.{}", op.name()));
+            }
+            c
+        }
         ApiRequest::SketchOp { node, card, op } => ch(E::Card, Op::Updated, *card)
             .in_node(*node)
             .titled(card_title(node, card))
@@ -632,6 +638,28 @@ pub struct TableOpInput {
     color: Value,
 }
 
+/// A table request: one op, or a list of them.
+///
+/// Accepting both because agents reasonably assume a list works — and when it
+/// didn't, serde's error was *"invalid type: map, expected a string"*, which
+/// names neither the array nor the limitation. Combined with `curl` exiting 0 on
+/// a 400, that produced edits reported as applied that never landed.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum TableOpBody {
+    One(TableOpInput),
+    Many(Vec<TableOpInput>),
+}
+
+impl TableOpBody {
+    fn into_vec(self) -> Vec<TableOpInput> {
+        match self {
+            TableOpBody::One(o) => vec![o],
+            TableOpBody::Many(v) => v,
+        }
+    }
+}
+
 impl TableOpInput {
     /// The sub-operation's name, for the change log's `table.<op>` field.
     pub fn name(&self) -> &str {
@@ -955,8 +983,8 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::SetChart { node, card, spec: None })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "table"]) => {
-            let op: TableOpInput = parse(body)?;
-            Ok(ApiRequest::TableOp { node: pid(nid)?, card: pid(cid)?, op })
+            let op: TableOpBody = parse(body)?;
+            Ok(ApiRequest::TableOp { node: pid(nid)?, card: pid(cid)?, ops: op.into_vec() })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "sketch"]) => {
             let op: SketchOpInput = parse(body)?;
@@ -1793,44 +1821,65 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
             }
         }
-        ApiRequest::TableOp { node, card, op } => {
-            let ok = match op.op.as_str() {
-                "set_cell" => doc.table_set_cell(
-                    node,
-                    card,
-                    op.row.unwrap_or(0),
-                    op.col.unwrap_or(0),
-                    op.text.unwrap_or_default(),
-                ),
-                "set_bg" => {
-                    let color = color_from_value(&op.color).unwrap_or(None);
-                    doc.table_set_bg(node, card, op.row.unwrap_or(0), op.col.unwrap_or(0), color)
-                }
-                "set_fg" => {
-                    let color = color_from_value(&op.color).unwrap_or(None);
-                    doc.table_set_fg(node, card, op.row.unwrap_or(0), op.col.unwrap_or(0), color)
-                }
-                "insert_row" => doc.table_insert_row(node, card, op.at.unwrap_or(0)),
-                "remove_row" => doc.table_remove_row(node, card, op.at.unwrap_or(0)),
-                "insert_col" => doc.table_insert_col(node, card, op.at.unwrap_or(0)),
-                "remove_col" => doc.table_remove_col(node, card, op.at.unwrap_or(0)),
-                "set_col_width" => {
-                    doc.table_set_col_width(node, card, op.col.unwrap_or(0), op.width.unwrap_or(110.0))
-                }
-                // No `col` = every column, which is the usual case: a table built
-                // by an agent has every column at the 110px default.
-                "autofit_cols" => doc.table_autofit_cols(node, card, op.col),
-                "set_header" => doc.table_set_header(node, card, op.header.unwrap_or(true)),
-                other => {
-                    return (false, ApiResponse::err(400, &format!("unknown table op: {other}")));
-                }
-            };
-            if ok {
-                let c = doc.card_mut(node, card).unwrap();
-                (true, ApiResponse::ok(card_json(c)))
-            } else {
-                (false, ApiResponse::err(400, "table op failed (not a table, or index out of range)"))
+        ApiRequest::TableOp { node, card, ops } => {
+            if ops.is_empty() {
+                return (false, ApiResponse::err(400, "no table ops given"));
             }
+            // Applied in order, stopping at the first failure and saying which
+            // one — a batch that half-applies and reports plain success is
+            // exactly the failure this batching was added to prevent.
+            let total = ops.len();
+            for (i, op) in ops.into_iter().enumerate() {
+                let name = op.op.clone();
+                let ok = match op.op.as_str() {
+                    "set_cell" => doc.table_set_cell(
+                        node,
+                        card,
+                        op.row.unwrap_or(0),
+                        op.col.unwrap_or(0),
+                        op.text.unwrap_or_default(),
+                    ),
+                    "set_bg" => {
+                        let color = color_from_value(&op.color).unwrap_or(None);
+                        doc.table_set_bg(node, card, op.row.unwrap_or(0), op.col.unwrap_or(0), color)
+                    }
+                    "set_fg" => {
+                        let color = color_from_value(&op.color).unwrap_or(None);
+                        doc.table_set_fg(node, card, op.row.unwrap_or(0), op.col.unwrap_or(0), color)
+                    }
+                    "insert_row" => doc.table_insert_row(node, card, op.at.unwrap_or(0)),
+                    "remove_row" => doc.table_remove_row(node, card, op.at.unwrap_or(0)),
+                    "insert_col" => doc.table_insert_col(node, card, op.at.unwrap_or(0)),
+                    "remove_col" => doc.table_remove_col(node, card, op.at.unwrap_or(0)),
+                    "set_col_width" => {
+                        doc.table_set_col_width(node, card, op.col.unwrap_or(0), op.width.unwrap_or(110.0))
+                    }
+                    // No `col` = every column, which is the usual case: a table built
+                    // by an agent has every column at the 110px default.
+                    "autofit_cols" => doc.table_autofit_cols(node, card, op.col),
+                    "set_header" => doc.table_set_header(node, card, op.header.unwrap_or(true)),
+                    other => {
+                        return (false, ApiResponse::err(400, &format!("unknown table op: {other}")));
+                    }
+            };
+                if !ok {
+                    return (
+                        i > 0,
+                        ApiResponse::err(
+                            400,
+                            &format!(
+                                "table op {}/{} ({name}) failed (not a table, or index out of \
+                                 range); {} earlier op(s) were applied",
+                                i + 1,
+                                total,
+                                i
+                            ),
+                        ),
+                    );
+                }
+            }
+            let c = doc.card_mut(node, card).unwrap();
+            (true, ApiResponse::ok(card_json(c)))
         }
         ApiRequest::SketchOp { node, card, op } => {
             let ok = match op.op.as_str() {
@@ -2577,6 +2626,72 @@ mod tests {
         assert_eq!(source_request(&mk(r#"{"body":"x"}"#)), None);
     }
 
+
+    /// The exact failure another agent hit: a list of ops was rejected with
+    /// serde's *"invalid type: map, expected a string"*, which names neither the
+    /// array nor the one-op-per-call limit. With `curl` exiting 0 on a 400, that
+    /// read as success and the edits never landed.
+    #[test]
+    fn a_batch_of_table_ops_applies_in_order() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "B".into());
+        let c = doc
+            .add_card(n, emath::pos2(0.0, 0.0), CardKind::Table { table: crate::model::TableData::empty(3, 3) })
+            .unwrap();
+        let body = r#"[{"op":"set_cell","row":0,"col":0,"text":"hi"},
+                       {"op":"set_header","header":true},
+                       {"op":"set_bg","row":0,"col":0,"color":"red"}]"#;
+        let req = route(&Method::Post, &format!("/api/nodes/{n}/cards/{c}/table"), "", body).unwrap();
+        let (changed, resp) = process(&mut doc, req);
+        assert!(changed);
+        assert_eq!(resp.status, 200, "{}", resp.body);
+
+        let card = doc.card(n, c).unwrap();
+        let CardKind::Table { table } = &card.kind else { panic!("not a table") };
+        assert_eq!(table.rows[0][0].text, "hi");
+        assert!(table.header);
+        assert_eq!(table.rows[0][0].bg, Some([239, 68, 68]));
+    }
+
+    /// A single op object must keep working exactly as before — every existing
+    /// caller sends one.
+    #[test]
+    fn a_single_table_op_still_works() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "B".into());
+        let c = doc
+            .add_card(n, emath::pos2(0.0, 0.0), CardKind::Table { table: crate::model::TableData::empty(3, 3) })
+            .unwrap();
+        let req = route(&Method::Post, &format!("/api/nodes/{n}/cards/{c}/table"), "",
+                        r#"{"op":"set_cell","row":0,"col":0,"text":"solo"}"#).unwrap();
+        let (changed, resp) = process(&mut doc, req);
+        assert!(changed && resp.status == 200);
+        let CardKind::Table { table } = &doc.card(n, c).unwrap().kind else { panic!() };
+        assert_eq!(table.rows[0][0].text, "solo");
+    }
+
+    /// A batch that fails partway must say **which** op failed and how many were
+    /// applied. Reporting a bare failure would leave the caller unable to tell
+    /// what state the table is in.
+    #[test]
+    fn a_failing_op_names_itself_and_what_already_applied() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "B".into());
+        let c = doc
+            .add_card(n, emath::pos2(0.0, 0.0), CardKind::Table { table: crate::model::TableData::empty(3, 3) })
+            .unwrap();
+        let body = r#"[{"op":"set_cell","row":0,"col":0,"text":"kept"},
+                       {"op":"set_cell","row":99,"col":99,"text":"out of range"}]"#;
+        let req = route(&Method::Post, &format!("/api/nodes/{n}/cards/{c}/table"), "", body).unwrap();
+        let (changed, resp) = process(&mut doc, req);
+        assert_eq!(resp.status, 400);
+        assert!(changed, "the first op did apply, so the document is dirty");
+        assert!(resp.body.contains("2/2"), "names the failing op: {}", resp.body);
+        assert!(resp.body.contains("1 earlier op"), "says what landed: {}", resp.body);
+        let CardKind::Table { table } = &doc.card(n, c).unwrap().kind else { panic!() };
+        assert_eq!(table.rows[0][0].text, "kept");
+    }
+
     #[test]
     fn routes_parse() {
         assert!(matches!(route(&Method::Get, "/api/tree", "", "").unwrap(), ApiRequest::Tree));
@@ -2854,7 +2969,7 @@ mod tests {
             r#"{"op":"set_header","header":false}"#,
         ] {
             let op: TableOpInput = serde_json::from_str(body).unwrap();
-            let (dirty, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
+            let (dirty, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, ops: vec![op] });
             assert!(dirty, "op {body}");
             assert_eq!(resp.status, 200, "op {body}");
         }
@@ -2864,7 +2979,7 @@ mod tests {
         assert!(!table.header);
         // An unknown op is a 400.
         let op: TableOpInput = serde_json::from_str(r#"{"op":"bogus"}"#).unwrap();
-        let (_d, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
+        let (_d, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, ops: vec![op] });
         assert_eq!(resp.status, 400);
     }
 
@@ -2909,7 +3024,7 @@ mod tests {
             .unwrap();
 
         let op: TableOpInput = serde_json::from_str(r#"{"op":"autofit_cols"}"#).unwrap();
-        let (dirty, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
+        let (dirty, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, ops: vec![op] });
         assert!(dirty);
         assert_eq!(resp.status, 200);
         let CardKind::Table { table } = &doc.nodes[&nid].cards[0].kind else { panic!() };
@@ -2918,13 +3033,13 @@ mod tests {
 
         // An out-of-range `col` is a 400, like the other indexed ops.
         let op: TableOpInput = serde_json::from_str(r#"{"op":"autofit_cols","col":7}"#).unwrap();
-        let (dirty, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
+        let (dirty, resp) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, ops: vec![op] });
         assert!(!dirty);
         assert_eq!(resp.status, 400);
 
         // Idempotent: fitting again on unchanged content changes nothing.
         let op: TableOpInput = serde_json::from_str(r#"{"op":"autofit_cols"}"#).unwrap();
-        let (_d, _r) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, op });
+        let (_d, _r) = process(&mut doc, ApiRequest::TableOp { node: nid, card: cid, ops: vec![op] });
         let CardKind::Table { table } = &doc.nodes[&nid].cards[0].kind else { panic!() };
         assert_eq!(table.col_width(1), fitted);
     }

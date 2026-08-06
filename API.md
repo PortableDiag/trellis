@@ -310,7 +310,8 @@ DELETE /api/nodes/{id}/cards/{cid}/group  → 200 {<updated card>}   | 404
 ### Table editing
 Fine-grained edits to a `table` card. One operation per request; `op` selects it.
 ```
-POST /api/nodes/{id}/cards/{cid}/table  {op, …}
+POST /api/nodes/{id}/cards/{cid}/table  {op, …}          one op
+POST /api/nodes/{id}/cards/{cid}/table  [{op, …}, {op, …}]   several, applied in order
   → 200 {<updated card>}   | 400 (unknown op / not a table / index out of range)  | 404
 ```
 | `op` | args | effect |
@@ -811,6 +812,19 @@ curl -s -H "X-API-Key: $KEY" -d '{"anchor":1}' $API/nodes/$NID/cards/2/dock
 # Convert card 1 to a checklist and fill it in one PATCH
 curl -s -X PATCH -H "X-API-Key: $KEY" \
   -d '{"kind":"checklist","items":[{"done":false,"text":"first"}]}' $API/nodes/$NID/cards/1
+
+# Several table ops in one call — applied in order. Building a styled table is
+# inherently many small edits, so send them as an array rather than N requests.
+curl -s -X POST -H "$K" -H 'Content-Type: application/json' \
+  -d '[{"op":"set_header","header":true},
+       {"op":"set_bg","row":0,"col":0,"color":"red"},
+       {"op":"set_fg","row":1,"col":0,"color":"blue"},
+       {"op":"autofit_cols"}]' \
+  "$B/nodes/$NODE/cards/$CID/table"
+# If one fails the response says which and how many already applied:
+#   {"error":"table op 3/4 (set_bg) failed …; 2 earlier op(s) were applied"}
+# **Check the status code.** curl exits 0 on a 400, so `curl` succeeding is not
+# the same as the edit landing — use -f, or read the body.
 
 # Table card: color a cell red, add a row, drop the header
 curl -s -H "X-API-Key: $KEY" -d '{"op":"set_bg","row":0,"col":0,"color":"red"}' $API/nodes/$NID/cards/1/table

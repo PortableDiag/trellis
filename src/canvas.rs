@@ -2544,7 +2544,7 @@ fn table_ui(
                 );
                 let fg = cell.fg.map(|[rr, gg, bb]| egui::Color32::from_rgb(rr, gg, bb));
                 if card.editing {
-                    let mut text = cell.text.clone();
+                    let text = cell.text.clone();
                     // Wired for the X11 primary selection exactly like the body
                     // editor: selecting in a cell offers the text to other apps,
                     // and middle-click pastes it back. Cells used a bare
