@@ -1,6 +1,6 @@
 [package]
 name = "trellis"
-version = "0.83.0"
+version = "0.84.0"
 edition = "2021"
 description = "A hierarchical, spatial note-taking app: a tree of free-form canvases"
 license = "MIT"
@@ -42,6 +42,13 @@ flate2 = "1"
 # The agent API key comes from the OS CSPRNG. Reading /dev/urandom directly
 # worked only on Unix; this asks each platform for its own generator.
 getrandom = "0.3"
+
+# Cancelling a plugin has to kill its *process group*: a plugin whose command is
+# a shell script leaves the real work running as a grandchild, still holding the
+# stdout pipe open, so killing only the child neither stops it nor ends the read.
+# Already in the tree via getrandom/tiny_http; this makes it a direct use.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

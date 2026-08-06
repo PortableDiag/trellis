@@ -80,13 +80,37 @@ environment (never argv, so tokens can't be read from the process list):
 | `TRELLIS_API` | base URL, e.g. `http://127.0.0.1:7373/api` |
 | `TRELLIS_TOKEN` | your scoped token — send as `X-API-Key` |
 | `TRELLIS_PLUGIN_DIR` | this folder, for your own config |
-| `TRELLIS_NODE` / `TRELLIS_NODE_TITLE` | set only when launched from a basket's menu |
-| `TRELLIS_TRIGGER` | `manual`, `schedule` or `change` |
+| `TRELLIS_NODE` / `TRELLIS_NODE_TITLE` | set when launched from a basket's or a card's menu |
+| `TRELLIS_CARD` / `TRELLIS_CARD_TITLE` | card-menu only: which card you were invoked on |
+| `TRELLIS_TRIGGER` | `manual`, `card-menu`, `schedule` or `change` |
 | `TRELLIS_SINCE` / `TRELLIS_REV` | on-change only: read `GET /api/changes?since=$TRELLIS_SINCE` for exactly what you haven't seen |
 
-Trigger kinds are declared in `plugin.json`: `manual`, `node-menu`, `schedule`
-(with `interval_mins`) and `on-change` (with `debounce_secs`). Scheduled and
-on-change plugins run only while Trellis is open.
+Trigger kinds are declared in `plugin.json`: `manual`, `node-menu`, `card-menu`,
+`schedule` (with `interval_mins`) and `on-change` (with `debounce_secs`).
+Scheduled and on-change plugins run only while Trellis is open.
 
-Print progress to stdout; the **last non-empty line becomes the status Trellis
-shows**. Exit non-zero to be reported as a failure.
+A card-menu plugin is handed the card's **id**, never its contents — read what
+you need over the API, under the scope you were approved for.
+
+### Progress, and being cancelled
+
+Print to stdout as you go: Trellis reads it **line by line while you run**, and
+the last non-empty line is the status it shows.
+
+A line that is a JSON object with `progress` (a **percentage**, 0–100) and/or
+`message` drives the progress bar in the Plugins window:
+
+```
+{"progress": 40, "message": "page 4 of 10"}
+```
+
+Anything else is taken as the message verbatim, so a plain `echo` works. Report a
+percentage if you know one — a plugin with no percentage shows a spinner, which
+cannot tell "working" from "stuck".
+
+**Cancel kills your process group**, so anything you shelled out to dies with
+you. Nothing is rolled back: whatever you already wrote to the document stays.
+If a partial run would leave a mess, write in an order where stopping early is
+still consistent.
+
+Exit non-zero to be reported as a failure.

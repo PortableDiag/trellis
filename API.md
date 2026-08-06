@@ -117,11 +117,12 @@ a readable status column into a *text* card:
 Limits worth knowing before you reach for it:
 - **Text colour only — no cell background.** Markdown has no concept of one. For
   a coloured *cell*, use a real **table card** and `set_bg` / `set_fg`.
-- **Emoji are monochrome, and newer ones don't render at all.** The bundled emoji
-  font predates Unicode 12, so 🟢🟡🟠🟥 come out as boxes, and even covered ones
-  (🔴 ✅) draw grey because the text stack rasterizes outlines, not colour. **Don't
-  use emoji as status indicators** — 🔴 and 🟢 are indistinguishable. Use a colour
-  span, or a table card's cell colours.
+- **Emoji are monochrome.** Since v0.84.0 every emoji *draws* — Trellis ships the
+  full outline Noto Emoji, so 🟢🟡🟠🟥 are no longer boxes, in exports as well as
+  on screen. They are still **shape only**: the text stack rasterizes glyph
+  outlines, and every colour emoji format is a bitmap or layered format it cannot
+  read. So **don't use emoji as status indicators** — 🔴 and 🟢 render as two
+  identical grey circles. Use a colour span, or a table card's cell colours.
 
 ## Endpoints
 

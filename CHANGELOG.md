@@ -4,6 +4,49 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.84.0]
+
+### Added
+- **A running plugin shows what it is doing, and can be stopped.** Its output is
+  read **line by line while it runs** rather than collected at the end, so the
+  Plugins window shows the latest line as it appears; a line that is a JSON
+  object with `progress` (a percentage) drives a real progress bar. **Cancel**
+  stops it.
+
+  A plugin with no percentage gets a spinner rather than a made-up bar — a bar
+  that isn't measuring anything is a lie about how far along the run is. Cancel
+  kills the **process group**, so a plugin that shelled out takes its children
+  with it: killing just the one process would have left the real work running
+  *and* hung the read, making Cancel appear to do nothing. A cancelled run is
+  logged as cancelled, not as a failure.
+
+- **Plugins can be invoked from a card.** A manifest declaring the `card-menu`
+  trigger appears in a card's right-click menu and is handed `TRELLIS_CARD` /
+  `TRELLIS_CARD_TITLE` alongside the basket's. It receives the card's **id**, not
+  its contents, and reads what it needs over the API under the scope it was
+  approved for — so the trigger grants nothing new. (It was in the documented
+  trigger set and had been removed in 0.80.0 rather than left declared, because a
+  trigger nothing implements is the same lie as a permission that isn't checked.)
+
+- **Emoji render.** Trellis now ships the full **outline** Noto Emoji, so
+  characters newer than the subset egui bundles — 🟢 🟡 🛑 and everything else
+  past Unicode 12 — draw instead of coming out as empty boxes. The PDF and image
+  exporters get it too; they used DejaVu alone, which has *zero* emoji coverage,
+  so an export was worse than the screen.
+
+  **They are monochrome, and that is not a font choice.** The text stack
+  rasterizes glyph *outlines*, and every colour emoji format is a bitmap
+  (CBDT/CBLC) or layered format it cannot read — adding NotoColorEmoji renders
+  nothing at all. 🔴 and 🟢 are two identical grey circles, so for status use a
+  table card's cell colours or an inline `<span style="color:…">`.
+
+### Fixed
+- **A `[[wiki-link]]` clicked inside a card navigates**, instead of opening your
+  browser. The click was read at a fixed point in the frame that ran *before* the
+  canvas drew, so a card's link was always noticed a frame late — by which time
+  the window manager had already been asked to open it. Links in the Backlinks
+  panel, which draws earlier, had always worked; that difference was the clue.
+
 ## [0.83.0]
 
 ### Added

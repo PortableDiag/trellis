@@ -24,6 +24,8 @@ pub struct Env<'a> {
     pub card_rects: &'a mut HashMap<CardId, egui::Rect>,
     /// Names of the user's saved card templates, for the "Insert template" menu.
     pub templates: &'a [String],
+    /// Approved plugins offering the `card-menu` trigger, as (index, title).
+    pub card_plugins: &'a [(usize, String)],
     /// `bytes://` URIs already registered with egui this session, so a text
     /// card's inline images are uploaded once instead of every frame.
     pub inline_sent: &'a mut std::collections::HashSet<String>,
@@ -162,6 +164,9 @@ pub enum CanvasAction {
     RemoveImage(CardId, usize),
     /// Run OCR over an image card's images and store the extracted text.
     OcrCard(CardId),
+    /// Run an approved `card-menu` plugin against this card (index into the
+    /// app's plugin list).
+    RunCardPlugin(CardId, usize),
     /// Save one of an image card's images to a file (index into `kind.images()`).
     SaveImage(CardId, usize),
     /// Save all of an image card's images into a chosen folder.
@@ -986,7 +991,9 @@ fn card_ui(
     if handle.double_clicked() && supports_edit(&card.kind) {
         actions.push(CanvasAction::SetEditing(card.id, !card.editing));
     }
-    handle.context_menu(|ui| card_menu(ui, card, node_path, env.templates, actions));
+    handle.context_menu(|ui| {
+        card_menu(ui, card, node_path, env.templates, env.card_plugins, actions)
+    });
 
     // Title label.
     let title_text = if card.title.is_empty() {
@@ -1732,6 +1739,7 @@ fn card_menu(
     card: &Card,
     node_path: &str,
     templates: &[String],
+    card_plugins: &[(usize, String)],
     actions: &mut Vec<CanvasAction>,
 ) {
     if supports_edit(&card.kind) && card.source.is_none() {
@@ -1807,6 +1815,19 @@ fn card_menu(
     if ui.button("Copy card").clicked() {
         actions.push(CanvasAction::CopyCard(card.id));
         ui.close_menu();
+    }
+    // Approved plugins that asked for the card menu. They receive the card's id
+    // and its basket's, not its contents — a plugin reads what it needs over the
+    // API under the scope it was approved for, so this trigger grants nothing
+    // new.
+    if !card_plugins.is_empty() {
+        ui.separator();
+        for (idx, title) in card_plugins {
+            if ui.button(title).clicked() {
+                actions.push(CanvasAction::RunCardPlugin(card.id, *idx));
+                ui.close_menu();
+            }
+        }
     }
     if matches!(card.kind, CardKind::Image { .. }) {
         if ui

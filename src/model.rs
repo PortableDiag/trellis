@@ -1265,6 +1265,58 @@ pub fn source_mtime(path: &str) -> Option<u64> {
 /// Font used by the PDF/image exporters (also embedded in the PDF).
 const EXPORT_FONT: &[u8] = include_bytes!("../assets/DejaVuSans.ttf");
 
+/// Emoji fallback for the exporters. DejaVu has **zero** emoji coverage, so
+/// without this an export was worse than the screen: every emoji in a card came
+/// out as a blank or a box. Outline (monochrome) Noto Emoji, the same file the
+/// UI uses — a colour bitmap font has no outlines for `ab_glyph` to rasterize or
+/// for a PDF to embed.
+const EXPORT_EMOJI_FONT: &[u8] = include_bytes!("../assets/NotoEmoji.ttf");
+
+/// The exporters' font stack: text, plus emoji for what the text font lacks.
+struct ExportFonts<'a> {
+    text: ab_glyph::FontRef<'a>,
+    emoji: ab_glyph::FontRef<'a>,
+}
+
+impl ExportFonts<'static> {
+    fn load() -> Result<Self, String> {
+        Ok(ExportFonts {
+            text: ab_glyph::FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?,
+            emoji: ab_glyph::FontRef::try_from_slice(EXPORT_EMOJI_FONT)
+                .map_err(|e| e.to_string())?,
+        })
+    }
+}
+
+impl<'a> ExportFonts<'a> {
+    /// Which font draws this char: the text font unless it has no glyph for it.
+    /// `true` means the emoji font was chosen — the PDF path needs to know,
+    /// since it embeds the two separately.
+    fn pick(&self, c: char) -> (&ab_glyph::FontRef<'a>, bool) {
+        use ab_glyph::Font as _;
+        if self.text.glyph_id(c).0 != 0 {
+            (&self.text, false)
+        } else {
+            (&self.emoji, true)
+        }
+    }
+
+    /// Split a string into the longest runs that share one font, in order.
+    /// Kerning is not carried across a run boundary — there is no meaningful
+    /// kern pair between a word and an emoji anyway.
+    fn runs(&self, s: &str) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> = Vec::new();
+        for c in s.chars() {
+            let (_, is_emoji) = self.pick(c);
+            match out.last_mut() {
+                Some((run, e)) if *e == is_emoji => run.push(c),
+                _ => out.push((c.to_string(), is_emoji)),
+            }
+        }
+        out
+    }
+}
+
 /// One laid-out line for the PDF/image exporters. `size` is a point size; an
 /// empty `text` is a vertical spacer.
 struct ExportLine {
@@ -1273,32 +1325,40 @@ struct ExportLine {
 }
 
 /// Width of `s` in the same units as `size_px`, using the font's advances.
-fn text_width(font: &ab_glyph::FontRef, size_px: f32, s: &str) -> f32 {
+///
+/// Measured per character against whichever font will actually draw it, so an
+/// emoji's width is the emoji font's — measuring everything with DejaVu would
+/// give every emoji the width of its missing-glyph box, and wrapping would be
+/// wrong wherever one appeared.
+fn text_width(fonts: &ExportFonts, size_px: f32, s: &str) -> f32 {
     use ab_glyph::{Font, PxScale, ScaleFont};
-    let scaled = font.as_scaled(PxScale::from(size_px));
     let mut w = 0.0;
-    let mut last = None;
+    let mut last: Option<(ab_glyph::GlyphId, bool)> = None;
     for c in s.chars() {
+        let (font, is_emoji) = fonts.pick(c);
+        let scaled = font.as_scaled(PxScale::from(size_px));
         let g = scaled.glyph_id(c);
-        if let Some(l) = last {
-            w += scaled.kern(l, g);
+        if let Some((l, was_emoji)) = last {
+            if was_emoji == is_emoji {
+                w += scaled.kern(l, g);
+            }
         }
         w += scaled.h_advance(g);
-        last = Some(g);
+        last = Some((g, is_emoji));
     }
     w
 }
 
 /// Greedy word-wrap `text` to `max_w` (same units as `size_px`), preserving the
 /// text's own newlines as hard breaks.
-fn wrap_text(font: &ab_glyph::FontRef, size_px: f32, text: &str, max_w: f32) -> Vec<String> {
-    let space = text_width(font, size_px, " ");
+fn wrap_text(fonts: &ExportFonts, size_px: f32, text: &str, max_w: f32) -> Vec<String> {
+    let space = text_width(fonts, size_px, " ");
     let mut lines = Vec::new();
     for para in text.split('\n') {
         let mut cur = String::new();
         let mut cur_w = 0.0;
         for word in para.split(' ').filter(|w| !w.is_empty()) {
-            let ww = text_width(font, size_px, word);
+            let ww = text_width(fonts, size_px, word);
             if !cur.is_empty() && cur_w + space + ww > max_w {
                 lines.push(std::mem::take(&mut cur));
                 cur_w = 0.0;
@@ -1318,7 +1378,7 @@ fn wrap_text(font: &ab_glyph::FontRef, size_px: f32, text: &str, max_w: f32) -> 
 /// Rasterize `text` onto `img` with its baseline at `baseline`, black on white.
 fn draw_text(
     img: &mut image::RgbaImage,
-    font: &ab_glyph::FontRef,
+    fonts: &ExportFonts,
     size_px: f32,
     x0: f32,
     baseline: f32,
@@ -1326,14 +1386,17 @@ fn draw_text(
 ) {
     use ab_glyph::{Font, PxScale, ScaleFont};
     let scale = PxScale::from(size_px);
-    let scaled = font.as_scaled(scale);
     let (w, h) = (img.width(), img.height());
     let mut x = x0;
-    let mut last = None;
+    let mut last: Option<(ab_glyph::GlyphId, bool)> = None;
     for c in text.chars() {
+        let (font, is_emoji) = fonts.pick(c);
+        let scaled = font.as_scaled(scale);
         let gid = scaled.glyph_id(c);
-        if let Some(l) = last {
-            x += scaled.kern(l, gid);
+        if let Some((l, was_emoji)) = last {
+            if was_emoji == is_emoji {
+                x += scaled.kern(l, gid);
+            }
         }
         let glyph = gid.with_scale_and_position(scale, ab_glyph::point(x, baseline));
         if let Some(og) = font.outline_glyph(glyph) {
@@ -1352,7 +1415,7 @@ fn draw_text(
             });
         }
         x += scaled.h_advance(gid);
-        last = Some(gid);
+        last = Some((gid, is_emoji));
     }
 }
 
@@ -3582,17 +3645,51 @@ fn card_lines(card: &Card) -> Vec<ExportLine> {
     out
 }
 
+/// Points per millimetre, for the PDF exporters (which lay out in mm but size
+/// text in points).
+const MM_TO_PT: f32 = 2.834_646;
+
+/// Draw one already-wrapped line into a PDF layer, switching embedded font per
+/// run.
+///
+/// A PDF text operator names exactly one font, so a line mixing words and emoji
+/// has to be written as several placed runs — `use_text` with the whole string
+/// would drop every character the named font lacks. With no emoji in the line
+/// this is a single run, i.e. exactly what it did before.
+fn pdf_line(
+    layer: &printpdf::PdfLayerReference,
+    fonts: &ExportFonts,
+    text_font: &printpdf::IndirectFontRef,
+    emoji_font: &printpdf::IndirectFontRef,
+    line: &str,
+    size: f32,
+    x_mm: f32,
+    y_mm: f32,
+) {
+    use printpdf::Mm;
+    let mut x = x_mm;
+    for (run, is_emoji) in fonts.runs(line) {
+        let f = if is_emoji { emoji_font } else { text_font };
+        layer.use_text(&run, size, Mm(x), Mm(y_mm), f);
+        // Advance by the run's own width, so the next run starts where this one
+        // ended rather than back at the margin.
+        x += text_width(fonts, size, &run) / MM_TO_PT;
+    }
+}
+
 /// Render a flat list of laid-out lines to a paginated A4 PDF. Shared by the
 /// whole-document and single-card PDF exporters.
 fn lines_to_pdf(lines: &[ExportLine]) -> Result<Vec<u8>, String> {
     use printpdf::{Mm, PdfDocument};
-    let font_ab = ab_glyph::FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?;
+    let fonts = ExportFonts::load()?;
     let (w_mm, h_mm, margin) = (210.0_f32, 297.0_f32, 20.0_f32);
-    const MM_TO_PT: f32 = 2.834_646;
     let content_w_pt = (w_mm - margin * 2.0) * MM_TO_PT;
     let (doc, page1, layer1) = PdfDocument::new("Trellis export", Mm(w_mm), Mm(h_mm), "Layer 1");
     let font = doc
         .add_external_font(std::io::Cursor::new(EXPORT_FONT))
+        .map_err(|e| e.to_string())?;
+    let emoji = doc
+        .add_external_font(std::io::Cursor::new(EXPORT_EMOJI_FONT))
         .map_err(|e| e.to_string())?;
     let mut layer = doc.get_page(page1).get_layer(layer1);
     let mut y = h_mm - margin;
@@ -3601,7 +3698,7 @@ fn lines_to_pdf(lines: &[ExportLine]) -> Result<Vec<u8>, String> {
         let wrapped = if l.text.is_empty() {
             vec![String::new()]
         } else {
-            wrap_text(&font_ab, l.size, &l.text, content_w_pt)
+            wrap_text(&fonts, l.size, &l.text, content_w_pt)
         };
         for line in wrapped {
             if y < margin {
@@ -3610,7 +3707,7 @@ fn lines_to_pdf(lines: &[ExportLine]) -> Result<Vec<u8>, String> {
                 y = h_mm - margin;
             }
             if !line.is_empty() {
-                layer.use_text(&line, l.size, Mm(margin), Mm(y), &font);
+                pdf_line(&layer, &fonts, &font, &emoji, &line, l.size, margin, y);
             }
             y -= leading;
         }
@@ -3622,9 +3719,8 @@ fn lines_to_pdf(lines: &[ExportLine]) -> Result<Vec<u8>, String> {
 /// `gif`). One tall page, black text on white. Shared by the whole-document and
 /// single-card image exporters.
 fn lines_to_image(lines: &[ExportLine], gif: bool) -> Result<Vec<u8>, String> {
-    use ab_glyph::FontRef;
     use image::{Rgba, RgbaImage};
-    let font = FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?;
+    let fonts = ExportFonts::load()?;
     let scale = 2.0_f32; // px per point
     let margin = 40.0_f32;
     let content_w = 760.0_f32;
@@ -3637,7 +3733,7 @@ fn lines_to_image(lines: &[ExportLine], gif: bool) -> Result<Vec<u8>, String> {
         if l.text.is_empty() {
             rows.push((String::new(), px));
         } else {
-            for w in wrap_text(&font, px, &l.text, content_w) {
+            for w in wrap_text(&fonts, px, &l.text, content_w) {
                 rows.push((w, px));
             }
         }
@@ -3649,7 +3745,7 @@ fn lines_to_image(lines: &[ExportLine], gif: bool) -> Result<Vec<u8>, String> {
     let mut y = margin;
     for (text, px) in &rows {
         if !text.is_empty() {
-            draw_text(&mut img, &font, *px, margin, y + *px, text);
+            draw_text(&mut img, &fonts, *px, margin, y + *px, text);
         }
         y += px * 1.5;
     }
@@ -3715,9 +3811,8 @@ pub fn basket_pdf(pages: &[ShotPage]) -> Result<Vec<u8>, String> {
     if pages.is_empty() {
         return Err("nothing to export".to_string());
     }
-    let font_ab = ab_glyph::FontRef::try_from_slice(EXPORT_FONT).map_err(|e| e.to_string())?;
+    let fonts = ExportFonts::load()?;
     let (w_mm, h_mm, margin) = (210.0_f32, 297.0_f32, 16.0_f32);
-    const MM_TO_PT: f32 = 2.834_646;
     let content_w_mm = w_mm - margin * 2.0;
     let content_w_pt = content_w_mm * MM_TO_PT;
 
@@ -3725,6 +3820,9 @@ pub fn basket_pdf(pages: &[ShotPage]) -> Result<Vec<u8>, String> {
         PdfDocument::new("Trellis basket", Mm(w_mm), Mm(h_mm), "Layer 1");
     let font =
         doc.add_external_font(std::io::Cursor::new(EXPORT_FONT)).map_err(|e| e.to_string())?;
+    let emoji = doc
+        .add_external_font(std::io::Cursor::new(EXPORT_EMOJI_FONT))
+        .map_err(|e| e.to_string())?;
 
     for (pi, page) in pages.iter().enumerate() {
         if pi > 0 {
@@ -3737,7 +3835,7 @@ pub fn basket_pdf(pages: &[ShotPage]) -> Result<Vec<u8>, String> {
         // Heading (selectable).
         if !page.title.is_empty() {
             let layer = doc.get_page(cur_page).get_layer(cur_layer);
-            layer.use_text(&page.title, 15.0, Mm(margin), Mm(y - 5.0), &font);
+            pdf_line(&layer, &fonts, &font, &emoji, &page.title, 15.0, margin, y - 5.0);
             y -= 9.0;
         }
 
@@ -3792,7 +3890,7 @@ pub fn basket_pdf(pages: &[ShotPage]) -> Result<Vec<u8>, String> {
                 let wrapped = if raw.is_empty() {
                     vec![String::new()]
                 } else {
-                    wrap_text(&font_ab, size, raw, content_w_pt)
+                    wrap_text(&fonts, size, raw, content_w_pt)
                 };
                 for line in wrapped {
                     if y < margin {
@@ -3803,7 +3901,7 @@ pub fn basket_pdf(pages: &[ShotPage]) -> Result<Vec<u8>, String> {
                         y = h_mm - margin;
                     }
                     if !line.is_empty() {
-                        tl.use_text(&line, size, Mm(margin), Mm(y), &font);
+                        pdf_line(&tl, &fonts, &font, &emoji, &line, size, margin, y);
                     }
                     y -= leading;
                 }
@@ -4748,6 +4846,53 @@ mod tests {
 
         let gif = doc.export_image(true).expect("gif");
         assert!(gif.starts_with(b"GIF8"), "GIF magic header");
+    }
+
+    /// DejaVu has no emoji at all, so before the fallback these came out blank.
+    /// Pinned at the font-stack level rather than by inspecting pixels: what
+    /// went wrong was "no font in the stack can draw this", and that is exactly
+    /// what this asserts.
+    #[test]
+    fn the_export_font_stack_covers_emoji_dejavu_lacks() {
+        use ab_glyph::Font as _;
+        let fonts = ExportFonts::load().expect("fonts load");
+        for (c, name) in [
+            ('\u{1F534}', "red circle"),
+            // Post-Unicode-12, and missing from the subset egui bundles — the
+            // glyph that started this.
+            ('\u{1F7E2}', "green circle"),
+            ('\u{2705}', "check mark"),
+            ('\u{1F6D1}', "stop sign"),
+        ] {
+            let (font, is_emoji) = fonts.pick(c);
+            assert!(is_emoji, "{name} should come from the emoji font");
+            assert_ne!(font.glyph_id(c).0, 0, "{name} has no glyph");
+        }
+        // Ordinary text must still come from DejaVu, not be dragged into the
+        // emoji font by an over-eager fallback.
+        assert!(!fonts.pick('A').1);
+        assert!(!fonts.pick('—').1);
+    }
+
+    /// An emoji in a card must not break the exporters, and must be placed as
+    /// its own run rather than dropped from the line.
+    #[test]
+    fn exports_render_a_card_containing_emoji() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Status \u{1F7E2}".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().body = "build \u{2705} deploy \u{1F534} rollback".into();
+
+        let fonts = ExportFonts::load().unwrap();
+        let runs = fonts.runs("build \u{2705} ok");
+        assert_eq!(runs.len(), 3, "text | emoji | text");
+        assert!(!runs[0].1 && runs[1].1 && !runs[2].1);
+        assert_eq!(runs[1].0, "\u{2705}");
+
+        let pdf = doc.export_pdf().expect("pdf with emoji");
+        assert!(pdf.starts_with(b"%PDF"));
+        let png = doc.export_image(false).expect("png with emoji");
+        assert_eq!(&png[1..4], b"PNG");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -644,6 +644,16 @@ pub struct Template {
     pub master: Option<MasterRef>,
 }
 
+/// What a plugin worker thread sends back.
+///
+/// Progress and completion share one channel so they can't arrive out of order —
+/// a late progress line landing after the "done" would otherwise leave a
+/// finished plugin showing a half-full bar forever.
+pub enum PluginEvent {
+    Progress(crate::plugins::Progress),
+    Done(crate::plugins::RunResult),
+}
+
 /// Command-line startup overrides (see `main`). Each field falls back to the
 /// saved setting when `None`, so a bare `trellis` behaves exactly as before.
 #[derive(Default)]
@@ -863,10 +873,17 @@ pub struct TrellisApp {
     mirror_dirs: Vec<String>,
     /// Finished runs, newest last, for the Plugins window's log pane.
     plugin_log: Vec<crate::plugins::RunResult>,
-    plugin_rx: Receiver<crate::plugins::RunResult>,
-    plugin_tx: Sender<crate::plugins::RunResult>,
+    plugin_rx: Receiver<PluginEvent>,
+    plugin_tx: Sender<PluginEvent>,
     /// Plugins currently running, so the UI can say so and not start a second.
     plugin_running: std::collections::HashSet<String>,
+    /// The latest progress line per running plugin, for the window and the
+    /// status bar.
+    plugin_progress: std::collections::HashMap<String, crate::plugins::Progress>,
+    /// The cancel flag handed to each running plugin. Setting it kills the
+    /// child; the entry goes when the run reports back, so a plugin ignoring
+    /// SIGKILL (it can't) would still be tracked honestly.
+    plugin_cancel: std::collections::HashMap<String, Arc<AtomicBool>>,
     /// Last run time per scheduled plugin, and the change-log sequence each
     /// on-change plugin has already been told about.
     plugin_last_run: std::collections::HashMap<String, Instant>,
@@ -1197,6 +1214,8 @@ impl TrellisApp {
             plugin_rx,
             plugin_tx,
             plugin_running: std::collections::HashSet::new(),
+            plugin_progress: std::collections::HashMap::new(),
+            plugin_cancel: std::collections::HashMap::new(),
             plugin_last_run: std::collections::HashMap::new(),
             plugin_seen_seq: std::collections::HashMap::new(),
             plugin_change_at: None,
@@ -1703,13 +1722,33 @@ impl TrellisApp {
         // irrelevant to it and 127.0.0.1 works whether or not LAN is enabled.
         let base = format!("http://127.0.0.1:{}/api", self.api_port);
         self.status = format!("Running {}…", p.manifest.title);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.plugin_cancel.insert(p.manifest.name.clone(), Arc::clone(&cancel));
+        self.plugin_progress.remove(&p.manifest.name);
         let tx = self.plugin_tx.clone();
         let egui_ctx = self.egui_ctx.clone();
         std::thread::spawn(move || {
-            let r = crate::plugins::run(&p, &token, &base, &ctx);
-            let _ = tx.send(r);
+            let ping = egui_ctx.clone();
+            let ptx = tx.clone();
+            let r = crate::plugins::run(&p, &token, &base, &ctx, &cancel, &|pr| {
+                let _ = ptx.send(PluginEvent::Progress(pr));
+                // Each line has to wake the UI itself: an idle window stops
+                // calling update(), and progress nobody repaints is no progress.
+                ping.request_repaint();
+            });
+            let _ = tx.send(PluginEvent::Done(r));
             egui_ctx.request_repaint();
         });
+    }
+
+    /// Ask a running plugin to stop. The flag is read by the runner's watcher
+    /// thread, which kills the child; the run then reports back as cancelled
+    /// like any other finish, so there is one path out of "running".
+    fn cancel_plugin(&mut self, name: &str) {
+        if let Some(flag) = self.plugin_cancel.get(name) {
+            flag.store(true, Ordering::Relaxed);
+            self.status = format!("Stopping {name}…");
+        }
     }
 
     /// Collect finished plugin runs.
@@ -1818,14 +1857,30 @@ impl TrellisApp {
     }
 
     fn pump_plugins(&mut self) {
-        let done: Vec<_> = std::iter::from_fn(|| self.plugin_rx.try_recv().ok()).collect();
-        for r in done {
-            self.plugin_running.remove(&r.plugin);
-            self.status = if r.ok { r.summary.clone() } else { format!("Plugin failed: {}", r.summary) };
-            self.plugin_log.push(r);
-            // Keep the pane bounded; a chatty plugin shouldn't grow forever.
-            if self.plugin_log.len() > 50 {
-                self.plugin_log.remove(0);
+        let events: Vec<_> = std::iter::from_fn(|| self.plugin_rx.try_recv().ok()).collect();
+        for ev in events {
+            match ev {
+                PluginEvent::Progress(pr) => {
+                    if !pr.message.is_empty() {
+                        self.status = pr.message.clone();
+                    }
+                    self.plugin_progress.insert(pr.plugin.clone(), pr);
+                }
+                PluginEvent::Done(r) => {
+                    self.plugin_running.remove(&r.plugin);
+                    self.plugin_cancel.remove(&r.plugin);
+                    self.plugin_progress.remove(&r.plugin);
+                    self.status = if r.ok || r.cancelled {
+                        r.summary.clone()
+                    } else {
+                        format!("Plugin failed: {}", r.summary)
+                    };
+                    self.plugin_log.push(r);
+                    // Keep the pane bounded; a chatty plugin shouldn't grow forever.
+                    if self.plugin_log.len() > 50 {
+                        self.plugin_log.remove(0);
+                    }
+                }
             }
         }
     }
@@ -2808,6 +2863,10 @@ impl TrellisApp {
             // themselves where the library is actually touched.
             CanvasAction::ResetView
             | CanvasAction::CopyCard(_)
+            // Launching a plugin changes nothing by itself. Anything it does to
+            // the document arrives over the API and is logged there, as `api`
+            // rather than `ui` — which is the honest actor.
+            | CanvasAction::RunCardPlugin(..)
             | CanvasAction::SaveImage(..)
             | CanvasAction::SaveAllImages(_)
             | CanvasAction::ExportCardPng(_)
@@ -3386,6 +3445,25 @@ impl TrellisApp {
                     if self.doc.remove_image(node, cid, idx) {
                         self.tex_cache.forget(cid);
                     }
+                }
+                CanvasAction::RunCardPlugin(cid, idx) => {
+                    // The plugin is told which card, not what is in it. It reads
+                    // that over the API under its own scope — so a read-only
+                    // plugin invoked from a card menu is still read-only.
+                    let node_title =
+                        self.doc.nodes.get(&node).map(|n| n.title.clone()).unwrap_or_default();
+                    let card_title =
+                        self.doc.card(node, cid).map(|c| c.title.clone()).unwrap_or_default();
+                    self.run_plugin(
+                        idx,
+                        vec![
+                            ("TRELLIS_TRIGGER".into(), "card-menu".into()),
+                            ("TRELLIS_NODE".into(), node.to_string()),
+                            ("TRELLIS_NODE_TITLE".into(), node_title),
+                            ("TRELLIS_CARD".into(), cid.to_string()),
+                            ("TRELLIS_CARD_TITLE".into(), card_title),
+                        ],
+                    );
                 }
                 CanvasAction::OcrCard(cid) => {
                     let images: Vec<Vec<u8>> = self
@@ -4514,6 +4592,7 @@ impl TrellisApp {
         let mut to_approve: Option<usize> = None;
         let mut to_revoke: Option<String> = None;
         let mut to_save: Option<usize> = None;
+        let mut to_cancel: Option<String> = None;
         let mut rescan = false;
 
         egui::Window::new("Plugins")
@@ -4554,7 +4633,32 @@ impl TrellisApp {
                         }
                         if running {
                             ui.spinner();
-                            ui.label(egui::RichText::new("running…").weak());
+                            let prog = self.plugin_progress.get(&p.manifest.name);
+                            // A bar only when the plugin reports a percentage.
+                            // A bar that isn't measuring anything is a lie about
+                            // how far along the run is.
+                            match prog.and_then(|pr| pr.percent) {
+                                Some(pct) => {
+                                    ui.add(
+                                        egui::ProgressBar::new(pct / 100.0)
+                                            .desired_width(140.0)
+                                            .show_percentage(),
+                                    );
+                                }
+                                None => {
+                                    ui.label(egui::RichText::new("running…").weak());
+                                }
+                            }
+                            if let Some(msg) = prog.map(|pr| pr.message.as_str()).filter(|m| !m.is_empty()) {
+                                ui.label(egui::RichText::new(msg).weak().small());
+                            }
+                            if ui
+                                .button("Cancel")
+                                .on_hover_text("Stop the plugin. Anything it already wrote stays.")
+                                .clicked()
+                            {
+                                to_cancel = Some(p.manifest.name.clone());
+                            }
                         }
                     });
                     ui.indent(&p.manifest.name, |ui| {
@@ -4706,7 +4810,11 @@ impl TrellisApp {
                     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                         for r in self.plugin_log.iter().rev() {
                             ui.horizontal(|ui| {
-                                if r.ok {
+                                if r.cancelled {
+                                    // Neither tick nor cross: you stopped it, so
+                                    // it neither succeeded nor went wrong.
+                                    ui.colored_label(egui::Color32::from_rgb(180, 180, 180), "■");
+                                } else if r.ok {
                                     ui.colored_label(egui::Color32::from_rgb(80, 190, 110), "✔");
                                 } else {
                                     ui.colored_label(egui::Color32::from_rgb(230, 100, 100), "✘");
@@ -4750,6 +4858,9 @@ impl TrellisApp {
         }
         if let Some(i) = to_run {
             self.run_plugin(i, Vec::new());
+        }
+        if let Some(name) = to_cancel {
+            self.cancel_plugin(&name);
         }
         if rescan {
             if let Some(d) = crate::plugins::plugins_dir(self.startup_data_dir.as_deref()) {
@@ -6481,17 +6592,6 @@ impl eframe::App for TrellisApp {
             self.kanban_window(ctx);
         }
 
-        // Follow [[wiki-links]] (rendered as the `trellis:` URL scheme) by
-        // navigating instead of letting eframe open a browser.
-        let clicked = ctx.output(|o| o.open_url.as_ref().map(|u| u.url.clone()));
-        if let Some(url) = clicked {
-            if let Some(t) = url.strip_prefix("trellis:") {
-                let target = t.to_string();
-                ctx.output_mut(|o| o.open_url = None);
-                self.follow_wikilink(&target);
-            }
-        }
-
         egui::SidePanel::left("tree")
             .resizable(true)
             .default_width(240.0)
@@ -6546,11 +6646,13 @@ impl eframe::App for TrellisApp {
                     }
                     let template_names: Vec<String> =
                         self.templates.iter().map(|t| t.card.title.clone()).collect();
+                    let card_plugins = self.plugins_for(crate::plugins::Trigger::CardMenu);
                     let mut env = Env {
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
                         card_rects: &mut self.card_rects,
                         templates: &template_names,
+                        card_plugins: &card_plugins,
                         inline_sent: &mut self.inline_sent,
                         inline_epoch: self.inline_epoch,
                         focus_card: self.focus_card,
@@ -6657,6 +6759,23 @@ impl eframe::App for TrellisApp {
         }
 
         self.lightbox_ui(ctx);
+
+        // Follow [[wiki-links]] (rendered as the `trellis:` URL scheme) by
+        // navigating instead of letting eframe open a browser.
+        //
+        // This must be the *last* thing in `update()`: `open_url` is set while a
+        // widget is rendered and cleared by the backend at the end of the frame,
+        // so anything drawn after this check gets its click read a frame too
+        // late — by which point eframe has already opened a browser. Links in a
+        // card were doing exactly that, because the canvas renders below.
+        let clicked = ctx.output(|o| o.open_url.as_ref().map(|u| u.url.clone()));
+        if let Some(url) = clicked {
+            if let Some(t) = url.strip_prefix("trellis:") {
+                let target = t.to_string();
+                ctx.output_mut(|o| o.open_url = None);
+                self.follow_wikilink(&target);
+            }
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -6720,6 +6839,20 @@ fn setup_fonts(ctx: &egui::Context) {
         "dejavu-mono".to_owned(),
         egui::FontData::from_static(include_bytes!("../assets/DejaVuSansMono.ttf")),
     );
+    // Emoji. egui bundles a *subset* of Noto Emoji that predates Unicode 12, so
+    // anything newer drew tofu — U+1F534 🔴 was there and U+1F7E2 🟢 was not,
+    // which is exactly the pair someone reaches for as a status indicator.
+    //
+    // This is the **outline** (monochrome) Noto Emoji, not NotoColorEmoji: that
+    // one is CBDT/CBLC, a colour *bitmap* format with no glyph outlines, and
+    // epaint rasterizes outlines — adding it renders nothing, silently. So
+    // emoji are shape-only here by construction, and two coloured circles still
+    // look identical. For status an agent should colour a table cell or use an
+    // inline `<span style="color:…">`; see API.md.
+    fonts.font_data.insert(
+        "noto-emoji".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/NotoEmoji.ttf")),
+    );
     fonts
         .families
         .entry(egui::FontFamily::Proportional)
@@ -6730,6 +6863,14 @@ fn setup_fonts(ctx: &egui::Context) {
         .entry(egui::FontFamily::Monospace)
         .or_default()
         .insert(0, "dejavu-mono".to_owned());
+    // Ahead of egui's own emoji fonts in the fallback chain, behind the text
+    // fonts: it must win over the stale subset for a glyph both define, and
+    // never over DejaVu for the arrows and dashes DejaVu draws better.
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        let chain = fonts.families.entry(family).or_default();
+        let at = if chain.is_empty() { 0 } else { 1 };
+        chain.insert(at, "noto-emoji".to_owned());
+    }
     ctx.set_fonts(fonts);
 }
 

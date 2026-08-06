@@ -26,7 +26,10 @@
 //! gets full access because narrowing it was inconvenient.
 
 use serde::{Deserialize, Serialize};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// What a plugin's token is allowed to do.
 ///
@@ -73,6 +76,10 @@ pub enum Trigger {
     Manual,
     /// Right-click a basket → *name*, invoked with that node's id.
     NodeMenu,
+    /// Right-click a card → *name*, invoked with that card's id and its basket's.
+    /// A plugin gets the ids, not the card — it reads what it needs over the API
+    /// under its own scope, so this trigger widens nothing.
+    CardMenu,
     /// Every `interval_mins` while Trellis is open. Nothing fires while it is
     /// closed — this is a desktop app, not a service, and pretending otherwise
     /// would make a schedule people rely on quietly unreliable.
@@ -89,6 +96,7 @@ impl Trigger {
         match self {
             Trigger::Manual => "Tools → Plugins",
             Trigger::NodeMenu => "right-click a basket",
+            Trigger::CardMenu => "right-click a card",
             Trigger::Schedule => "on a schedule",
             Trigger::OnChange => "when the document changes",
         }
@@ -302,72 +310,216 @@ pub fn mint_token() -> String {
 pub struct RunResult {
     pub plugin: String,
     pub ok: bool,
+    /// Stopped by the user rather than by failing. Kept apart from `ok` because
+    /// painting a deliberate cancel as an error trains people to ignore errors.
+    pub cancelled: bool,
     pub summary: String,
     pub output: String,
 }
 
-/// Run a plugin, capturing what it printed.
+/// A line a running plugin printed, as it prints it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Progress {
+    pub plugin: String,
+    /// Percent complete, when the plugin reported one. `None` means "still
+    /// working" with no estimate — which is most plugins, and is fine.
+    pub percent: Option<f32>,
+    pub message: String,
+}
+
+/// Read one line of a plugin's stdout as progress.
+///
+/// A JSON object carrying `progress` (**percent**, 0–100) and/or `message` is
+/// the structured form; anything else is taken as the message verbatim. Both are
+/// supported on purpose: the structured form is what a progress bar needs, and
+/// the plain form means `echo` from a shell script already works. Percent rather
+/// than a 0–1 fraction because `1` would otherwise be ambiguous between "1%" and
+/// "finished", and a plugin author would have to guess which.
+fn parse_progress(line: &str) -> (Option<f32>, String) {
+    let t = line.trim();
+    if t.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+            let pct = v.get("progress").and_then(|p| p.as_f64()).map(|p| p.clamp(0.0, 100.0) as f32);
+            let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("").trim().to_string();
+            if pct.is_some() || !msg.is_empty() {
+                return (pct, msg);
+            }
+        }
+    }
+    (None, t.to_string())
+}
+
+/// Stop a plugin and everything it started.
+///
+/// On Unix the child leads its own process group (see `run`), so signalling the
+/// negated pid reaches every descendant — which is the only version of "cancel"
+/// that is true for a plugin that shells out. TERM first so a plugin can finish
+/// the write it is in the middle of, then KILL for anything that ignores it.
+///
+/// Elsewhere this is the child alone: Windows would need a Job object, and
+/// claiming more than that in the UI would be a lie.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pgid = child.id() as i32;
+        unsafe {
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+        // A short grace period, then insist. Anything longer would leave the
+        // window saying "Stopping…" for long enough to look broken.
+        for _ in 0..10 {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+}
+
+/// Run a plugin, streaming what it prints and stopping when asked to.
 ///
 /// The plugin is told everything it needs through the environment rather than
 /// argv, so a token can't be read out of the process list by anything else on
 /// the machine.
 ///
 /// Runs on a worker thread — a plugin may take minutes, and blocking the UI
-/// thread on one would freeze the window and stall autosave.
+/// thread on one would freeze the window and stall autosave. Output is read
+/// **as it arrives** rather than collected at exit: a sync of hundreds of items
+/// that shows nothing until it finishes is indistinguishable from one that has
+/// hung, and there would be no way to stop it.
+///
+/// Setting `cancel` kills the child. That closes its stdout, which ends the read
+/// loop below — so cancelling needs no separate wake-up.
 pub fn run(
     plugin: &Plugin,
     token: &str,
     base_url: &str,
     ctx: &[(String, String)],
+    cancel: &Arc<AtomicBool>,
+    on_progress: &dyn Fn(Progress),
 ) -> RunResult {
+    let name = plugin.manifest.name.clone();
     let mut cmd = std::process::Command::new(plugin.program());
     cmd.args(&plugin.manifest.args)
         .current_dir(&plugin.dir)
         .env("TRELLIS_API", base_url)
         .env("TRELLIS_TOKEN", token)
         .env("TRELLIS_PLUGIN_DIR", &plugin.dir)
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     for (k, v) in ctx {
         cmd.env(k, v);
     }
-
-    match cmd.output() {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let ok = out.status.success();
-            // The last non-empty line of stdout is the plugin's headline: short
-            // enough for a status bar, and it keeps the convention trivial to
-            // follow from any language.
-            let summary = stdout
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|| {
-                    if ok {
-                        format!("{} finished", plugin.manifest.title)
-                    } else {
-                        format!("{} failed ({})", plugin.manifest.title, out.status)
-                    }
-                });
-            let mut output = stdout;
-            if !stderr.trim().is_empty() {
-                output.push_str("\n--- stderr ---\n");
-                output.push_str(&stderr);
-            }
-            RunResult { plugin: plugin.manifest.name.clone(), ok, summary, output }
-        }
-        Err(e) => RunResult {
-            plugin: plugin.manifest.name.clone(),
-            ok: false,
-            // Naming the program is the difference between a usable error and
-            // "it didn't work" — the usual cause is a missing interpreter or a
-            // file that isn't executable.
-            summary: format!("could not start {}: {e}", plugin.program().display()),
-            output: String::new(),
-        },
+    // Give the plugin its own process group so cancelling can take the whole
+    // tree. Without this, a plugin whose command is `./run.sh` puts the actual
+    // work in a grandchild: killing the shell leaves it running, and — because
+    // it inherited the stdout pipe — the read loop below never ends either, so
+    // Cancel would appear to do nothing at all.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
     }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return RunResult {
+                plugin: name,
+                ok: false,
+                cancelled: false,
+                // Naming the program is the difference between a usable error
+                // and "it didn't work" — the usual cause is a missing
+                // interpreter or a file that isn't executable.
+                summary: format!("could not start {}: {e}", plugin.program().display()),
+                output: String::new(),
+            }
+        }
+    };
+
+    let out_pipe = child.stdout.take();
+    let err_pipe = child.stderr.take();
+
+    // stderr on its own thread. A plugin that writes more to stderr than the
+    // pipe buffer holds would block forever waiting for someone to drain it,
+    // while we sat reading stdout — a deadlock that only shows up on chatty
+    // plugins, i.e. in production.
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(p) = err_pipe {
+            use std::io::Read;
+            let _ = std::io::BufReader::new(p).read_to_string(&mut s);
+        }
+        s
+    });
+
+    // The killer needs the child while this thread reads its output, so the
+    // handle is shared. The lock is only ever held long enough to signal.
+    let child = Arc::new(Mutex::new(child));
+    let finished = Arc::new(AtomicBool::new(false));
+    let killer = {
+        let child = Arc::clone(&child);
+        let cancel = Arc::clone(cancel);
+        let finished = Arc::clone(&finished);
+        std::thread::spawn(move || {
+            while !finished.load(Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed) {
+                    if let Ok(mut c) = child.lock() {
+                        kill_tree(&mut c);
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        })
+    };
+
+    let mut stdout = String::new();
+    let mut summary: Option<String> = None;
+    if let Some(p) = out_pipe {
+        for line in std::io::BufReader::new(p).lines() {
+            let Ok(line) = line else { break };
+            stdout.push_str(&line);
+            stdout.push('\n');
+            let (percent, message) = parse_progress(&line);
+            // The last non-empty message is the plugin's headline — the same
+            // convention as before streaming, so existing plugins are unchanged.
+            if !message.is_empty() {
+                summary = Some(message.clone());
+            }
+            if percent.is_some() || !message.is_empty() {
+                on_progress(Progress { plugin: name.clone(), percent, message });
+            }
+        }
+    }
+
+    finished.store(true, Ordering::Relaxed);
+    let status = child.lock().ok().and_then(|mut c| c.wait().ok());
+    let _ = killer.join();
+    let stderr = err_thread.join().unwrap_or_default();
+
+    let was_cancelled = cancel.load(Ordering::Relaxed);
+    let ok = !was_cancelled && status.map(|s| s.success()).unwrap_or(false);
+    let summary = if was_cancelled {
+        format!("{} cancelled", plugin.manifest.title)
+    } else {
+        summary.unwrap_or_else(|| match status {
+            Some(s) if s.success() => format!("{} finished", plugin.manifest.title),
+            Some(s) => format!("{} failed ({s})", plugin.manifest.title),
+            None => format!("{} ended unexpectedly", plugin.manifest.title),
+        })
+    };
+    let mut output = stdout;
+    if !stderr.trim().is_empty() {
+        output.push_str("\n--- stderr ---\n");
+        output.push_str(&stderr);
+    }
+    RunResult { plugin: name, ok, cancelled: was_cancelled, summary, output }
 }
 
 #[cfg(test)]
@@ -457,6 +609,89 @@ mod tests {
         // A bare name is PATH — never a file inside the plugin, even if one
         // exists there with that name.
         assert_eq!(plug("python3").program(), PathBuf::from("python3"));
+    }
+
+    /// Both progress forms have to work: the structured one drives the bar, and
+    /// the plain one is what a shell script's `echo` already produces.
+    #[test]
+    fn progress_reads_json_or_a_plain_line() {
+        assert_eq!(
+            parse_progress(r#"{"progress": 42, "message": "page 3 of 7"}"#),
+            (Some(42.0), "page 3 of 7".to_string())
+        );
+        assert_eq!(parse_progress(r#"{"progress": 10}"#), (Some(10.0), String::new()));
+        assert_eq!(parse_progress("  syncing 3 items  "), (None, "syncing 3 items".to_string()));
+        // Out-of-range percentages are clamped, not believed.
+        assert_eq!(parse_progress(r#"{"progress": 900}"#).0, Some(100.0));
+        assert_eq!(parse_progress(r#"{"progress": -5}"#).0, Some(0.0));
+        // A line that merely starts with a brace is still a message.
+        assert_eq!(parse_progress("{not json"), (None, "{not json".to_string()));
+        // JSON carrying neither field is not progress — it's output.
+        assert_eq!(parse_progress(r#"{"a":1}"#), (None, r#"{"a":1}"#.to_string()));
+    }
+
+    fn shell_plugin(dir: &Path, script: &str) -> Plugin {
+        std::fs::create_dir_all(dir).unwrap();
+        let s = dir.join("run.sh");
+        std::fs::write(&s, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut m: Manifest = serde_json::from_str(&manifest_json("")).unwrap();
+        m.command = "./run.sh".into();
+        m.title = "Shell".into();
+        Plugin { manifest: m, dir: dir.to_path_buf(), enabled: true }
+    }
+
+    /// Output must arrive while the plugin is still running, not at exit — the
+    /// whole point of streaming is that a long run shows something.
+    #[cfg(unix)]
+    #[test]
+    fn progress_arrives_line_by_line_and_the_last_message_is_the_summary() {
+        let dir = std::env::temp_dir().join(format!("trellis-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = shell_plugin(
+            &dir,
+            "#!/bin/sh\necho '{\"progress\": 50, \"message\": \"halfway\"}'\necho done here\n",
+        );
+        let seen = Mutex::new(Vec::new());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let r = run(&p, "tok", "http://127.0.0.1:1/api", &[], &cancel, &|pr| {
+            seen.lock().unwrap().push(pr);
+        });
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].percent, Some(50.0));
+        assert_eq!(seen[0].message, "halfway");
+        assert!(r.ok && !r.cancelled);
+        assert_eq!(r.summary, "done here");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cancelling has to actually stop the process, and say so — a cancel that
+    /// only hides the run while it keeps writing is worse than no cancel.
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_kills_the_child_and_is_not_reported_as_a_failure() {
+        let dir = std::env::temp_dir().join(format!("trellis-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = shell_plugin(&dir, "#!/bin/sh\necho started\nsleep 60\necho never\n");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let start = std::time::Instant::now();
+        let r = run(&p, "tok", "http://127.0.0.1:1/api", &[], &cancel, &|_| {});
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "did not stop promptly");
+        assert!(r.cancelled, "reported as cancelled");
+        assert!(!r.ok, "and not as success");
+        assert_eq!(r.summary, "Shell cancelled");
+        assert!(!r.output.contains("never"), "the rest of the script never ran");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

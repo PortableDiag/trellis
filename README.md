@@ -192,8 +192,9 @@ from the main cluster, and click or drag on it to jump there without zooming out
   (or its checklist is fully checked). Track deadlines that span workspaces
   without copying cards around.
 - **Wiki-links & backlinks** — write `[[Node Title]]` in a card to make a
-  clickable link that jumps to that node; **View → Backlinks** shows everything
-  that links to the current node ("linked here").
+  clickable link that jumps to that node — in the card itself as well as in the
+  Backlinks panel; **View → Backlinks** shows everything that links to the
+  current node ("linked here").
 - **Link graph** (View → Link graph) — a force-directed picture of the wiki-link
   web across the tree; click a node to open it.
 - **Kanban board** (View → Kanban board) — cards with a `status::` property shown
@@ -239,8 +240,12 @@ from the main cluster, and click or drag on it to jump there without zooming out
   the token itself, so there is no credential to copy, paste or rotate, and
   **Revoke** stops it working immediately. A read-only plugin is enforced as
   read-only by the API, not merely asked to behave. Plugins run from Tools →
-  Plugins or from a basket's right-click menu, and live per instance (see
-  [Separate documents](#separate-documents-side-by-side)). Worked example:
+  Plugins, from a basket's or a **card's** right-click menu, on a schedule, or
+  when the document changes; they live per instance (see
+  [Separate documents](#separate-documents-side-by-side)). A running plugin
+  shows **live progress** — a bar when it reports a percentage, its latest line
+  otherwise — and a **Cancel** button that stops it and everything it started.
+  Worked example:
   [`plugins/dry-backup/`](plugins/dry-backup/README.md), which copies a document
   into a [Dry](https://dry.ai) space and can be re-run without duplicating.
 - **Web clipper** — a small Chrome/Edge extension (`web-clipper/`) clips the
