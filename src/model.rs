@@ -80,6 +80,86 @@ pub struct TableData {
     /// is what every table saved before charts existed deserializes to.
     #[serde(default)]
     pub chart: Option<ChartSpec>,
+    /// Conditional formatting: colour cells by their value. Re-applied after
+    /// every refresh of a `source`-backed table, so live data stays coloured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<CellRule>,
+}
+
+/// Colour a column's cells by what they contain.
+///
+/// Deliberately a small, explicit rule list rather than a formula language: the
+/// point is "colour column 2 by value", and every extra capability here is one
+/// more thing to specify, document and get wrong.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CellRule {
+    /// Column index this rule tests. `None` = every column.
+    #[serde(default)]
+    pub col: Option<usize>,
+    /// `gt` `lt` `ge` `le` `eq` `ne` `contains` `empty` `not_empty`.
+    pub when: String,
+    /// The value compared against. Numeric comparisons use the same decorated
+    /// parser as charts (`1,234.5`, `$12`, `40%`, `(3)` = −3) so a table and its
+    /// chart never disagree about what a cell means.
+    ///
+    /// Accepts a JSON **number or string** — `"value": 1000` is what anyone
+    /// writing a numeric threshold types, and rejecting it would be pedantry.
+    #[serde(default, deserialize_with = "de_scalar_string")]
+    pub value: String,
+    #[serde(default)]
+    pub bg: Option<[u8; 3]>,
+    #[serde(default)]
+    pub fg: Option<[u8; 3]>,
+}
+
+/// Deserialize a number, string or bool into a `String`, so a numeric threshold
+/// can be written as a number.
+fn de_scalar_string<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    })
+}
+
+impl CellRule {
+    /// Whether this rule matches `text`.
+    pub fn matches(&self, text: &str) -> bool {
+        let t = text.trim();
+        match self.when.as_str() {
+            "empty" => t.is_empty(),
+            "not_empty" => !t.is_empty(),
+            "contains" => t.to_lowercase().contains(&self.value.trim().to_lowercase()),
+            "eq" | "ne" => {
+                // Compare as numbers when both sides look numeric, so `1,200`
+                // and `1200` match; fall back to case-insensitive text.
+                let same = match (parse_number(t), parse_number(&self.value)) {
+                    (Some(a), Some(b)) => (a - b).abs() < f64::EPSILON,
+                    _ => t.eq_ignore_ascii_case(self.value.trim()),
+                };
+                if self.when == "eq" { same } else { !same }
+            }
+            "gt" | "lt" | "ge" | "le" => {
+                // A non-numeric cell matches no ordering rule — it has no
+                // position on the scale, and guessing one would colour a header
+                // or a blank as though it were data.
+                let (Some(a), Some(b)) = (parse_number(t), parse_number(&self.value)) else {
+                    return false;
+                };
+                match self.when.as_str() {
+                    "gt" => a > b,
+                    "lt" => a < b,
+                    "ge" => a >= b,
+                    _ => a <= b,
+                }
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Parse a spreadsheet-ish number: `1,234.5`, `$12`, `40%`, `(3)` = -3.
@@ -255,6 +335,7 @@ impl TableData {
             col_widths: Vec::new(),
             header: true,
             chart: None,
+            rules: Vec::new(),
         }
     }
 
@@ -280,7 +361,7 @@ impl TableData {
         if rows.is_empty() {
             rows.push(vec![TableCell::default(); cols]);
         }
-        TableData { rows, col_widths: Vec::new(), header: true, chart: None }
+        TableData { rows, col_widths: Vec::new(), header: true, chart: None, rules: Vec::new() }
     }
 
     /// Read the table as chart data: `(labels, series)` where each series is a
@@ -962,6 +1043,94 @@ fn default_true() -> bool {
 }
 
 
+
+impl TableData {
+    /// Replace cell **text** from parsed rows, keeping everything the user or a
+    /// previous call set up: column widths, the header flag, the chart spec and
+    /// the formatting rules.
+    ///
+    /// This exists because `from_values` builds a fresh `TableData` and so drops
+    /// `col_widths` — fine for a one-off import, ruinous on a `source` refresh
+    /// that runs every few seconds, which would re-flatten the columns
+    /// continuously while someone was trying to read them.
+    pub fn fill_values(&mut self, values: Vec<Vec<String>>) {
+        let cols = values.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
+        let mut rows: Vec<Vec<TableCell>> = values
+            .into_iter()
+            .map(|r| {
+                let mut row: Vec<TableCell> = r.into_iter().map(TableCell::new).collect();
+                row.resize(cols, TableCell::default());
+                row
+            })
+            .collect();
+        if rows.is_empty() {
+            rows.push(vec![TableCell::default(); cols]);
+        }
+        self.rows = rows;
+        // Widths are per column, so trim if the file lost columns but never
+        // grow — a missing entry already means "default width".
+        self.col_widths.truncate(cols);
+        self.apply_rules();
+    }
+
+    /// Re-colour every cell from the rules. First matching rule wins, so the
+    /// order a caller sends them in is the order they take effect.
+    ///
+    /// Cells the rules don't match are **cleared**, not left alone: otherwise a
+    /// value that stops being an error would keep its red background forever,
+    /// which is worse than no colour at all.
+    pub fn apply_rules(&mut self) {
+        if self.rules.is_empty() {
+            return;
+        }
+        let header_rows = usize::from(self.header);
+        for (r, row) in self.rows.iter_mut().enumerate() {
+            if r < header_rows {
+                continue; // a header is a label, not a value
+            }
+            for (c, cell) in row.iter_mut().enumerate() {
+                let hit = self
+                    .rules
+                    .iter()
+                    .find(|rule| rule.col.map_or(true, |rc| rc == c) && rule.matches(&cell.text));
+                match hit {
+                    Some(rule) => {
+                        cell.bg = rule.bg;
+                        cell.fg = rule.fg;
+                    }
+                    None => {
+                        cell.bg = None;
+                        cell.fg = None;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse a delimited file into rows, picking the delimiter from the extension.
+///
+/// `.tsv`/`.tab` are tab-separated; everything else is treated as CSV. The `csv`
+/// crate handles quoting and embedded newlines either way, so this is a
+/// parameter rather than a second parser.
+pub fn delimited_to_values(path: &str, text: &str) -> Result<Vec<Vec<String>>, String> {
+    let lower = path.to_ascii_lowercase();
+    let delim = if lower.ends_with(".tsv") || lower.ends_with(".tab") { b'\t' } else { b',' };
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .delimiter(delim)
+        .from_reader(text.as_bytes());
+    let mut out = Vec::new();
+    for rec in rdr.records() {
+        out.push(rec.map_err(|e| e.to_string())?.iter().map(|s| s.to_string()).collect());
+    }
+    if out.is_empty() {
+        return Err(format!("{path} has no rows"));
+    }
+    Ok(out)
+}
+
 /// Largest file a pointer card will mirror.
 ///
 /// The body is held in memory, rendered as markdown, indexed by search and
@@ -1274,7 +1443,7 @@ impl Document {
         }
     }
 
-    fn table_mut(&mut self, node: NodeId, card: CardId) -> Option<&mut TableData> {
+    pub fn table_mut(&mut self, node: NodeId, card: CardId) -> Option<&mut TableData> {
         match self.card_mut(node, card).map(|c| &mut c.kind) {
             Some(CardKind::Table { table }) => Some(table),
             _ => None,

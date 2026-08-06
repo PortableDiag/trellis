@@ -120,8 +120,12 @@ from the main cluster, and click or drag on it to jump there without zooming out
   than copied into them: the file stays authoritative and the card is read-only
   until you **Stop mirroring** (which keeps the text). The mirrored text is
   searchable and exports like any other card. Agents get the same via `source`
-  on card create/PATCH. *Note: a card can mirror any file you can read, so treat
-  the API key as equivalent to filesystem read access — see [API.md](API.md).*
+  on card create/PATCH. **A table card can mirror a CSV/TSV** — the file fills its
+  cells, so you get live data with real cell colours and column widths, and
+  **conditional formatting** can colour a column by value (over 1000 → red, and
+  so on). Refreshes keep your widths and colours. *Note: a card can mirror any
+  file you can read, so treat the API key as equivalent to filesystem read
+  access — see [API.md](API.md).*
 - **Snip to card** (Tools → Snip to card) — capture a screen region straight
   into an image card in the current basket. **OCR all images** (Tools) extracts
   text from every image card that lacks it, making old scans searchable.

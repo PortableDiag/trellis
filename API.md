@@ -79,7 +79,8 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `chart` | table | how the table is drawn as a chart (`{kind,label_col,value_cols,show_table}`), or `null` for a plain grid. Set via the chart sub-resource (below) |
 | `strokes` | sketch | read: `[{color:[r,g,b], width, points:[[x,y],…]}, …]`. Edit via the sketch sub-resource (below) |
 | `touched` | all | unix seconds when this card last changed (read-only; omitted entirely if it never has). The document's only timestamp — unlike `/api/changes` it survives a restart |
-| `source` | text, code | a file this card **mirrors**: `body` becomes a read-only live copy, refreshed while the document is open. Omitted when the card isn't mirroring |
+| `rules` | table | conditional formatting — colour cells by value (read; set with the `set_rules` table op) |
+| `source` | text, code, **table** | a file this card **mirrors**: `body` becomes a read-only live copy, refreshed while the document is open. Omitted when the card isn't mirroring |
 | `source_error` | text, code | why the last read failed (`null` when fine). Only present alongside `source` |
 
 **Group** — a labeled container that a set of cards belong to; drawn as a box you
@@ -644,9 +645,38 @@ omitted, because plotting a blank status cell as 0 would invent a reading that
 was never taken. A lone value between two gaps still shows, as a dot.
 
 ### Mirror a file (`source`)
-Point a **text** or **code** card at a file and its body becomes a **read-only
-live copy**, re-read while the document is open (checked every ~3 s; only files
-whose modification time changed are re-read).
+Point a **text**, **code** or **table** card at a file and it becomes a
+**read-only live copy**, re-read while the document is open (checked every ~3 s;
+only files whose modification time changed are re-read).
+
+**A table card mirrors a CSV/TSV into its cells** — live data with real cell
+colours and column widths, which a markdown table cannot do. The delimiter comes
+from the extension: `.tsv`/`.tab` are tab-separated, anything else is CSV.
+
+```
+POST /api/nodes/{id}/cards {"kind":"table","source":"/srv/metrics.csv","header":true}
+```
+
+A refresh replaces **cell text only** — column widths, the header flag, the chart
+spec and the formatting rules all survive, so a table you sized and coloured stays
+that way while the data moves under it.
+
+**Conditional formatting** — colour cells by what they contain:
+```
+POST /api/nodes/{id}/cards/{cid}/table {"op":"set_rules","rules":[…]}
+```
+| key | |
+|---|---|
+| `col` | column index to test; omit for every column |
+| `when` | `gt` `lt` `ge` `le` `eq` `ne` `contains` `empty` `not_empty` |
+| `value` | compared against — a **number or string**; numbers use the decorated parser (`1,234.5`, `$12`, `40%`, `(3)` = −3) |
+| `bg` / `fg` | `[r,g,b]`, hex or a colour name |
+
+**First matching rule wins**, so send them most-specific first. A cell matching no
+rule is **cleared**, which is why a value that stops being an error loses its red.
+Header rows are never coloured — a header is a label, not a value. A non-numeric
+cell never matches an ordering rule (`gt`/`lt`/…), so blanks and text don't get
+coloured as though they were zero. `"rules": []` clears the formatting.
 ```
 POST  /api/nodes/{id}/cards        {kind:"text", title:"README", source:"/srv/app/README.md"}
 PATCH /api/nodes/{id}/cards/{cid}  {source:"/srv/app/README.md"}   attach or re-point
@@ -805,6 +835,19 @@ curl -s -H "X-API-Key: $KEY" \
 curl -s -H "X-API-Key: $KEY" \
   -d '{"kind":"code","title":"snippet","lang":"rust","body":"fn main() {}"}' \
   $API/nodes/$NID/cards
+
+# A live table from a CSV, coloured by value. Rules re-apply on every refresh,
+# and column widths survive it — so size it once and it stays sized.
+CID=$(curl -s -X POST -H "$K" -H 'Content-Type: application/json' \
+  -d '{"kind":"table","title":"Live metrics","source":"/srv/metrics.csv","header":true,"fit":true}' \
+  "$B/nodes/$NODE/cards" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -X POST -H "$K" -H 'Content-Type: application/json' -d '[
+  {"op":"set_rules","rules":[
+    {"col":1,"when":"gt","value":1000,"bg":"red","fg":"white"},
+    {"col":1,"when":"gt","value":100,"bg":[232,163,61]},
+    {"col":1,"when":"le","value":100,"bg":"green"},
+    {"col":2,"when":"eq","value":"DEGRADED","bg":"red","fg":"white"}]},
+  {"op":"autofit_cols"}]' "$B/nodes/$NODE/cards/$CID/table"
 
 # Coloured status text inside a markdown table (text card — no cell backgrounds;
 # for those use a table card + set_bg). Emoji are monochrome, so don't use 🔴/🟢

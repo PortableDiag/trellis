@@ -4,6 +4,39 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.83.0]
+
+### Added
+- **A table card can mirror a CSV/TSV file.** Point `source` at one and it fills
+  the cells, re-read while the document is open — live data with **real cell
+  colours and column widths**, which a markdown table can't do. The delimiter
+  comes from the extension (`.tsv`/`.tab` → tab, else comma).
+
+  A refresh replaces **cell text only**: column widths, the header flag, the
+  chart spec and the formatting rules all survive it. That matters more than it
+  sounds — the poll runs every few seconds, so a refresh that rebuilt the table
+  would re-flatten your columns continuously while you were reading them.
+
+- **Conditional formatting — colour cells by value.** `POST …/table
+  {"op":"set_rules","rules":[…]}` with `col`, `when`
+  (`gt`/`lt`/`ge`/`le`/`eq`/`ne`/`contains`/`empty`/`not_empty`), `value`, and
+  `bg`/`fg`. First matching rule wins, and rules re-apply after every refresh, so
+  live data stays coloured.
+
+  A cell matching no rule is **cleared**, so a value that stops being an error
+  loses its red instead of keeping it forever. Header rows are never coloured — a
+  header is a label, not a value — and a non-numeric cell never matches an
+  ordering rule, so a blank isn't treated as zero. Thresholds accept a **number
+  or a string**; numbers use the same decorated parser as charts, so a table and
+  its chart can't disagree about what a cell means.
+
+### Fixed
+- **A malformed table request says what's wrong with it.** The batch/single form
+  was an untagged enum, so any mistake came back as *"data did not match any
+  variant"* — naming neither the field nor the problem. The shape is now picked
+  from the body and serde's real error comes through (*"invalid type: integer
+  `1000`, expected a string"*).
+
 ## [0.82.0]
 
 ### Added

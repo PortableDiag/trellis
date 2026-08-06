@@ -616,9 +616,13 @@ struct AddImageInput {
 /// carry its arguments (unused ones are ignored).
 #[derive(Deserialize)]
 pub struct TableOpInput {
+    /// Conditional-formatting rules for `set_rules`. Replaces the whole list, so
+    /// sending `[]` clears the formatting.
+    #[serde(default)]
+    rules: Option<Vec<crate::model::CellRule>>,
     /// `set_cell` | `set_bg` | `set_fg` | `insert_row` | `remove_row` |
     /// `insert_col` | `remove_col` | `set_col_width` | `autofit_cols` |
-    /// `set_header`.
+    /// `set_header` | `set_rules`.
     op: String,
     #[serde(default)]
     row: Option<usize>,
@@ -645,7 +649,6 @@ pub struct TableOpInput {
 /// names neither the array nor the limitation. Combined with `curl` exiting 0 on
 /// a 400, that produced edits reported as applied that never landed.
 #[derive(Deserialize)]
-#[serde(untagged)]
 pub enum TableOpBody {
     One(TableOpInput),
     Many(Vec<TableOpInput>),
@@ -983,7 +986,16 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::SetChart { node, card, spec: None })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "table"]) => {
-            let op: TableOpBody = parse(body)?;
+            // Parsed by shape rather than through an untagged enum: untagged
+            // reports only "data did not match any variant", which hides the
+            // real problem (a bad field, a wrong type) behind a message naming
+            // neither. Pick the branch from the first character and let serde's
+            // own error through.
+            let op: TableOpBody = if body.trim_start().starts_with('[') {
+                TableOpBody::Many(parse(body)?)
+            } else {
+                TableOpBody::One(parse(body)?)
+            };
             Ok(ApiRequest::TableOp { node: pid(nid)?, card: pid(cid)?, ops: op.into_vec() })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "sketch"]) => {
@@ -1858,6 +1870,16 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     // by an agent has every column at the 110px default.
                     "autofit_cols" => doc.table_autofit_cols(node, card, op.col),
                     "set_header" => doc.table_set_header(node, card, op.header.unwrap_or(true)),
+                    // Colour cells by value. Applied immediately and re-applied
+                    // after every `source` refresh, so live data stays coloured.
+                    "set_rules" => match doc.table_mut(node, card) {
+                        Some(t) => {
+                            t.rules = op.rules.clone().unwrap_or_default();
+                            t.apply_rules();
+                            true
+                        }
+                        None => false,
+                    },
                     other => {
                         return (false, ApiResponse::err(400, &format!("unknown table op: {other}")));
                     }
@@ -2202,6 +2224,11 @@ pub(crate) fn card_json(c: &Card) -> Value {
     // time rather than a made-up one.
     if let Some(t) = c.touched {
         v["touched"] = json!(t);
+    }
+    if let CardKind::Table { table } = &c.kind {
+        if !table.rules.is_empty() {
+            v["rules"] = serde_json::to_value(&table.rules).unwrap_or(Value::Null);
+        }
     }
     if let Some(s) = &c.source {
         v["source"] = json!(s);
@@ -2690,6 +2717,91 @@ mod tests {
         assert!(resp.body.contains("1 earlier op"), "says what landed: {}", resp.body);
         let CardKind::Table { table } = &doc.card(n, c).unwrap().kind else { panic!() };
         assert_eq!(table.rows[0][0].text, "kept");
+    }
+
+
+    /// The trap this feature is most likely to reintroduce: a `source` refresh
+    /// runs every few seconds, so if it rebuilt the table it would re-flatten
+    /// the user's columns continuously.
+    #[test]
+    fn filling_a_table_keeps_widths_header_and_rules() {
+        use crate::model::{CellRule, TableData};
+        let mut t = TableData::empty(2, 3);
+        t.col_widths = vec![300.0, 80.0, 150.0];
+        t.header = true;
+        t.rules = vec![CellRule {
+            col: Some(1), when: "gt".into(), value: "100".into(),
+            bg: Some([1, 2, 3]), fg: None,
+        }];
+        t.fill_values(vec![
+            vec!["Service".into(), "Latency".into(), "Status".into()],
+            vec!["db".into(), "1240".into(), "SLOW".into()],
+        ]);
+        assert_eq!(t.col_widths, vec![300.0, 80.0, 150.0], "widths must survive a refresh");
+        assert!(t.header);
+        assert_eq!(t.rules.len(), 1);
+        assert_eq!(t.rows[1][1].bg, Some([1, 2, 3]), "rules re-applied to new data");
+        assert_eq!(t.rows[0][1].bg, None, "the header is a label, not a value");
+    }
+
+    /// A cell that stops matching must lose its colour, or a value that stops
+    /// being an error keeps a red background forever.
+    #[test]
+    fn rules_clear_colour_when_a_value_stops_matching() {
+        use crate::model::{CellRule, TableData};
+        let mut t = TableData::empty(1, 1);
+        t.header = false;
+        t.rules = vec![CellRule {
+            col: None, when: "gt".into(), value: "100".into(),
+            bg: Some([9, 9, 9]), fg: None,
+        }];
+        t.fill_values(vec![vec!["500".into()]]);
+        assert_eq!(t.rows[0][0].bg, Some([9, 9, 9]));
+        t.fill_values(vec![vec!["5".into()]]);
+        assert_eq!(t.rows[0][0].bg, None, "stale colour must not persist");
+    }
+
+    #[test]
+    fn rule_comparisons_handle_decorated_numbers_and_text() {
+        use crate::model::CellRule;
+        let r = |when: &str, v: &str| CellRule {
+            col: None, when: when.into(), value: v.into(), bg: None, fg: None,
+        };
+        assert!(r("gt", "1000").matches("1,240"));
+        assert!(r("gt", "1000").matches("$1,240.50"));
+        assert!(r("lt", "0").matches("(3)"), "(3) is -3");
+        assert!(!r("gt", "100").matches("N/A"), "non-numeric has no place on a scale");
+        assert!(r("eq", "1200").matches("1,200"), "numeric equality ignores formatting");
+        assert!(r("eq", "fail").matches("FAIL"), "text equality is case-insensitive");
+        assert!(r("contains", "grad").matches("DEGRADED"));
+        assert!(r("empty", "").matches("   "));
+        assert!(r("not_empty", "").matches("x"));
+    }
+
+    /// TSV is picked from the extension, not sniffed.
+    #[test]
+    fn delimiter_comes_from_the_extension() {
+        use crate::model::delimited_to_values;
+        let csv = delimited_to_values("/tmp/x.csv", "a,b\n1,2").unwrap();
+        assert_eq!(csv[1], vec!["1", "2"]);
+        let tsv = delimited_to_values("/tmp/x.tsv", "a\tb\n1\t2").unwrap();
+        assert_eq!(tsv[1], vec!["1", "2"]);
+        // A CSV parser on tab data yields one column, which is the failure mode
+        // the extension check exists to avoid.
+        assert_eq!(delimited_to_values("/tmp/x.csv", "a\tb").unwrap()[0].len(), 1);
+        assert!(delimited_to_values("/tmp/x.csv", "").is_err(), "an empty file is an error");
+    }
+
+    /// A numeric threshold written as a JSON number must work — it is what
+    /// anyone writing one types.
+    #[test]
+    fn a_rule_threshold_accepts_a_number_or_a_string() {
+        let n: crate::model::CellRule =
+            serde_json::from_str(r#"{"when":"gt","value":1000}"#).unwrap();
+        assert_eq!(n.value, "1000");
+        let s: crate::model::CellRule =
+            serde_json::from_str(r#"{"when":"eq","value":"FAIL"}"#).unwrap();
+        assert_eq!(s.value, "FAIL");
     }
 
     #[test]

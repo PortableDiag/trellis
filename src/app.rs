@@ -1549,12 +1549,31 @@ impl TrellisApp {
         for (nid, cid, path) in stale {
             let result = crate::model::read_source(&path);
             let Some(card) = self.doc.card_mut(nid, cid) else { continue };
-            let before = (card.body.clone(), card.source_error.clone());
+            let before = source_signature(card);
             match result {
                 Ok((text, mtime)) => {
-                    card.body = text;
-                    card.source_mtime = Some(mtime);
-                    card.source_error = None;
+                    // A table card mirrors *data*, not prose: parse the file
+                    // into cells. Filling rather than rebuilding is essential —
+                    // rebuilding drops column widths, and on a 3-second poll
+                    // that would re-flatten the columns continuously while
+                    // someone was reading them.
+                    let is_table = matches!(card.kind, CardKind::Table { .. });
+                    if is_table {
+                        match crate::model::delimited_to_values(&path, &text) {
+                            Ok(values) => {
+                                if let CardKind::Table { table } = &mut card.kind {
+                                    table.fill_values(values);
+                                }
+                                card.source_mtime = Some(mtime);
+                                card.source_error = None;
+                            }
+                            Err(e) => card.source_error = Some(e),
+                        }
+                    } else {
+                        card.body = text;
+                        card.source_mtime = Some(mtime);
+                        card.source_error = None;
+                    }
                 }
                 Err(e) => {
                     // Keep the last good text: a mirror that empties itself
@@ -1562,9 +1581,10 @@ impl TrellisApp {
                     card.source_error = Some(e);
                 }
             }
-            if before != (self.doc.card(nid, cid).map(|c| c.body.clone()).unwrap_or_default(),
-                          self.doc.card(nid, cid).and_then(|c| c.source_error.clone()))
-            {
+            // Compare a signature, not just the body: a table's refresh moves
+            // cells while `body` never changes, so a body-only comparison would
+            // report no change and never wake a client.
+            if Some(before) != self.doc.card(nid, cid).map(source_signature) {
                 self.note_card(nid, cid, crate::changelog::Op::Updated, "source");
             }
         }
@@ -5205,7 +5225,7 @@ impl TrellisApp {
                         "GET    /api/nodes/{id}/cards/{cid}        (one card, without the whole basket)",
                         "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, size?, fit?, image_base64?, inline_images?, source?}",
                         "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, size?, items?, source?, …}",
-                        "         source: mirror a file (body read-only, PATCH body → 409); source:\"\" detaches",
+                        "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
                         "DELETE /api/nodes/{id}/cards/{cid}",
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
                         "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
@@ -5213,6 +5233,7 @@ impl TrellisApp {
                         "POST   /api/nodes/{id}/cards/{cid}/group {group}           (remove: DELETE …/group)",
                         "POST   /api/nodes/{id}/cards/{cid}/table {op, …}           (set_cell / insert_row / set_col_width / autofit_cols {col?} …)",
                         "         …or send an ARRAY of ops, applied in order; a failure names which one",
+                        "         set_rules {rules:[{col?,when,value,bg?,fg?}]}  colour cells by value (gt/lt/ge/le/eq/ne/contains/empty)",
                         "POST   /api/nodes/{id}/cards/{cid}/chart {kind, label_col?, value_cols?, show_table?}  (bar|line|scatter|pie; DELETE …/chart = plain grid)",
                         "POST   /api/nodes/{id}/cards/{cid}/sketch {op, …}          (add_stroke / undo / clear)",
                         "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}    (GET / DELETE …/images/{idx})",
@@ -6710,6 +6731,25 @@ fn setup_fonts(ctx: &egui::Context) {
         .or_default()
         .insert(0, "dejavu-mono".to_owned());
     ctx.set_fonts(fonts);
+}
+
+/// What a mirrored card looks like right now, for spotting a real change.
+///
+/// Cheap and comparable: the body for a text/code card, the cell text for a
+/// table, plus the error either way. `CardKind` has no `PartialEq` — deriving one
+/// across the whole enum (image bytes included) to answer this would be far more
+/// than the question needs.
+fn source_signature(c: &crate::model::Card) -> (String, Option<String>) {
+    let content = match &c.kind {
+        CardKind::Table { table } => table
+            .rows
+            .iter()
+            .map(|r| r.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\u{1f}"))
+            .collect::<Vec<_>>()
+            .join("\u{1e}"),
+        _ => c.body.clone(),
+    };
+    (content, c.source_error.clone())
 }
 
 /// A random API key: 48 hex chars from the OS CSPRNG.
