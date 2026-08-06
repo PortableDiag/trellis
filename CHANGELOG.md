@@ -19,9 +19,6 @@ All notable changes to Trellis. Format loosely follows
   response now says **which one and how many already applied**, so a caller can
   tell what state the table is in rather than guessing.
 
-## [Unreleased]
-
-### Added
 - **A notifications plugin** (`plugins/notify/`) — a task digest of overdue and
   due-today cards on a schedule, and a nudge when an agent changes the document,
   to Telegram. No app change was needed: it is built entirely on the change log
