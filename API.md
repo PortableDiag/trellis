@@ -95,6 +95,33 @@ Text card bodies are **CommonMark Markdown** (headings, lists, tables, task
 lists, fenced code with highlighting, bold/italic/strikethrough). There is no
 underline. Use `\n` for line breaks.
 
+**Coloured text works, including inside markdown tables.** The renderer is
+patched to honour an inline colour span:
+
+```html
+<span style="color:#22c55e">PASS</span>
+```
+
+It nests with other inline markup (`<span style="color:#ef4444">**FAIL**</span>`
+is bold red) and renders **inside table cells**, which is the cheapest way to get
+a readable status column into a *text* card:
+
+```md
+| Check | Status |
+|---|---|
+| TLS  | <span style="color:#22c55e">PASS</span> |
+| Auth | <span style="color:#ef4444">**FAIL**</span> |
+```
+
+Limits worth knowing before you reach for it:
+- **Text colour only — no cell background.** Markdown has no concept of one. For
+  a coloured *cell*, use a real **table card** and `set_bg` / `set_fg`.
+- **Emoji are monochrome, and newer ones don't render at all.** The bundled emoji
+  font predates Unicode 12, so 🟢🟡🟠🟥 come out as boxes, and even covered ones
+  (🔴 ✅) draw grey because the text stack rasterizes outlines, not colour. **Don't
+  use emoji as status indicators** — 🔴 and 🟢 are indistinguishable. Use a colour
+  span, or a table card's cell colours.
+
 ## Endpoints
 
 `{id}` is a node id, `{cid}` a card id. Bodies marked `{…}` are JSON. `?` = optional.
@@ -778,6 +805,14 @@ curl -s -H "X-API-Key: $KEY" \
 curl -s -H "X-API-Key: $KEY" \
   -d '{"kind":"code","title":"snippet","lang":"rust","body":"fn main() {}"}' \
   $API/nodes/$NID/cards
+
+# Coloured status text inside a markdown table (text card — no cell backgrounds;
+# for those use a table card + set_bg). Emoji are monochrome, so don't use 🔴/🟢
+# as indicators — they both render grey.
+curl -s -X POST -H "$K" -H 'Content-Type: application/json' -d '{
+  "kind":"text","title":"Checks","fit":true,
+  "body":"| Check | Status |\n|---|---|\n| TLS | <span style=\"color:#22c55e\">PASS</span> |\n| Auth | <span style=\"color:#ef4444\">**FAIL**</span> |"
+}' "$B/nodes/$NODE/cards"
 
 # Add a card and color its title bar in one call (name, hex, or [r,g,b] all work)
 curl -s -H "X-API-Key: $KEY" \
