@@ -795,6 +795,12 @@ Both carry the same two limits:
   `/api/tree`, `/api/nodes` — titles and shape, never card content).
   `403 {"error":"outside the basket this token was given access to"}`.
 
+**A subtree token cannot mirror files.** `source` on a card is refused with
+`403 {"error":"a token confined to a basket cannot mirror files"}`, regardless of
+*Files agents may mirror* — otherwise the token could point a card in its own
+basket at any readable file and fetch the contents back, which would make the
+confinement meaningless.
+
 **A subtree token cannot use the whole-document query surfaces.** `/api/search`,
 `/api/tasks`, `/api/kanban`, `/api/graph`, `/api/tags` and `/api/query` name no
 node, so they are refused. That is the point — those are exactly the calls that

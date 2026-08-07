@@ -4,6 +4,30 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.85.1]
+
+### Fixed
+- **Selecting text no longer floods the system with `xclip` processes.** Owning
+  the X11 PRIMARY selection means handing it to `xclip`/`xsel`, which
+  **daemonize and stay resident** to serve it. Trellis spawned one per selection
+  change and tracked none of them, so dragging across a card title left one
+  resident process per character — and the survivors then competed for selection
+  ownership, breaking the clipboard **for the whole desktop**, not just for
+  Trellis.
+
+  Exactly one now lives at a time: the previous owner is killed and reaped
+  before the next is spawned, and its handle is kept so it can be retired. The
+  existing "did the text actually change" guard was never enough on its own,
+  because a drag changes the text on every frame. Present since v0.79.0.
+- **A token confined to a basket can no longer mirror files.** It could create a
+  card **inside its own basket** with `source` pointing at any file the global
+  mirror policy allowed, then read the contents back — so the confinement leaked
+  the filesystem completely, including another Trellis document sitting on disk.
+  Found by testing the new scope rather than by reading it. `source` is now
+  refused outright for a subtree-scoped token (`403`), whatever the policy says:
+  an agent penned into one basket has no business reading the disk. The instance
+  key is unaffected, and so is your own File → Mirror a file….
+
 ## [0.85.0]
 
 ### Added

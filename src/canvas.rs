@@ -3065,9 +3065,26 @@ fn take_primary_selection() -> Option<String> {
     None
 }
 
+/// The resident `xclip`/`xsel` currently owning PRIMARY on our behalf.
+///
+/// There must be **at most one**. These tools daemonize and stay alive to serve
+/// the selection, so spawning one per change piles up resident processes that
+/// fight each other for ownership — which breaks the clipboard for the whole
+/// desktop, not just for Trellis.
+#[cfg(target_os = "linux")]
+static PRIMARY_OWNER: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
 /// Own the X11 PRIMARY selection with `text` via xclip/xsel (they daemonize to
-/// serve it to other apps — arboard/egui can't). Only runs when the selection
-/// changed, on a detached thread so writing can't stall the UI.
+/// serve it to other apps — arboard/egui can't).
+///
+/// **Kills the previous owner before spawning a new one.** Without that, every
+/// change spawned another resident process: dragging across a card title made
+/// one per character, and the survivors competed for selection ownership until
+/// the clipboard stopped working system-wide. The "did the text change" guard
+/// below is not enough on its own — a drag changes the text on every frame, so
+/// it lets nearly all of them through.
+///
+/// Runs on a detached thread so neither the kill nor the write can stall the UI.
 #[cfg(target_os = "linux")]
 fn set_primary_selection(ui: &egui::Ui, text: &str) {
     let key = egui::Id::new("trellis_primary_sel");
@@ -3079,6 +3096,13 @@ fn set_primary_selection(ui: &egui::Ui, text: &str) {
     std::thread::spawn(move || {
         use std::io::Write;
         use std::process::{Command, Stdio};
+        // Retire the previous owner first. Held across the spawn so two rapid
+        // selections can't both get past the check and leave one orphaned.
+        let Ok(mut owner) = PRIMARY_OWNER.lock() else { return };
+        if let Some(mut old) = owner.take() {
+            let _ = old.kill();
+            let _ = old.wait(); // reap it, or we trade daemons for zombies
+        }
         for (cmd, args) in [
             ("xclip", &["-selection", "primary"][..]),
             ("xsel", &["--primary", "--input"][..]),
@@ -3093,7 +3117,9 @@ fn set_primary_selection(ui: &egui::Ui, text: &str) {
                 if let Some(mut si) = child.stdin.take() {
                     let _ = si.write_all(text.as_bytes());
                 }
-                let _ = child.wait(); // xclip/xsel fork to a daemon, so this returns
+                // Do NOT wait: the process stays alive to serve the selection.
+                // Keep the handle so the next change can retire exactly this one.
+                *owner = Some(child);
                 return;
             }
         }

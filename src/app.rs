@@ -2038,6 +2038,23 @@ impl TrellisApp {
             // the document, so it is checked here rather than in `process`,
             // which has no access to the setting.
             if let Some(path) = api::source_request(&cmd.req) {
+                // A token confined to a basket may not mirror a file at all,
+                // whatever the global policy allows.
+                //
+                // Without this the confinement leaks completely: the token
+                // creates a card **inside its own basket** pointing at any file
+                // the policy permits, then reads the body back. Verified before
+                // the fix — a file outside the basket came back in full, and
+                // under the default policy that includes another document on
+                // disk. The scope says "this basket and nothing else"; reading
+                // the filesystem is not in that.
+                if cmd.scope.as_ref().and_then(|s| s.subtree).is_some() {
+                    let _ = cmd.resp.send(api::ApiResponse::err(
+                        403,
+                        "a token confined to a basket cannot mirror files",
+                    ));
+                    continue;
+                }
                 if let Err(e) =
                     crate::model::mirror_allowed(&path, self.mirror_policy, &self.mirror_dirs)
                 {
