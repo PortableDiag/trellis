@@ -817,12 +817,32 @@ All errors return `{"error":"<message>"}` with the status code:
 
 | code | meaning |
 |---|---|
-| 400 | bad JSON body, bad id, or missing parent |
+| 400 | bad JSON body, **unknown field**, bad id, or missing parent |
 | 401 | wrong API key |
-| 403 | API disabled (no key set) |
+| 403 | API disabled (no key set), or outside a scoped token's basket |
 | 404 | node/card not found, or unknown route |
 | 503 | app not accepting requests |
 | 504 | app didn't respond in time (window busy/hung) |
+
+### Unknown fields are rejected (since v0.86.0)
+
+A field the API doesn't know is a **400 that names it**, rather than a 200 that
+quietly ignores it:
+
+```
+PATCH /api/nodes/1/cards/2   {"x": 10, "y": 20}
+→ 400 {"error":"invalid JSON body: unknown field `x`, expected one of `title`,
+   `body`, `color`, `lang`, `pos`, `size`, `items`, `rows`, `kind`, `header`,
+   `font_scale`, `inline_images`, `fit`, `source`"}
+```
+
+The error lists every field that body accepts, so a typo or a wrong guess tells
+you the right name immediately. (`pos` is the one above — a card's position is
+`"pos": [x, y]`, not `x`/`y`.)
+
+Before this, such a request returned **200** and did nothing, which is
+indistinguishable from success. If you are writing a client, this is the change
+most likely to surface a bug you already had.
 
 ## Examples
 

@@ -372,6 +372,7 @@ impl ApiResponse {
 // --- request DTOs -----------------------------------------------------------
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateNodeInput {
     #[serde(default)]
     parent: Option<NodeId>,
@@ -383,6 +384,7 @@ struct CreateNodeInput {
 /// `before`/`after` another card id, an absolute `index`, or `to:"front"|"back"`
 /// (front = drawn on top / laid out last, back = first).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MoveCardInput {
     #[serde(default)]
     before: Option<u64>,
@@ -412,6 +414,7 @@ impl MoveCardInput {
 /// as a chart. Omitted fields keep their current value, so you can flip the kind
 /// without restating the columns.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChartInput {
     /// `bar` | `line` | `scatter`.
     pub kind: String,
@@ -432,6 +435,7 @@ pub struct ChartInput {
 /// - `parent` + `to`: `"top"` or `"bottom"` of `parent` (or the current parent
 ///   if `parent` is omitted).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MoveNodeInput {
     #[serde(default)]
     before: Option<NodeId>,
@@ -447,6 +451,7 @@ pub struct MoveNodeInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExpandInput {
     expanded: bool,
     /// Apply to the whole subtree (node + all descendants), not just this node.
@@ -455,6 +460,7 @@ struct ExpandInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateNodeInput {
     #[serde(default)]
     title: Option<String>,
@@ -466,6 +472,7 @@ struct UpdateNodeInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddCardInput {
     #[serde(default = "default_kind")]
     kind: String,
@@ -519,6 +526,7 @@ fn default_kind() -> String {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChecklistItemInput {
     #[serde(default)]
     done: bool,
@@ -527,6 +535,7 @@ struct ChecklistItemInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateCardInput {
     #[serde(default)]
     title: Option<String>,
@@ -577,6 +586,7 @@ pub struct UpdateCardInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateGroupInput {
     /// Ids of the cards to group (need at least two that exist in the node).
     cards: Vec<u64>,
@@ -585,6 +595,7 @@ struct CreateGroupInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateGroupInput {
     #[serde(default)]
     title: Option<String>,
@@ -593,6 +604,7 @@ struct UpdateGroupInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DockInput {
     /// The card this one should stick to.
     anchor: u64,
@@ -954,6 +966,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "property"]) => {
             #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
             struct PropInput {
                 key: String,
                 value: String,
@@ -1076,6 +1089,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "history"]) => Ok(ApiRequest::HistoryList),
         (Method::Post, ["api", "history", "restore"]) => {
             #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
             struct RestoreInput {
                 file: String,
             }
@@ -1086,6 +1100,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "templates", "rebuild"]) => Ok(ApiRequest::TemplateRebuild),
         (Method::Post, ["api", "templates"]) => {
             #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
             struct RegInput {
                 node: NodeId,
                 card: u64,
@@ -1097,6 +1112,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Post, ["api", "templates", idx, "insert"]) => {
             #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
             struct InsInput {
                 node: NodeId,
                 #[serde(default)]
@@ -1109,6 +1125,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Post, ["api", "templates", idx, "update"]) => {
             #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
             struct UpdInput {
                 node: NodeId,
                 card: u64,
@@ -2803,6 +2820,65 @@ mod tests {
         let s: crate::model::CellRule =
             serde_json::from_str(r#"{"when":"eq","value":"FAIL"}"#).unwrap();
         assert_eq!(s.value, "FAIL");
+    }
+
+    /// A misspelled or invented field must be a 400 that **names** it, not a
+    /// 200 that quietly does nothing.
+    ///
+    /// This cost real time three separate ways before it was fixed: `{"x":…,
+    /// "y":…}` on a card PATCH (the field is `pos`) reported success for five
+    /// cards and moved none of them. A write that reports success without
+    /// writing is indistinguishable from one that worked, which is the worst
+    /// failure an API can have.
+    #[test]
+    fn an_unknown_field_is_rejected_and_named() {
+        let err = match route(&Method::Patch, "/api/nodes/1/cards/2", "", r#"{"x": 10, "y": 20}"#) {
+            Err(e) => e,
+            Ok(_) => panic!("an unknown field was accepted"),
+        };
+        assert_eq!(err.0, 400);
+        assert!(err.1.contains('x'), "the error names the offending field: {}", err.1);
+        assert!(err.1.contains("pos"), "and lists what was expected: {}", err.1);
+
+        // The same on create, and on a node.
+        let code = |body: &str, path: &str| match route(&Method::Post, path, "", body) {
+            Err((c, _)) => c,
+            Ok(_) => panic!("an unknown field was accepted: {body}"),
+        };
+        assert_eq!(code(r#"{"titel":"typo"}"#, "/api/nodes/1/cards"), 400);
+        assert_eq!(code(r#"{"title":"ok","colour":"red"}"#, "/api/nodes"), 400);
+    }
+
+    /// The flip side, and the reason this is worth a test rather than a glance:
+    /// every field the docs promise must still be accepted. These are exactly
+    /// the payloads the shipped clients send.
+    #[test]
+    fn every_documented_field_still_parses() {
+        assert!(route(
+            &Method::Post,
+            "/api/nodes/1/cards",
+            "",
+            r#"{"kind":"text","title":"t","body":"b","color":"amber","fit":true,
+                "pos":[10,20],"size":[300,200],"font_scale":1.2,"lang":"rust",
+                "header":true,"rows":[["a"]],"items":[{"done":false,"text":"i"}],
+                "image_base64":"","inline_images":[],"source":""}"#
+        )
+        .is_ok());
+        assert!(route(
+            &Method::Patch,
+            "/api/nodes/1/cards/2",
+            "",
+            r#"{"title":"t","body":"b","pos":[1,2],"size":[3,4],"fit":true,"kind":"code"}"#
+        )
+        .is_ok());
+        assert!(route(&Method::Post, "/api/nodes", "", r#"{"title":"n","parent":3}"#).is_ok());
+        assert!(route(
+            &Method::Post,
+            "/api/nodes/1/cards/2/move",
+            "",
+            r#"{"node":4,"pos":[5,6]}"#
+        )
+        .is_ok());
     }
 
     #[test]

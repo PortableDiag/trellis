@@ -4,6 +4,33 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.86.0]
+
+### Changed
+- **A request with an unknown field is now rejected instead of silently
+  ignored.** Sending a field the API doesn't know used to return **200** and do
+  nothing with it; it now returns **400** naming the field and listing what was
+  expected:
+
+  ```
+  PATCH …/cards/2  {"x":10,"y":20}
+  → 400 {"error":"invalid JSON body: unknown field `x`, expected one of
+     `title`, `body`, `color`, `lang`, `pos`, `size`, `items`, `rows`, `kind`,
+     `header`, `font_scale`, `inline_images`, `fit`, `source`"}
+  ```
+
+  This is a **breaking change for a client that sends fields the API never
+  had** — such a client was already being ignored, but it was being ignored
+  *quietly*. A write reported as applied that never landed is the worst failure
+  an API can have, and this shape had already cost real time three separate
+  ways: the example above is a genuine one, where five cards reported success
+  and none of them moved.
+
+  Applies to every JSON body the API accepts — nodes, cards, moves, groups,
+  docking, charts, properties, templates and history. **Document *reading* stays
+  tolerant** of unknown fields on purpose, so a newer document still opens in an
+  older build; this is only about the API's input.
+
 ## [0.85.1]
 
 ### Fixed
