@@ -207,6 +207,73 @@ def ensure_types(key, space):
         print(f"Created type {name}")
 
 
+def find_item_id(key, space, type_name, trellis_id):
+    """The Dry item id for a Trellis id, via a scalar `where` match.
+
+    `create` upserts on `TrellisId` but doesn't hand back ids, so publishing has
+    to look the item up. `TrellisId` is plain `shortText` — exactly the scalar
+    case Dry's where-filter is reliable on; a reference/selection field would
+    match on stored ids instead of the value.
+    """
+    data = dry(key, "read", space=space, type=type_name,
+               where={"TrellisId": str(trellis_id)}, limit=2)
+    items = data.get("items") or []
+    if not items:
+        die(f"backed the card up but then couldn't find it in Dry "
+            f"(no {type_name} with TrellisId {trellis_id})")
+    if len(items) > 1:
+        die(f"{len(items)} Dry items share TrellisId {trellis_id} — refusing to "
+            f"guess which one to publish")
+    item_id = items[0].get("ID") or items[0].get("id")
+    if not item_id:
+        die(f"Dry returned a {type_name} with no ID field: {list(items[0])[:6]}")
+    return item_id
+
+
+def publish_card(key, cfg, node_id, card_id):
+    """Mode 2: make one card readable at a public URL.
+
+    Backs the card up first, so what gets published is current rather than
+    whatever a previous run happened to leave. Publishing writes only to Dry —
+    this plugin stays read-only against Trellis.
+    """
+    inst = trellis("/instance")
+    doc = inst.get("document") or "untitled"
+    space_name = cfg.get("space") or f"Trellis backup — {doc}"
+    space = ensure_space(key, space_name)
+    ensure_types(key, space)
+
+    card = trellis(f"/nodes/{node_id}/cards/{card_id}")
+    all_nodes = {n["id"]: n for n in trellis("/nodes").get("nodes", [])}
+    path = node_path(all_nodes, int(node_id))
+    props = {p["key"]: p["value"] for p in (card.get("properties") or [])}
+    item = {"type": "TrellisCard", "fields": {
+        "TrellisId": str(card.get("id", card_id)),
+        "Title": card.get("title") or "",
+        "Body": card.get("body") or "",
+        "Kind": card.get("kind") or "",
+        "Basket": path,
+        "Tags": " ".join(card.get("tags") or []),
+        "Due": props.get("due", ""),
+        "Status": props.get("status", ""),
+    }}
+    data = dry(key, "create", space=space, items=[item])
+    check_import_report(data, "cards", 1)
+    print(f"Backed up “{card.get('title') or card_id}” to “{space_name}”")
+
+    item_id = find_item_id(key, space, "TrellisCard", card.get("id", card_id))
+    out = dry(key, "publish", item=item_id)
+    # `isPublicObject` is read back from Dry's own state rather than echoed, so
+    # it is worth actually checking: a URL beside `false` would be a dead link.
+    if not out.get("isPublicObject"):
+        die("Dry accepted the publish but reports the item is still private")
+    url = out.get("url")
+    if not url:
+        die("Dry published the item but returned no URL")
+    print("Anyone with this link can read this card — no Dry account needed.")
+    print(url)  # last line: becomes the status Trellis shows
+
+
 def node_path(nodes, nid):
     """Breadcrumb for a node, so a card's basket is identifiable when names repeat."""
     parts, seen = [], set()
@@ -236,6 +303,16 @@ def main():
     else:
         die("no Dry credential set — open Tools → Plugins and fill in either the "
             "MCP token or the access key")
+
+    # Invoked from a card's right-click menu: publish that one card instead of
+    # running a backup. Trellis hands over the ids, never the card itself.
+    card_id = os.environ.get("TRELLIS_CARD")
+    if card_id:
+        node_id = os.environ.get("TRELLIS_NODE")
+        if not node_id:
+            die("launched on a card but without its basket (TRELLIS_NODE unset)")
+        publish_card(key, cfg, node_id, card_id)
+        return
 
     inst = trellis("/instance")
     doc = inst.get("document") or "untitled"

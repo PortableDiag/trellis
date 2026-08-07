@@ -35,6 +35,39 @@ if it tried.
 - **Tools → Plugins… → Run now** — backs up the whole document.
 - **Right-click a basket → Plugins → Back up to Dry** — backs up just that basket
   and everything under it.
+- **Right-click a card → Plugins → Back up to Dry** — backs that one card up and
+  then **publishes it**, printing a public link as the run's last line (so it
+  becomes the status Trellis shows).
+
+  The card is re-backed-up first, so what gets published is current rather than
+  whatever a previous run left behind. Publishing writes only to Dry — this
+  plugin stays read-only against your document.
+
+### The public link does not work yet
+
+Publishing itself works: `op: "publish"` sets `isPublicObject` on the item, Dry
+reads the value back, and returns a URL. **But fetching that URL without a Dry
+account redirects to the sign-in page**, so it is not yet usable as "send someone
+a link".
+
+Measured, not assumed — an anonymous request to a freshly published item:
+
+```
+GET https://dry.ai/v?t=tsr&oc=$<id>
+302 → /signIn?rU=…
+```
+
+The item's own `isPublicObject` flag is set; what is missing is on the read side.
+Dry's `publish` op deliberately rejects spaces and folders because publishing a
+*space* needs `publicRole` role assignments, and an item inside a space with no
+public role appears to be unreachable regardless of its own flag. Either the
+viewer needs to honour `isPublicObject` on an item independently of its space, or
+publishing an item needs to grant the space enough public role to serve that one
+item.
+
+Nothing in this plugin needs to change when that is resolved — it already checks
+the returned `isPublicObject` and refuses to claim success if it comes back
+false.
 
 ## What lands in Dry
 
