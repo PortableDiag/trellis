@@ -826,6 +826,41 @@ All errors return `{"error":"<message>"}` with the status code:
 
 ## Examples
 
+### Working under an agent token
+
+If the user issued you a token (*Settings → Agent API → Agent tokens*) rather
+than the instance key, you are confined to one basket. Find it first — the
+structural reads are the only whole-instance calls you have:
+
+```sh
+TOKEN=agent_…                       # yours; `plug_…` if you are a plugin
+API=http://127.0.0.1:7374/api
+
+# Which document, and what shape is it? Both allowed at any scope.
+curl -s -H "X-API-Key: $TOKEN" $API/instance
+curl -s -H "X-API-Key: $TOKEN" $API/tree
+
+# Your basket is normally the one named after you. Everything you do goes in it.
+MINE=$(curl -s -H "X-API-Key: $TOKEN" $API/tree \
+       | python3 -c 'import sys,json
+t=json.load(sys.stdin)
+print(next(r["id"] for r in t["roots"] if r["title"]=="ALICE"))')
+
+curl -s -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind":"text","title":"Nightly check","body":"status:: done\ndue:: 2026-08-20"}' \
+  $API/nodes/$MINE/cards
+
+# These are refused (403) — they name no basket, so they would read everything:
+#   /search  /tasks  /kanban  /graph  /tags  /query
+# So is `source` (mirroring a file), and any node outside your subtree.
+```
+
+**Check the status code, not `curl`'s exit code** — `curl` exits 0 on a 403 or a
+400, so a refused write looks like a successful one otherwise. Add `-w '%{http_code}'`
+or `-f`.
+
+### Everything else
+
 ```sh
 KEY=<your key>
 API=http://127.0.0.1:7373/api
