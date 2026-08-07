@@ -719,8 +719,12 @@ pub fn ui(
     // Reset-view button — in a foreground layer, untransformed, so it stays put
     // and clickable above the cards.
     let btn_pos = egui::pos2(canvas_rect.right() - 104.0, canvas_rect.top() + 8.0);
+    // `Middle`, not `Foreground`: the cards are painted in the panel's
+    // background layer, so Middle is already above them — while Foreground is
+    // above *windows* too, which had these toggles painting straight through
+    // Settings, Kanban and every other window, and taking the clicks with them.
     egui::Area::new(ui.id().with("reset_view"))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Middle)
         .fixed_pos(btn_pos)
         .show(ui.ctx(), |ui| {
             // Keep the label on one line — the Area would otherwise size narrow
@@ -738,7 +742,7 @@ pub fn ui(
     // Card tools (top-left): Dock-mode toggle and, when 2+ cards are selected,
     // a Group button.
     egui::Area::new(ui.id().with("card_tools"))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Middle)
         .fixed_pos(egui::pos2(canvas_rect.left() + 8.0, canvas_rect.top() + 8.0))
         .show(ui.ctx(), |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);

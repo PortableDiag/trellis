@@ -644,6 +644,20 @@ pub struct Template {
     pub master: Option<MasterRef>,
 }
 
+/// What a new agent token is scoped to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TokenTarget {
+    /// Make a root basket named after the agent and confine it there. The
+    /// default, because "this agent gets its own workspace" is the case worth
+    /// making easy — the alternative is issuing a whole-document token because
+    /// creating a basket first was a separate chore.
+    NewBasket,
+    /// Confine it to a basket that already exists.
+    Existing(NodeId),
+    /// No confinement. Deliberately the awkward option.
+    WholeDocument,
+}
+
 /// What a plugin worker thread sends back.
 ///
 /// Progress and completion share one channel so they can't arrive out of order —
@@ -907,6 +921,14 @@ pub struct TrellisApp {
     api_lan: bool,
     api_status: String,
     show_settings: bool,
+    /// The "issue a token to an agent" form in Settings → Agent API.
+    new_token_label: String,
+    new_token_target: TokenTarget,
+    new_token_read_only: bool,
+    /// The token just minted, kept so it can be copied. Cleared when the form is
+    /// reused, so the panel doesn't keep offering a stale one.
+    new_token_minted: Option<(String, String)>,
+    new_token_error: String,
 
     /// The external-tools window. Its probe of PATH is cached in
     /// `req_scan` — hitting the filesystem for every tool on every frame would
@@ -1230,6 +1252,11 @@ impl TrellisApp {
             api_lan,
             api_status,
             show_settings: false,
+            new_token_label: String::new(),
+            new_token_target: TokenTarget::NewBasket,
+            new_token_read_only: false,
+            new_token_minted: None,
+            new_token_error: String::new(),
             last_source_poll: None,
             show_requirements: false,
             req_scan: Vec::new(),
@@ -1678,7 +1705,9 @@ impl TrellisApp {
             Ok(g) => g,
             Err(_) => return String::new(),
         };
-        if let Some(existing) = g.iter_mut().find(|g| g.plugin == name) {
+        // `!standalone` throughout: a plugin must never pick up a token the user
+        // issued to an agent that happens to share its name.
+        if let Some(existing) = g.iter_mut().find(|g| g.plugin == name && !g.standalone) {
             if existing.scope == want {
                 return existing.token.clone();
             }
@@ -1688,17 +1717,73 @@ impl TrellisApp {
             return existing.token.clone();
         }
         let token = crate::plugins::mint_token();
-        g.push(crate::plugins::Grant { plugin: name, token: token.clone(), scope: want });
+        g.push(crate::plugins::Grant {
+            plugin: name,
+            token: token.clone(),
+            scope: want,
+            standalone: false,
+        });
         token
     }
 
     fn is_approved(&self, name: &str) -> bool {
-        self.grants.lock().map(|g| g.iter().any(|g| g.plugin == name)).unwrap_or(false)
+        self.grants
+            .lock()
+            .map(|g| g.iter().any(|g| g.plugin == name && !g.standalone))
+            .unwrap_or(false)
     }
 
     fn revoke(&mut self, name: &str) {
         if let Ok(mut g) = self.grants.lock() {
-            g.retain(|g| g.plugin != name);
+            g.retain(|g| !(g.plugin == name && !g.standalone));
+        }
+    }
+
+    /// Every token issued to an agent, as (label, scope, token).
+    fn agent_tokens(&self) -> Vec<(String, crate::plugins::Scope, String)> {
+        self.grants
+            .lock()
+            .map(|g| {
+                g.iter()
+                    .filter(|g| g.standalone)
+                    .map(|g| (g.plugin.clone(), g.scope.clone(), g.token.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Issue a token to an agent. The label is the agent's own name, so a token
+    /// found in a config file elsewhere can be matched back to who holds it.
+    /// Returns an error rather than silently replacing an existing one — two
+    /// agents sharing a label would make revocation ambiguous.
+    fn mint_agent_token(
+        &mut self,
+        label: &str,
+        scope: crate::plugins::Scope,
+    ) -> Result<String, String> {
+        let label = label.trim().to_string();
+        if label.is_empty() {
+            return Err("Give the token a name — the agent's own name.".into());
+        }
+        let Ok(mut g) = self.grants.lock() else {
+            return Err("could not read the token list".into());
+        };
+        if g.iter().any(|g| g.standalone && g.plugin.eq_ignore_ascii_case(&label)) {
+            return Err(format!("There is already a token named {label}. Revoke it first."));
+        }
+        let token = crate::plugins::mint_agent_token();
+        g.push(crate::plugins::Grant {
+            plugin: label,
+            token: token.clone(),
+            scope,
+            standalone: true,
+        });
+        Ok(token)
+    }
+
+    fn revoke_agent_token(&mut self, label: &str) {
+        if let Ok(mut g) = self.grants.lock() {
+            g.retain(|g| !(g.standalone && g.plugin == label));
         }
     }
 
@@ -1932,7 +2017,11 @@ impl TrellisApp {
                     if !allowed {
                         let _ = cmd.resp.send(api::ApiResponse::err(
                             403,
-                            "outside the basket this plugin was given access to",
+                            // "token", not "plugin": the same scope check now
+                            // answers agents holding a token of their own, and
+                            // an error naming the wrong kind of caller sends
+                            // whoever reads it looking in the wrong list.
+                            "outside the basket this token was given access to",
                         ));
                         continue;
                     }
@@ -5015,8 +5104,220 @@ impl TrellisApp {
         }
     }
 
+    /// Issue and revoke the tokens held by agents elsewhere — one per agent,
+    /// named after it, each confined to its own basket.
+    ///
+    /// This exists because the alternative people actually reach for is handing
+    /// out the instance key, which is unrestricted and can only be revoked by
+    /// regenerating it and breaking every other client at once.
+    fn agent_tokens_ui(&mut self, ui: &mut egui::Ui, doc_title: &str) {
+        let existing = self.agent_tokens();
+        if existing.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "None. An agent on your network needs a token of its own — the API \
+                     key above is unrestricted and revoking it breaks every client.",
+                )
+                .weak()
+                .small(),
+            );
+        }
+        let mut revoke: Option<String> = None;
+        for (label, scope, token) in &existing {
+            let basket = scope.subtree.and_then(|n| self.doc.nodes.get(&n)).map(|n| n.title.clone());
+            ui.horizontal(|ui| {
+                ui.strong(label);
+                let sentence = scope.describe_named(doc_title, basket.as_deref());
+                ui.label(
+                    egui::RichText::new(format!("can {sentence}")).color(if scope.subtree.is_none()
+                    {
+                        egui::Color32::from_rgb(230, 160, 60)
+                    } else {
+                        ui.visuals().weak_text_color()
+                    }),
+                );
+                if ui
+                    .small_button("Copy")
+                    .on_hover_text("Copy this token, to paste into the agent's configuration")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(token.clone());
+                }
+                if ui
+                    .small_button("Revoke")
+                    .on_hover_text("This token stops working immediately. Others are unaffected.")
+                    .clicked()
+                {
+                    revoke = Some(label.clone());
+                }
+            });
+            // A basket that has been deleted since would silently widen nothing
+            // — the scope still refuses — but the row would read as if the token
+            // were fine, so say so.
+            if scope.subtree.is_some() && basket.is_none() {
+                ui.label(
+                    egui::RichText::new(
+                        "  ↳ its basket no longer exists; every request is refused",
+                    )
+                    .color(egui::Color32::from_rgb(230, 100, 100))
+                    .small(),
+                );
+            }
+        }
+        if let Some(label) = revoke {
+            self.revoke_agent_token(&label);
+            if self.new_token_minted.as_ref().map(|(l, _)| l == &label).unwrap_or(false) {
+                self.new_token_minted = None;
+            }
+            self.status = format!("Revoked {label}'s token");
+        }
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_token_label)
+                    .desired_width(140.0)
+                    .hint_text("agent's name"),
+            );
+            let label = self.new_token_label.trim().to_string();
+            // Path, not just title: two baskets called "Notes" under different
+            // projects are indistinguishable otherwise, and picking the wrong
+            // one here is a permission mistake.
+            let current = match self.new_token_target {
+                TokenTarget::NewBasket => {
+                    if label.is_empty() {
+                        "a new basket".to_string()
+                    } else {
+                        format!("a new basket “{label}”")
+                    }
+                }
+                TokenTarget::Existing(id) => crate::tree::node_path(&self.doc, id),
+                TokenTarget::WholeDocument => "the whole document".to_string(),
+            };
+            egui::ComboBox::from_id_salt("agent_token_target")
+                .selected_text(current)
+                .width(240.0)
+                .show_ui(ui, |ui| {
+                    let new_label = if label.is_empty() {
+                        "a new basket".to_string()
+                    } else {
+                        format!("a new basket “{label}”")
+                    };
+                    ui.selectable_value(&mut self.new_token_target, TokenTarget::NewBasket, new_label);
+                    let mut ids: Vec<NodeId> = self.doc.nodes.keys().copied().collect();
+                    ids.sort_unstable();
+                    for id in ids {
+                        let path = crate::tree::node_path(&self.doc, id);
+                        ui.selectable_value(&mut self.new_token_target, TokenTarget::Existing(id), path);
+                    }
+                    ui.separator();
+                    ui.selectable_value(
+                        &mut self.new_token_target,
+                        TokenTarget::WholeDocument,
+                        "the whole document (no limit)",
+                    );
+                });
+            ui.checkbox(&mut self.new_token_read_only, "read-only");
+            if ui.button("Issue token").clicked() {
+                self.issue_agent_token();
+            }
+        });
+        if !self.new_token_error.is_empty() {
+            ui.label(
+                egui::RichText::new(&self.new_token_error)
+                    .color(egui::Color32::from_rgb(230, 100, 100))
+                    .small(),
+            );
+        }
+        if let Some((label, token)) = self.new_token_minted.clone() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{label}:")).strong());
+                ui.add(
+                    egui::TextEdit::singleline(&mut token.clone())
+                        .desired_width(300.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+                if ui.button("Copy").clicked() {
+                    ui.ctx().copy_text(token.clone());
+                }
+            });
+            ui.label(
+                egui::RichText::new(
+                    "Send as X-API-Key (or Authorization: Bearer). It stays listed above, \
+                     so you can copy it again — it is stored in this instance's settings, \
+                     and pretending otherwise would just make you mint a second one.",
+                )
+                .weak()
+                .small(),
+            );
+        }
+        if self.api_lan {
+            ui.label(
+                egui::RichText::new(
+                    "The API is plain HTTP: a token crossing your network is readable by \
+                     anything on it.",
+                )
+                .weak()
+                .small(),
+            );
+        }
+    }
+
+    /// Mint the token the form describes, creating its basket if that's what was
+    /// asked for.
+    fn issue_agent_token(&mut self) {
+        self.new_token_error.clear();
+        let label = self.new_token_label.trim().to_string();
+        if label.is_empty() {
+            self.new_token_error = "Give the token a name — the agent's own name.".into();
+            return;
+        }
+        let subtree = match self.new_token_target {
+            TokenTarget::WholeDocument => None,
+            TokenTarget::Existing(id) => {
+                if !self.doc.nodes.contains_key(&id) {
+                    self.new_token_error = "That basket no longer exists.".into();
+                    return;
+                }
+                Some(id)
+            }
+            TokenTarget::NewBasket => {
+                // Named after the agent, so the basket and the token that can
+                // reach it carry the same name in both places.
+                let id = self.doc.add_node(None, label.clone());
+                self.note(
+                    crate::changelog::Change::new(
+                        crate::changelog::Actor::Ui,
+                        crate::changelog::Entity::Node,
+                        crate::changelog::Op::Created,
+                        id,
+                    )
+                    .titled(label.clone()),
+                );
+                Some(id)
+            }
+        };
+        let scope = crate::plugins::Scope { read_only: self.new_token_read_only, subtree };
+        match self.mint_agent_token(&label, scope) {
+            Ok(_token) => {
+                let token = self
+                    .agent_tokens()
+                    .into_iter()
+                    .find(|(l, _, _)| l == &label)
+                    .map(|(_, _, t)| t)
+                    .unwrap_or_default();
+                self.new_token_minted = Some((label.clone(), token));
+                self.status = format!("Issued a token to {label}");
+                self.new_token_label.clear();
+                self.new_token_target = TokenTarget::NewBasket;
+            }
+            Err(e) => self.new_token_error = e,
+        }
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
+        let doc_title = doc_display_name(self.doc_path.as_deref());
         egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
@@ -5053,6 +5354,12 @@ impl TrellisApp {
                         if ui.button("Copy").clicked() {
                             ui.ctx().copy_text(self.api_key.clone());
                         }
+                    });
+                    ui.end_row();
+
+                    ui.label("Agent tokens");
+                    ui.vertical(|ui| {
+                        self.agent_tokens_ui(ui, &doc_title);
                     });
                     ui.end_row();
 
@@ -5630,13 +5937,23 @@ impl TrellisApp {
     /// Ctrl+O: a centered palette to fuzzy-jump to any node by title or path.
     fn quick_switcher(&mut self, ctx: &egui::Context) {
         let q = self.switcher_query.to_lowercase();
+        // A bare node id jumps straight to that node. Ids are what the API,
+        // `/api/tree` and every error message talk in, so typing one you just
+        // read somewhere is the obvious thing to try — and it used to find
+        // nothing at all unless the number happened to appear in a title.
+        // `#12` works too, since that's how ids are written in the docs.
+        let by_id = queried_node_id(&q).filter(|id| self.doc.nodes.contains_key(id));
         // (id, title, path, score) for every node that matches; best score first.
         let mut matches: Vec<(NodeId, String, String, i32)> = Vec::new();
         for (&id, n) in &self.doc.nodes {
             let path = crate::tree::node_path(&self.doc, id);
             let title_lc = n.title.to_lowercase();
             let hay = format!("{}\n{}", title_lc, path.to_lowercase());
-            if let Some(score) = fuzzy_score(&q, &title_lc, &hay) {
+            // Below every real score, so an exact id is always the first row —
+            // and never listed twice when the title matches the digits as well.
+            if Some(id) == by_id {
+                matches.push((id, n.title.clone(), path, i32::MIN));
+            } else if let Some(score) = fuzzy_score(&q, &title_lc, &hay) {
                 matches.push((id, n.title.clone(), path, score));
             }
         }
@@ -7046,6 +7363,20 @@ fn ocr_images(images: &[Vec<u8>]) -> Result<String, String> {
 /// Prefers a title substring, then a title subsequence, then a path hit. Empty
 /// query matches everything (so Ctrl+O with no text lists nodes). `title` and
 /// `hay` (title + "\n" + path) are lowercased by the caller.
+/// The node id a Go-to-node query names, if it is one.
+///
+/// Accepts `12` and `#12`, with surrounding space. Nothing else: `12 notes` is a
+/// search for a title, not an id, and treating it as one would hijack a perfectly
+/// good text query.
+fn queried_node_id(query: &str) -> Option<NodeId> {
+    let t = query.trim();
+    let digits = t.strip_prefix('#').unwrap_or(t);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<NodeId>().ok()
+}
+
 fn fuzzy_score(query: &str, title: &str, hay: &str) -> Option<i32> {
     if query.is_empty() {
         return Some(1000);
@@ -7248,6 +7579,106 @@ fn default_autosave_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Typing an id has to find that node and nothing else. The `#` form is
+    /// accepted because that is how ids are written in the docs and in the tree.
+    #[test]
+    fn go_to_node_accepts_a_node_id() {
+        assert_eq!(queried_node_id("12"), Some(12));
+        assert_eq!(queried_node_id("#12"), Some(12));
+        assert_eq!(queried_node_id("  7 "), Some(7));
+        assert_eq!(queried_node_id("0"), Some(0));
+    }
+
+    /// A query that merely *contains* digits is still a title search — hijacking
+    /// it would break looking up "Q4 2026" or "v2".
+    #[test]
+    fn go_to_node_leaves_text_queries_alone() {
+        assert_eq!(queried_node_id(""), None);
+        assert_eq!(queried_node_id("#"), None);
+        assert_eq!(queried_node_id("12 notes"), None);
+        assert_eq!(queried_node_id("v2"), None);
+        assert_eq!(queried_node_id("Q4 2026"), None);
+        assert_eq!(queried_node_id("-3"), None);
+    }
+
+    /// An exact id must outrank every fuzzy hit, or typing "2" in a document
+    /// full of "2026" cards would bury the node you asked for.
+    #[test]
+    fn an_id_match_sorts_above_any_fuzzy_score() {
+        let best_fuzzy = fuzzy_score("2", "2026 plans", "2026 plans").unwrap();
+        assert!(i32::MIN < best_fuzzy);
+    }
+
+    fn test_app_grants() -> Arc<Mutex<Vec<crate::plugins::Grant>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    /// The whole point of a per-agent token: revoking one must not disturb the
+    /// others, and a plugin must never inherit one.
+    #[test]
+    fn agent_tokens_are_independent_of_each_other_and_of_plugins() {
+        use crate::plugins::{Grant, Scope};
+        let grants = test_app_grants();
+        {
+            let mut g = grants.lock().unwrap();
+            g.push(Grant {
+                plugin: "ALICE".into(),
+                token: "agent_a".into(),
+                scope: Scope { read_only: false, subtree: Some(7) },
+                standalone: true,
+            });
+            g.push(Grant {
+                plugin: "BOB".into(),
+                token: "agent_b".into(),
+                scope: Scope { read_only: true, subtree: Some(9) },
+                standalone: true,
+            });
+            // A *plugin* that happens to share a name with an agent.
+            g.push(Grant {
+                plugin: "ALICE".into(),
+                token: "plug_x".into(),
+                scope: Scope::default(),
+                standalone: false,
+            });
+        }
+        // Revoking the agent leaves the other agent and the plugin alone.
+        grants.lock().unwrap().retain(|g| !(g.standalone && g.plugin == "ALICE"));
+        let left = grants.lock().unwrap();
+        let tokens: Vec<&str> = left.iter().map(|g| g.token.as_str()).collect();
+        assert!(!tokens.contains(&"agent_a"), "the agent's token is gone");
+        assert!(tokens.contains(&"agent_b"), "the other agent is untouched");
+        assert!(tokens.contains(&"plug_x"), "the plugin's grant is untouched");
+    }
+
+    /// The sentence a token is checked against has to name the basket — "one
+    /// basket" is not something anyone can audit.
+    #[test]
+    fn a_scoped_token_describes_itself_by_basket_name() {
+        use crate::plugins::Scope;
+        let s = Scope { read_only: false, subtree: Some(7) };
+        assert_eq!(s.describe_named("Personal.ron", Some("ALICE")), "read and change ALICE and everything under it");
+        let ro = Scope { read_only: true, subtree: Some(7) };
+        assert_eq!(ro.describe_named("Personal.ron", Some("ALICE")), "read ALICE and everything under it");
+        let whole = Scope::default();
+        assert_eq!(
+            whole.describe_named("Personal.ron", None),
+            "read and change your whole Personal.ron document"
+        );
+    }
+
+    /// Agent tokens are tellable from plugin tokens at a glance — they end up in
+    /// config files elsewhere, and "which list do I revoke this from" has to be
+    /// answerable from the string itself.
+    #[test]
+    fn agent_and_plugin_tokens_are_distinguishable() {
+        let a = crate::plugins::mint_agent_token();
+        let p = crate::plugins::mint_token();
+        assert!(a.starts_with("agent_"));
+        assert!(p.starts_with("plug_"));
+        assert_ne!(a[6..], p[5..]);
+        assert!(a.len() > 40);
+    }
 
     /// The gap under an API-created card: `Card::fit_size` has no font context so
     /// it *estimates* the wrapped height, and estimates tall. The right-click

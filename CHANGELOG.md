@@ -4,6 +4,46 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [0.85.0]
+
+### Added
+- **Give each agent a token of its own** (*Tools → Settings → Agent API → Agent
+  tokens*). Type the agent's name, and Trellis mints a token, creates a root
+  basket of that name, and confines the token to it: the agent can read and write
+  its own workspace and **nothing else in the document**. Read-only is a
+  checkbox; an existing basket or the whole document are the other choices.
+
+  This replaces handing out the instance key, which is unrestricted and can only
+  be revoked by regenerating it — breaking every other client at once. Each token
+  revokes on its own, and the list says in plain words what each one can reach:
+  *"ALICE can read and change ALICE and everything under it."*
+
+  **The confinement is enforced on the way in.** A request naming a basket
+  outside the scope is refused, and so is one that names **no** basket — which
+  includes `/api/search`, `/api/tasks`, `/api/kanban` and `/api/graph`, since
+  those read the whole document. That is the point rather than an oversight, but
+  it does mean a confined agent cannot see your agenda; an agent that needs the
+  agenda needs whole-document access, and that is a different decision to make
+  deliberately. Only `/api/health`, `/api/instance`, `/api/tree` and `/api/nodes`
+  are exempt — titles and shape, never card content — so the agent can find its
+  own basket.
+
+  Agent tokens are prefixed `agent_` and plugin tokens `plug_`, so a token found
+  in a config file somewhere says which list to revoke it from.
+
+### Fixed
+- **Go to node accepts a node id.** Typing `12` or `#12` jumps straight to that
+  node, ranked above every fuzzy title hit. Ids are what the API, `/api/tree` and
+  every error message talk in, so typing one you just read somewhere is the
+  obvious thing to try — and it used to find nothing at all unless the digits
+  happened to appear in a title. A query that merely *contains* digits (`v2`,
+  `Q4 2026`) is still a title search.
+- **The Dock/Snap and Reset view buttons no longer float above windows.** They
+  were drawn in the foreground layer to sit above the cards, which also put them
+  above Settings, the Kanban board and every other window — visibly painted
+  through them, and stealing the clicks that landed there. They now sit in the
+  layer between the cards and the windows, which is what "above the cards" meant.
+
 ## [0.84.0]
 
 ### Added

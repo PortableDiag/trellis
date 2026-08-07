@@ -805,12 +805,13 @@ fn handle(
                         // changes something.
                         let is_read = method == Method::Get;
                         if !g.scope.allows_method(is_read) {
+                            // Name the holder, not the kind: the same grant list
+                            // now carries plugins and agent tokens, and "'ALICE'
+                            // has read-only access" is what tells whoever reads
+                            // the log which credential to go and look at.
                             return ApiResponse::err(
                                 403,
-                                &format!(
-                                    "plugin '{}' has read-only access to this document",
-                                    g.plugin
-                                ),
+                                &format!("'{}' has read-only access to this document", g.plugin),
                             );
                         }
                         scope = Some(g.scope);

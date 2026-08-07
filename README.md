@@ -231,6 +231,19 @@ from the main cluster, and click or drag on it to jump there without zooming out
   Enable it in **Tools → Settings**, where **Examples** gives you copy-paste
   `curl` commands already filled in with this instance's host, port and key; see
   [API.md](API.md).
+- **Agent tokens** (**Tools → Settings → Agent API**) — give each agent on your
+  network a credential of its own instead of handing out the instance key. Name
+  the token after the agent, and Trellis will make it a basket of that name and
+  confine it there: it can read and write its own workspace and **nothing else**
+  in the document. Optionally read-only. Revoking one takes effect immediately
+  and leaves every other client working — which the instance key cannot do, since
+  regenerating it breaks them all at once.
+
+  The confinement is enforced on the way in, not asked for politely: a request
+  naming a basket outside the token's scope is refused, and so is one that names
+  no basket at all — which includes search, the agenda and the Kanban board,
+  because those read the whole document. An agent that needs those needs
+  whole-document access, and that is a different decision.
 - **Plugins** (**Tools → Plugins…**) — third-party integrations that are *not*
   Trellis code. A plugin is a separate program Trellis launches, which talks back
   over the same agent API; because it runs out-of-process, one that crashes can't

@@ -772,24 +772,38 @@ same place, so they cannot disagree.
   no patch to misapply — and it is why consecutive identical changes collapse
   into one entry (a card drag is *one* `moved`, not one per frame).
 
-## Plugin tokens
+## Scoped tokens
 
-Besides the instance key, the API accepts **tokens minted for approved plugins**
-(*Tools → Plugins…*). They are ordinary credentials — same `X-API-Key` header —
-but **scoped**, and the scope is enforced here rather than trusted:
+Besides the instance key, the API accepts **scoped tokens**. They are ordinary
+credentials — same `X-API-Key` (or `Authorization: Bearer`) header — but limited,
+and the limit is enforced here rather than trusted. There are two kinds, minted
+in different places and revoked independently:
 
-- A **read-only** plugin's token is refused on anything but `GET`, with
-  `403 {"error":"plugin '<name>' has read-only access to this document"}`. This is
-  checked before the request reaches the document.
-- A plugin confined to a **subtree** may only act on that node and its
-  descendants. A request that names no node is **refused** rather than allowed
-  through, except for the structural reads it needs to orient itself
-  (`/api/health`, `/api/instance`, `/api/tree`, `/api/nodes` — titles and shape,
-  never card content). `403 {"error":"outside the basket this plugin was given
-  access to"}`.
+| prefix | minted in | held by |
+|---|---|---|
+| `agent_` | *Settings → Agent API → Agent tokens* | an agent or service elsewhere, named after it |
+| `plug_` | *Tools → Plugins…*, on approving a plugin | a plugin on this machine; never shown to you |
 
-Plugin tokens are prefixed `plug_` so they're tellable from the instance key at a
-glance. Revoking a plugin deletes its token and takes effect immediately.
+Both carry the same two limits:
+
+- **Read-only** — refused on anything but `GET`, with
+  `403 {"error":"'<name>' has read-only access to this document"}`. Checked
+  before the request reaches the document.
+- **Confined to a subtree** — may only act on that node and its descendants. A
+  request that names no node is **refused** rather than allowed through, except
+  for the structural reads needed to orient (`/api/health`, `/api/instance`,
+  `/api/tree`, `/api/nodes` — titles and shape, never card content).
+  `403 {"error":"outside the basket this token was given access to"}`.
+
+**A subtree token cannot use the whole-document query surfaces.** `/api/search`,
+`/api/tasks`, `/api/kanban`, `/api/graph`, `/api/tags` and `/api/query` name no
+node, so they are refused. That is the point — those are exactly the calls that
+read everything — but it means an agent given a basket of its own sees only what
+is in that basket. Give it the instance key or a whole-document token if it needs
+the agenda, and understand that this is the same as letting it read everything.
+
+Revoking is immediate and affects only that token; the instance key and every
+other token keep working.
 
 ## Errors
 

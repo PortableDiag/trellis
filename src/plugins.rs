@@ -61,6 +61,18 @@ impl Scope {
         }
     }
 
+    /// The same sentence, but naming the basket. Used where the basket is known
+    /// — "read and change **ALICE** and everything under it" is a far better
+    /// thing to check a token against than "one basket".
+    pub fn describe_named(&self, doc_title: &str, basket: Option<&str>) -> String {
+        let what = if self.read_only { "read" } else { "read and change" };
+        match (self.subtree, basket) {
+            (Some(_), Some(name)) => format!("{what} {name} and everything under it"),
+            (Some(_), None) => format!("{what} one basket and everything under it"),
+            (None, _) => format!("{what} your whole {doc_title} document"),
+        }
+    }
+
     /// Whether a request method is permitted. The only check cheap enough to run
     /// on the API thread, and the one that matters most.
     pub fn allows_method(&self, is_read: bool) -> bool {
@@ -289,20 +301,45 @@ pub fn write_config(
 }
 
 /// A minted token and the scope it carries. Stored in the app's config, keyed by
-/// plugin name, so approval survives a restart and revocation is real.
+/// name, so approval survives a restart and revocation is real.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Grant {
+    /// The installed plugin's name, or — for a standalone token — the label the
+    /// user gave it. The field keeps its old name so configs written before
+    /// standalone tokens existed still load.
     pub plugin: String,
     pub token: String,
     pub scope: Scope,
+    /// Minted for something that is **not** an installed plugin: an agent or
+    /// service elsewhere on the network, holding the token itself.
+    ///
+    /// Kept as a flag rather than inferred, so a plugin can never inherit an
+    /// agent's grant by being installed under the same name — that would hand a
+    /// local executable a credential the user issued to something else.
+    #[serde(default)]
+    pub standalone: bool,
 }
 
-/// Mint a token. Same CSPRNG as the API key — a plugin token is a credential to
-/// the same API, so it gets the same strength.
+/// Mint a token for an installed plugin.
 pub fn mint_token() -> String {
+    mint("plug")
+}
+
+/// Mint a token for an agent or service that is not a plugin.
+///
+/// A different prefix because these are the ones a person handles: a token in a
+/// config file somewhere on the network should say at a glance what it is, and
+/// which of the two lists to revoke it from.
+pub fn mint_agent_token() -> String {
+    mint("agent")
+}
+
+/// Same CSPRNG as the API key — every one of these is a credential to the same
+/// API, so they all get the same strength.
+fn mint(prefix: &str) -> String {
     let mut buf = [0u8; 24];
     getrandom::fill(&mut buf).expect("OS random number generator unavailable");
-    format!("plug_{}", buf.iter().map(|b| format!("{b:02x}")).collect::<String>())
+    format!("{prefix}_{}", buf.iter().map(|b| format!("{b:02x}")).collect::<String>())
 }
 
 /// The result of one plugin run, for the log pane.
