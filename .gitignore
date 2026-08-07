@@ -9,3 +9,7 @@ docs/SESSION-*.md
 # A plugin's own credentials live beside it and must never be committed.
 plugins/*/config.json
 plugins/*/state.json
+
+# Python bytecode from the bundled plugins
+__pycache__/
+*.pyc
