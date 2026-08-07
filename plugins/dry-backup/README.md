@@ -43,31 +43,37 @@ if it tried.
   whatever a previous run left behind. Publishing writes only to Dry — this
   plugin stays read-only against your document.
 
-### The public link does not work yet
+### The link is checked anonymously before you are given it
 
-Publishing itself works: `op: "publish"` sets `isPublicObject` on the item, Dry
-reads the value back, and returns a URL. **But fetching that URL without a Dry
-account redirects to the sign-in page**, so it is not yet usable as "send someone
-a link".
+Two different things have to be true for a share link to work, and for a while
+only the first one was:
 
-Measured, not assumed — an anonymous request to a freshly published item:
+1. **Dry marks the item public.** `op: "publish"` sets `isPublicObject` and
+   returns a URL. The plugin reads that flag back from Dry's own state rather
+   than trusting the echo.
+2. **The viewer actually serves that URL to a stranger.** The plugin now fetches
+   the returned URL **with no credentials at all** and follows the redirect
+   chain. If it lands on a sign-in page, you get an error naming exactly that,
+   and the URL is *not* presented as usable.
 
-```
-GET https://dry.ai/v?t=tsr&oc=$<id>
-302 → /signIn?rU=…
-```
+Step 2 exists because step 1 passed while the link was dead — for a period the
+flag was set and an anonymous request still ended at `/signIn?rU=…`. A share link
+that only works for the person who made it is worse than an error, because you
+send it to someone before you find out.
 
-The item's own `isPublicObject` flag is set; what is missing is on the read side.
-Dry's `publish` op deliberately rejects spaces and folders because publishing a
-*space* needs `publicRole` role assignments, and an item inside a space with no
-public role appears to be unreachable regardless of its own flag. Either the
-viewer needs to honour `isPublicObject` on an item independently of its space, or
-publishing an item needs to grant the space enough public role to serve that one
-item.
+A redirect on its own is not treated as failure: Dry's viewer canonicalises
+`/v?t=tsr&oc=$…` to another `/v?…` even for a nonsense id, so what is judged is
+where the chain **lands**. A 2xx means the viewer served us something rather than
+turning us away — a necessary condition, not proof the card's text is on the
+page. Open the link in a private window once to confirm that.
 
-Nothing in this plugin needs to change when that is resolved — it already checks
-the returned `isPublicObject` and refuses to claim success if it comes back
-false.
+If the check cannot run at all (no network), the plugin says so rather than
+passing by default: *unverified* and *verified good* must not look the same.
+
+**As of this writing the fix is patched on Dry's side but not yet deployed.**
+Until it is, publishing a card reports the sign-in bounce and exits non-zero. No
+change here is needed when it deploys — just re-run the plugin on the card and
+the same check will pass.
 
 ## What lands in Dry
 

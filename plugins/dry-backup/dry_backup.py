@@ -29,6 +29,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DRY_API = "https://dry.ai/api/dbcrud"
@@ -118,6 +119,76 @@ def dry(cred, op, **body):
     if not out.get("success"):
         die(f"Dry {op}: {out.get('error', 'unknown error')}")
     return out.get("data", {})
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Hand redirects back to the caller so the *chain* can be inspected."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Where a redirect chain ending here means "you are not allowed to see this".
+_SIGN_IN = ("signin", "sign-in", "login", "log-in", "auth")
+
+MAX_HOPS = 5
+
+
+def link_is_reachable_anonymously(url):
+    """Fetch the published URL with no credentials at all.
+
+    This is the check that matters, and the one whose absence cost a release.
+    `isPublicObject` is Dry's *intent*; whether the viewer honours it is a
+    different question, and for a while the two disagreed — the flag was set and
+    the URL still bounced a logged-out visitor to `/signIn`. A publish that
+    reports success while handing you a link only you can open is precisely the
+    silent-failure shape this project keeps stamping out.
+
+    **A redirect is not itself the failure.** Dry's viewer redirects even for a
+    nonsense id — it canonicalises `/v?t=tsr&oc=$…` to another `/v?…` — so
+    treating any 3xx as "not public" would call a perfectly good link broken the
+    moment Dry adds a hop. What matters is where the chain *lands*: a sign-in
+    page means no, a 2xx means the viewer served us something.
+
+    Returns ``(ok, detail)``. Note what a 200 does and does not prove: the page
+    is an SPA shell, so a 200 means we were not turned away. That is a necessary
+    condition, not proof the card's text is in it — only opening the link shows
+    that. The bounce to sign-in, by contrast, is unambiguous.
+    """
+    # No credentials. The User-Agent still matters: Dry's edge blocks unknown
+    # agents with an HTML 403, which would read as "not public" if we sent
+    # urllib's default.
+    opener = urllib.request.build_opener(_NoRedirect)
+    seen = [url]
+    current = url
+    try:
+        for _ in range(MAX_HOPS):
+            req = urllib.request.Request(current, headers={"User-Agent": USER_AGENT})
+            try:
+                with opener.open(req, timeout=30) as r:
+                    code = getattr(r, "status", None) or r.getcode()
+                    return True, f"HTTP {code} after {len(seen) - 1} redirect(s)"
+            except urllib.error.HTTPError as e:
+                if e.code not in (301, 302, 303, 307, 308):
+                    if e.code == 403:
+                        return False, ("HTTP 403 — either the item is not really "
+                                       "public, or Dry's edge blocked this client")
+                    return False, f"HTTP {e.code}"
+                loc = (e.headers.get("Location", "") if e.headers else "")
+                if not loc:
+                    return False, f"HTTP {e.code} with no Location header"
+                current = urllib.parse.urljoin(current, loc)
+                if any(w in current.lower() for w in _SIGN_IN):
+                    return False, ("the link sends a logged-out visitor to sign "
+                                   f"in ({current})")
+                if current in seen:
+                    return False, f"the link redirects in a loop ({current})"
+                seen.append(current)
+        return False, f"the link redirected more than {MAX_HOPS} times"
+    except Exception as e:  # noqa: BLE001 - a checker must not mask the outcome
+        # Could not run the check. Say so rather than passing it by default:
+        # "unverified" and "verified good" must not look the same.
+        return None, f"could not be checked ({e})"
 
 
 def check_import_report(data, what, expected):
@@ -270,6 +341,19 @@ def publish_card(key, cfg, node_id, card_id):
     url = out.get("url")
     if not url:
         die("Dry published the item but returned no URL")
+
+    ok, detail = link_is_reachable_anonymously(url)
+    if ok is False:
+        # The item really is flagged public on Dry's side — this is not a failed
+        # publish, it is a link that doesn't serve. Say which, and don't present
+        # the URL as usable: a share link that only works for you is worse than
+        # an error, because you send it to someone before finding out.
+        die(f"Dry marked the card public but {detail}. Nothing to fix here — "
+            f"this is Dry's viewer, not the publish. The card is backed up and "
+            f"flagged public; re-run this to re-check. URL: {url}")
+    if ok is None:
+        print(f"Published, but the link {detail} — open it in a private window "
+              f"before sending it to anyone.")
     print("Anyone with this link can read this card — no Dry account needed.")
     print(url)  # last line: becomes the status Trellis shows
 

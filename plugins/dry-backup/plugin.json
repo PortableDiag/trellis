@@ -2,7 +2,7 @@
   "name": "dry-backup",
   "title": "Back up to Dry",
   "description": "Copy this document's baskets and cards into a Dry space. Re-running updates the same items instead of duplicating them, so it is safe to run as often as you like. Right-click a card to publish it at a public link anyone can read.",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "command": "python3",
   "args": ["dry_backup.py"],
   "triggers": ["manual", "node-menu", "card-menu"],
