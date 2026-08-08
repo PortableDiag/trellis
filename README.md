@@ -260,7 +260,11 @@ from the main cluster, and click or drag on it to jump there without zooming out
   otherwise — and a **Cancel** button that stops it and everything it started.
   Worked example:
   [`plugins/dry-backup/`](plugins/dry-backup/README.md), which copies a document
-  into a [Dry](https://dry.ai) space and can be re-run without duplicating.
+  into a [Dry](https://dry.ai) space and can be re-run without duplicating, and
+  can **publish a single card at a public link** from its right-click menu — it
+  fetches that link with no credentials before handing it to you, so a link that
+  only works for you is an error rather than something you find out after
+  sending it to someone.
 - **Web clipper** — a small Chrome/Edge extension (`web-clipper/`) clips the
   current page or your text selection into a Trellis basket over the LAN API.
 - **Companion mobile app** — a native Android viewer/capture app talks to the

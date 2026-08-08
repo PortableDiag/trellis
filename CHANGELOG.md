@@ -4,6 +4,33 @@ All notable changes to Trellis. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the app version in
 `Cargo.toml`, each with a matching git tag and GitHub release.
 
+## [Unreleased]
+
+Nothing in `src/` has changed since 0.86.0, so there is no new app version — the
+binary the 0.86.0 release carries is still current. The bundled plugin below is
+versioned independently of the app.
+
+### Changed
+- **Dry backup plugin 1.3.0 — a published link is checked anonymously before you
+  are given it.** Publishing already verified `isPublicObject`, read back from
+  Dry's own state rather than echoed, and **that check passed the whole time the
+  link was dead**: the flag was set and a logged-out visitor was still bounced to
+  a sign-in page. Checking the intent is not checking the outcome.
+
+  The plugin now fetches the returned URL **with no credentials at all** and
+  follows the redirect chain. Landing on a sign-in page is an error naming
+  exactly that, and the URL is deliberately *not* offered as usable — a share
+  link that only works for the person who made it is worse than an error, because
+  you send it to someone before finding out. If the check cannot run at all, it
+  says so instead of passing by default: *unverified* and *verified good* must not
+  look the same.
+
+  A redirect is not itself the failure. Dry's viewer canonicalises its own URLs
+  even for a nonsense id, so treating any 3xx as "not public" would call a good
+  link broken the moment a hop was added; what is judged is where the chain
+  lands. A 2xx means the viewer served something rather than turning us away —
+  necessary, not proof the card's text is on the page.
+
 ## [0.86.0]
 
 ### Changed
