@@ -42,6 +42,11 @@ pub enum ApiRequest {
     /// path. Without it, re-reading a card you just wrote means pulling the
     /// whole basket back.
     GetCard { node: NodeId, card: u64 },
+    /// One card from its id alone, without already knowing its basket. Ids are
+    /// unique per document, so an id *is* an address — but every other card route
+    /// is `/nodes/{node}/cards/{card}`, so an id quoted in a note or read out of
+    /// a response could only be resolved by walking every basket.
+    LocateCard(u64),
     CreateNode { parent: Option<NodeId>, title: String },
     UpdateNode { id: NodeId, title: Option<String>, color: Option<[u8; 3]>, bg: Option<[u8; 3]> },
     DeleteNode(NodeId),
@@ -949,6 +954,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "nodes", nid, "cards", cid]) => {
             Ok(ApiRequest::GetCard { node: pid(nid)?, card: pid(cid)? })
         }
+        (Method::Get, ["api", "cards", cid]) => Ok(ApiRequest::LocateCard(pid(cid)?)),
         (Method::Post, ["api", "nodes", id, "cards"]) => {
             let input: AddCardInput = parse(body)?;
             Ok(ApiRequest::AddCard { node: pid(id)?, input })
@@ -1346,6 +1352,27 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         },
         ApiRequest::GetCard { node, card } => match doc.card(node, card) {
             Some(c) => (false, ApiResponse::ok(card_json(c))),
+            None => (false, ApiResponse::err(404, "card not found")),
+        },
+        // The basket comes back with the card: an id alone is enough to *find* a
+        // card, but every route that edits one still needs the node, so returning
+        // it here saves the caller a second lookup it has no way to perform.
+        ApiRequest::LocateCard(card) => match doc.locate_card(card) {
+            Some(node) => {
+                let c = match doc.card(node, card) {
+                    Some(c) => c,
+                    None => return (false, ApiResponse::err(404, "card not found")),
+                };
+                (
+                    false,
+                    ApiResponse::ok(json!({
+                        "node": node,
+                        "node_title": doc.nodes.get(&node).map(|n| n.title.clone()).unwrap_or_default(),
+                        "node_path": doc.node_path(node),
+                        "card": card_json(c),
+                    })),
+                )
+            }
             None => (false, ApiResponse::err(404, "card not found")),
         },
         ApiRequest::CreateNode { parent, title } => {
@@ -2618,6 +2645,12 @@ mod tests {
         assert!(!is_scope_neutral(&ApiRequest::Tasks { include_done: true, project: None }));
         assert!(!is_scope_neutral(&ApiRequest::Kanban { project: None }));
         assert!(!is_scope_neutral(&ApiRequest::Graph));
+        // Locating a card names no basket until the document resolves one, so it
+        // must not be neutral either — the app loop resolves it and checks the
+        // basket it lands in. Neutral here would hand a confined token every card
+        // in the document, one id at a time.
+        assert!(!is_scope_neutral(&ApiRequest::LocateCard(1)));
+        assert_eq!(target_node(&ApiRequest::LocateCard(1)), None);
     }
 
 
@@ -2901,6 +2934,13 @@ mod tests {
             route(&Method::Get, "/api/nodes/5/cards/9", "", "").unwrap(),
             ApiRequest::GetCard { node: 5, card: 9 }
         ));
+        // The by-id lookup is its own top-level route: no node in the path,
+        // because not knowing the node is the entire reason to call it.
+        assert!(matches!(
+            route(&Method::Get, "/api/cards/9", "", "").unwrap(),
+            ApiRequest::LocateCard(9)
+        ));
+        assert!(route(&Method::Get, "/api/cards/nine", "", "").is_err());
         assert!(matches!(
             route(&Method::Get, "/api/search", "q=hello%20world", "").unwrap(),
             ApiRequest::Search(q) if q == "hello world"
@@ -3197,6 +3237,61 @@ mod tests {
         assert_eq!(resp.status, 404);
         let (_d, resp) = process(&mut doc, ApiRequest::GetCard { node: nid, card: 9999 });
         assert_eq!(resp.status, 404);
+    }
+
+    /// The direction that was missing: an id, on its own, back to a card. An
+    /// agent that reads "card 1391" in a note had no way to resolve it without
+    /// walking every basket, and neither did the operator.
+    #[test]
+    fn locate_card_finds_a_card_from_its_id_alone() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "A".into());
+        let b = doc.add_node(Some(a), "B".into());
+        let cid = doc.add_card(b, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(b, cid).unwrap().title = "the one".into();
+
+        let (dirty, resp) = process(&mut doc, ApiRequest::LocateCard(cid));
+        assert!(!dirty, "a read must never mark the document dirty");
+        assert_eq!(resp.status, 200);
+        let got: Value = serde_json::from_str(&resp.body).unwrap();
+        // The basket comes back too: an id is enough to *find* a card, but every
+        // route that edits one still needs the node.
+        assert_eq!(got["node"], b);
+        assert_eq!(got["node_title"], "B");
+        assert_eq!(got["node_path"], doc.node_path(b));
+        assert_eq!(got["card"]["title"], "the one");
+        assert_eq!(got["card"]["id"], cid);
+
+        // The card body is the same shape GET /nodes/{n}/cards/{c} returns, so a
+        // caller can hand it to the same code.
+        let (_d, direct) = process(&mut doc, ApiRequest::GetCard { node: b, card: cid });
+        let direct: Value = serde_json::from_str(&direct.body).unwrap();
+        assert_eq!(got["card"], direct);
+
+        let (_d, resp) = process(&mut doc, ApiRequest::LocateCard(9999));
+        assert_eq!(resp.status, 404);
+    }
+
+    /// Node ids and card ids are separate spaces, so the same number can name
+    /// both. The route must answer about the card and never fall back to a node
+    /// that happens to share the number.
+    #[test]
+    fn locate_card_is_not_confused_by_a_node_with_the_same_number() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "a node".into());
+        let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, cid).unwrap().title = "a card".into();
+
+        let (_d, resp) = process(&mut doc, ApiRequest::LocateCard(n));
+        // Either the number is also a card id — then it must resolve to *that
+        // card* — or it is not, and this is a 404. What it must never be is the
+        // node dressed up as a card.
+        if resp.status == 200 {
+            let got: Value = serde_json::from_str(&resp.body).unwrap();
+            assert_eq!(got["card"]["id"], n, "resolved the node id as if it were a card");
+        } else {
+            assert_eq!(resp.status, 404);
+        }
     }
 
     #[test]

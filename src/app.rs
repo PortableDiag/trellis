@@ -2012,7 +2012,20 @@ impl TrellisApp {
                 if let Some(root) = scope.subtree {
                     let allowed = match api::target_node(&cmd.req) {
                         Some(n) => self.node_is_within(n, root),
-                        None => api::is_scope_neutral(&cmd.req),
+                        // `GET /api/cards/{id}` names a card, not a basket, so it
+                        // has no target until the document resolves one. Do that
+                        // here — where the tree exists — and check the basket it
+                        // actually lands in, so a confined token can resolve the
+                        // ids it is quoted for its own cards without the route
+                        // becoming a way to read the rest of the document. An id
+                        // that resolves to nothing is refused, not waved through.
+                        None => match &cmd.req {
+                            api::ApiRequest::LocateCard(cid) => self
+                                .doc
+                                .locate_card(*cid)
+                                .is_some_and(|n| self.node_is_within(n, root)),
+                            _ => api::is_scope_neutral(&cmd.req),
+                        },
                     };
                     if !allowed {
                         let _ = cmd.resp.send(api::ApiResponse::err(
@@ -5658,6 +5671,7 @@ impl TrellisApp {
                         "GET    /api/graph                         (wiki-link nodes + edges)",
                         "GET    /api/nodes/{id}/cards",
                         "GET    /api/nodes/{id}/cards/{cid}        (one card, without the whole basket)",
+                        "GET    /api/cards/{cid}                   (find a card from its id alone → {node, node_path, card})",
                         "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, size?, fit?, image_base64?, inline_images?, source?}",
                         "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, size?, items?, source?, …}",
                         "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
@@ -5951,30 +5965,55 @@ impl TrellisApp {
         }
     }
 
-    /// Ctrl+O: a centered palette to fuzzy-jump to any node by title or path.
+    /// Ctrl+O: a centered palette to fuzzy-jump to any node by title or path —
+    /// or straight to a node **or card** by its id.
     fn quick_switcher(&mut self, ctx: &egui::Context) {
         let q = self.switcher_query.to_lowercase();
-        // A bare node id jumps straight to that node. Ids are what the API,
+        // A bare id jumps straight to what it names. Ids are what the API,
         // `/api/tree` and every error message talk in, so typing one you just
         // read somewhere is the obvious thing to try — and it used to find
         // nothing at all unless the number happened to appear in a title.
         // `#12` works too, since that's how ids are written in the docs.
-        let by_id = queried_node_id(&q).filter(|id| self.doc.nodes.contains_key(id));
-        // (id, title, path, score) for every node that matches; best score first.
-        let mut matches: Vec<(NodeId, String, String, i32)> = Vec::new();
+        //
+        // **Cards are searched as well as nodes**, because a card id is what an
+        // agent quotes most: they run into the thousands while node ids stop in
+        // the hundreds, so nearly every id an operator was handed resolved to
+        // nothing here. One number can name both a node and a card — they are
+        // separate id spaces — so both rows are offered rather than guessing.
+        let typed = queried_node_id(&q);
+        let by_id = typed.filter(|id| self.doc.nodes.contains_key(id));
+        let card_by_id = typed.and_then(|id| self.doc.locate_card(id).map(|node| (node, id)));
+        let mut matches: Vec<SwitcherHit> = Vec::new();
+        if let Some((node, card)) = card_by_id {
+            let path = crate::tree::node_path(&self.doc, node);
+            let label = self
+                .doc
+                .card(node, card)
+                .map(card_label)
+                .unwrap_or_else(|| "(untitled card)".to_string());
+            // Just above a node id match, so that when a number is both, the
+            // node — the coarser, more likely target — still leads.
+            matches.push(SwitcherHit { node, card: Some(card), id: card, label, path, score: i32::MIN + 1 });
+        }
         for (&id, n) in &self.doc.nodes {
             let path = crate::tree::node_path(&self.doc, id);
             let title_lc = n.title.to_lowercase();
             let hay = format!("{}\n{}", title_lc, path.to_lowercase());
             // Below every real score, so an exact id is always the first row —
             // and never listed twice when the title matches the digits as well.
-            if Some(id) == by_id {
-                matches.push((id, n.title.clone(), path, i32::MIN));
-            } else if let Some(score) = fuzzy_score(&q, &title_lc, &hay) {
-                matches.push((id, n.title.clone(), path, score));
-            }
+            let score = if Some(id) == by_id {
+                i32::MIN
+            } else {
+                match fuzzy_score(&q, &title_lc, &hay) {
+                    Some(s) => s,
+                    None => continue,
+                }
+            };
+            matches.push(SwitcherHit { node: id, card: None, id, label: n.title.clone(), path, score });
         }
-        matches.sort_by(|a, b| a.3.cmp(&b.3).then(a.2.len().cmp(&b.2.len())).then(a.1.cmp(&b.1)));
+        matches.sort_by(|a, b| {
+            a.score.cmp(&b.score).then(a.path.len().cmp(&b.path.len())).then(a.label.cmp(&b.label))
+        });
         matches.truncate(50);
         if matches.is_empty() {
             self.switcher_index = 0;
@@ -6001,10 +6040,10 @@ impl TrellisApp {
         if up {
             self.switcher_index = self.switcher_index.saturating_sub(1);
         }
-        let mut jump: Option<NodeId> = None;
+        let mut jump: Option<(NodeId, Option<CardId>)> = None;
         if enter {
             if let Some(m) = matches.get(self.switcher_index) {
-                jump = Some(m.0);
+                jump = Some((m.node, m.card));
             }
         }
 
@@ -6018,32 +6057,51 @@ impl TrellisApp {
             .show(ctx, |ui| {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.switcher_query)
-                        .hint_text("Jump to a node…  ↑↓ move · Enter open · Esc close")
+                        .hint_text("Jump to a node or card…  title, path, or an id")
                         .desired_width(f32::INFINITY),
                 );
                 resp.request_focus();
                 ui.separator();
                 egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, false]).show(ui, |ui| {
-                    for (i, (id, title, path, _)) in matches.iter().enumerate() {
+                    for (i, m) in matches.iter().enumerate() {
                         let sel = i == idx;
-                        let shown = if title.trim().is_empty() { "(untitled)".to_string() } else { title.clone() };
+                        let shown =
+                            if m.label.trim().is_empty() { "(untitled)".to_string() } else { m.label.clone() };
                         let r = ui.add(egui::SelectableLabel::new(sel, egui::RichText::new(shown).strong()));
-                        ui.small(egui::RichText::new(path).weak());
+                        // The id is shown, not just accepted. Until now it lived
+                        // only behind right-click → Copy, so an operator handed a
+                        // number had no way to see one anywhere in the app and no
+                        // way to check they'd landed on the right thing.
+                        ui.horizontal(|ui| {
+                            ui.small(
+                                egui::RichText::new(if m.card.is_some() {
+                                    format!("card #{}", m.id)
+                                } else {
+                                    format!("node #{}", m.id)
+                                })
+                                .weak(),
+                            );
+                            ui.small(egui::RichText::new(&m.path).weak());
+                        });
                         if r.clicked() {
-                            jump = Some(*id);
+                            jump = Some((m.node, m.card));
                         }
                         if sel {
                             r.scroll_to_me(Some(egui::Align::Center));
                         }
                     }
                     if matches.is_empty() && !self.switcher_query.is_empty() {
-                        ui.weak("No matching nodes.");
+                        ui.weak("No matching nodes or cards.");
                     }
                 });
             });
 
-        if let Some(id) = jump {
-            self.jump_to_node(id);
+        // A card hit reveals the card itself — recenter and flash — rather than
+        // just opening the basket and leaving you to find it. `reveal_hit` is the
+        // same path the Agenda, Kanban, Find, Tags and Backlinks rows already use.
+        if let Some((node, card)) = jump {
+            self.switcher_open = false;
+            self.reveal_hit(ctx, node, card);
         }
     }
 
@@ -7385,6 +7443,42 @@ fn ocr_images(images: &[Vec<u8>]) -> Result<String, String> {
 /// Accepts `12` and `#12`, with surrounding space. Nothing else: `12 notes` is a
 /// search for a title, not an id, and treating it as one would hijack a perfectly
 /// good text query.
+/// One row in the Ctrl+O palette: a node, or a card inside one.
+struct SwitcherHit {
+    /// The basket to open. For a card hit this is the card's basket.
+    node: NodeId,
+    /// Set when this row is a card, so Enter reveals the card and not just its
+    /// basket.
+    card: Option<CardId>,
+    /// The id shown on the row — the node's, or the card's.
+    id: u64,
+    label: String,
+    path: String,
+    score: i32,
+}
+
+/// What to call a card in the palette. Cards very often have no title, so fall
+/// back to the first non-empty line of the body: a row reading "(untitled card)"
+/// tells you nothing about whether you found the right one.
+fn card_label(c: &crate::model::Card) -> String {
+    if !c.title.trim().is_empty() {
+        return c.title.clone();
+    }
+    let line = c
+        .body
+        .lines()
+        .map(|l| l.trim_start_matches(['#', '-', '*', '>', ' ']).trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if line.is_empty() {
+        "(untitled card)".to_string()
+    } else if line.chars().count() > 60 {
+        format!("{}…", line.chars().take(60).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
 fn queried_node_id(query: &str) -> Option<NodeId> {
     let t = query.trim();
     let digits = t.strip_prefix('#').unwrap_or(t);
@@ -7625,6 +7719,41 @@ mod tests {
     fn an_id_match_sorts_above_any_fuzzy_score() {
         let best_fuzzy = fuzzy_score("2", "2026 plans", "2026 plans").unwrap();
         assert!(i32::MIN < best_fuzzy);
+        // A card hit sits just above a node hit, so when one number names both,
+        // the node still leads — but both are still ahead of every fuzzy row.
+        assert!(i32::MIN < i32::MIN + 1 && i32::MIN + 1 < best_fuzzy);
+    }
+
+    /// Most cards have no title. A palette row reading "(untitled card)" would
+    /// not tell you whether you'd found the right one, which is the only
+    /// question the row exists to answer.
+    #[test]
+    fn a_card_row_is_labelled_by_its_title_then_its_first_real_line() {
+        use crate::model::{Card, CardKind};
+        let mut c = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Text);
+        c.title = "Has a title".into();
+        c.body = "body text".into();
+        assert_eq!(card_label(&c), "Has a title");
+
+        // No title: the first non-empty line, with markdown ornament stripped so
+        // a heading doesn't read as "### Heading".
+        c.title = String::new();
+        c.body = "\n\n### The real first line\nmore".into();
+        assert_eq!(card_label(&c), "The real first line");
+
+        c.body = "- a bullet".into();
+        assert_eq!(card_label(&c), "a bullet");
+
+        // Nothing at all is honest rather than blank.
+        c.body = "   \n\n".into();
+        assert_eq!(card_label(&c), "(untitled card)");
+
+        // Long lines are truncated by *characters*, not bytes — slicing a
+        // multi-byte char in half would panic on a card full of em-dashes.
+        c.body = "é".repeat(200);
+        let label = card_label(&c);
+        assert!(label.ends_with('…'));
+        assert_eq!(label.chars().count(), 61);
     }
 
     fn test_app_grants() -> Arc<Mutex<Vec<crate::plugins::Grant>>> {

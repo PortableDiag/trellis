@@ -6,11 +6,40 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
-Nothing in `src/` has changed since 0.86.0, so there is no new app version — the
-binary the 0.86.0 release carries is still current. The bundled plugin below is
-versioned independently of the app.
+## [0.87.0]
+
+### Added
+- **Go to a card by its id — and see ids at all.** `Ctrl+O` (View → Go to node…)
+  already jumped to a **node** id; typing a **card** id found nothing, and said
+  *"No matching nodes"*, which reads as the feature being broken. It was the
+  common case: card ids run into the thousands while node ids stop in the
+  hundreds, so nearly every id an agent quotes in a note is a card id.
+
+  A card id now resolves, and Enter **reveals the card** — the canvas recenters
+  and the card flashes, the same path the Agenda and Kanban rows use — rather
+  than just opening its basket and leaving you to find it. Each row now also
+  **prints the id** (`card #1391`, `node #63`) and the basket path, which is the
+  first place in the app a card id is *visible* rather than only copyable behind
+  right-click → Copy.
+
+  Node ids and card ids are separate spaces, so one number can name both; both
+  rows are offered rather than guessing, with the node first. Cards very often
+  have no title, so a row falls back to the first real line of the body — a
+  palette full of "(untitled card)" answers nothing.
+
+- **`GET /api/cards/{cid}`** — the same lookup for agents, which is where the
+  problem starts: an id read out of an earlier response or quoted in a card could
+  only be resolved by walking every basket, because every other card route is
+  `/nodes/{id}/cards/{cid}`. Returns the card **and its basket**
+  (`{node, node_title, node_path, card}`), since every route that *edits* a card
+  still needs the node. A confined agent token may resolve ids **inside its own
+  basket** and is refused (403) for anything outside it: the route names no
+  basket until the document resolves one, so the check happens after resolution,
+  where the tree exists.
 
 ### Changed
+- **Dry backup plugin 1.3.0** (shipped 2026-08-07, versioned independently of the
+  app — recorded here for the trail).
 - **Dry backup plugin 1.3.0 — a published link is checked anonymously before you
   are given it.** Publishing already verified `isPublicObject`, read back from
   Dry's own state rather than echoed, and **that check passed the whole time the

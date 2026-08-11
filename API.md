@@ -167,6 +167,17 @@ GET /api/nodes/{id}/cards/{cid}
         path, so re-reading a card you just wrote doesn't mean pulling the whole
         basket back. Same object as an entry in the list above.
 
+GET /api/cards/{cid}
+  → 200 {node, node_title, node_path, card:{<card>}}              | 404
+        find a card from its **id alone**, without already knowing its basket.
+        Card ids are unique per document, so an id is a complete address — but
+        every other card route is /nodes/{id}/cards/{cid}, so an id quoted in a
+        note or read out of an earlier response could only be resolved by
+        walking every basket. The owning node comes back with it, because every
+        route that *edits* a card still needs the node.
+        Node ids and card ids are separate spaces: the same number can name one
+        of each, and this route always answers about the card.
+
 GET /api/search?q=<text>
   → 200 {"hits":[ {node,card,node_title,snippet} ]}                   (case-insensitive)
 ```
@@ -949,6 +960,14 @@ curl -s -H "X-API-Key: $KEY" $API/history        # {count, keep, min_gap_mins, s
 
 # Read back the one card you just wrote (rather than the whole basket)
 curl -s -H "X-API-Key: $KEY" $API/nodes/$NID/cards/$CID
+
+# Resolve a card id you were handed — a note, an earlier response, a colleague —
+# without knowing which basket it is in. The owning node comes back with it, so
+# the next call can be an edit.
+curl -s -H "X-API-Key: $KEY" $API/cards/1391
+# → {"node":63,"node_title":"Trellis Open Items",
+#    "node_path":"Trellis › Trellis Open Items","card":{"id":1391,…}}
+NID=$(curl -s -H "X-API-Key: $KEY" $API/cards/1391 | python3 -c 'import json,sys;print(json.load(sys.stdin)["node"])')
 
 # Edit a card body
 curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"body":"updated text"}' $API/nodes/$NID/cards/1

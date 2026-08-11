@@ -281,7 +281,7 @@ from the main cluster, and click or drag on it to jump there without zooming out
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo canvas edits (moves, autosort, …) |
 | Ctrl+S | Save |
 | Ctrl+F | Toggle search |
-| Ctrl+O | Go to node (fuzzy quick switcher) |
+| Ctrl+O | Go to node **or card** — fuzzy by title/path, or exact by id (`1391`, `#1391`) |
 | Ctrl+N | New document |
 | Ctrl+`+` / `-` / `0` | Zoom in / out / reset |
 | Ctrl+scroll | Zoom (toggle in Settings; on by default) |

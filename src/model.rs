@@ -1495,6 +1495,18 @@ impl Document {
         self.nodes.get(&node)?.cards.iter().find(|c| c.id == card)
     }
 
+    /// Which basket holds this card? Card ids are unique across the document, so
+    /// an id is a complete address on its own — but every other lookup here takes
+    /// `(node, card)`, so an id read out of an API response or quoted in a note
+    /// could not be turned back into a card by anyone who didn't already know the
+    /// basket. This is the missing direction.
+    pub fn locate_card(&self, card: CardId) -> Option<NodeId> {
+        self.nodes
+            .iter()
+            .find(|(_, n)| n.cards.iter().any(|c| c.id == card))
+            .map(|(&id, _)| id)
+    }
+
     /// Store OCR-extracted text on an image card. Returns false if not an image card.
     pub fn set_card_ocr(&mut self, node: NodeId, card: CardId, text: String) -> bool {
         match self.card_mut(node, card).map(|c| &mut c.kind) {
@@ -3991,6 +4003,41 @@ mod tests {
     fn hard_wrap_renders_as_line_breaks_in_html() {
         // The whole point: two lines become two visual lines (<br>), not one.
         assert!(md_to_html("line one\nline two").contains("<br"));
+    }
+
+    /// A card id is only a usable address if it names exactly one card in the
+    /// whole document — that is what lets `/api/cards/{id}` and the Ctrl+O
+    /// palette resolve a bare number. `next_card_id` is document-wide, so ids
+    /// never restart per basket; this pins that, because a per-node counter
+    /// would make every lookup here ambiguous instead of merely wrong.
+    #[test]
+    fn a_card_id_locates_exactly_one_basket() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "A".into());
+        let b = doc.add_node(None, "B".into());
+        let c1 = doc.add_card(a, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let c2 = doc.add_card(b, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let c3 = doc.add_card(b, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        assert_ne!(c1, c2, "ids must not restart in a new basket");
+        assert_ne!(c2, c3);
+        assert_eq!(doc.locate_card(c1), Some(a));
+        assert_eq!(doc.locate_card(c2), Some(b));
+        assert_eq!(doc.locate_card(c3), Some(b));
+        assert_eq!(doc.locate_card(9999), None, "an unknown id resolves to nothing");
+    }
+
+    /// Moving a card between baskets has to move where its id resolves, or the
+    /// palette would keep sending you to the basket it used to live in.
+    #[test]
+    fn locate_card_follows_a_card_to_its_new_basket() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "A".into());
+        let b = doc.add_node(None, "B".into());
+        let c = doc.add_card(a, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        assert_eq!(doc.locate_card(c), Some(a));
+        doc.move_card_to_node(a, c, b, None);
+        assert_eq!(doc.locate_card(c), Some(b));
     }
 
     #[test]
