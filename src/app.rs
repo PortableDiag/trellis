@@ -741,6 +741,9 @@ pub struct TrellisApp {
     /// command when the open document actually changes (see `sync_window_title`).
     window_title: String,
     dialog_parent: Option<DialogParent>,
+    /// Colour emoji overlay — see [`crate::emoji`]. Holds the font bytes and one
+    /// texture per character actually seen.
+    emoji: crate::emoji::Emoji,
     /// Full-screen image viewer, opened by double-clicking an image card image.
     lightbox: Option<Lightbox>,
     dirty: bool,
@@ -1152,6 +1155,7 @@ impl TrellisApp {
             // Empty so the first frame always pushes the real title.
             window_title: String::new(),
             dialog_parent: None,
+            emoji: crate::emoji::Emoji::new(),
             lightbox: None,
             dirty: false,
             autosave,
@@ -5739,6 +5743,16 @@ impl TrellisApp {
                     );
                 ui.checkbox(&mut self.snap_mode, "Snap mode (align card edges while dragging)")
                     .on_hover_text("When on, a dragged card's edges snap to nearby cards' edges.");
+                // Colour emoji come from a font on the machine, not from the
+                // app: say which one, because "still grey" otherwise looks like
+                // a bug rather than a missing font.
+                ui.add_space(4.0);
+                ui.weak(self.emoji.status())
+                    .on_hover_text(
+                        "Emoji are drawn from a colour font's bitmaps, painted over the text. \
+                         Windows' Segoe UI Emoji stores its colour as vector layers rather than \
+                         bitmaps, so it can't be used this way and emoji stay monochrome there.",
+                    );
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -7454,6 +7468,11 @@ impl eframe::App for TrellisApp {
                 self.follow_wikilink(ctx, &target);
             }
         }
+
+        // Colour emoji, painted over the glyphs laid out above. Last, and after
+        // the wiki-link check, because it reads back what the frame drew —
+        // anything added to a paint list after this point is not covered.
+        self.emoji.overlay(ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

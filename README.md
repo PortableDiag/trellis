@@ -332,6 +332,15 @@ Every [release](https://github.com/PortableDiag/trellis/releases) attaches a
 ready-to-run build. There is nothing to install alongside it — the fonts and
 icon are compiled in.
 
+**Colour emoji** are the one thing read from the system rather than compiled in,
+because a colour emoji font is ~10 MB and every platform already ships one.
+Trellis finds Noto Color Emoji (Linux) or Apple Color Emoji (macOS) and paints
+its bitmaps over the text; **Settings → Canvas** names the file it found, or
+says it found none. Windows' Segoe UI Emoji stores colour as vector layers
+rather than bitmaps, so emoji stay monochrome there — as they do in PDF/PNG
+exports on every platform. Point `TRELLIS_EMOJI_FONT` at a font file to override
+the search.
+
 | Platform | File |
 |---|---|
 | Linux (x86_64) | `trellis-<version>-linux-x86_64` |

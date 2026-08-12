@@ -3356,7 +3356,7 @@ dependencies = [
 
 [[package]]
 name = "trellis"
-version = "0.90.2"
+version = "0.91.0"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
@@ -3384,6 +3384,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny_http",
+ "ttf-parser 0.25.1",
 ]
 
 [[package]]

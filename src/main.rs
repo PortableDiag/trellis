@@ -11,6 +11,7 @@ mod backup;
 mod canvas;
 mod changelog;
 mod deps;
+mod emoji;
 mod images;
 mod model;
 mod plugins;

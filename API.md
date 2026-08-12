@@ -117,12 +117,16 @@ a readable status column into a *text* card:
 Limits worth knowing before you reach for it:
 - **Text colour only — no cell background.** Markdown has no concept of one. For
   a coloured *cell*, use a real **table card** and `set_bg` / `set_fg`.
-- **Emoji are monochrome.** Since v0.84.0 every emoji *draws* — Trellis ships the
-  full outline Noto Emoji, so 🟢🟡🟠🟥 are no longer boxes, in exports as well as
-  on screen. They are still **shape only**: the text stack rasterizes glyph
-  outlines, and every colour emoji format is a bitmap or layered format it cannot
-  read. So **don't use emoji as status indicators** — 🔴 and 🟢 render as two
-  identical grey circles. Use a colour span, or a table card's cell colours.
+- **Emoji are in colour on screen since v0.91.0**, so 🔴 and 🟢 are now a red
+  circle and a green one and *are* usable as status indicators. Colour comes
+  from an emoji font on the machine (Noto Color Emoji on Linux, Apple Color
+  Emoji on macOS), painted over the laid-out text — **Settings → Canvas** names
+  the file in use. Where no such font exists, notably **Windows** (Segoe UI
+  Emoji stores colour as vector layers rather than bitmaps), emoji fall back to
+  the monochrome outline shipped since v0.84.0 and two circles again look alike.
+  **Exports (PDF/PNG) are still monochrome.** So for a status colour that is the
+  same everywhere and for anyone opening the document, a colour span or a table
+  card's cell colours remains the portable choice.
 
 ## Endpoints
 
@@ -1143,8 +1147,9 @@ curl -s -X POST -H "$K" -H 'Content-Type: application/json' -d '[
   {"op":"autofit_cols"}]' "$B/nodes/$NODE/cards/$CID/table"
 
 # Coloured status text inside a markdown table (text card — no cell backgrounds;
-# for those use a table card + set_bg). Emoji are monochrome, so don't use 🔴/🟢
-# as indicators — they both render grey.
+# for those use a table card + set_bg). Since v0.91.0 emoji do render in colour
+# on screen, but not in exports and not without a colour emoji font (Windows),
+# so a span is still the choice that looks the same everywhere.
 curl -s -X POST -H "$K" -H 'Content-Type: application/json' -d '{
   "kind":"text","title":"Checks","fit":true,
   "body":"| Check | Status |\n|---|---|\n| TLS | <span style=\"color:#22c55e\">PASS</span> |\n| Auth | <span style=\"color:#ef4444\">**FAIL**</span> |"

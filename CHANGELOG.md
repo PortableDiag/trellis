@@ -6,6 +6,36 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.91.0]
+
+### Added
+- **Emoji are in colour.** 🔴 and 🟢 are a red circle and a green one, not two
+  identical grey ones — on cards, titles, the tree, panels and menus alike.
+
+  The recorded reason this wasn't worth doing was sound about the *font stack*:
+  egui rasterizes glyph **outlines**, and every colour-emoji format is something
+  else (Noto Color Emoji is CBDT/CBLC bitmaps, Apple Color Emoji is `sbix`,
+  Segoe UI Emoji is COLR/CPAL vector layers). Adding such a font renders blank
+  glyphs, silently.
+
+  So the colour doesn't come from the text stack. egui has already decided where
+  every glyph goes; at the end of the frame Trellis reads those positions back
+  and paints the font's own bitmap over each emoji. **Layout is untouched** — the
+  monochrome outline font still supplies the advance width, so wrapping,
+  selection and hit-testing are exactly what they were — and where no colour font
+  exists (**Windows**, whose Segoe UI Emoji has no per-glyph bitmap) nothing is
+  painted and the monochrome glyph already there stands. **Settings → Canvas**
+  names the font in use, because "still grey" otherwise reads as a bug rather
+  than a missing font.
+
+  Scanning the frame is what makes it consistent: hooking each place text is
+  drawn would have covered titles but not markdown bodies, which is exactly the
+  partial, inconsistent set that made this look not worth building.
+
+  **Not covered:** PDF/PNG **exports**, which render through their own font stack
+  and stay monochrome; and a ZWJ sequence (👨‍👩‍👧) paints as its component glyphs,
+  since that is how it is laid out.
+
 ## [0.90.2]
 
 ### Fixed
