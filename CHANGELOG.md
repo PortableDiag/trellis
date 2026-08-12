@@ -6,6 +6,52 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.88.0]
+
+### Added
+- **Daily notes — opt-in, and off until you say so.** Choose a *journal root* in
+  **Tools → Settings → Daily notes**, and **Ctrl+T** (View → Today's note) opens
+  today's node, creating `<root> → <month> → <day>` only as far as it needs to.
+
+  **Nothing dated is ever created any other way.** Ordinary node creation knows
+  nothing about journals, so a document whose owner never asked for one cannot
+  grow one — which was the constraint that kept this feature unbuilt for so long.
+
+  The setting lives in the instance's config, so it is **per document**: a work
+  document can keep a journal while a personal one never does.
+
+  Two behaviours that matter on a journal kept by hand for months:
+  - **A day already in the tree is adopted, never duplicated.** Matching is by the
+    date the title *parses to*, not by string, so `8/11/2026` beside `6/09/2026`,
+    a misspelled weekday, or dashes instead of slashes all resolve to the same
+    day. A string comparison would sail past every one of those and create a
+    second node for a day that already exists — the exact failure this replaces.
+  - **A new year becomes a sibling of the old root, not a child**, and the stored
+    root follows it, so January does not end up nested inside last year.
+
+  A newly created day drops into **date order** rather than simply on top, so
+  back-filling an older day lands it in place instead of above the days that came
+  after it. Days already out of order are left alone.
+
+- **`POST /api/daily {date?}`** — the same thing for agents, with full parity on
+  the setting behind it: **`GET /api/daily`** reports whether it is on and which
+  node is the root, and **`POST`/`DELETE /api/daily/root`** are the two buttons in
+  Settings. An agent that cannot see or change the configuration cannot
+  collaborate on it.
+
+  **Pass `date` rather than building a title.** Writing `"Wednesday 8/12/2026"` by
+  hand is how a journal ends up with two nodes for one day, and it is what agents
+  were already doing.
+
+### Changed
+- **API.md now says how to track work**, before the endpoints that do it. One task
+  is one card that never moves and is never copied; a copied task card is *N*
+  separate tasks as far as the Agenda and Kanban are concerned, each with its own
+  `status::` and `due::`, and nothing warns you. The Agenda is the daily list —
+  that is what replaces the card people (and agents) were copying forward. Added
+  because both a human and an agent independently arrived at the copying pattern.
+
+
 ## [0.87.0]
 
 ### Added

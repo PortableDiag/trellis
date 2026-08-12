@@ -1495,6 +1495,90 @@ impl Document {
         self.nodes.get(&node)?.cards.iter().find(|c| c.id == card)
     }
 
+    /// Find (or create) the journal node for one calendar day, and say what it
+    /// took to get there.
+    ///
+    /// The shape is `<year> → <month> → <day>`, which is the structure a hand-kept
+    /// journal already grows into. Everything here is **find-first**: an existing
+    /// node is adopted rather than duplicated, because the whole failure this
+    /// replaces is ending up with two nodes for one day.
+    ///
+    /// Matching a day is by **parsed date, not by title text**. A journal kept by
+    /// hand drifts — `8/11/2026` beside `6/09/2026`, a misspelled weekday, a
+    /// different separator — and a string comparison would sail past all of those
+    /// and make a second node for a day that already exists.
+    ///
+    /// `root` is the year. When the year turns over, the sibling for the new year
+    /// is found or created and returned as `root`, so the caller can follow it.
+    /// Nothing here is automatic: it runs only when the user (or an agent) asks
+    /// for today, never as a side effect of creating an ordinary node.
+    pub fn ensure_daily(&mut self, root: NodeId, date: DailyDate) -> Option<DailyNode> {
+        let root_node = self.nodes.get(&root)?;
+        let parent_of_root = root_node.parent;
+
+        // 1. The year. If the designated root is itself titled with a year and the
+        //    calendar has moved on, use that year's sibling instead of nesting
+        //    2027 inside 2026.
+        let year_node = match root_node.title.trim().parse::<i32>() {
+            Ok(y) if y != date.year => {
+                let want = date.year.to_string();
+                let siblings: Vec<NodeId> = match parent_of_root {
+                    Some(p) => self.nodes.get(&p).map(|n| n.children.clone()).unwrap_or_default(),
+                    None => self.roots.clone(),
+                };
+                match siblings.iter().find(|id| {
+                    self.nodes.get(id).is_some_and(|n| n.title.trim() == want)
+                }) {
+                    Some(&id) => id,
+                    None => self.add_node(parent_of_root, want),
+                }
+            }
+            _ => root,
+        };
+
+        // 2. The month, by name, case-insensitively.
+        let month = self.find_or_create_child(year_node, &date.month_name);
+        // 3. The day, by the date its title parses to.
+        let existing = self.nodes.get(&month).map(|n| n.children.clone()).unwrap_or_default();
+        let found = existing.iter().find(|id| {
+            self.nodes
+                .get(id)
+                .and_then(|n| parse_daily_title(&n.title))
+                .is_some_and(|(y, m, d)| (y, m, d) == (date.year, date.month, date.day))
+        });
+        if let Some(&id) = found {
+            return Some(DailyNode { node: id, created: false, root: year_node });
+        }
+        let id = self.add_node(Some(month), date.title());
+        // Newest first, by date — not simply "at the top". Today lands first in
+        // the normal flow either way, but back-filling an older day has to drop
+        // it into place rather than above days that came after it. Siblings whose
+        // titles don't parse are stepped over, keeping the order they had.
+        let pos = existing
+            .iter()
+            .position(|sib| {
+                self.nodes
+                    .get(sib)
+                    .and_then(|n| parse_daily_title(&n.title))
+                    .is_some_and(|(y, m, d)| (y, m, d) < (date.year, date.month, date.day))
+            })
+            .unwrap_or(existing.len());
+        self.move_node(id, Some(month), pos);
+        Some(DailyNode { node: id, created: true, root: year_node })
+    }
+
+    /// A child with this title (case-insensitive), or a new one appended.
+    fn find_or_create_child(&mut self, parent: NodeId, title: &str) -> NodeId {
+        let kids = self.nodes.get(&parent).map(|n| n.children.clone()).unwrap_or_default();
+        let want = title.to_lowercase();
+        for id in kids {
+            if self.nodes.get(&id).is_some_and(|n| n.title.trim().to_lowercase() == want) {
+                return id;
+            }
+        }
+        self.add_node(Some(parent), title.to_string())
+    }
+
     /// Which basket holds this card? Card ids are unique across the document, so
     /// an id is a complete address on its own — but every other lookup here takes
     /// `(node, card)`, so an id read out of an API response or quoted in a note
@@ -3313,6 +3397,89 @@ pub struct KanbanCard {
     pub tags: Vec<String>,
 }
 
+/// The calendar day a journal node stands for, plus the names to write.
+///
+/// Passed in rather than read from the clock so the logic is testable and so
+/// "today" is decided in exactly one place (`chrono::Local`, same as `due::`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DailyDate {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    /// `"Tuesday"` — written into the title, never parsed back out.
+    pub weekday: String,
+    /// `"August"` — the month node's title.
+    pub month_name: String,
+}
+
+impl DailyDate {
+    /// `Tuesday 8/11/2026` — unpadded, matching the dominant hand-kept form.
+    /// Only ever used for a node being **created**; finding one goes by
+    /// [`parse_daily_title`], which accepts every spelling already in the tree.
+    pub fn title(&self) -> String {
+        format!("{} {}/{}/{}", self.weekday, self.month, self.day, self.year)
+    }
+}
+
+/// Where [`Document::ensure_daily`] landed.
+#[derive(Clone, Copy, Debug)]
+pub struct DailyNode {
+    pub node: NodeId,
+    /// False when an existing node was adopted — the common case, and the point.
+    pub created: bool,
+    /// The year node used, which differs from the one passed in after a year
+    /// rollover. The caller should store this back as the journal root.
+    pub root: NodeId,
+}
+
+/// Pull a date out of a journal node's title, however it was written.
+///
+/// Accepts `M/D/YYYY` with or without zero padding, and `-` or `.` in place of
+/// `/`, anywhere in the string — so `Tuesday 8/11/2026`, `6/09/2026` and even
+/// `Wednedsay 7/15/2026` all resolve. Deliberately tolerant: this is what stops
+/// a second node being created for a day that is already there under a slightly
+/// different spelling.
+pub fn parse_daily_title(title: &str) -> Option<(i32, u32, u32)> {
+    let bytes: Vec<char> = title.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut nums: Vec<u32> = Vec::new();
+        let mut cur = String::new();
+        let mut j = i;
+        while j < bytes.len() {
+            let c = bytes[j];
+            if c.is_ascii_digit() {
+                cur.push(c);
+                j += 1;
+            } else if matches!(c, '/' | '-' | '.') && !cur.is_empty() && nums.len() < 2 {
+                nums.push(cur.parse().ok()?);
+                cur.clear();
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        if !cur.is_empty() {
+            if let Ok(n) = cur.parse::<u32>() {
+                nums.push(n);
+            }
+        }
+        if nums.len() == 3 {
+            let (m, d, y) = (nums[0], nums[1], nums[2]);
+            if (1..=12).contains(&m) && (1..=31).contains(&d) && y >= 1000 {
+                return Some((y as i32, m, d));
+            }
+        }
+        i = if j > start { j } else { start + 1 };
+    }
+    None
+}
+
 /// Parse a `YYYY-MM-DD` date to days since 1970-01-01 (UTC), or `None`. Uses
 /// Howard Hinnant's days-from-civil algorithm (inverse of the stamp formatter).
 pub fn parse_ymd(s: &str) -> Option<i64> {
@@ -4003,6 +4170,142 @@ mod tests {
     fn hard_wrap_renders_as_line_breaks_in_html() {
         // The whole point: two lines become two visual lines (<br>), not one.
         assert!(md_to_html("line one\nline two").contains("<br"));
+    }
+
+    /// The titles in a hand-kept journal are not uniform. These are all real
+    /// forms taken from a live work document, and every one of them has to
+    /// resolve — a title this misses becomes a duplicate node for a day that
+    /// already exists, which is the exact failure the feature removes.
+    #[test]
+    fn a_day_is_recognised_however_its_title_was_written() {
+        assert_eq!(parse_daily_title("Tuesday 8/11/2026"), Some((2026, 8, 11)));
+        assert_eq!(parse_daily_title("Tuesday 6/09/2026"), Some((2026, 6, 9)));  // zero-padded
+        assert_eq!(parse_daily_title("Wednedsay 7/15/2026"), Some((2026, 7, 15))); // misspelled
+        assert_eq!(parse_daily_title("8/1/2026"), Some((2026, 8, 1)));           // no weekday
+        assert_eq!(parse_daily_title("Friday 08-07-2026"), Some((2026, 8, 7)));  // dashes
+        // Not dates.
+        assert_eq!(parse_daily_title("August"), None);
+        assert_eq!(parse_daily_title("2026"), None);
+        assert_eq!(parse_daily_title("Sprint 3/4 done"), None); // 3/4 is not a date
+        assert_eq!(parse_daily_title("13/40/2026"), None);      // out of range
+    }
+
+    /// Find-first is the whole contract: asking twice must land on one node.
+    #[test]
+    fn ensure_daily_adopts_an_existing_day_instead_of_duplicating_it() {
+        let mut doc = Document::empty();
+        let year = doc.add_node(None, "2026".into());
+        let month = doc.add_node(Some(year), "August".into());
+        // Written by hand, in a form the feature would not itself produce.
+        let existing = doc.add_node(Some(month), "Tuesday 08/11/2026".into());
+
+        let date = DailyDate {
+            year: 2026, month: 8, day: 11,
+            weekday: "Tuesday".into(), month_name: "August".into(),
+        };
+        let r = doc.ensure_daily(year, date.clone()).unwrap();
+        assert_eq!(r.node, existing, "made a second node for a day already there");
+        assert!(!r.created);
+        assert_eq!(doc.nodes[&month].children.len(), 1);
+
+        // And again — still one.
+        let r2 = doc.ensure_daily(year, date).unwrap();
+        assert_eq!(r2.node, existing);
+        assert_eq!(doc.nodes[&month].children.len(), 1);
+    }
+
+    /// A back-filled day drops into date order rather than landing on top of
+    /// days that came after it — the reason the position is computed and not
+    /// simply 0.
+    #[test]
+    fn a_backfilled_day_lands_in_date_order() {
+        let mut doc = Document::empty();
+        let year = doc.add_node(None, "2026".into());
+        let aug = doc.add_node(Some(year), "August".into());
+        let d13 = doc.add_node(Some(aug), "Thursday 8/13/2026".into());
+        let d11 = doc.add_node(Some(aug), "Tuesday 8/11/2026".into());
+
+        // 8/12 belongs between them, not above 8/13.
+        let mid = doc.ensure_daily(year, DailyDate {
+            year: 2026, month: 8, day: 12,
+            weekday: "Wednesday".into(), month_name: "August".into(),
+        }).unwrap();
+        assert_eq!(doc.nodes[&aug].children, vec![d13, mid.node, d11]);
+
+        // An older day than any present goes last.
+        let old = doc.ensure_daily(year, DailyDate {
+            year: 2026, month: 8, day: 1,
+            weekday: "Saturday".into(), month_name: "August".into(),
+        }).unwrap();
+        assert_eq!(doc.nodes[&aug].children, vec![d13, mid.node, d11, old.node]);
+    }
+
+    /// A missing month is created, and today lands at the top: a journal is read
+    /// downward from the newest day.
+    #[test]
+    fn ensure_daily_creates_the_month_and_puts_today_first() {
+        let mut doc = Document::empty();
+        let year = doc.add_node(None, "2026".into());
+        let august = doc.add_node(Some(year), "August".into());
+        let older = doc.add_node(Some(august), "Monday 8/3/2026".into());
+
+        let r = doc.ensure_daily(year, DailyDate {
+            year: 2026, month: 8, day: 11,
+            weekday: "Tuesday".into(), month_name: "August".into(),
+        }).unwrap();
+        assert!(r.created);
+        assert_eq!(doc.nodes[&august].children, vec![r.node, older], "today must be first");
+        assert_eq!(doc.nodes[&r.node].title, "Tuesday 8/11/2026");
+
+        // A month that does not exist yet is created under the same year.
+        let sep = doc.ensure_daily(year, DailyDate {
+            year: 2026, month: 9, day: 1,
+            weekday: "Tuesday".into(), month_name: "September".into(),
+        }).unwrap();
+        let sep_month = doc.nodes[&sep.node].parent.unwrap();
+        assert_eq!(doc.nodes[&sep_month].title, "September");
+        assert_eq!(doc.nodes[&sep_month].parent, Some(year));
+    }
+
+    /// January must not end up inside last year. The new year is a *sibling* of
+    /// the old root, and the caller is told so it can follow.
+    #[test]
+    fn a_new_year_becomes_a_sibling_not_a_child() {
+        let mut doc = Document::empty();
+        let y2026 = doc.add_node(None, "2026".into());
+
+        let r = doc.ensure_daily(y2026, DailyDate {
+            year: 2027, month: 1, day: 2,
+            weekday: "Saturday".into(), month_name: "January".into(),
+        }).unwrap();
+
+        assert_ne!(r.root, y2026, "root must move to the new year");
+        assert_eq!(doc.nodes[&r.root].title, "2027");
+        assert_eq!(doc.nodes[&r.root].parent, doc.nodes[&y2026].parent, "same level as 2026");
+        assert!(doc.nodes[&y2026].children.is_empty(), "2027 must not nest inside 2026");
+
+        // Asking again reuses the 2027 it just made.
+        let again = doc.ensure_daily(r.root, DailyDate {
+            year: 2027, month: 1, day: 2,
+            weekday: "Saturday".into(), month_name: "January".into(),
+        }).unwrap();
+        assert_eq!(again.node, r.node);
+        assert!(!again.created);
+    }
+
+    /// Month matching ignores case, so a journal titled "AUGUST" or "august"
+    /// does not sprout a second August beside it.
+    #[test]
+    fn month_matching_ignores_case() {
+        let mut doc = Document::empty();
+        let year = doc.add_node(None, "2026".into());
+        let shouty = doc.add_node(Some(year), "AUGUST".into());
+        let r = doc.ensure_daily(year, DailyDate {
+            year: 2026, month: 8, day: 11,
+            weekday: "Tuesday".into(), month_name: "August".into(),
+        }).unwrap();
+        assert_eq!(doc.nodes[&r.node].parent, Some(shouty));
+        assert_eq!(doc.nodes[&year].children.len(), 1);
     }
 
     /// A card id is only a usable address if it names exactly one card in the

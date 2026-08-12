@@ -42,6 +42,17 @@ pub enum ApiRequest {
     /// path. Without it, re-reading a card you just wrote means pulling the
     /// whole basket back.
     GetCard { node: NodeId, card: u64 },
+    /// A journal node for a calendar day, created on demand under the configured
+    /// root. `None` = today. App-intercepted: the root is a per-instance
+    /// **setting**, so only the app loop knows whether daily notes are on at all.
+    DailyNote { date: Option<String> },
+    /// Read the daily-notes setting: is it on, and which node is the journal
+    /// root. The UI shows this in Settings, so the API has to answer it too —
+    /// an agent that cannot see the configuration cannot collaborate on it.
+    DailyConfig,
+    /// Set the journal root (`Some`) or switch daily notes off (`None`) — the
+    /// two buttons in Settings, reachable by an agent.
+    SetDailyRoot(Option<NodeId>),
     /// One card from its id alone, without already knowing its basket. Ids are
     /// unique per document, so an id *is* an address — but every other card route
     /// is `/nodes/{node}/cards/{card}`, so an id quoted in a note or read out of
@@ -453,6 +464,23 @@ pub struct MoveNodeInput {
     index: Option<usize>,
     #[serde(default)]
     to: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DailyRootInput {
+    /// The node to keep the journal under — the year, in a year-per-root tree.
+    pub node: NodeId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DailyInput {
+    /// `YYYY-MM-DD`. Omitted (or an empty body) means today — the common case.
+    /// Accepting a date is what lets an agent stop hand-building dated node
+    /// titles, which is how a journal drifts into two nodes for one day.
+    #[serde(default)]
+    pub date: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -955,6 +983,17 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::GetCard { node: pid(nid)?, card: pid(cid)? })
         }
         (Method::Get, ["api", "cards", cid]) => Ok(ApiRequest::LocateCard(pid(cid)?)),
+        // POST, not GET: it creates the node when it isn't there yet.
+        (Method::Get, ["api", "daily"]) => Ok(ApiRequest::DailyConfig),
+        (Method::Post, ["api", "daily", "root"]) => {
+            let i: DailyRootInput = parse(body)?;
+            Ok(ApiRequest::SetDailyRoot(Some(i.node)))
+        }
+        (Method::Delete, ["api", "daily", "root"]) => Ok(ApiRequest::SetDailyRoot(None)),
+        (Method::Post, ["api", "daily"]) => {
+            let i: DailyInput = if body.trim().is_empty() { DailyInput { date: None } } else { parse(body)? };
+            Ok(ApiRequest::DailyNote { date: i.date })
+        }
         (Method::Post, ["api", "nodes", id, "cards"]) => {
             let input: AddCardInput = parse(body)?;
             Ok(ApiRequest::AddCard { node: pid(id)?, input })
@@ -1160,6 +1199,31 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
 /// clock by 86,400 made the agenda jump a day early every evening west of
 /// Greenwich — at 17:00 PDT it is already tomorrow in UTC, so a task due
 /// tomorrow was bucketed as due today.
+/// Today, as the journal writes it. Local calendar day, from the same clock
+/// `today_days()` reads — an agenda that says "today" and a journal node named
+/// for a different day would be its own bug.
+pub fn today_daily_date() -> crate::model::DailyDate {
+    from_naive(chrono::Local::now().date_naive())
+}
+
+/// The same, for an explicit `YYYY-MM-DD`. `None` if it isn't a real date —
+/// 2026-02-30 is rejected rather than rounded, because a journal node named for
+/// a day that does not exist is worse than an error.
+pub fn daily_date_from(s: &str) -> Option<crate::model::DailyDate> {
+    chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok().map(from_naive)
+}
+
+fn from_naive(d: chrono::NaiveDate) -> crate::model::DailyDate {
+    use chrono::Datelike;
+    crate::model::DailyDate {
+        year: d.year(),
+        month: d.month(),
+        day: d.day(),
+        weekday: d.format("%A").to_string(),
+        month_name: d.format("%B").to_string(),
+    }
+}
+
 pub fn today_days() -> i64 {
     // Format the local date and run it through the very same parser that reads
     // `due::`, so "today" and a due date can never disagree about what a
@@ -2170,7 +2234,10 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::TemplateInsert { .. }
         | ApiRequest::TemplateUpdate { .. }
         | ApiRequest::TemplateRebuild
-        | ApiRequest::TemplateDelete(_) => {
+        | ApiRequest::TemplateDelete(_)
+        | ApiRequest::DailyNote { .. }
+        | ApiRequest::DailyConfig
+        | ApiRequest::SetDailyRoot(_) => {
             (false, ApiResponse::err(500, "request not handled by the app loop"))
         }
     }
@@ -2940,6 +3007,29 @@ mod tests {
             route(&Method::Get, "/api/cards/9", "", "").unwrap(),
             ApiRequest::LocateCard(9)
         ));
+        // Daily notes: the action, and the setting behind it, both reachable.
+        assert!(matches!(
+            route(&Method::Post, "/api/daily", "", "").unwrap(),
+            ApiRequest::DailyNote { date: None }
+        ));
+        assert!(matches!(
+            route(&Method::Post, "/api/daily", "", r#"{"date":"2026-08-12"}"#).unwrap(),
+            ApiRequest::DailyNote { date: Some(d) } if d == "2026-08-12"
+        ));
+        assert!(matches!(
+            route(&Method::Get, "/api/daily", "", "").unwrap(),
+            ApiRequest::DailyConfig
+        ));
+        assert!(matches!(
+            route(&Method::Post, "/api/daily/root", "", r#"{"node":5}"#).unwrap(),
+            ApiRequest::SetDailyRoot(Some(5))
+        ));
+        assert!(matches!(
+            route(&Method::Delete, "/api/daily/root", "", "").unwrap(),
+            ApiRequest::SetDailyRoot(None)
+        ));
+        // A typo'd field is a 400, like everywhere else since v0.86.0.
+        assert!(route(&Method::Post, "/api/daily", "", r#"{"day":"2026-08-12"}"#).is_err());
         assert!(route(&Method::Get, "/api/cards/nine", "", "").is_err());
         assert!(matches!(
             route(&Method::Get, "/api/search", "q=hello%20world", "").unwrap(),
@@ -3242,6 +3332,25 @@ mod tests {
     /// The direction that was missing: an id, on its own, back to a card. An
     /// agent that reads "card 1391" in a note had no way to resolve it without
     /// walking every basket, and neither did the operator.
+    /// A journal node named for a day that does not exist is worse than an
+    /// error, so an impossible date is refused rather than rounded.
+    #[test]
+    fn a_daily_date_must_be_a_real_calendar_day() {
+        let d = daily_date_from("2026-08-11").unwrap();
+        assert_eq!((d.year, d.month, d.day), (2026, 8, 11));
+        assert_eq!(d.weekday, "Tuesday");
+        assert_eq!(d.month_name, "August");
+        assert_eq!(d.title(), "Tuesday 8/11/2026");
+
+        assert!(daily_date_from("2026-02-30").is_none());
+        assert!(daily_date_from("2026-13-01").is_none());
+        assert!(daily_date_from("11/08/2026").is_none());
+        assert!(daily_date_from("").is_none());
+        // A leap day that exists, and one that does not.
+        assert!(daily_date_from("2028-02-29").is_some());
+        assert!(daily_date_from("2026-02-29").is_none());
+    }
+
     #[test]
     fn locate_card_finds_a_card_from_its_id_alone() {
         let mut doc = Document::empty();

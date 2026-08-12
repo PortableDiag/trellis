@@ -72,6 +72,9 @@ const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
 const SNAP_MODE_KEY: &str = "snap_mode";
 const MINIMAP_KEY: &str = "minimap";
+/// Journal root for daily notes. Absent = the feature is off, which is the
+/// default and the whole point: a dated node must never appear unasked.
+const DAILY_ROOT_KEY: &str = "daily_root";
 const THEME_KEY: &str = "theme";
 const AUTOSAVE_KEY: &str = "autosave";
 const AGENDA_PROJECT_KEY: &str = "agenda_project";
@@ -832,6 +835,10 @@ pub struct TrellisApp {
     /// When on, a small overview map in the canvas's bottom-right shows the whole
     /// basket and a reticle of the current view (Settings; on by default).
     minimap_enabled: bool,
+    /// Journal root for daily notes, or `None` when the feature is off.
+    /// Per instance (it lives in this instance's config), so a work document can
+    /// keep a journal while a personal one never grows one.
+    daily_root: Option<NodeId>,
     /// A copied card, ready to paste into any basket.
     card_clipboard: Option<crate::model::Card>,
     /// Runtime multi-selection of cards in the current basket, used to build a
@@ -1197,6 +1204,10 @@ impl TrellisApp {
             theme,
             zoom_enabled,
             minimap_enabled,
+            daily_root: cc
+                .storage
+                .and_then(|st| st.get_string(DAILY_ROOT_KEY))
+                .and_then(|v| v.trim().parse::<NodeId>().ok()),
             reorder_mode: false,
             dock_mode,
             snap_mode,
@@ -1998,6 +2009,10 @@ impl TrellisApp {
                 let _ = cmd.resp.send(resp);
                 continue;
             }
+            if let Some(resp) = self.handle_api_daily(&cmd.req) {
+                let _ = cmd.resp.send(resp);
+                continue;
+            }
             if let Some(resp) = self.handle_api_instance(&cmd.req) {
                 let _ = cmd.resp.send(resp);
                 continue;
@@ -2286,6 +2301,95 @@ impl TrellisApp {
     /// agent uses this to confirm it is driving the one it means to before it
     /// writes anything. Needs the doc path + server settings, so it's answered
     /// here rather than in `api::process`.
+    /// Open today's journal node, creating it (and any missing month) on the way.
+    ///
+    /// Returns `None` when daily notes are switched off, which is the default.
+    /// **This is the only thing that ever creates a dated node** — nothing on the
+    /// ordinary node-creation path knows about journals, so a document whose
+    /// owner never asked for one can never grow one.
+    fn go_to_today(&mut self) -> Option<crate::model::DailyNode> {
+        self.go_to_day(api::today_daily_date())
+    }
+
+    fn go_to_day(&mut self, date: crate::model::DailyDate) -> Option<crate::model::DailyNode> {
+        let root = self.daily_root?;
+        if !self.doc.nodes.contains_key(&root) {
+            // The journal root was deleted. Switch the feature off rather than
+            // silently rebuilding a tree somewhere else.
+            self.daily_root = None;
+            self.status = "Daily notes: the journal root is gone — set it again in Settings".into();
+            return None;
+        }
+        let res = self.doc.ensure_daily(root, date)?;
+        if res.root != root {
+            // A new year. Follow it, so next January doesn't keep reaching for
+            // the old one.
+            self.daily_root = Some(res.root);
+        }
+        if res.created {
+            self.mark_dirty();
+        }
+        self.jump_to_node(res.node);
+        Some(res)
+    }
+
+    fn handle_api_daily(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
+        match req {
+            // Read the setting — the same two facts Settings shows.
+            api::ApiRequest::DailyConfig => Some(api::ApiResponse::ok(serde_json::json!({
+                "enabled": self.daily_root.is_some(),
+                "root": self.daily_root,
+                "root_title": self.daily_root.and_then(|id| self.doc.nodes.get(&id).map(|n| n.title.clone())),
+                "root_path": self.daily_root.map(|id| self.doc.node_path(id)),
+            }))),
+            // Set or clear it — the two buttons in Settings.
+            api::ApiRequest::SetDailyRoot(root) => Some(match root {
+                Some(id) if !self.doc.nodes.contains_key(id) => {
+                    api::ApiResponse::err(404, "node not found")
+                }
+                Some(id) => {
+                    self.daily_root = Some(*id);
+                    api::ApiResponse::ok(serde_json::json!({
+                        "enabled": true,
+                        "root": id,
+                        "root_path": self.doc.node_path(*id),
+                    }))
+                }
+                None => {
+                    self.daily_root = None;
+                    api::ApiResponse::ok(serde_json::json!({ "enabled": false, "root": null }))
+                }
+            }),
+            api::ApiRequest::DailyNote { date } => {
+                let d = match date {
+                    Some(s) => match api::daily_date_from(s) {
+                        Some(d) => d,
+                        None => {
+                            return Some(api::ApiResponse::err(
+                                400,
+                                "date must be YYYY-MM-DD and a real calendar day",
+                            ))
+                        }
+                    },
+                    None => api::today_daily_date(),
+                };
+                Some(match self.go_to_day(d) {
+                Some(res) => api::ApiResponse::ok(serde_json::json!({
+                    "node": res.node,
+                    "created": res.created,
+                    "title": self.doc.nodes.get(&res.node).map(|n| n.title.clone()),
+                    "path": self.doc.node_path(res.node),
+                })),
+                None => api::ApiResponse::err(
+                    404,
+                    "daily notes are off for this instance — Tools → Settings → Daily notes",
+                ),
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn handle_api_instance(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
         match req {
             api::ApiRequest::Instance => Some(api::ApiResponse::ok(serde_json::json!({
@@ -4481,6 +4585,19 @@ impl TrellisApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    // Only shown when a journal root has been chosen. An action
+                    // that silently does nothing is worse than an absent one.
+                    if self.daily_root.is_some() {
+                        if ui
+                            .button("Today's note")
+                            .on_hover_text("Ctrl+T — open today's journal node, creating it if needed")
+                            .clicked()
+                        {
+                            self.go_to_today();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                    }
                     if ui
                         .button("Go to node…")
                         .on_hover_text("Ctrl+O — fuzzy-jump to any node by title or path")
@@ -5530,6 +5647,62 @@ impl TrellisApp {
                 );
 
                 ui.add_space(10.0);
+                ui.heading("Daily notes");
+                ui.small(
+                    egui::RichText::new(
+                        "Off unless you choose a journal root. Trellis then keeps \
+                         <root> → <month> → <day> under it, and Ctrl+T opens today's node, \
+                         creating it only if it isn't there. Nothing dated is ever created \
+                         any other way. This setting belongs to this instance, so one \
+                         document can keep a journal while another never grows one.",
+                    )
+                    .weak(),
+                );
+                let current = self
+                    .daily_root
+                    .and_then(|id| self.doc.nodes.get(&id).map(|n| (id, n.title.clone())));
+                ui.horizontal(|ui| {
+                    ui.label("Journal root:");
+                    match &current {
+                        Some((id, title)) => {
+                            ui.label(egui::RichText::new(format!("{title}  (#{id})")).strong());
+                        }
+                        None => {
+                            ui.label(egui::RichText::new("none — daily notes are off").weak());
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let sel = self.selected.and_then(|id| {
+                        self.doc.nodes.get(&id).map(|n| (id, n.title.clone()))
+                    });
+                    let label = match &sel {
+                        Some((_, t)) => format!("Use selected node: {t}"),
+                        None => "Select a node in the tree first".to_string(),
+                    };
+                    if ui
+                        .add_enabled(sel.is_some(), egui::Button::new(label))
+                        .on_hover_text(
+                            "Point it at the node holding your journal — for a year-per-root \
+                             tree, the year itself. When the year turns over, Trellis moves to \
+                             that year's sibling rather than nesting the new year inside the old.",
+                        )
+                        .clicked()
+                    {
+                        if let Some((id, _)) = sel {
+                            self.daily_root = Some(id);
+                        }
+                    }
+                    if ui
+                        .add_enabled(self.daily_root.is_some(), egui::Button::new("Turn off"))
+                        .on_hover_text("Stops Ctrl+T and POST /api/daily. Nothing is deleted.")
+                        .clicked()
+                    {
+                        self.daily_root = None;
+                    }
+                });
+
+                ui.add_space(10.0);
                 ui.heading("Canvas");
                 ui.checkbox(
                     &mut self.zoom_enabled,
@@ -5672,6 +5845,9 @@ impl TrellisApp {
                         "GET    /api/nodes/{id}/cards",
                         "GET    /api/nodes/{id}/cards/{cid}        (one card, without the whole basket)",
                         "GET    /api/cards/{cid}                   (find a card from its id alone → {node, node_path, card})",
+                        "POST   /api/daily  {date?}                (a day's journal node, created on demand; opt-in per instance)",
+                        "GET    /api/daily                         (is it on, and which node is the journal root)",
+                        "POST   /api/daily/root {node}   /   DELETE /api/daily/root   (turn it on / off)",
                         "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, size?, fit?, image_base64?, inline_images?, source?}",
                         "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, size?, items?, source?, …}",
                         "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
@@ -6918,6 +7094,11 @@ impl eframe::App for TrellisApp {
             self.switcher_query.clear();
             self.switcher_index = 0;
         }
+        if cmd && ctx.input(|i| i.key_pressed(egui::Key::T)) {
+            // Silent when daily notes are off — there is no journal to open, and
+            // a hotkey must not be the thing that creates one.
+            self.go_to_today();
+        }
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::N)) {
             self.new_document();
         }
@@ -7183,6 +7364,12 @@ impl eframe::App for TrellisApp {
         storage.set_string(DOCK_MODE_KEY, self.dock_mode.to_string());
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
         storage.set_string(MINIMAP_KEY, self.minimap_enabled.to_string());
+        // Absent rather than "0" when off: a stored root that points at nothing
+        // would be indistinguishable from a deleted journal.
+        storage.set_string(
+            DAILY_ROOT_KEY,
+            self.daily_root.map(|id| id.to_string()).unwrap_or_default(),
+        );
         storage.set_string(THEME_KEY, self.theme.key().to_string());
         storage.set_string(AUTOSAVE_KEY, self.autosave.to_string());
         storage.set_string(

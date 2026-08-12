@@ -274,6 +274,23 @@ from the main cluster, and click or drag on it to jump there without zooming out
   document you've opened stays readable when the desktop is unreachable. Separate
   repo: [trellis-android](https://github.com/PortableDiag/trellis-android).
 
+
+**Daily notes — opt-in, and off until you say so.** Choose a *journal root* in
+**Tools → Settings → Daily notes** and **Ctrl+T** opens today's node, creating
+`<root> → <month> → <day>` only as far as it needs to. A day already in the tree
+is *adopted, not duplicated* — the date is matched by parsing the title, so a
+journal you have kept by hand (`8/11/2026` next to `6/09/2026`, a misspelled
+weekday) keeps working untouched. A new year becomes a sibling of the old root
+rather than nesting inside it. **Nothing dated is ever created any other way**,
+and the setting belongs to that instance, so a work document can keep a journal
+while a personal one never grows one. Agents get the same thing at
+`POST /api/daily`.
+
+**Today's note is a journal, not a task list.** A task is one card carrying
+`status::` and `due::` that stays in its own basket; the **Agenda** and **Kanban**
+gather them across the whole document, which is what replaces a list copied from
+day to day.
+
 ## Keyboard
 
 | Shortcut | Action |
@@ -282,6 +299,7 @@ from the main cluster, and click or drag on it to jump there without zooming out
 | Ctrl+S | Save |
 | Ctrl+F | Toggle search |
 | Ctrl+O | Go to node **or card** — fuzzy by title/path, or exact by id (`1391`, `#1391`) |
+| Ctrl+T | Today's note (only when daily notes are switched on) |
 | Ctrl+N | New document |
 | Ctrl+`+` / `-` / `0` | Zoom in / out / reset |
 | Ctrl+scroll | Zoom (toggle in Settings; on by default) |

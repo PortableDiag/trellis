@@ -475,6 +475,56 @@ GET /api/query?tag=todo&key=status&value=open&text=release
 ```
 All params optional, but at least one of `tag`/`key`/`text` is needed (else empty).
 
+### Tracking work — read this before creating task cards
+
+**One task is one card, and it never moves and is never copied.** This is the
+single most important convention in the API, and the one agents get wrong.
+
+The failure looks reasonable while you are doing it: you keep a "today's tasks"
+card and copy it forward to tomorrow, or you stamp a fresh checklist into each
+new basket. What you have then built is **N cards that Trellis reads as N
+separate tasks**, each with its own `status::` and `due::`. The Agenda and Kanban
+show the same work several times, no card is authoritative, and "what is actually
+outstanding" stops having an answer. Nothing warns you.
+
+Do this instead:
+
+```sh
+# 1. Create the task ONCE, in the basket that owns the work.
+#    The properties are ordinary text in the body. The `::` needs a trailing
+#    space, or it is not parsed as a property.
+curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"kind":"text","title":"Migrate the gateway to the new host",
+       "body":"status:: todo\ndue:: 2026-08-15\n#infra\n\nContext, links, whatever."}' \
+  $API/nodes/$NID/cards
+
+# 2. Change its state in place. Never create a second card for the same work.
+curl -s -X POST -H "X-API-Key: $KEY" -d '{"key":"status","value":"doing"}' \
+  $API/nodes/$NID/cards/$CID/property
+curl -s -X POST -H "X-API-Key: $KEY" -d '{"key":"due","value":"2026-08-18"}' \
+  $API/nodes/$NID/cards/$CID/property     # slipped a day? edit the date, don't copy
+
+# 3. Read the whole picture back from the views, not from a list you maintain.
+curl -s -H "X-API-Key: $KEY" $API/tasks             # bucketed by due date
+curl -s -H "X-API-Key: $KEY" $API/kanban            # grouped by status
+curl -s -H "X-API-Key: $KEY" "$API/tasks?project=$PROJECT"   # one project only
+```
+
+**The views are the daily list.** `GET /api/tasks` already answers "what is due
+today, what is overdue, what is coming" across every basket in the document —
+that is what replaces the card you were tempted to copy. If you want a written
+record of *what happened* on a given day, that is a journal entry (see
+[Daily notes](#daily-notes)), which is a different thing from a task and should
+not carry `due::`.
+
+**Sub-steps belong inside the task card**, as a checklist, not as separate cards —
+unless a sub-step has a real due date of its own, in which case make it a card and
+link the two with `[[wiki-links]]` so each shows up in the other's backlinks.
+
+**Before creating a task card, check whether it already exists.**
+`GET /api/query?q=...` or `GET /api/search?q=...` costs one call and is the
+difference between updating the task and duplicating it.
+
 ### Tasks (agenda)
 Every card carrying a `due:: <date>` property, as tasks. A task is **done** if it
 has `status:: done|complete|closed` or (for a checklist) all items are checked.
@@ -518,6 +568,54 @@ POST /api/ocr → 200 {"started":<bool>,"cards":<n queued>}
 ```
 (The **Snip to card** capture — grab a screen region into an image card — is
 UI-only, since it needs a human to select the region on screen.)
+
+### Daily notes
+
+A journal node for one calendar day, created on demand. **Opt-in and per
+instance**: it does nothing until a *journal root* is chosen in
+**Tools → Settings → Daily notes**, so a work document can keep a journal while a
+personal one never grows one. Nothing dated is ever created any other way —
+ordinary node creation knows nothing about journals.
+
+```
+POST /api/daily            {date?}      date = "YYYY-MM-DD"; omitted = today
+  → 200 {"node":976,"created":false,"title":"Tuesday 8/11/2026","path":"2026 › August › Tuesday 8/11/2026"}
+  | 400 (date isn't a real calendar day)
+  | 404 {"error":"daily notes are off for this instance — Tools → Settings → Daily notes"}
+
+GET    /api/daily          → 200 {"enabled":true,"root":5,"root_title":"2026","root_path":"2026"}
+POST   /api/daily/root     {node}       turn it on / move the journal root
+DELETE /api/daily/root                  turn it off (nothing is deleted)
+```
+
+`POST`, not `GET`, because it creates the node when the day's is not there yet.
+`created` says which happened, so an agent can tell "I opened today's note" from
+"I started it".
+
+**Pass `date` rather than building a title yourself.** Writing
+`"Wednesday 8/12/2026"` by hand is how a journal ends up with two nodes for one
+day: the next writer spells it `08/12` or misses the weekday, and nothing
+notices. Hand the endpoint a date and it does the matching.
+
+`GET /api/daily` and the two `root` routes are the API half of **Tools → Settings
+→ Daily notes**, so an agent can see whether the feature is on for this instance,
+and switch it on, exactly as a person can.
+
+The structure is `<root> → <month> → <day>`, with the root being the year. Two
+behaviours worth knowing:
+
+- **A day is matched by the date its title parses to, not by string.** A journal
+  kept by hand drifts — `8/11/2026` beside `6/09/2026`, a misspelled weekday,
+  dashes instead of slashes — and all of those resolve to the same day. This is
+  what stops a second node appearing for a day that already exists. New nodes are
+  written `Tuesday 8/11/2026`.
+- **A new year becomes a sibling of the old root, not a child**, and the stored
+  root follows it, so January does not end up nested inside last year.
+
+Today's note is where you record *what happened*. It is not where tasks live —
+see [Tracking work](#tracking-work--read-this-before-creating-task-cards). A task
+is one card with `status::`/`due::` that stays in its own basket; copying it into
+a daily note creates a second task.
 
 ### Version history
 Browse the automatic save-time snapshots and restore one (replaces the current
