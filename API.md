@@ -582,13 +582,38 @@ DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due
 POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done}
 ```
 
+Reading a card back gives you the ids to use:
+
+```sh
+curl -s -H "X-API-Key: $KEY" $API/nodes/$NID/cards/$CID
+# → {"kind":"checklist","items":[{"id":60,"done":false,"text":"… due:: 2026-08-15"}, …]}
+
+# Slip one line's date; its siblings are untouched.
+curl -s -X POST -H "X-API-Key: $KEY" -d '{"key":"due","value":"2026-08-20"}' \
+  $API/nodes/$NID/cards/$CID/items/60/property
+
+# Tick it.
+curl -s -X POST -H "X-API-Key: $KEY" -d '{"done":true}' \
+  $API/nodes/$NID/cards/$CID/items/60/done
+```
+
 **Why ids matter:** an item used to be identified by its position, so reordering a
 list silently renamed every task in it. Ids are what let a line be linked to,
-rescheduled, and followed over time. A wholesale `PATCH {"items":[…]}` **carries
-existing ids across by position**, so editing text or ticking a box preserves
-identity — but rewriting the array in a different order tells the API these are
-different lines, and it will treat them that way. Use the item routes above to
-change one line.
+rescheduled, and followed over time.
+
+**A wholesale `PATCH {"items":[…]}` reads the array two ways, decided by the
+payload as a whole:**
+
+- **You send ids back** (the natural read-modify-write: GET the card, edit the
+  array, PATCH it) — each id names its line, so **reordering and deleting from
+  the middle keep every survivor's identity**. A line with no id is new.
+- **You send no ids at all** — ids carry across **by position**, so the ordinary
+  edits an older client makes (change text, tick a box, append) still preserve
+  identity.
+
+Never mix the two in one payload expecting both: the rule is chosen once per
+request, because a new line inheriting a position's id while another line claims
+that id explicitly would hand one identity to two lines.
 
 ### `start::` — a task that spans days
 

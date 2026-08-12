@@ -6,6 +6,24 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.90.2]
+
+### Fixed
+- **A checklist card can be read and written back again.** `GET` started
+  returning item `id`s in v0.90.0, but `PATCH` rejected them — so the natural way
+  any client edits a list (GET the card, change the array, PATCH it back) failed
+  with `unknown field \`id\``. Found by hitting it while editing a real card.
+
+  Sending ids back is now not just accepted but **honoured**: each id names its
+  line, so **reordering the array or deleting from the middle keeps every
+  survivor's identity**, which the positional rule could not do. A payload with
+  no ids still carries them across by position, so older clients are unaffected.
+
+  The rule is chosen once per request rather than per item — a new line
+  inheriting a position's id while another line claimed that id explicitly would
+  give one identity to two lines, which a test now pins.
+
+
 ## [0.90.1]
 
 ### Fixed

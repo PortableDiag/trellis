@@ -586,6 +586,19 @@ fn default_kind() -> String {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChecklistItemInput {
+    /// The item's stable id, as `GET` returns it.
+    ///
+    /// **Accepting this is what makes a read-modify-write round-trip work** —
+    /// the natural way any client edits a list is to GET the card, change the
+    /// array and PATCH it back, and since v0.90.0 that array comes back carrying
+    /// ids. Rejecting them turned the obvious pattern into a 400.
+    ///
+    /// When present it is *honoured*, so identity follows the item rather than
+    /// its position: reorder the array, or delete a line from the middle, and
+    /// every surviving item keeps the id it had. Omit it and the old
+    /// positional carry-over still applies, so existing clients are unaffected.
+    #[serde(default)]
+    id: u64,
     #[serde(default)]
     done: bool,
     #[serde(default)]
@@ -1880,11 +1893,29 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         // Reordering without losing identity is what the
                         // checklist op surface is for.
                         let old_ids: Vec<crate::model::ItemId> = it.iter().map(|i| i.id).collect();
+                        // Which rule applies is decided by the payload as a
+                        // whole, never per item. Mixing them hands the same id
+                        // to two lines: a new line at position 2 would inherit
+                        // the old position-2 id while another line claims that
+                        // id explicitly, and two items with one identity is
+                        // worse than no identity at all.
+                        let id_aware = items.iter().any(|i| i.id != 0);
                         *it = items
                             .into_iter()
                             .enumerate()
                             .map(|(n, i)| ChecklistItem {
-                                id: old_ids.get(n).copied().unwrap_or(0),
+                                id: if id_aware {
+                                    // The client speaks ids: an id names the
+                                    // line, so reordering and deleting from the
+                                    // middle keep every survivor's identity, and
+                                    // a line without one is simply new.
+                                    i.id
+                                } else {
+                                    // A client that sends no ids at all gets the
+                                    // positional carry-over, so the ordinary
+                                    // edits it makes still preserve identity.
+                                    old_ids.get(n).copied().unwrap_or(0)
+                                },
                                 done: i.done,
                                 text: i.text,
                             })
@@ -3504,6 +3535,59 @@ mod tests {
     /// The direction that was missing: an id, on its own, back to a card. An
     /// agent that reads "card 1391" in a note had no way to resolve it without
     /// walking every basket, and neither did the operator.
+    /// The natural client pattern is GET, edit the array, PATCH it back. Since
+    /// `GET` returns item ids, `PATCH` has to accept them — rejecting them turned
+    /// the obvious round-trip into a 400. And honouring them means identity
+    /// follows the *line*, not its position.
+    #[test]
+    fn a_checklist_round_trips_and_ids_survive_reordering() {
+        use crate::model::{CardKind, ChecklistItem};
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist {
+            items: vec![ChecklistItem::new("a"), ChecklistItem::new("b"), ChecklistItem::new("c")],
+        }).unwrap();
+        doc.ensure_item_ids();
+        let ids: Vec<u64> = match &doc.card(n, c).unwrap().kind {
+            CardKind::Checklist { items } => items.iter().map(|i| i.id).collect(),
+            _ => unreachable!(),
+        };
+
+        // GET → the ids are in the payload.
+        let (_d, got) = process(&mut doc, ApiRequest::GetCard { node: n, card: c });
+        let v: Value = serde_json::from_str(&got.body).unwrap();
+        assert_eq!(v["items"][0]["id"], ids[0]);
+
+        // PATCH the very same array back, reordered — this must not 400, and
+        // every line must keep the id it had.
+        let body = serde_json::json!({"items":[
+            {"id": ids[2], "done": true,  "text": "c"},
+            {"id": ids[0], "done": false, "text": "a edited"},
+            {"done": false, "text": "brand new"}
+        ]});
+        let req = route(&Method::Patch, &format!("/api/nodes/{n}/cards/{c}"), "", &body.to_string())
+            .expect("PATCH with ids must parse, not 400");
+        let (_d, resp) = process(&mut doc, req);
+        assert_eq!(resp.status, 200);
+
+        let after: Vec<(u64, bool, String)> = match &doc.card(n, c).unwrap().kind {
+            CardKind::Checklist { items } =>
+                items.iter().map(|i| (i.id, i.done, i.text.clone())).collect(),
+            _ => unreachable!(),
+        };
+        assert_eq!(after[0].0, ids[2], "the moved line keeps its identity");
+        assert_eq!(after[1].0, ids[0]);
+        assert!(after[0].1, "and its done state came along");
+        assert_eq!(after[1].2, "a edited");
+        assert_eq!(after[2].0, 0, "a line with no id is new; ensure_item_ids assigns it");
+        // No id is handed to two lines — the failure this rule exists to stop.
+        let live: Vec<u64> = after.iter().map(|(i, _, _)| *i).filter(|i| *i != 0).collect();
+        let mut uniq = live.clone(); uniq.sort_unstable(); uniq.dedup();
+        assert_eq!(live.len(), uniq.len(), "duplicate item id after a round-trip");
+        // The deleted middle line's id is not reused by anything here.
+        assert!(!after.iter().any(|(i, _, _)| *i == ids[1]));
+    }
+
     /// A journal node named for a day that does not exist is worse than an
     /// error, so an impossible date is refused rather than rounded.
     /// The whole point of a span: work in flight reads as *now*, not as a future
