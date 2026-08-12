@@ -2888,6 +2888,32 @@ impl Document {
         true
     }
 
+    /// Remove an inline `key:: value` line entirely.
+    ///
+    /// Distinct from setting it empty, which leaves `due:: ` behind — a property
+    /// that still exists and parses as an unreadable date, so the card stays on
+    /// the agenda under "No date" instead of leaving it. Returns false if the
+    /// card had no such line.
+    pub fn clear_card_property(&mut self, node: NodeId, card: CardId, key: &str) -> bool {
+        let key = key.to_lowercase();
+        let Some(c) = self.card_mut(node, card) else { return false };
+        let prefix = format!("{key}:: ");
+        let before = c.body.lines().count();
+        let kept: Vec<&str> = c
+            .body
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start().to_lowercase();
+                !(t.starts_with(&prefix) || t.trim_end() == format!("{key}::"))
+            })
+            .collect();
+        if kept.len() == before {
+            return false;
+        }
+        c.body = kept.join("\n");
+        true
+    }
+
     /// Cards that carry a `status::` property, grouped by status value (for a
     /// Kanban board). Each entry: `(node, card, card title, node title)`.
     #[allow(clippy::type_complexity)]
@@ -4170,6 +4196,29 @@ mod tests {
     fn hard_wrap_renders_as_line_breaks_in_html() {
         // The whole point: two lines become two visual lines (<br>), not one.
         assert!(md_to_html("line one\nline two").contains("<br"));
+    }
+
+    /// Clearing a property must remove the line, not blank it. A `due::` with
+    /// nothing after it is still a property: the card stays on the agenda under
+    /// "No date" instead of leaving it, which is the opposite of what "clear"
+    /// means to the person who clicked it.
+    #[test]
+    fn clearing_a_property_removes_the_line_rather_than_emptying_it() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().body = "status:: doing\ndue:: 2026-08-15\nnotes here".into();
+
+        assert!(doc.clear_card_property(n, c, "due"));
+        let body = &doc.card(n, c).unwrap().body;
+        assert!(!body.contains("due::"), "the line must be gone, not blank: {body:?}");
+        assert!(body.contains("status:: doing"), "other properties untouched");
+        assert!(body.contains("notes here"));
+        assert!(doc.card_property(n, c, "due").is_none());
+
+        // Clearing what isn't there is false, not a panic or a stray edit.
+        assert!(!doc.clear_card_property(n, c, "due"));
+        assert_eq!(doc.card_property(n, c, "status").as_deref(), Some("doing"));
     }
 
     /// The titles in a hand-kept journal are not uniform. These are all real

@@ -463,6 +463,12 @@ Set a property on a card (rewrites the `key:: …` line in its body, or appends
 one) — e.g. to move a card on the Kanban board:
 ```
 POST /api/nodes/{id}/cards/{cid}/property  {key, value}
+DELETE /api/nodes/{id}/cards/{cid}/property?key=<key>
+  → 200 {"cleared":true|false,"key":"due"}          | 400 (no key) | 404 (card not found)
+        Removes the whole `key:: value` line. `cleared:false` means the card
+        never had it — not an error. **Setting a property to "" is not the
+        same**: that leaves `due::` present but unparseable, so the task stays
+        on the agenda under "No date" instead of leaving it.
     → 200 {"card":<cid>,"key":<k>,"value":<v>}   | 404
 ```
 
@@ -503,6 +509,12 @@ curl -s -X POST -H "X-API-Key: $KEY" -d '{"key":"status","value":"doing"}' \
   $API/nodes/$NID/cards/$CID/property
 curl -s -X POST -H "X-API-Key: $KEY" -d '{"key":"due","value":"2026-08-18"}' \
   $API/nodes/$NID/cards/$CID/property     # slipped a day? edit the date, don't copy
+
+# 2b. Drop a date entirely. DELETE removes the `due::` line; setting it to ""
+#     would leave the property there, unreadable, and the card would sit under
+#     "No date" instead of leaving the agenda.
+curl -s -X DELETE -H "X-API-Key: $KEY" \
+  "$API/nodes/$NID/cards/$CID/property?key=due"
 
 # 3. Read the whole picture back from the views, not from a list you maintain.
 curl -s -H "X-API-Key: $KEY" $API/tasks             # bucketed by due date

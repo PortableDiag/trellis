@@ -286,6 +286,12 @@ and the setting belongs to that instance, so a work document can keep a journal
 while a personal one never grows one. Agents get the same thing at
 `POST /api/daily`.
 
+**Reschedule from the Agenda.** Right-click any task row for *Today / Tomorrow /
+In 3 days / Next week / Next month / Clear date* — the dates are shown, so you
+pick a day rather than compute one. Moving a task used to mean opening the card
+and editing the `due::` line by hand, and that friction is why people copy a task
+card to the next day instead, which silently creates a *second* task.
+
 **Today's note is a journal, not a task list.** A task is one card carrying
 `status::` and `due::` that stays in its own basket; the **Agenda** and **Kanban**
 gather them across the whole document, which is what replaces a list copied from

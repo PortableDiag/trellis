@@ -5854,6 +5854,7 @@ impl TrellisApp {
                         "DELETE /api/nodes/{id}/cards/{cid}",
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
                         "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
+                        "DELETE /api/nodes/{id}/cards/{cid}/property?key=due        (remove the line; not the same as value:\"\")",
                         "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE …/dock)",
                         "POST   /api/nodes/{id}/cards/{cid}/group {group}           (remove: DELETE …/group)",
                         "POST   /api/nodes/{id}/cards/{cid}/table {op, …}           (set_cell / insert_row / set_col_width / autofit_cols {col?} …)",
@@ -6430,6 +6431,9 @@ impl TrellisApp {
         let today = crate::api::today_days();
         let mut tasks = self.doc.tasks();
         let mut jump: Option<(NodeId, CardId)> = None;
+        // (node, card, new due) — `None` clears the date. Applied after the
+        // panel closes, since the panel borrows the document to draw itself.
+        let mut reschedule: Option<(NodeId, CardId, Option<String>)> = None;
         egui::SidePanel::right("agenda").resizable(true).default_width(320.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Agenda");
@@ -6547,11 +6551,50 @@ impl TrellisApp {
                                     .sense(egui::Sense::click()),
                             )
                         });
-                        if ui.add(egui::Label::new(title).sense(egui::Sense::click())).clicked()
-                            || row.inner.clicked()
-                        {
+                        let label =
+                            ui.add(egui::Label::new(title).sense(egui::Sense::click()));
+                        if label.clicked() || row.inner.clicked() {
                             jump = Some((t.node, t.card));
                         }
+                        // Move a task without leaving the list. Editing the
+                        // `due::` line by hand was the only way, and that
+                        // friction is exactly what makes people copy a task card
+                        // to the next day instead — which silently creates a
+                        // second task.
+                        label.context_menu(|ui| {
+                            ui.label(egui::RichText::new(&t.title).strong());
+                            ui.small(egui::RichText::new(format!("due {}", t.due)).weak());
+                            ui.separator();
+                            for (text, days, months) in [
+                                ("Today", 0i64, 0u32),
+                                ("Tomorrow", 1, 0),
+                                ("In 3 days", 3, 0),
+                                ("Next week", 7, 0),
+                                ("Next month", 0, 1),
+                            ] {
+                                let when = crate::api::date_from_today(days, months);
+                                if ui.button(format!("{text}  ({when})")).clicked() {
+                                    reschedule = Some((t.node, t.card, Some(when)));
+                                    ui.close_menu();
+                                }
+                            }
+                            ui.separator();
+                            if ui
+                                .button("Clear date")
+                                .on_hover_text(
+                                    "Removes the due:: line — the task moves to \"No date\" \
+                                     rather than leaving the agenda",
+                                )
+                                .clicked()
+                            {
+                                reschedule = Some((t.node, t.card, None));
+                                ui.close_menu();
+                            }
+                            if ui.button("Open the card").clicked() {
+                                jump = Some((t.node, t.card));
+                                ui.close_menu();
+                            }
+                        });
                         // Full breadcrumb, not just the parent: "Open Items"
                         // exists under more than one project, and the bare name
                         // has had agents attribute a task to the wrong one. The
@@ -6583,6 +6626,21 @@ impl TrellisApp {
                 }
             });
         });
+        if let Some((node, card, due)) = reschedule {
+            let changed = match &due {
+                Some(d) => self.doc.set_card_property(node, card, "due", d),
+                None => self.doc.clear_card_property(node, card, "due"),
+            };
+            if changed {
+                // note_card stamps `touched` and marks the document dirty; doing
+                // either here as well would be a second, divergent code path.
+                self.note_card(node, card, crate::changelog::Op::Updated, "due");
+                self.status = match due {
+                    Some(d) => format!("Task due {d}"),
+                    None => "Task due date cleared".to_string(),
+                };
+            }
+        }
         if let Some((node, card)) = jump {
             self.jump_to_card(ctx, node, card);
         }

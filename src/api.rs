@@ -74,6 +74,10 @@ pub enum ApiRequest {
     MoveCard { node: NodeId, card: u64, mv: MoveCardInput },
     // Set an inline key:: value property on a card (e.g. status for the board).
     SetCardProperty { node: NodeId, card: u64, key: String, value: String },
+    /// Remove a `key:: value` line outright. Distinct from setting it empty,
+    /// which leaves the property present but unreadable — a card whose `due::`
+    /// is blank stays on the agenda under "No date" instead of leaving it.
+    ClearCardProperty { node: NodeId, card: u64, key: String },
     // Grouping.
     ListGroups(NodeId),
     CreateGroup { node: NodeId, cards: Vec<u64>, title: Option<String> },
@@ -182,6 +186,7 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::DeleteCard { node, .. }
         | ApiRequest::MoveCard { node, .. }
         | ApiRequest::SetCardProperty { node, .. }
+        | ApiRequest::ClearCardProperty { node, .. }
         | ApiRequest::DockCard { node, .. }
         | ApiRequest::DetachCard { node, .. }
         | ApiRequest::SetCardGroup { node, .. }
@@ -1009,6 +1014,13 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             let mv: MoveCardInput = parse(body)?;
             Ok(ApiRequest::MoveCard { node: pid(nid)?, card: pid(cid)?, mv })
         }
+        (Method::Delete, ["api", "nodes", nid, "cards", cid, "property"]) => {
+            let key = query_get(query, "key").unwrap_or_default();
+            if key.trim().is_empty() {
+                return Err((400, "property to clear: /property?key=due".into()));
+            }
+            Ok(ApiRequest::ClearCardProperty { node: pid(nid)?, card: pid(cid)?, key })
+        }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "property"]) => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -1213,6 +1225,20 @@ pub fn daily_date_from(s: &str) -> Option<crate::model::DailyDate> {
     chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok().map(from_naive)
 }
 
+/// `YYYY-MM-DD` for a day relative to today — what the Agenda's reschedule
+/// shortcuts write into `due::`. Months are added calendar-wise (chrono clamps
+/// 31 Jan + 1 month to 28/29 Feb rather than overflowing into March).
+pub fn date_from_today(days: i64, months: u32) -> String {
+    let mut d = chrono::Local::now().date_naive();
+    if months > 0 {
+        d = d.checked_add_months(chrono::Months::new(months)).unwrap_or(d);
+    }
+    if days != 0 {
+        d = d.checked_add_signed(chrono::Duration::days(days)).unwrap_or(d);
+    }
+    d.format("%Y-%m-%d").to_string()
+}
+
 fn from_naive(d: chrono::NaiveDate) -> crate::model::DailyDate {
     use chrono::Datelike;
     crate::model::DailyDate {
@@ -1414,6 +1440,13 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             }
             None => (false, ApiResponse::err(404, "node not found")),
         },
+        ApiRequest::ClearCardProperty { node, card, key } => {
+            if doc.card(node, card).is_none() {
+                return (false, ApiResponse::err(404, "card not found"));
+            }
+            let removed = doc.clear_card_property(node, card, &key);
+            (removed, ApiResponse::ok(json!({ "cleared": removed, "key": key })))
+        }
         ApiRequest::GetCard { node, card } => match doc.card(node, card) {
             Some(c) => (false, ApiResponse::ok(card_json(c))),
             None => (false, ApiResponse::err(404, "card not found")),
@@ -3030,6 +3063,12 @@ mod tests {
         ));
         // A typo'd field is a 400, like everywhere else since v0.86.0.
         assert!(route(&Method::Post, "/api/daily", "", r#"{"day":"2026-08-12"}"#).is_err());
+        // Clearing a property needs the key, and says so rather than 404ing.
+        assert!(matches!(
+            route(&Method::Delete, "/api/nodes/3/cards/4/property", "key=due", "").unwrap(),
+            ApiRequest::ClearCardProperty { node: 3, card: 4, key } if key == "due"
+        ));
+        assert!(route(&Method::Delete, "/api/nodes/3/cards/4/property", "", "").is_err());
         assert!(route(&Method::Get, "/api/cards/nine", "", "").is_err());
         assert!(matches!(
             route(&Method::Get, "/api/search", "q=hello%20world", "").unwrap(),
@@ -3334,6 +3373,26 @@ mod tests {
     /// walking every basket, and neither did the operator.
     /// A journal node named for a day that does not exist is worse than an
     /// error, so an impossible date is refused rather than rounded.
+    /// The Agenda's shortcuts write real dates, and a month is a calendar month:
+    /// 31 January + 1 month is the end of February, not the 3rd of March.
+    #[test]
+    fn relative_dates_are_calendar_dates() {
+        let today = date_from_today(0, 0);
+        assert_eq!(today, chrono::Local::now().format("%Y-%m-%d").to_string());
+        let tomorrow = date_from_today(1, 0);
+        assert_eq!(
+            crate::model::parse_ymd(&tomorrow).unwrap(),
+            crate::model::parse_ymd(&today).unwrap() + 1
+        );
+        let week = date_from_today(7, 0);
+        assert_eq!(
+            crate::model::parse_ymd(&week).unwrap(),
+            crate::model::parse_ymd(&today).unwrap() + 7
+        );
+        // A month lands on a real day, whatever today is.
+        assert!(crate::model::parse_ymd(&date_from_today(0, 1)).is_some());
+    }
+
     #[test]
     fn a_daily_date_must_be_a_real_calendar_day() {
         let d = daily_date_from("2026-08-11").unwrap();

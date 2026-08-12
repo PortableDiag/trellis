@@ -6,6 +6,27 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.89.0]
+
+### Added
+- **Reschedule a task from the Agenda, without opening it.** Right-click any task
+  row: *Today · Tomorrow · In 3 days · Next week · Next month · Clear date*, each
+  showing the date it will write, so you pick a day rather than work one out.
+
+  This is the other half of *"one card, never copied"*. Moving a task used to mean
+  clicking through to the card and editing the `due::` line by hand — and that
+  friction is exactly why people copy a task card to the next day instead, which
+  silently creates a **second task** with its own status and date. The correct
+  workflow is now also the quickest one.
+
+- **`DELETE /api/nodes/{id}/cards/{cid}/property?key=<key>`** — remove a
+  `key:: value` line outright, which the API previously could not do. **Setting a
+  property to `""` is not the same thing**: that leaves `due::` present but
+  unparseable, so the task sits on the agenda under "No date" instead of leaving
+  it. `cleared:false` means the card never had the property, which is an answer,
+  not an error.
+
+
 ## [0.88.0]
 
 ### Added
