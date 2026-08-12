@@ -6,6 +6,42 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.93.0]
+
+### Added
+- **Links that open Trellis on a card.** `trellis://7374/card/1391` — click it in
+  a browser, a terminal or a chat window and the instance serving that port comes
+  forward with the card revealed. `GET /api/cards/{cid}/link` mints one, so an
+  agent never assembles it by hand.
+
+  **The port is the address**, because one instance serves one document — which is
+  also what makes it work with several instances running, the normal case here.
+  `?doc=Personal.ron` is optional and is a *check*: the instance refuses with 409
+  if it is serving something else. That matters because **card ids are unique
+  within a document, not across documents** — `1365` is a real card in both of
+  this operator's documents, so a link to the wrong port would otherwise land on a
+  real card that is not the one meant.
+
+  `/open/...` is **unauthenticated and navigation-only** — it focuses the window
+  and answers `{"opened":…}`, never document content, because a keyless route that
+  could read cards by walking ids would be a hole. It sits outside `/api`.
+
+  **`http://127.0.0.1:<port>/open/card/<cid>` works with nothing installed.** The
+  `trellis://` form needs the desktop to know the scheme, so Trellis registers
+  itself on a new install and again if the binary moves, with *Settings → Agent
+  API → Register now* and *Tools → Register trellis:// links…* as explicit
+  controls. It **will not overwrite a working registration**, so a development
+  build cannot hijack the handler from the installed one.
+
+  The scheme name is one constant, and the follower accepts **`hypercube://`**
+  as well — a link pasted into a note outlives a rename.
+
+- **File → Restart** — save and start this same instance again: same document,
+  same port, same data directory. The new process waits before binding, because
+  the old one still holds the API port for the moment it takes to exit, and a
+  failed bind is not fatal: it starts *without* an API, which looks healthy and
+  answers nothing.
+
 ## [0.92.0]
 
 Two axes the canvas never had, both **off by default**, both **view** settings.

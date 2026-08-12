@@ -59,6 +59,23 @@ struct Args {
 }
 
 fn main() -> eframe::Result<()> {
+    // A restart spawns this process while the old one is still holding the API
+    // port. Binding it is not fatal — Trellis starts *without* an API, which
+    // looks perfectly healthy and answers nothing — so wait for the old process
+    // to go rather than racing it. Set only by File → Restart.
+    if let Ok(ms) = std::env::var("TRELLIS_RESTART_DELAY_MS") {
+        if let Ok(ms) = ms.parse::<u64>() {
+            std::thread::sleep(std::time::Duration::from_millis(ms.min(10_000)));
+        }
+    }
+    // A `trellis://` link. The scheme handler is this same binary, so the OS
+    // hands the URL to a *new* process; that process forwards it to whichever
+    // instance is serving that port and exits. Nothing opens a second window on
+    // a document that is already open.
+    if let Some(url) = std::env::args().nth(1).filter(|a| link_scheme(a).is_some()) {
+        std::process::exit(follow_link(&url));
+    }
+
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -111,6 +128,97 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| Ok(Box::new(app::TrellisApp::new(cc, startup)))),
     )
+}
+
+/// The URL scheme links are **minted** under.
+///
+/// One constant because the name is not settled — `hypercube://` is on the table
+/// now that the canvas has depth and a time axis — and a scheme name ends up in
+/// minted links, the OS registration, the docs and the prompts. Changing it
+/// should be this line, not a search-and-replace across four surfaces.
+pub const URL_SCHEME: &str = "trellis";
+
+/// Every scheme this build will **follow**.
+///
+/// Deliberately wider than what it mints: a link pasted into a note, a chat or a
+/// session report outlives a rename, so renaming the scheme must not break every
+/// link already written under the old one.
+pub const URL_SCHEMES: &[&str] = &["trellis", "hypercube"];
+
+/// Which known scheme this URL uses, if any.
+fn link_scheme(url: &str) -> Option<&'static str> {
+    URL_SCHEMES.iter().copied().find(|s| url.starts_with(&format!("{s}://")))
+}
+
+/// Hand a link URL to the instance that owns it.
+///
+/// Format (see API.md): `trellis://<port>/card/<id>` or `.../node/<id>`, with an
+/// optional `?doc=<file>` the receiving instance verifies. The port is the
+/// address because one instance serves one document — so a link names the port,
+/// not a file path, and `doc=` is a check rather than a lookup.
+///
+/// Returns a process exit code: 0 opened it, 1 could not.
+fn follow_link(url: &str) -> i32 {
+    let Some(scheme) = link_scheme(url) else {
+        eprintln!("trellis: not a link scheme I know: {url}");
+        return 1;
+    };
+    let rest = &url[scheme.len() + "://".len()..];
+    let (target, query) = match rest.split_once('?') {
+        Some((t, q)) => (t, Some(q)),
+        None => (rest, None),
+    };
+    let parts: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
+    let (port, kind, id) = match parts.as_slice() {
+        [port, kind, id] => (*port, *kind, *id),
+        _ => {
+            eprintln!("trellis: not a link I understand: {url}\n\
+                       expected {scheme}://<port>/card/<id> or {scheme}://<port>/node/<id>");
+            return 1;
+        }
+    };
+    if !matches!(kind, "card" | "node") {
+        eprintln!("trellis: {kind} is not a link target — use card or node");
+        return 1;
+    }
+    if port.parse::<u16>().is_err() || id.parse::<u64>().is_err() {
+        eprintln!("trellis: port and id must be numbers: {url}");
+        return 1;
+    }
+    let q = query.map(|q| format!("?{q}")).unwrap_or_default();
+    // Written by hand rather than pulling in an HTTP client: it is one
+    // unauthenticated GET to loopback, and a dependency taken for that would be
+    // a dependency in every build of the app.
+    use std::io::{Read, Write};
+    let addr = format!("127.0.0.1:{port}");
+    let mut sock = match std::net::TcpStream::connect(&addr) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "trellis: nothing is serving port {port} ({e}).\n\
+                 Start the instance for that document first — the port is the document."
+            );
+            return 1;
+        }
+    };
+    let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(4)));
+    let req = format!(
+        "GET /open/{kind}/{id}{q} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    );
+    if let Err(e) = sock.write_all(req.as_bytes()) {
+        eprintln!("trellis: could not send the request: {e}");
+        return 1;
+    }
+    let mut resp = String::new();
+    let _ = sock.read_to_string(&mut resp);
+    let status = resp.split_whitespace().nth(1).unwrap_or("");
+    if status.starts_with('2') {
+        0
+    } else {
+        let body = resp.split("\r\n\r\n").nth(1).unwrap_or("").trim();
+        eprintln!("trellis: {} — {body}", if status.is_empty() { "no reply" } else { status });
+        1
+    }
 }
 
 fn parse_args() -> Result<Args, String> {

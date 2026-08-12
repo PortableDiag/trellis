@@ -171,6 +171,18 @@ GET /api/nodes/{id}/cards/{cid}
         path, so re-reading a card you just wrote doesn't mean pulling the whole
         basket back. Same object as an entry in the list above.
 
+GET /api/cards/{cid}/link
+  → 200 {card, node, node_path, document, link, link_verified, http}   | 404
+        the canonical URL for this card — see **Links that open Trellis on a
+        card**. Ask for it rather than assembling one: the port and the document
+        name are the instance's, not something a client can know.
+
+GET /open/card/{cid}   ·   GET /open/node/{id}        [no key; not under /api]
+  → 200 {"opened":"card 1391"}   | 404 (no such target)  | 409 (?doc= mismatch)
+        what a `trellis://` link resolves to. Navigation only — it focuses the
+        window and reveals the target, and deliberately returns no document
+        content, because it is the one route that answers without a key.
+
 GET /api/cards/{cid}
   → 200 {node, node_title, node_path, card:{<card>}}              | 404
         find a card from its **id alone**, without already knowing its basket.
@@ -550,6 +562,53 @@ Two deliberate limits, both learned by running it against a real document:
   basket and nothing outside it, so only cards living in a *day* are projected —
   they share the journal's coordinate space. A task in a project basket belongs
   to the Agenda, which is what `/api/tasks` is for.
+
+### Links that open Trellis on a card
+
+An agent can hand over a **link**, not just an id. Clicking it opens the running
+instance on that exact card.
+
+```
+trellis://<port>/card/<cid>               trellis://7374/card/1391
+trellis://<port>/node/<id>                trellis://7373/node/63
+trellis://<port>/card/<cid>?doc=<file>    optional, verified on arrival
+http://127.0.0.1:<port>/open/card/<cid>   the same thing, no registration needed
+```
+
+**Never build one by hand — ask for it:**
+
+```sh
+curl -s -H "X-API-Key: $KEY" $API/cards/1391/link
+# → {"card":1391,"node":63,"node_path":"Trellis › Trellis Open Items",
+#    "document":"Personal.ron",
+#    "link":"trellis://7374/card/1391",
+#    "link_verified":"trellis://7374/card/1391?doc=Personal.ron",
+#    "http":"http://127.0.0.1:7374/open/card/1391"}
+```
+
+**The port is the address**, because one instance serves one document — which is
+what makes this work with several instances running at once (two documents plus a
+development build is the normal case here). A link goes to the instance on that
+port and nowhere else.
+
+**`doc=` is optional and is a *check*, not a lookup.** Given, the instance refuses
+with `409` if it is serving a different document; omitted, the port is taken at
+its word. Worth including in anything durable — a session report, a card, a chat
+message — because **card ids are unique within a document, not across documents**:
+`1365` is a real card in *both* of this operator's documents, so a link aimed at
+the wrong port lands on a real card that is not the one meant.
+
+**`/open/...` is unauthenticated and navigation-only.** It focuses a window and
+answers `{"opened":…}` or a 404; it never returns document content, because a
+route with no key that could read cards by walking ids would be a hole. It sits
+deliberately outside `/api`.
+
+**Registration.** `trellis://` needs the desktop to know the scheme. Trellis
+registers itself on a new install, and again if the binary moves; *Settings →
+Agent API → Register now* and *Tools → Register trellis:// links…* are the
+explicit controls. It will **not** overwrite a working registration, so a
+development build cannot hijack the handler. The `http://127.0.0.1` form needs
+none of this and works today — which is why it exists.
 
 ### Tracking work — read this before creating task cards
 

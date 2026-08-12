@@ -75,6 +75,13 @@ const SNAP_MODE_KEY: &str = "snap_mode";
 /// and both default off: `z` and the span stay on the card whatever these say, so
 /// turning one off flattens what you see rather than discarding what someone
 /// arranged. A new user meets the canvas they have always had.
+/// Which binary path we last registered as the `trellis://` handler.
+///
+/// Stored rather than a bare "done" flag so a **new install, or the same install
+/// moved**, re-registers itself: a handler pointing at a binary that is no longer
+/// there fails silently, and a link that does nothing is indistinguishable from
+/// the feature not existing.
+const URL_SCHEME_REGISTERED_KEY: &str = "url_scheme_registered";
 const DEPTH_MODE_KEY: &str = "depth_mode";
 const TIME_MODE_KEY: &str = "time_mode";
 const MINIMAP_KEY: &str = "minimap";
@@ -800,6 +807,11 @@ pub struct TrellisApp {
     /// A card the canvas should recenter on next frame (agenda/Kanban row click).
     /// One-shot: cleared right after the canvas consumes it.
     focus_card: Option<CardId>,
+    /// A `trellis://` link landed on the API thread, which has no frame context;
+    /// the reveal (and the window focus) happen on the next frame, where one
+    /// exists. The highlight clock is frame time, not wall clock.
+    pending_reveal: Option<(NodeId, CardId)>,
+    focus_window: bool,
     /// The card to flash-highlight on the canvas, and the `ctx` time the flash ends.
     highlight_card: Option<CardId>,
     highlight_until: f64,
@@ -846,6 +858,9 @@ pub struct TrellisApp {
     snap_mode: bool,
     depth_mode: bool,
     time_mode: bool,
+    /// Path this build registered as the link handler, if any — shown in
+    /// Settings so "why doesn't my link open?" has an answer on screen.
+    url_scheme_registered: Option<String>,
     /// When on, a small overview map in the canvas's bottom-right shows the whole
     /// basket and a reticle of the current view (Settings; on by default).
     minimap_enabled: bool,
@@ -1059,6 +1074,27 @@ impl TrellisApp {
             .and_then(|s| s.get_string(TIME_MODE_KEY))
             .map(|s| s == "true")
             .unwrap_or(false);
+        // Register the link scheme on a fresh install, and again if the binary
+        // has moved. Silent and best-effort: it is a convenience, and a desktop
+        // that has no `xdg-mime` must not produce an error dialog on first run.
+        // The `http://127.0.0.1:<port>/open/...` form works regardless.
+        let exe_now = std::env::current_exe().ok().map(|p| p.display().to_string());
+        let registered_for = cc.storage.and_then(|s| s.get_string(URL_SCHEME_REGISTERED_KEY));
+        // **Never clobber a working registration.** Three or more instances is the
+        // normal case here — two documents plus a dev build — and they share one
+        // desktop-wide handler. If a scratch or development binary silently
+        // re-pointed it at itself, every link would break the moment that binary
+        // was rebuilt or deleted. So the automatic path only acts when there is
+        // no handler, or the one there points at a binary that no longer exists.
+        // Settings → Register now is the deliberate override.
+        let url_scheme_registered = match (&exe_now, &registered_for) {
+            (Some(exe), Some(done)) if exe == done && scheme_handler_healthy() => {
+                registered_for.clone()
+            }
+            (Some(_), _) if scheme_handler_healthy() => registered_for.clone(),
+            (Some(_), _) => register_url_scheme().ok().and(exe_now.clone()),
+            _ => registered_for.clone(),
+        };
         let minimap_enabled = cc
             .storage
             .and_then(|s| s.get_string(MINIMAP_KEY))
@@ -1199,6 +1235,8 @@ impl TrellisApp {
             switcher_index: 0,
             scroll_to: None,
             focus_card: None,
+            pending_reveal: None,
+            focus_window: false,
             highlight_card: None,
             highlight_until: 0.0,
             tags_open: false,
@@ -1238,6 +1276,7 @@ impl TrellisApp {
             snap_mode,
             depth_mode,
             time_mode,
+            url_scheme_registered,
             card_clipboard: None,
             card_rects: HashMap::new(),
             card_shot: None,
@@ -1376,6 +1415,41 @@ impl TrellisApp {
 
     /// Mark the document changed: flags it dirty for save and bumps the shared
     /// revision so the API's `/api/wait` long-poll wakes live clients.
+    /// Relaunch this instance exactly as it was started.
+    ///
+    /// The whole point is *exactly*: same document, same `--port`, same
+    /// `--data-dir`. An instance is defined by those — the port **is** the
+    /// document's address — so a restart that dropped an argument would quietly
+    /// open a different instance, or a second one on the default port.
+    ///
+    /// The new process waits before binding. The old one is still holding the
+    /// API port for the moment it takes this one to exit, and a failed bind does
+    /// not stop Trellis starting — it starts without an API, which looks healthy
+    /// and answers nothing. That failure already has a status-bar warning
+    /// because two instances on one port produced it once.
+    fn restart(&mut self) {
+        // Save first: the child opens the file this process is about to leave.
+        if self.dirty {
+            self.save();
+        }
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                self.status = format!("Restart failed: {e}");
+                return;
+            }
+        };
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        match std::process::Command::new(exe)
+            .args(&args)
+            .env("TRELLIS_RESTART_DELAY_MS", "1500")
+            .spawn()
+        {
+            Ok(_) => self.status = "Restarting…".into(),
+            Err(e) => self.status = format!("Restart failed: {e}"),
+        }
+    }
+
     fn mark_dirty(&mut self) {
         self.dirty = true;
         self.last_change = Some(Instant::now());
@@ -2040,6 +2114,10 @@ impl TrellisApp {
                 let _ = cmd.resp.send(resp);
                 continue;
             }
+            if let Some(resp) = self.handle_api_open(&cmd.req) {
+                let _ = cmd.resp.send(resp);
+                continue;
+            }
             if let Some(resp) = self.handle_api_instance(&cmd.req) {
                 let _ = cmd.resp.send(resp);
                 continue;
@@ -2425,6 +2503,90 @@ impl TrellisApp {
             }
             _ => None,
         }
+    }
+
+    /// `GET /open/...` — a `trellis://` link landing in this instance.
+    ///
+    /// Navigation only. It answers whether the target exists and moves the
+    /// window there; it never returns document content, because this is the one
+    /// route with no key and a page that could read cards by walking ids is the
+    /// same hole that was closed in v0.85.1 for mirrored files.
+    fn handle_api_open(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
+        // Minting a link needs the port and the document name, which are app
+        // state rather than document state — hence answering it here.
+        if let api::ApiRequest::CardLink(cid) = req {
+            let cid = *cid as crate::model::CardId;
+            let Some(node) = self.doc.locate_card(cid) else {
+                return Some(api::ApiResponse::err(404, "no card with that id"));
+            };
+            let doc = self
+                .doc_path
+                .as_ref()
+                .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
+                .unwrap_or_default();
+            let scheme = crate::URL_SCHEME;
+            let port = self.api_port;
+            return Some(api::ApiResponse::ok(serde_json::json!({
+                "card": cid,
+                "node": node,
+                "node_path": self.doc.node_path(node),
+                "document": doc,
+                // The bare form is what you paste. `verified` adds the check that
+                // turns "a different document is on this port" from a silent
+                // landing on the wrong real card into an error.
+                "link": format!("{scheme}://{port}/card/{cid}"),
+                "link_verified": format!("{scheme}://{port}/card/{cid}?doc={doc}"),
+                // Works with nothing registered — a browser or a terminal can
+                // follow it today.
+                "http": format!("http://127.0.0.1:{port}/open/card/{cid}"),
+            })));
+        }
+        let api::ApiRequest::Open { node, id, doc } = req else {
+            return None;
+        };
+        // `doc` is optional — the port is the address (the operator's ruling) —
+        // but when it is given it is checked, so the one real failure mode (a
+        // different document started on that port) is an error rather than a
+        // silent landing on a real card that is not the one meant.
+        if let Some(want) = doc {
+            let have = self
+                .doc_path
+                .as_ref()
+                .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
+                .unwrap_or_default();
+            if !want.is_empty() && !have.eq_ignore_ascii_case(want) {
+                return Some(api::ApiResponse::err(
+                    409,
+                    &format!("this port is serving {have}, not {want}"),
+                ));
+            }
+        }
+        let found = if *node {
+            let nid = *id as crate::model::NodeId;
+            self.doc.nodes.contains_key(&nid).then(|| {
+                self.jump_to_node(nid);
+                format!("node {nid}")
+            })
+        } else {
+            let cid = *id as crate::model::CardId;
+            self.doc.locate_card(cid).map(|n| {
+                // Same reveal the Agenda and a [[#id]] link use — land *on* the
+                // card, not merely in its basket — deferred to the next frame.
+                self.pending_reveal = Some((n, cid));
+                format!("card {cid}")
+            })
+        };
+        Some(match found {
+            Some(what) => {
+                // Ask for focus on the next frame — a link that navigates a
+                // window you cannot see has not taken you anywhere. Done via a
+                // flag because this runs on the pump, not inside a frame.
+                self.focus_window = true;
+                self.status = format!("Opened {what} from a link");
+                api::ApiResponse::ok(serde_json::json!({ "opened": what }))
+            }
+            None => api::ApiResponse::err(404, "no such target in this document"),
+        })
     }
 
     fn handle_api_instance(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
@@ -4608,6 +4770,20 @@ impl TrellisApp {
                         }
                     });
                     ui.separator();
+                    if ui
+                        .button("Restart")
+                        .on_hover_text(
+                            "Save and start this same instance again — same document, same \
+                             port, same data directory. What you need after installing a new \
+                             build.",
+                        )
+                        .clicked()
+                    {
+                        self.restart();
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
@@ -4751,6 +4927,27 @@ impl TrellisApp {
                     }
                 });
                 ui.menu_button("Tools", |ui| {
+                    if ui
+                        .button(format!("Register {}:// links…", crate::URL_SCHEME))
+                        .on_hover_text(
+                            "Teach this desktop to open a link like trellis://7374/card/1391 in \
+                             Trellis. Without it the links still work from a terminal, and the \
+                             http://127.0.0.1 form works anywhere — this is what makes them \
+                             clickable in a browser or a chat window.",
+                        )
+                        .clicked()
+                    {
+                        self.status = match register_url_scheme() {
+                            Ok(path) => {
+                                self.url_scheme_registered =
+                                    std::env::current_exe().ok().map(|p| p.display().to_string());
+                                format!("Registered {}:// — {path}", crate::URL_SCHEME)
+                            }
+                            Err(e) => format!("Could not register the link scheme: {e}"),
+                        };
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui
                         .add_enabled(self.selected.is_some(), egui::Button::new("Autosort cards"))
                         .on_hover_text("Arrange this basket's cards into a tidy, non-overlapping grid")
@@ -5529,6 +5726,40 @@ impl TrellisApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.heading("Agent API");
+                // Links are how an agent hands you a place, so this belongs
+                // beside the key and the endpoint list rather than in Canvas.
+                ui.horizontal(|ui| {
+                    let scheme = crate::URL_SCHEME;
+                    match &self.url_scheme_registered {
+                        Some(p) if !p.is_empty() => {
+                            ui.weak(format!("{scheme}:// links open this build"))
+                                .on_hover_text(format!("Registered for {p}"));
+                        }
+                        _ => {
+                            ui.weak(format!("{scheme}:// links are not registered on this desktop"));
+                        }
+                    }
+                    if ui
+                        .button("Register now")
+                        .on_hover_text(
+                            "Done automatically on a new install and whenever the binary moves. \
+                             Use this if a link stopped opening — or after installing Trellis \
+                             somewhere new. The http://127.0.0.1:<port>/open/… form needs no \
+                             registration and works anywhere.",
+                        )
+                        .clicked()
+                    {
+                        match register_url_scheme() {
+                            Ok(path) => {
+                                self.url_scheme_registered =
+                                    std::env::current_exe().ok().map(|p| p.display().to_string());
+                                self.status = format!("Registered {scheme}:// — {path}");
+                            }
+                            Err(e) => self.status = format!("Could not register: {e}"),
+                        }
+                    }
+                });
+                ui.add_space(4.0);
                 ui.label(
                     "An HTTP API for agents (and the Trellis mobile app) to add, query, \
                      edit and remove nodes and cards. Localhost-only by default; enable \
@@ -5926,6 +6157,8 @@ impl TrellisApp {
                         "GET    /api/nodes/{id}/cards",
                         "GET    /api/nodes/{id}/cards/{cid}        (one card, without the whole basket)",
                         "GET    /api/cards/{cid}                   (find a card from its id alone → {node, node_path, card})",
+                        "GET    /api/cards/{cid}/link              (canonical trellis:// link for this card)",
+                        "GET    /open/card/{cid} · /open/node/{id} (no key — what a trellis:// link opens)",
                         "GET    /api/cards/{cid}/backlinks         (cards whose [[#id]] links point at this card)",
                         "POST   /api/nodes/{id}/cards/{cid}/items/{item}/property {key, value}   (one checklist LINE)",
                         "DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due",
@@ -7553,6 +7786,17 @@ impl eframe::App for TrellisApp {
             }
         }
 
+        // A `trellis://` link that arrived on the API thread: reveal it here,
+        // where there is a frame (the highlight fade is measured in frame time)
+        // and where the viewport can be asked for focus.
+        if let Some((node, card)) = self.pending_reveal.take() {
+            self.jump_to_card(ctx, node, card);
+        }
+        if std::mem::take(&mut self.focus_window) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            ctx.request_repaint();
+        }
+
         // Colour emoji, painted over the glyphs laid out above. Last, and after
         // the wiki-link check, because it reads back what the frame drew —
         // anything added to a paint list after this point is not covered.
@@ -7573,6 +7817,10 @@ impl eframe::App for TrellisApp {
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
         storage.set_string(DEPTH_MODE_KEY, self.depth_mode.to_string());
         storage.set_string(TIME_MODE_KEY, self.time_mode.to_string());
+        storage.set_string(
+            URL_SCHEME_REGISTERED_KEY,
+            self.url_scheme_registered.clone().unwrap_or_default(),
+        );
         storage.set_string(MINIMAP_KEY, self.minimap_enabled.to_string());
         // Absent rather than "0" when off: a stored root that points at nothing
         // would be indistinguishable from a deleted journal.
@@ -7618,6 +7866,74 @@ impl eframe::App for TrellisApp {
 /// dashes and box-drawing that egui's default fonts lack, so UI glyphs and the
 /// wide Unicode common in dev/sysadmin notes render instead of showing tofu.
 /// The egui defaults stay as fallback (emoji, Cyrillic, …).
+/// Is there already a link handler pointing at a binary that still exists?
+///
+/// The question is not "did *we* register" — several instances share one
+/// desktop-wide handler, and any Trellis binary can forward a link, because a
+/// link names a **port** and the handler is a one-shot forwarder that exits. It
+/// only needs replacing when it points at something that has gone.
+fn scheme_handler_healthy() -> bool {
+    let Ok(home) = std::env::var("HOME") else { return false };
+    let file = std::path::Path::new(&home)
+        .join(".local/share/applications")
+        .join(format!("{}-url.desktop", crate::URL_SCHEME));
+    let Ok(text) = std::fs::read_to_string(&file) else { return false };
+    text.lines()
+        .find_map(|l| l.strip_prefix("Exec="))
+        .map(|exec| {
+            // `Exec=/path/to/trellis %u` — the path is everything before ` %`.
+            let path = exec.split(" %").next().unwrap_or("").trim();
+            !path.is_empty() && std::path::Path::new(path).exists()
+        })
+        .unwrap_or(false)
+}
+
+/// Register this binary as the handler for `trellis://` links.
+///
+/// Linux only for now: a `.desktop` file plus `xdg-mime`. macOS wants the scheme
+/// in the bundle's `Info.plist` (so it belongs in the packaging step, not at
+/// runtime) and Windows wants registry keys under `HKCU\Software\Classes`.
+/// Both are deliberately left undone rather than half-done — the `http://`
+/// form works on every platform today, which is why that form exists.
+fn register_url_scheme() -> Result<String, String> {
+    if !cfg!(target_os = "linux") {
+        return Err(
+            "only Linux is wired up; use the http://127.0.0.1:<port>/open/... form, which needs \
+             no registration"
+                .into(),
+        );
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // No dependency for this: it is one environment variable, and taking a
+    // crate for it would put it in every build.
+    let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+    let dir = std::path::Path::new(&home).join(".local/share/applications");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let scheme = crate::URL_SCHEME;
+    let file = dir.join(format!("{scheme}-url.desktop"));
+    // `%u` hands the URL through as the first argument, which is exactly what
+    // `follow_link` expects. NoDisplay keeps it out of the app menu: this is a
+    // handler, not a second launcher for Trellis.
+    let desktop = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Trellis link handler\n\
+         Exec={} %u\n\
+         NoDisplay=true\n\
+         Terminal=false\n\
+         MimeType=x-scheme-handler/{scheme};\n",
+        exe.display()
+    );
+    std::fs::write(&file, desktop).map_err(|e| e.to_string())?;
+    // Best-effort: the file alone is enough on a desktop that rescans, and both
+    // of these are absent on minimal systems.
+    let _ = std::process::Command::new("update-desktop-database").arg(&dir).status();
+    let _ = std::process::Command::new("xdg-mime")
+        .args(["default", &format!("{scheme}-url.desktop"), &format!("x-scheme-handler/{scheme}")])
+        .status();
+    Ok(file.display().to_string())
+}
+
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(

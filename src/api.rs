@@ -152,6 +152,16 @@ pub enum ApiRequest {
     // Stamp a master card for every template that lacks a live one.
     TemplateRebuild,
     TemplateDelete(usize),
+    /// `GET /open/card/{cid}` or `/open/node/{id}` — reveal a target in this
+    /// running instance. **Unauthenticated and navigation-only**: it focuses a
+    /// window and answers ok/not-found, never document content, because a link
+    /// has to be clickable from a terminal or a browser and anything that
+    /// returned data would let a web page read notes by walking ids.
+    Open { node: bool, id: u64, doc: Option<String> },
+    /// `GET /api/cards/{cid}/link` — the canonical URL for a card, so an agent
+    /// never builds one by hand. Hand-built identifiers are how the work journal
+    /// grew three spellings of the same day.
+    CardLink(u64),
 }
 
 /// Which card a request asked to size to its content, if any.
@@ -891,7 +901,11 @@ fn handle(
     // token minted for a plugin. A plugin token carries a scope, and the half of
     // it that can be judged without the document — read-only — is enforced right
     // here, before the request is ever queued for the app.
-    let is_health = method == Method::Get && path == "/api/health";
+    // `/open/...` joins health as unauthenticated. It carries no document data
+    // and only moves the window, so a key would buy nothing except making the
+    // links unclickable — which is the entire feature.
+    let is_health = method == Method::Get
+        && (path == "/api/health" || path.starts_with("/open/"));
     let mut scope: Option<crate::plugins::Scope> = None;
     if !is_health {
         let configured = key.lock().map(|k| k.clone()).unwrap_or_default();
@@ -1018,6 +1032,19 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
     let seg: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match (method, seg.as_slice()) {
         (Method::Get, ["api", "health"]) => Ok(ApiRequest::Health),
+        // Deliberately outside /api: this is a link target, not part of the
+        // agent surface, and it is the one route that answers without a key.
+        (Method::Get, ["api", "cards", cid, "link"]) => Ok(ApiRequest::CardLink(pid(cid)?)),
+        (Method::Get, ["open", "card", cid]) => Ok(ApiRequest::Open {
+            node: false,
+            id: pid(cid)?,
+            doc: query_get(query, "doc"),
+        }),
+        (Method::Get, ["open", "node", id]) => Ok(ApiRequest::Open {
+            node: true,
+            id: pid(id)?,
+            doc: query_get(query, "doc"),
+        }),
         (Method::Get, ["api", "tree"]) => Ok(ApiRequest::Tree),
         (Method::Get, ["api", "nodes"]) => Ok(ApiRequest::ListNodes),
         (Method::Post, ["api", "nodes"]) => {
@@ -2460,6 +2487,8 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::TemplateUpdate { .. }
         | ApiRequest::TemplateRebuild
         | ApiRequest::TemplateDelete(_)
+        | ApiRequest::Open { .. }
+        | ApiRequest::CardLink(_)
         | ApiRequest::DailyNote { .. }
         | ApiRequest::DailyConfig
         | ApiRequest::SetDailyRoot(_) => {

@@ -61,6 +61,14 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   full-text searchable. **Right-click → Download** saves an image back out to a
   file (or **All N images…** into a folder) to share or reuse.
 
+**Links** — `trellis://7374/card/1391` opens that card in the instance serving
+that port (`GET /api/cards/{cid}/link` mints one). The port is the address, so it
+works with several instances running; `?doc=Personal.ron` is an optional check,
+worth adding to anything durable because card ids repeat across documents. The
+`http://127.0.0.1:<port>/open/card/<cid>` form needs nothing installed, and
+**File → Restart** brings this same instance back on the same port after an
+upgrade.
+
 **Depth and time** — two axes the canvas can be given, both **off by default**,
 toggled by **Depth** and **Time** beside Dock and Snap. **Depth** makes a basket a
 volume: cards have a real `z`, nearer ones are larger and cover further ones, a
