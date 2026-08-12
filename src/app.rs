@@ -564,7 +564,10 @@ fn kanban_card_ui(
                 .inner_margin(6.0)
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width()); // fill the column
-                    ui.label(egui::RichText::new(&kc.title).strong());
+                    // Same reason as the agenda: a board column is narrow and a
+                    // task can carry its context in its text.
+                    ui.label(egui::RichText::new(elide(&kc.title, 70)).strong())
+                        .on_hover_text(&kc.title);
                     if kc.due.is_some() || !kc.tags.is_empty() {
                         ui.horizontal_wrapped(|ui| {
                             if let Some(due) = &kc.due {
@@ -6552,10 +6555,16 @@ impl TrellisApp {
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new(label).strong().color(color));
                     for t in group {
+                        // A task's text can be long — a checklist line often
+                        // carries its context with it, and a 300-character row
+                        // turns the agenda into a wall. Show the first line's
+                        // worth and keep the whole thing on hover; the card
+                        // itself is where the full text belongs.
+                        let shown = elide(&t.title, 80);
                         let title = if t.done {
-                            egui::RichText::new(&t.title).strikethrough().weak()
+                            egui::RichText::new(&shown).strikethrough().weak()
                         } else {
-                            egui::RichText::new(&t.title)
+                            egui::RichText::new(&shown)
                         };
                         let pcolor = project_color(&self.doc, t.root);
                         let row = ui.horizontal(|ui| {
@@ -6569,8 +6578,11 @@ impl TrellisApp {
                                     .sense(egui::Sense::click()),
                             )
                         });
-                        let label =
+                        let mut label =
                             ui.add(egui::Label::new(title).sense(egui::Sense::click()));
+                        if shown.len() < t.title.len() {
+                            label = label.on_hover_text(&t.title);
+                        }
                         if label.clicked() || row.inner.clicked() {
                             jump = Some((t.node, t.card));
                         }
@@ -7723,6 +7735,19 @@ fn ocr_images(images: &[Vec<u8>]) -> Result<String, String> {
 /// Accepts `12` and `#12`, with surrounding space. Nothing else: `12 notes` is a
 /// search for a title, not an id, and treating it as one would hijack a perfectly
 /// good text query.
+/// Shorten `text` to `max` characters on a word boundary, with an ellipsis.
+///
+/// By characters, never bytes — a task line full of em-dashes and arrows would
+/// panic on a byte slice. Breaks at whitespace so a row never ends mid-word.
+fn elide(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    let cut = head.rfind(char::is_whitespace).unwrap_or(head.len());
+    format!("{}…", head[..cut].trim_end())
+}
+
 /// One row in the Ctrl+O palette: a node, or a card inside one.
 struct SwitcherHit {
     /// The basket to open. For a card hit this is the card's basket.
@@ -7997,6 +8022,24 @@ mod tests {
         assert_eq!(queried_node_id("v2"), None);
         assert_eq!(queried_node_id("Q4 2026"), None);
         assert_eq!(queried_node_id("-3"), None);
+    }
+
+    /// A long task line has to shorten without panicking on a multi-byte char
+    /// and without ending mid-word — agenda rows are 300+ characters now that a
+    /// checklist item can carry its own context.
+    #[test]
+    fn elide_shortens_on_a_word_boundary_and_counts_characters() {
+        assert_eq!(elide("short", 80), "short");
+        assert_eq!(elide("one two three four", 11), "one two…");
+        // Never slices a multi-byte character in half.
+        let emdash = "→ ".repeat(200);
+        let out = elide(&emdash, 40);
+        assert!(out.ends_with('…'));
+        assert!(out.chars().count() <= 41);
+        // Exactly at the limit is left alone.
+        let exact: String = "a".repeat(80);
+        assert_eq!(elide(&exact, 80), exact);
+        assert!(elide(&"a".repeat(81), 80).ends_with('…'));
     }
 
     /// An exact id must outrank every fuzzy hit, or typing "2" in a document

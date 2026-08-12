@@ -6,6 +6,18 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.90.1]
+
+### Fixed
+- **A long task no longer turns the Agenda into a wall of text.** Now that a
+  checklist line can be a task, a task's text often carries its own context —
+  real rows reached 300+ characters and swamped the panel. Agenda and Kanban rows
+  show the first ~80 characters, broken on a word, with the whole thing on hover.
+  The card still holds the full text; only the row is shortened. Truncation
+  counts **characters, not bytes**, so a line full of arrows and em-dashes can't
+  panic on a split character.
+
+
 ## [0.90.0]
 
 Tasks stop being a thing you copy and start being a thing that exists.
