@@ -71,6 +71,12 @@ const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
 const SNAP_MODE_KEY: &str = "snap_mode";
+/// Depth (true Z) and Time (a card with extent in days). Both are **view** modes
+/// and both default off: `z` and the span stay on the card whatever these say, so
+/// turning one off flattens what you see rather than discarding what someone
+/// arranged. A new user meets the canvas they have always had.
+const DEPTH_MODE_KEY: &str = "depth_mode";
+const TIME_MODE_KEY: &str = "time_mode";
 const MINIMAP_KEY: &str = "minimap";
 /// Journal root for daily notes. Absent = the feature is off, which is the
 /// default and the whole point: a dated node must never appear unasked.
@@ -838,6 +844,8 @@ pub struct TrellisApp {
     dock_mode: bool,
     /// When on, a dragged card's edges snap to nearby cards' edges.
     snap_mode: bool,
+    depth_mode: bool,
+    time_mode: bool,
     /// When on, a small overview map in the canvas's bottom-right shows the whole
     /// basket and a reticle of the current view (Settings; on by default).
     minimap_enabled: bool,
@@ -1041,6 +1049,16 @@ impl TrellisApp {
             .and_then(|s| s.get_string(SNAP_MODE_KEY))
             .map(|s| s == "true")
             .unwrap_or(false);
+        let depth_mode = cc
+            .storage
+            .and_then(|s| s.get_string(DEPTH_MODE_KEY))
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let time_mode = cc
+            .storage
+            .and_then(|s| s.get_string(TIME_MODE_KEY))
+            .map(|s| s == "true")
+            .unwrap_or(false);
         let minimap_enabled = cc
             .storage
             .and_then(|s| s.get_string(MINIMAP_KEY))
@@ -1218,6 +1236,8 @@ impl TrellisApp {
             reorder_mode: false,
             dock_mode,
             snap_mode,
+            depth_mode,
+            time_mode,
             card_clipboard: None,
             card_rects: HashMap::new(),
             card_shot: None,
@@ -3122,6 +3142,9 @@ impl TrellisApp {
             | CanvasAction::ClearSelection
             | CanvasAction::ToggleDockMode
             | CanvasAction::ToggleSnapMode
+            | CanvasAction::ToggleDepthMode
+            | CanvasAction::ToggleTimeMode
+            | CanvasAction::RevealElsewhere(..)
             | CanvasAction::SaveAsTemplate(_)
             | CanvasAction::UpdateTemplate(..)
             | CanvasAction::DeleteTemplate(_) => return None,
@@ -3136,6 +3159,7 @@ impl TrellisApp {
 
             CanvasAction::Remove(c) => card(Op::Deleted, *c).titled(title(c)),
             CanvasAction::MoveCard(c, _) => card(Op::Moved, *c).titled(title(c)).field("pos"),
+            CanvasAction::SetZ(c, _) => card(Op::Moved, *c).titled(title(c)).field("z"),
             CanvasAction::RaiseCard(c) => card(Op::Moved, *c).titled(title(c)).field("order"),
             CanvasAction::ResizeCard(c, _) => upd(c, "size"),
             CanvasAction::FitCard(c) => upd(c, "size"),
@@ -3772,6 +3796,18 @@ impl TrellisApp {
                 CanvasAction::ClearSelection => self.card_sel.clear(),
                 CanvasAction::ToggleDockMode => self.dock_mode = !self.dock_mode,
                 CanvasAction::ToggleSnapMode => self.snap_mode = !self.snap_mode,
+                CanvasAction::ToggleDepthMode => self.depth_mode = !self.depth_mode,
+                CanvasAction::ToggleTimeMode => self.time_mode = !self.time_mode,
+                CanvasAction::RevealElsewhere(home, cid) => {
+                    // Go to where the card actually lives and reveal it there —
+                    // the same path the Agenda and a [[#id]] link already use.
+                    self.jump_to_card(ctx, home, cid);
+                }
+                CanvasAction::SetZ(cid, z) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        c.z = z;
+                    }
+                }
                 CanvasAction::GroupSelected => {
                     let ids: Vec<_> = self.card_sel.iter().copied().collect();
                     if self.doc.group_cards(node, &ids, "Group".to_string()).is_some() {
@@ -5743,6 +5779,20 @@ impl TrellisApp {
                     );
                 ui.checkbox(&mut self.snap_mode, "Snap mode (align card edges while dragging)")
                     .on_hover_text("When on, a dragged card's edges snap to nearby cards' edges.");
+                ui.checkbox(&mut self.depth_mode, "Depth — the basket is a volume (true Z)")
+                    .on_hover_text(
+                        "Cards get a real depth instead of a stacking order: near ones are \
+                         larger and cover far ones, and Shift+scroll over a card slides it \
+                         toward or away from you. Off is exactly the flat canvas — a card's \
+                         depth is kept either way, so turning this off never loses an \
+                         arrangement, and with it off the depth is simply the stacking order.",
+                    );
+                ui.checkbox(&mut self.time_mode, "Time — a task is present on every day it spans")
+                    .on_hover_text(
+                        "A card carrying start:: and due:: is shown in every day between them, \
+                         as the same card — one id, one truth, edited in any of them. Off, a \
+                         day shows only the cards that live in it, exactly as now.",
+                    );
                 // Colour emoji come from a font on the machine, not from the
                 // app: say which one, because "still grey" otherwise looks like
                 // a bug rather than a missing font.
@@ -5883,8 +5933,8 @@ impl TrellisApp {
                         "POST   /api/daily  {date?}                (a day's journal node, created on demand; opt-in per instance)",
                         "GET    /api/daily                         (is it on, and which node is the journal root)",
                         "POST   /api/daily/root {node}   /   DELETE /api/daily/root   (turn it on / off)",
-                        "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, size?, fit?, image_base64?, inline_images?, source?}",
-                        "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, size?, items?, source?, …}",
+                        "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, fit?, image_base64?, inline_images?, source?}",
+                        "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, z?, size?, items?, source?, …}",
                         "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
                         "DELETE /api/nodes/{id}/cards/{cid}",
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
@@ -7360,6 +7410,37 @@ impl eframe::App for TrellisApp {
                     };
                     let can_paste = self.card_clipboard.is_some();
                     let node_path = crate::tree::node_path(&self.doc, sel);
+                    // Time mode: if this basket is a journal day, gather the cards
+                    // whose span covers it. Cloned because the canvas borrows the
+                    // document immutably for the node it is drawing, and these
+                    // live in other baskets — one clone per projected card per
+                    // frame, bounded by what is live on a single day.
+                    let projected: Vec<(NodeId, String, crate::model::Card)> = if self.time_mode {
+                        self.doc
+                            .nodes
+                            .get(&sel)
+                            .and_then(|n| crate::model::parse_daily_title(&n.title))
+                            // Through the same parser `due::` goes through, so a
+                            // day node and a due date cannot disagree about what
+                            // a calendar day is — the bug `today_days` exists to
+                            // prevent, one level up.
+                            .and_then(|(y, m, d)| {
+                                crate::model::parse_ymd(&format!("{y:04}-{m:02}-{d:02}"))
+                            })
+                            .map(|day| {
+                                self.doc
+                                    .cards_live_on(day, sel)
+                                    .into_iter()
+                                    .filter_map(|(home, cid)| {
+                                        let c = self.doc.card(home, cid)?.clone();
+                                        Some((home, crate::tree::node_path(&self.doc, home), c))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
                     let node = self.doc.nodes.get(&sel).unwrap();
                     let actions = canvas::ui(
                         ui,
@@ -7370,6 +7451,9 @@ impl eframe::App for TrellisApp {
                         can_paste,
                         self.dock_mode,
                         self.snap_mode,
+                        self.depth_mode,
+                        self.time_mode,
+                        &projected,
                         &mut env,
                         &self.card_sel,
                     );
@@ -7487,6 +7571,8 @@ impl eframe::App for TrellisApp {
         storage.set_string(ZOOM_ENABLED_KEY, self.zoom_enabled.to_string());
         storage.set_string(DOCK_MODE_KEY, self.dock_mode.to_string());
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
+        storage.set_string(DEPTH_MODE_KEY, self.depth_mode.to_string());
+        storage.set_string(TIME_MODE_KEY, self.time_mode.to_string());
         storage.set_string(MINIMAP_KEY, self.minimap_enabled.to_string());
         // Absent rather than "0" when off: a stored root that points at nothing
         // would be indistinguishable from a deleted journal.

@@ -675,6 +675,19 @@ pub struct Card {
     pub id: CardId,
     /// Top-left position in canvas coordinates (independent of pan).
     pub pos: egui::Pos2,
+    /// Depth, in the **same units as `pos`** — positive is toward the viewer.
+    ///
+    /// A basket is a volume, not a plane. With **Depth** off this is the
+    /// stacking order and nothing more, so the coordinate never becomes
+    /// meaningless; with it on, this is a real position and the camera projects
+    /// it. Same units as x/y deliberately: "200 nearer" is then the same size of
+    /// move as "200 right", which is what lets an agent reason about depth with
+    /// the arithmetic it already uses for position.
+    ///
+    /// `serde(default)` = every document written before depth existed loads with
+    /// every card at `0.0`, i.e. coplanar, i.e. exactly what it looks like today.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub z: f32,
     pub size: egui::Vec2,
     pub title: String,
     /// Markdown / code text. Unused by image and checklist cards.
@@ -739,6 +752,12 @@ fn default_font_scale() -> f32 {
     1.0
 }
 
+/// Skip `z` when it is zero, so a flat document's file is byte-identical to what
+/// it was before depth existed — a diff of a 2-D document should not be noise.
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+
 impl Card {
     /// This card's inline `key:: value` properties (parsed from title + body).
     pub fn properties(&self) -> Vec<(String, String)> {
@@ -754,6 +773,7 @@ impl Card {
         Self {
             id,
             pos,
+            z: 0.0,
             // A brand-new card has never been *changed*; the first edit stamps it.
             touched: None,
             source: None,
@@ -2668,6 +2688,7 @@ impl Document {
             body: c.body.clone(),
             color: c.color,
             size: [c.size.x, c.size.y],
+            z: c.z,
             font_scale: c.font_scale,
             inline_images: c.inline_images.clone(),
             kind: c.kind.clone(),
@@ -2689,6 +2710,10 @@ impl Document {
             c.body = exp.body;
             c.color = exp.color;
             c.size = egui::vec2(exp.size[0].max(40.0), exp.size[1].max(30.0));
+            // Depth rides along even when the basket is being viewed flat: a
+            // card that carried depth out must carry it back in, or "export then
+            // import" quietly loses the arrangement.
+            c.z = exp.z;
             c.font_scale = if exp.font_scale > 0.0 { exp.font_scale } else { 1.0 };
             c.inline_images = exp.inline_images;
             c.editing = false;
@@ -3713,6 +3738,62 @@ impl TaskItem {
     }
 }
 
+impl Document {
+    /// Cards that are **live on `day`** (days since the Unix epoch) and live
+    /// somewhere other than `exclude` — the cards a day should show in addition
+    /// to its own.
+    ///
+    /// This is the whole of the time axis: a card is present in a day when that
+    /// day falls inside its `start::`→`due::` span, which is a *derived* fact,
+    /// never an authored one. Nothing is copied and nothing has to be kept in
+    /// sync; the card exists once, and each day is a different point on the axis
+    /// looking at it.
+    ///
+    /// Deduplicated by card, because a checklist with several dated items yields
+    /// one task per item and they all point at the same card.
+    pub fn cards_live_on(&self, day: i64, exclude: NodeId) -> Vec<(NodeId, CardId)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for t in self.tasks() {
+            if t.node == exclude {
+                continue;
+            }
+            // **Containment, not `live_on`.** `live_on` keeps an unfinished
+            // deadline live on every later day, which is right for an agenda —
+            // a missed deadline still applies — and wrong for a slice of time.
+            // Without this a day fills with every overdue task in the document,
+            // which is what the first run of this looked like.
+            let inside = match (t.start_days, t.due_days) {
+                (Some(s), Some(d)) => day >= s && day <= d,
+                (None, Some(d)) => day == d,
+                _ => false,
+            };
+            if !inside || t.done {
+                continue;
+            }
+            // **Only cards that live in a day.** A card's position means
+            // something within its own basket and nothing outside it, so
+            // projecting one from a project basket lands it at coordinates that
+            // are arbitrary here — in practice a pile. A card living in another
+            // *day* shares the journal's coordinate space, and is exactly the
+            // case this exists for: work written on the 11th that is still in
+            // flight on the 12th. Everything else is the Agenda's job.
+            let from_a_day = self
+                .nodes
+                .get(&t.node)
+                .map(|n| parse_daily_title(&n.title).is_some())
+                .unwrap_or(false);
+            if !from_a_day {
+                continue;
+            }
+            if seen.insert((t.node, t.card)) {
+                out.push((t.node, t.card));
+            }
+        }
+        out
+    }
+}
+
 /// A card on the Kanban board — its status column plus the bits the board shows.
 pub struct KanbanCard {
     pub node: NodeId,
@@ -3864,6 +3945,11 @@ pub struct CardExport {
     pub body: String,
     pub color: [u8; 3],
     pub size: [f32; 2],
+    /// Depth. `serde(default)` so a card file or template written before depth
+    /// existed still loads, and one written *with* depth still loads in an older
+    /// build — export must never be lossy in either direction.
+    #[serde(default)]
+    pub z: f32,
     #[serde(default = "default_font_scale")]
     pub font_scale: f32,
     /// Inline images referenced by the body (`![alt](trellis:N)`), embedded so
@@ -3920,7 +4006,7 @@ fn inline_body_with_data_uris(card: &Card) -> String {
     })
 }
 
-fn searchable_body(card: &Card) -> String {
+pub fn searchable_body(card: &Card) -> String {
     match &card.kind {
         CardKind::Text => strip_inline_markers(&card.body),
         CardKind::Code { .. } => card.body.clone(),
@@ -5209,6 +5295,83 @@ mod tests {
     }
 
     #[test]
+    /// The time axis is *containment*, and only between days.
+    ///
+    /// Both halves were found by running it: without containment a day fills
+    /// with every overdue task in the document (`live_on` deliberately keeps a
+    /// missed deadline live forever, which is an agenda rule, not a calendar
+    /// one), and without the day restriction a card is projected at coordinates
+    /// that mean nothing outside its own basket, landing in a pile.
+    #[test]
+    fn a_day_shows_only_spanning_work_from_other_days() {
+        let mut doc = Document::empty();
+        let d11 = doc.add_node(None, "Tuesday 8/11/2026".into());
+        let d12 = doc.add_node(None, "Wednesday 8/12/2026".into());
+        let proj = doc.add_node(None, "Open Items".into());
+        let day = parse_ymd("2026-08-12").unwrap();
+
+        let spanning = doc.add_card(d11, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(d11, spanning).unwrap().body =
+            "start:: 2026-08-11\ndue:: 2026-08-15".into();
+        let overdue = doc.add_card(d11, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(d11, overdue).unwrap().body = "due:: 2026-06-01".into();
+        let elsewhere = doc.add_card(proj, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(proj, elsewhere).unwrap().body =
+            "start:: 2026-08-11\ndue:: 2026-08-15".into();
+
+        let got = doc.cards_live_on(day, d12);
+        assert_eq!(got, vec![(d11, spanning)], "only the spanning card, only from a day");
+
+        // Outside the span it is simply not there.
+        assert!(doc.cards_live_on(parse_ymd("2026-08-20").unwrap(), d12).is_empty());
+        // And a day never projects itself.
+        assert!(doc.cards_live_on(parse_ymd("2026-08-11").unwrap(), d11).is_empty());
+    }
+
+    /// Depth must survive leaving the document and coming back, and a card file
+    /// written before depth existed must still load. Export being lossy in
+    /// either direction is the failure that would make the Depth toggle a trap:
+    /// arrange a basket, export it, import it, and the arrangement is gone.
+    #[test]
+    fn depth_round_trips_through_export_and_old_files_still_load() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Deep".into());
+        let c = doc.add_card(n, egui::pos2(10.0, 20.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().z = 240.0;
+
+        let json = doc.export_card_json(n, c).expect("export");
+        assert!(json.contains("\"z\""), "depth is written out: {json}");
+        let exp = parse_card_export(&json).expect("parse");
+        assert_eq!(exp.z, 240.0);
+
+        let n2 = doc.add_node(None, "Flat".into());
+        let c2 = doc.add_card_from_export(n2, egui::pos2(0.0, 0.0), exp).unwrap();
+        assert_eq!(doc.card(n2, c2).unwrap().z, 240.0, "depth came back");
+
+        // A card file from before depth existed has no `z` at all.
+        let old = json.replace("\"z\": 240.0,", "");
+        let exp_old = parse_card_export(&old).expect("an older card file still parses");
+        assert_eq!(exp_old.z, 0.0, "missing depth reads as the flat plane, not an error");
+    }
+
+    /// A flat document must serialize exactly as it did before depth existed —
+    /// otherwise every 2-D document's file changes the first time it is saved by
+    /// this build, which is noise in a diff and in version history.
+    #[test]
+    fn a_flat_card_writes_no_depth_field() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Flat".into());
+        let c = doc.add_card(n, egui::pos2(1.0, 2.0), CardKind::Text).unwrap();
+        let flat = ron::ser::to_string(doc.card(n, c).unwrap()).unwrap();
+        assert!(!flat.contains("z:"), "no depth field for a card that has none: {flat}");
+        doc.card_mut(n, c).unwrap().z = 5.0;
+        let deep = ron::ser::to_string(doc.card(n, c).unwrap()).unwrap();
+        assert!(deep.contains("z:"), "and it appears once there is depth: {deep}");
+        // ...and reading it back is the same card.
+        let back: Card = ron::from_str(&deep).unwrap();
+        assert_eq!(back.z, 5.0);
+    }
+
     fn card_export_round_trips_inline_images() {
         let mut doc = Document::empty();
         let n = doc.add_node(None, "n".into());

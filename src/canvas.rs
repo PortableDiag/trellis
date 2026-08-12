@@ -130,6 +130,15 @@ fn bevel_title(title: egui::Rect, c: f32) -> Vec<egui::Pos2> {
 pub enum CanvasAction {
     AddCard(CardKind, egui::Pos2),
     MoveCard(CardId, egui::Vec2),
+    /// Slide a card along Z (Shift+scroll over its title bar). The value is the
+    /// new absolute depth, already clamped by the canvas.
+    SetZ(CardId, f32),
+    ToggleDepthMode,
+    ToggleTimeMode,
+    /// Go to a card that is *projected* into this day but lives elsewhere —
+    /// the only interaction a projection offers, because it is a view of a card
+    /// and the card is where you edit it.
+    RevealElsewhere(crate::model::NodeId, CardId),
     ResizeCard(CardId, egui::Vec2),
     /// Resize a card to fit its content (right-click → Fit to content).
     FitCard(CardId),
@@ -245,6 +254,12 @@ pub fn ui(
     can_paste: bool,
     dock_mode: bool,
     snap_mode: bool,
+    depth_mode: bool,
+    time_mode: bool,
+    // `projected`: cards that live in another basket but are live on this day,
+    // with the basket they actually live in. Empty unless Time is on and this
+    // node is a journal day — see `Document::cards_live_on`.
+    projected: &[(crate::model::NodeId, String, Card)],
     env: &mut Env,
     selection: &HashSet<CardId>,
 ) -> Vec<CanvasAction> {
@@ -318,7 +333,10 @@ pub fn ui(
 
     // Wheel over empty canvas pans; Ctrl+wheel (and pinch) zoom instead — egui
     // routes Ctrl+scroll into zoom_delta and out of smooth_scroll_delta.
-    if canvas_resp.hovered() && !minimap_over {
+    // Shift+scroll is the Z gesture in depth mode, so it must not also pan —
+    // otherwise pushing a card away drags the whole basket with it.
+    let depth_scroll = depth_mode && ui.input(|i| i.modifiers.shift_only());
+    if canvas_resp.hovered() && !minimap_over && !depth_scroll {
         view.translation += ui.input(|i| i.smooth_scroll_delta);
         if zoom_enabled {
             let zd = ui.input(|i| i.zoom_delta());
@@ -618,13 +636,125 @@ pub fn ui(
     // Cards are drawn directly at their zoomed screen rects (see card_ui), which
     // keeps text selection/editing working (transformed layers broke it).
     env.card_rects.clear();
-    for card in &node.cards {
-        env.card_rects.insert(card.id, screen_rect(card));
+    // Far cards first. That single ordering buys both halves of depth: egui draws
+    // later shapes on top, so near cards occlude far ones, and it also gives
+    // later widgets interaction priority, so a click lands on the *nearest* card
+    // under the pointer rather than the last one in document order.
+    let mut order: Vec<usize> = (0..node.cards.len()).collect();
+    if depth_mode {
+        order.sort_by(|&a, &b| {
+            node.cards[a]
+                .z
+                .partial_cmp(&node.cards[b].z)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    // Shift+scroll over a card slides it in Z. Resolved here rather than inside
+    // `card_ui` because it has to pick the nearest card under the pointer, which
+    // only this loop knows — and because the pan it replaces lives out here too.
+    // Holding Shift makes the platform report a *horizontal* wheel, so the delta
+    // arrives on x rather than y. Take whichever axis actually carries it, or the
+    // gesture silently does nothing — which is how it first shipped in testing.
+    let z_scroll = if depth_scroll {
+        ui.input(|i| {
+            let d = i.raw_scroll_delta;
+            if d.y.abs() >= d.x.abs() { d.y } else { d.x }
+        })
+    } else {
+        0.0
+    };
+    let pointer = ui.input(|i| i.pointer.hover_pos());
+    if z_scroll != 0.0 {
+        if let Some(pp) = pointer {
+            // Nearest first: reverse of the draw order.
+            if let Some(&i) = order.iter().rev().find(|&&i| {
+                let c = &node.cards[i];
+                let t = depth_transform(to_screen, canvas_rect.center(), c.z, depth_mode);
+                t.mul_rect(world_rect(c)).contains(pp)
+            }) {
+                let c = &node.cards[i];
+                // Scale the step by the card's own depth factor so a push feels
+                // the same size wherever it already is.
+                let step = z_scroll * 0.6;
+                actions.push(CanvasAction::SetZ(c.id, (c.z + step).clamp(Z_MIN, Z_MAX)));
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+    // Projections first, so a day's own cards always sit in front of work merely
+    // passing through it. They are drawn, not built as widgets: a projection is a
+    // *view* of a card, and offering an edit here would be the second place a
+    // task can be changed — which is the exact thing this design exists to avoid.
+    for (home, home_path, card) in projected {
+        let t = depth_transform(to_screen, canvas_rect.center(), card.z, depth_mode);
+        let r = t.mul_rect(world_rect(card));
+        if !canvas_rect.intersects(r) {
+            continue;
+        }
+        let z = t.scaling;
+        let accent = egui::Color32::from_rgb(card.color[0], card.color[1], card.color[2]);
+        let paint = ui.painter_at(canvas_rect);
+        // Dashed-looking double outline and a translucent fill: it must not be
+        // mistakable for a card that lives here.
+        paint.rect_filled(r, 6.0 * z, ui.visuals().panel_fill.gamma_multiply(0.55));
+        paint.rect_stroke(r, 6.0 * z, egui::Stroke::new(1.5 * z, accent.gamma_multiply(0.8)));
+        paint.rect_stroke(r.shrink(3.0 * z), 4.0 * z, egui::Stroke::new(1.0 * z, accent.gamma_multiply(0.35)));
+        let title_h = TITLE_H * z;
+        let title_rect = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), title_h));
+        paint.rect_filled(title_rect, 6.0 * z, accent.gamma_multiply(0.28));
+        paint.text(
+            title_rect.left_center() + egui::vec2(8.0 * z, 0.0),
+            egui::Align2::LEFT_CENTER,
+            &card.title,
+            egui::FontId::proportional(12.0 * z),
+            ui.visuals().strong_text_color(),
+        );
+        // Say where it actually lives. Without this a projection is a mystery
+        // card, and the whole contract is that it is visibly a view of one.
+        paint.text(
+            egui::pos2(r.left() + 8.0 * z, r.bottom() - 6.0 * z),
+            egui::Align2::LEFT_BOTTOM,
+            format!("\u{2197} lives in {home_path}"),
+            egui::FontId::proportional(10.0 * z),
+            ui.visuals().weak_text_color(),
+        );
+        let body: String = crate::model::searchable_body(card).chars().take(400).collect();
+        if !body.is_empty() {
+            let inner = egui::Rect::from_min_max(
+                egui::pos2(r.left() + 8.0 * z, title_rect.bottom() + 4.0 * z),
+                egui::pos2(r.right() - 8.0 * z, r.bottom() - 18.0 * z),
+            );
+            let galley = ui.painter().layout(
+                body,
+                egui::FontId::proportional(11.0 * z),
+                ui.visuals().weak_text_color(),
+                inner.width().max(1.0),
+            );
+            paint.with_clip_rect(inner).galley(inner.min, galley, ui.visuals().weak_text_color());
+        }
+        let resp = ui.interact(
+            r,
+            ui.id().with(("projected", *home, card.id)),
+            egui::Sense::click(),
+        );
+        if resp.clicked() {
+            actions.push(CanvasAction::RevealElsewhere(*home, card.id));
+        }
+        resp.on_hover_text(format!(
+            "{}\n\nLives in {home_path}. This day is inside its start::/due:: span, so it is \
+             here too — the same card, not a copy. Click to go there and edit it.",
+            card.title
+        ));
+    }
+    for &i in &order {
+        let card = &node.cards[i];
+        let t = depth_transform(to_screen, canvas_rect.center(), card.z, depth_mode);
+        env.card_rects.insert(card.id, t.mul_rect(world_rect(card)));
         card_ui(
             ui,
             card,
             node_path,
-            to_screen,
+            t,
             canvas_rect,
             env,
             selection.contains(&card.id),
@@ -761,6 +891,29 @@ pub fn ui(
                 {
                     actions.push(CanvasAction::ToggleSnapMode);
                 }
+                if ui
+                    .selectable_label(time_mode, "Time")
+                    .on_hover_text(
+                        "Time: a task carrying start:: and due:: is shown in every day it \
+                         spans, as the same card — not a copy. Click one to go to where it \
+                         lives and edit it there. Off, a day shows only its own cards.",
+                    )
+                    .clicked()
+                {
+                    actions.push(CanvasAction::ToggleTimeMode);
+                }
+                if ui
+                    .selectable_label(depth_mode, "Depth")
+                    .on_hover_text(
+                        "Depth: the basket is a volume, not a plane. Shift+scroll over a card \
+                         to slide it toward or away from you. Turning this off flattens the \
+                         view — it never discards depth, and a flat basket looks exactly as \
+                         it does now.",
+                    )
+                    .clicked()
+                {
+                    actions.push(CanvasAction::ToggleDepthMode);
+                }
                 if selection.len() >= 2
                     && ui
                         .button(format!("Group {} cards", selection.len()))
@@ -776,12 +929,57 @@ pub fn ui(
     ui.painter().text(
         canvas_rect.left_bottom() + egui::vec2(8.0, -6.0),
         egui::Align2::LEFT_BOTTOM,
-        "double-click: text card · right-click: any card · drag title: move · ctrl+click: select · drag group header: move group · ctrl+scroll: zoom",
+        if depth_mode {
+            "double-click: text card · right-click: any card · drag title: move · ctrl+click: select · ctrl+scroll: zoom · shift+scroll over a card: slide it in Z"
+        } else {
+            "double-click: text card · right-click: any card · drag title: move · ctrl+click: select · drag group header: move group · ctrl+scroll: zoom"
+        },
         egui::FontId::proportional(11.0),
         ui.visuals().weak_text_color(),
     );
 
     actions
+}
+
+/// How far the camera sits from the `z = 0` plane, in world units.
+///
+/// This is the one number that decides how strong the perspective is: the whole
+/// depth range is a fraction of it, so a card at `z = +300` with the camera at
+/// 2000 is 1.18x nearer-looking, not a fisheye. Chosen to read as depth without
+/// making text at the back unreadable — the legibility cost is the known price of
+/// this feature, so the default leans conservative.
+pub const CAMERA_DIST: f32 = 2000.0;
+
+/// Clamp for `z`. Beyond these a card is either through the camera or too small
+/// to read, and both are ways of losing a card that the user cannot easily undo.
+pub const Z_MIN: f32 = -1600.0;
+pub const Z_MAX: f32 = 1200.0;
+
+/// The world→screen transform for one card, given its depth.
+///
+/// A real projection rather than "draw it smaller and fainter": the card's centre
+/// is projected through a pinhole camera at [`CAMERA_DIST`], and its size scales
+/// by the same factor, which is exactly what a billboarded quad does in a 3-D
+/// scene. That is what makes this the first step toward VR rather than a 2.5-D
+/// effect that would have to be thrown away — the desktop is one camera into the
+/// scene, and a headset is another.
+///
+/// Cards stay parallel to the view plane (no rotation) on purpose: an
+/// axis-aligned card is laid out at its *effective* size, so its text is
+/// rasterized for the size it is drawn at instead of being stretched. That is the
+/// mitigation for the one real cost of depth on a monitor.
+fn depth_transform(base: TSTransform, focus: egui::Pos2, z: f32, depth_mode: bool) -> TSTransform {
+    if !depth_mode || z == 0.0 {
+        return base;
+    }
+    // Positive z is toward the viewer, so it shortens the camera distance.
+    let s = (CAMERA_DIST / (CAMERA_DIST - z.clamp(Z_MIN, Z_MAX))).clamp(0.05, 20.0);
+    // Scale the whole mapping about `focus`, the point on screen the camera looks
+    // through: p -> focus + (base*p - focus) * s, which is still a TSTransform.
+    TSTransform {
+        scaling: base.scaling * s,
+        translation: base.translation * s + focus.to_vec2() * (1.0 - s),
+    }
 }
 
 /// Apply a multiplicative zoom `factor` anchored at `screen_pt`, clamped so the

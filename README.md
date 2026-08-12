@@ -61,6 +61,18 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   full-text searchable. **Right-click → Download** saves an image back out to a
   file (or **All N images…** into a folder) to share or reuse.
 
+**Depth and time** — two axes the canvas can be given, both **off by default**,
+toggled by **Depth** and **Time** beside Dock and Snap. **Depth** makes a basket a
+volume: cards have a real `z`, nearer ones are larger and cover further ones, a
+click lands on the nearest, and **Shift+scroll over a card** slides it toward or
+away from you. It is a camera rather than a drawing trick, which is what makes VR
+a second renderer of the same scene later rather than a rewrite. **Time** makes a
+task present on every day it spans: a card carrying `start::` and `due::` shows up
+in each journal day between them — the *same card*, not a copy, marked as a
+projection and naming where it lives. Turning either off changes only what you
+see: `z` and the span stay on the card, so an arrangement is never lost, and with
+Depth off `z` is simply the stacking order.
+
 Cards drag by the title bar, resize from the corner, raise to front on click,
 duplicate, recolor, copy/paste into another basket, and delete. Right-click →
 **Export Card** saves just that card to share — **PNG** or **PDF** (a WYSIWYG

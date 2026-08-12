@@ -197,13 +197,15 @@ for a search hit that matched a **node title** rather than a card.
 POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
-POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, rows?, header?, pos?, size?, color?, font_scale?, fit?, image_base64?, inline_images?, source?}
+POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, color?, font_scale?, fit?, image_base64?, inline_images?, source?}
   → 201 {"id":<new>}   | 404 if node doesn't exist
 ```
 `kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
 `table` (starts as an empty 3×3), `image`, or `sketch` (an empty draw surface). `pos` is `[x,y]` canvas coordinates
 (default `[40,40]`); pass distinct positions to avoid stacking cards on top of
-each other. `size` is `[w,h]`. `color` sets the title-bar accent at creation (see
+each other. `size` is `[w,h]`. **`z`** is depth in the **same units as `pos`** — positive is
+toward the viewer, so `z: 200` is as far *forward* as `pos` `+200` is to the
+right. See [Depth and time](#depth-and-time) before using it. `color` sets the title-bar accent at creation (see
 the accepted formats below). `items` is used only for `checklist`; `lang` only
 for `code`. `rows` fills a **table** card's cells row by row (`[["a","b"],…]`,
 ragged rows padded to the widest) and `header` styles its first row — so a
@@ -227,7 +229,7 @@ PATCH /api/nodes/{id}              {title?, color?, bg?}
         color: tag color; bg: basket background color — both setting only
         (can't clear via API; use the app's Default to reset)
 
-PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, fit?, lang?, pos?, size?, items?, rows?, header?, inline_images?, source?}
+PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, fit?, lang?, pos?, z?, size?, items?, rows?, header?, inline_images?, source?}
   → 200 {<updated card>}   | 404
 ```
 Every field is optional; only those present are changed. `pos`/`size` are
@@ -504,6 +506,50 @@ GET /api/query?tag=todo&key=status&value=open&text=release
     → 200 {"count":N,"hits":[{node,card,node_title,snippet}, …]}
 ```
 All params optional, but at least one of `tag`/`key`/`text` is needed (else empty).
+
+### Depth and time
+
+A basket is a **volume**, and a task can **occupy a range of days**. Both axes are
+**off by default** (canvas buttons *Depth* and *Time*, beside Dock and Snap), and
+both are **view** settings — the data is on the card either way.
+
+**`z` — depth.** Same units as `pos`; positive is toward the viewer. Clamped to
+`[-1600, 1200]`. With Depth **on** a card is projected through a camera: nearer
+cards are larger and cover further ones, and a click lands on the nearest. With
+Depth **off** `z` is simply the stacking order, so it is never meaningless — and
+it is never discarded, so turning the toggle off cannot cost an arrangement.
+
+```sh
+curl -s -X POST -H "$KEY" -H 'Content-Type: application/json' \
+  -d '{"kind":"text","title":"In front","body":"…","pos":[200,160],"z":400}' \
+  $API/nodes/$NID/cards
+curl -s -X PATCH -H "$KEY" -d '{"z":-300}' $API/nodes/$NID/cards/$CID   # push it back
+```
+
+**The reader may have Depth off.** So `z` is for **arrangement**; anything that
+carries *meaning* still belongs in the text, a `#tag` or a `key:: value`. This is
+the same trap as using emoji for status: don't put the message where the reader
+may not be looking.
+
+**The overlap check changes shape too.** The pairwise AABB pass recommended after
+a batch of `fit: true` edits is 2-D: two cards sharing x/y at different `z` are
+*not* colliding, so compare depth as well or it reports collisions that aren't.
+
+**Time — a card is present on every day it spans.** With Time on, a journal day
+also shows cards from *other days* whose `start::`→`due::` span contains it — the
+**same card**, not a copy, drawn as a projection that names where it lives and
+takes you there when clicked. Nothing new to author: it is the `start::` span
+from v0.90.0, read as extent.
+
+Two deliberate limits, both learned by running it against a real document:
+
+- **Containment, not the agenda rule.** `/api/tasks` keeps a missed deadline live
+  on every later day, which is right for a list of work and wrong for a day: it
+  would fill every day with every overdue task in the document.
+- **Only from other days.** A card's position means something inside its own
+  basket and nothing outside it, so only cards living in a *day* are projected —
+  they share the journal's coordinate space. A task in a project basket belongs
+  to the Agenda, which is what `/api/tasks` is for.
 
 ### Tracking work — read this before creating task cards
 

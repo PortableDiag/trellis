@@ -296,6 +296,7 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
                 (patch.color.is_some(), "color"),
                 (patch.lang.is_some(), "lang"),
                 (patch.pos.is_some(), "pos"),
+                (patch.z.is_some(), "z"),
                 (patch.size.is_some(), "size"),
                 (patch.items.is_some(), "items"),
                 (patch.rows.is_some(), "rows"),
@@ -552,6 +553,17 @@ pub struct AddCardInput {
     header: Option<bool>,
     #[serde(default)]
     pos: Option<[f32; 2]>,
+    /// Depth, in the **same units as `pos`** — positive is toward the viewer, so
+    /// a larger `z` is nearer. Same units deliberately: "200 nearer" is then the
+    /// same size of move as "200 right".
+    ///
+    /// A basket is a volume. With the canvas's **Depth** toggle off this is just
+    /// the stacking order, so it is never meaningless — but it also means the
+    /// reader may not see it. **Put arrangement in `z`; put meaning in the text,
+    /// a `#tag` or a `key:: value`**, or you have written something they may
+    /// never look at.
+    #[serde(default)]
+    z: Option<f32>,
     /// Card size (width, height).
     #[serde(default)]
     size: Option<[f32; 2]>,
@@ -621,6 +633,17 @@ pub struct UpdateCardInput {
     /// Absolute top-left position on the basket canvas.
     #[serde(default)]
     pos: Option<[f32; 2]>,
+    /// Depth, in the **same units as `pos`** — positive is toward the viewer, so
+    /// a larger `z` is nearer. Same units deliberately: "200 nearer" is then the
+    /// same size of move as "200 right".
+    ///
+    /// A basket is a volume. With the canvas's **Depth** toggle off this is just
+    /// the stacking order, so it is never meaningless — but it also means the
+    /// reader may not see it. **Put arrangement in `z`; put meaning in the text,
+    /// a `#tag` or a `key:: value`**, or you have written something they may
+    /// never look at.
+    #[serde(default)]
+    z: Option<f32>,
     /// Card size (width, height).
     #[serde(default)]
     size: Option<[f32; 2]>,
@@ -1752,6 +1775,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         if let Some([w, h]) = input.size {
                             c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
                         }
+                        if let Some(z) = input.z {
+                            c.z = z.clamp(crate::canvas::Z_MIN, crate::canvas::Z_MAX);
+                        }
                         if let Some(fs) = input.font_scale {
                             c.font_scale = fs.clamp(0.25, 4.0);
                         }
@@ -1865,6 +1891,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some([x, y]) = patch.pos {
                     c.pos = egui::pos2(x, y);
+                }
+                if let Some(z) = patch.z {
+                    // Clamped to the same range the canvas gesture uses: beyond
+                    // it a card is through the camera or too small to read, and
+                    // both are ways of losing a card the user cannot easily undo.
+                    c.z = z.clamp(crate::canvas::Z_MIN, crate::canvas::Z_MAX);
                 }
                 if let Some([w, h]) = patch.size {
                     c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
@@ -2519,6 +2551,7 @@ pub(crate) fn card_json(c: &Card) -> Value {
         "title": c.title,
         "kind": c.kind.label().to_lowercase(),
         "pos": [c.pos.x, c.pos.y],
+        "z": c.z,
         "size": [c.size.x, c.size.y],
         "color": c.color,
         "group": c.group,

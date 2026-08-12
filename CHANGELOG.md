@@ -6,6 +6,52 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.92.0]
+
+Two axes the canvas never had, both **off by default**, both **view** settings.
+
+### Added
+- **Depth — a basket is a volume (`z`).** Cards get a real depth instead of a
+  stacking order: nearer ones are larger and cover further ones, a click lands on
+  the **nearest**, and **Shift+scroll over a card slides it** toward or away from
+  you. Toggle it with **Depth**, beside Dock and Snap.
+
+  It is a **camera**, not scale-and-dim: each card is projected through a pinhole
+  at a fixed distance, which is what a billboarded quad does in a 3-D scene. That
+  matters because the next step is VR as a **second renderer** of the same scene —
+  a 2.5-D effect would have to be thrown away to get there. Cards stay parallel to
+  the view plane, so each is laid out at its **effective** size and its text is
+  rasterized for the size it is drawn at rather than stretched.
+
+  **Turning Depth off cannot cost you anything.** `z` stays on the card and simply
+  becomes the stacking order, so the coordinate is never meaningless and an
+  arrangement is never discarded. A flat document's file is unchanged — `z` is
+  omitted entirely when it is zero.
+
+- **Time — a task is present on every day it spans.** With **Time** on, a journal
+  day also shows cards from other days whose `start::`→`due::` span contains it:
+  the **same card**, not a copy, drawn as a projection that names where it lives
+  and takes you there when clicked. Nothing new to author — it is the `start::`
+  span from v0.90.0, read as extent.
+
+  This replaces copying a card forward, which made a *second* task with its own
+  `status::` and `due::`, counted twice, with nothing warning you.
+
+  Two limits, both found by running it against a real document rather than
+  reasoning about it: it uses **containment**, not the agenda's rule that a missed
+  deadline stays live forever (which filled a day with every overdue task in the
+  document); and it projects **only cards that live in other days**, because a
+  card's position means something inside its own basket and nothing outside it —
+  projecting from a project basket produced a pile. Work living elsewhere is the
+  Agenda's job.
+
+- **`z` over the API**, on card create, patch and read, in the **same units as
+  `pos`** so "200 nearer" is the same size of move as "200 right". Documented with
+  the trap that matters: the reader may have Depth **off**, so `z` is for
+  arrangement — meaning still belongs in text, a `#tag` or a `key:: value`.
+  Export, import and templates carry it in both directions, and a card file
+  written before depth existed still loads.
+
 ## [0.91.0]
 
 ### Added
