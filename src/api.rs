@@ -53,6 +53,10 @@ pub enum ApiRequest {
     /// Set the journal root (`Some`) or switch daily notes off (`None`) — the
     /// two buttons in Settings, reachable by an agent.
     SetDailyRoot(Option<NodeId>),
+    /// Cards whose `[[#id]]` links point at one card. The basket-level
+    /// `Backlinks` is useless in a journal document, where every card written on
+    /// a day shares one basket.
+    CardBacklinks(u64),
     /// One card from its id alone, without already knowing its basket. Ids are
     /// unique per document, so an id *is* an address — but every other card route
     /// is `/nodes/{node}/cards/{card}`, so an id quoted in a note or read out of
@@ -74,6 +78,13 @@ pub enum ApiRequest {
     MoveCard { node: NodeId, card: u64, mv: MoveCardInput },
     // Set an inline key:: value property on a card (e.g. status for the board).
     SetCardProperty { node: NodeId, card: u64, key: String, value: String },
+    /// Set a property on one checklist ITEM — the line, not the card. Needed
+    /// because a checklist's lines are separate tasks with separate dates.
+    SetItemProperty { node: NodeId, card: u64, item: u64, key: String, value: String },
+    /// Remove a property from one checklist item, or clear its date.
+    ClearItemProperty { node: NodeId, card: u64, item: u64, key: String },
+    /// Tick or untick one checklist item — the done signal, over the API.
+    SetItemDone { node: NodeId, card: u64, item: u64, done: bool },
     /// Remove a `key:: value` line outright. Distinct from setting it empty,
     /// which leaves the property present but unreadable — a card whose `due::`
     /// is blank stays on the agenda under "No date" instead of leaving it.
@@ -187,6 +198,9 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::MoveCard { node, .. }
         | ApiRequest::SetCardProperty { node, .. }
         | ApiRequest::ClearCardProperty { node, .. }
+        | ApiRequest::SetItemProperty { node, .. }
+        | ApiRequest::ClearItemProperty { node, .. }
+        | ApiRequest::SetItemDone { node, .. }
         | ApiRequest::DockCard { node, .. }
         | ApiRequest::DetachCard { node, .. }
         | ApiRequest::SetCardGroup { node, .. }
@@ -469,6 +483,12 @@ pub struct MoveNodeInput {
     index: Option<usize>,
     #[serde(default)]
     to: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoneInput {
+    pub done: bool,
 }
 
 #[derive(Deserialize)]
@@ -987,6 +1007,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "nodes", nid, "cards", cid]) => {
             Ok(ApiRequest::GetCard { node: pid(nid)?, card: pid(cid)? })
         }
+        (Method::Get, ["api", "cards", cid, "backlinks"]) => Ok(ApiRequest::CardBacklinks(pid(cid)?)),
         (Method::Get, ["api", "cards", cid]) => Ok(ApiRequest::LocateCard(pid(cid)?)),
         // POST, not GET: it creates the node when it isn't there yet.
         (Method::Get, ["api", "daily"]) => Ok(ApiRequest::DailyConfig),
@@ -1013,6 +1034,33 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "nodes", nid, "cards", cid, "move"]) => {
             let mv: MoveCardInput = parse(body)?;
             Ok(ApiRequest::MoveCard { node: pid(nid)?, card: pid(cid)?, mv })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "items", iid, "property"]) => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct PropInput {
+                key: String,
+                value: String,
+            }
+            let i: PropInput = parse(body)?;
+            Ok(ApiRequest::SetItemProperty {
+                node: pid(nid)?, card: pid(cid)?, item: pid(iid)?, key: i.key, value: i.value,
+            })
+        }
+        (Method::Delete, ["api", "nodes", nid, "cards", cid, "items", iid, "property"]) => {
+            let key = query_get(query, "key").unwrap_or_default();
+            if key.trim().is_empty() {
+                return Err((400, "property to clear: /property?key=due".into()));
+            }
+            Ok(ApiRequest::ClearItemProperty {
+                node: pid(nid)?, card: pid(cid)?, item: pid(iid)?, key,
+            })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "items", iid, "done"]) => {
+            let i: DoneInput = parse(body)?;
+            Ok(ApiRequest::SetItemDone {
+                node: pid(nid)?, card: pid(cid)?, item: pid(iid)?, done: i.done,
+            })
         }
         (Method::Delete, ["api", "nodes", nid, "cards", cid, "property"]) => {
             let key = query_get(query, "key").unwrap_or_default();
@@ -1269,6 +1317,22 @@ pub fn task_bucket(due_days: Option<i64>, today: i64) -> &'static str {
     }
 }
 
+/// The bucket for a task that may occupy a **span** of days.
+///
+/// A task with `start:: 2026-08-11  due:: 2026-08-15` is genuinely in flight on
+/// the 12th, 13th and 14th — it is not "later", it is *now*, and burying it
+/// under a future date is how a multi-day piece of work disappears until the day
+/// it is already late. Started work therefore reads as **today** until it is
+/// overdue, which is where the "sliding" behaviour comes from: the card never
+/// moves, the window does.
+pub fn task_bucket_spanning(t: &crate::model::TaskItem, today: i64) -> &'static str {
+    match (t.start_days, t.due_days) {
+        (Some(s), Some(d)) if s <= today && today < d => "today",
+        (Some(s), None) if s <= today => "today",
+        _ => task_bucket(t.due_days, today),
+    }
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, (u16, String)> {
     serde_json::from_str(body).map_err(|e| (400, format!("invalid JSON body: {e}")))
 }
@@ -1440,6 +1504,29 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             }
             None => (false, ApiResponse::err(404, "node not found")),
         },
+        ApiRequest::SetItemProperty { node, card, item, key, value } => {
+            let ok = doc.set_item_property(node, card, item, &key, &value);
+            if ok {
+                (true, ApiResponse::ok(json!({ "item": item, "key": key, "value": value })))
+            } else {
+                (false, ApiResponse::err(404, "no such checklist item on that card"))
+            }
+        }
+        ApiRequest::ClearItemProperty { node, card, item, key } => {
+            if doc.item_mut(node, card, item).is_none() {
+                return (false, ApiResponse::err(404, "no such checklist item on that card"));
+            }
+            let cleared = doc.clear_item_property(node, card, item, &key);
+            (cleared, ApiResponse::ok(json!({ "item": item, "key": key, "cleared": cleared })))
+        }
+        ApiRequest::SetItemDone { node, card, item, done } => {
+            let ok = doc.set_item_done(node, card, item, done);
+            if ok {
+                (true, ApiResponse::ok(json!({ "item": item, "done": done })))
+            } else {
+                (false, ApiResponse::err(404, "no such checklist item on that card"))
+            }
+        }
         ApiRequest::ClearCardProperty { node, card, key } => {
             if doc.card(node, card).is_none() {
                 return (false, ApiResponse::err(404, "card not found"));
@@ -1447,6 +1534,23 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let removed = doc.clear_card_property(node, card, &key);
             (removed, ApiResponse::ok(json!({ "cleared": removed, "key": key })))
         }
+        ApiRequest::CardBacklinks(card) => match doc.locate_card(card) {
+            Some(node) => {
+                let hits: Vec<Value> = doc
+                    .backlinks_card(node, card)
+                    .into_iter()
+                    .map(|h| json!({
+                        "node": h.node,
+                        "card": h.card,
+                        "node_title": h.node_title,
+                        "node_path": doc.node_path(h.node),
+                        "snippet": h.snippet,
+                    }))
+                    .collect();
+                (false, ApiResponse::ok(json!({ "card": card, "node": node, "hits": hits })))
+            }
+            None => (false, ApiResponse::err(404, "card not found")),
+        },
         ApiRequest::GetCard { node, card } => match doc.card(node, card) {
             Some(c) => (false, ApiResponse::ok(card_json(c))),
             None => (false, ApiResponse::err(404, "card not found")),
@@ -1592,7 +1696,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         .clone()
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|i| ChecklistItem { done: i.done, text: i.text })
+                        .map(|i| ChecklistItem { id: 0, done: i.done, text: i.text })
                         .collect(),
                 },
                 "table" => {
@@ -1764,9 +1868,26 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some(items) = patch.items {
                     if let CardKind::Checklist { items: it } = &mut c.kind {
+                        // **Carry the existing ids across, by position.** A
+                        // wholesale replace is how most clients edit a checklist,
+                        // and minting fresh ids here would silently destroy the
+                        // identity of every line on every edit — breaking links
+                        // to items and making each task look new to anything
+                        // tracking it. Positional carry-over is right for the
+                        // common cases (edit a line, tick a box, append); a
+                        // client that *reorders* by rewriting the array is
+                        // telling us these are different lines, and gets that.
+                        // Reordering without losing identity is what the
+                        // checklist op surface is for.
+                        let old_ids: Vec<crate::model::ItemId> = it.iter().map(|i| i.id).collect();
                         *it = items
                             .into_iter()
-                            .map(|i| ChecklistItem { done: i.done, text: i.text })
+                            .enumerate()
+                            .map(|(n, i)| ChecklistItem {
+                                id: old_ids.get(n).copied().unwrap_or(0),
+                                done: i.done,
+                                text: i.text,
+                            })
                             .collect();
                     }
                 }
@@ -2182,10 +2303,18 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         "project": t.root,
                         "project_title": t.root_title,
                         "card": t.card,
+                        // Present when the task is one LINE of a checklist —
+                        // the address a client needs to change that line rather
+                        // than the whole card.
+                        "item": t.item,
                         "title": t.title,
                         "due": t.due,
+                        // Present when the task spans days rather than naming a
+                        // single deadline.
+                        "start": t.start,
+                        "live_today": t.live_on(today),
                         "done": t.done,
-                        "bucket": task_bucket(t.due_days, today),
+                        "bucket": task_bucket_spanning(&t, today),
                     })
                 })
                 .collect();
@@ -2404,7 +2533,11 @@ pub(crate) fn card_json(c: &Card) -> Value {
         CardKind::Checklist { items } => {
             v["items"] = json!(items
                 .iter()
-                .map(|i| json!({ "done": i.done, "text": i.text }))
+                // The id is what a caller addresses to change one line —
+                // `…/items/{id}/property`. Without it here, the only way to
+                // learn an item's id is /api/tasks, which lists only the dated
+                // ones, so an undated line would be unreachable.
+                .map(|i| json!({ "id": i.id, "done": i.done, "text": i.text }))
                 .collect::<Vec<_>>());
         }
         CardKind::Table { table } => {
@@ -3373,6 +3506,46 @@ mod tests {
     /// walking every basket, and neither did the operator.
     /// A journal node named for a day that does not exist is worse than an
     /// error, so an impossible date is refused rather than rounded.
+    /// The whole point of a span: work in flight reads as *now*, not as a future
+    /// date that hides it until it is already late.
+    #[test]
+    fn a_started_task_reads_as_today_until_it_is_overdue() {
+        use crate::model::TaskItem;
+        let mk = |start: Option<i64>, due: Option<i64>, done: bool| TaskItem {
+            node: 1, node_title: String::new(), node_path: String::new(),
+            root: 1, root_title: String::new(), card: 1, item: None,
+            title: String::new(),
+            due: String::new(), due_days: due,
+            start: start.map(|_| "s".into()), start_days: start,
+            done,
+        };
+        let today = 100;
+
+        // A plain deadline is unchanged — every task written before spans existed.
+        assert_eq!(task_bucket_spanning(&mk(None, Some(105), false), today), "week");
+        assert_eq!(task_bucket_spanning(&mk(None, Some(100), false), today), "today");
+        assert_eq!(task_bucket_spanning(&mk(None, Some(99), false), today), "overdue");
+
+        // Started, still running: it is happening NOW, not "later".
+        assert_eq!(task_bucket_spanning(&mk(Some(98), Some(105), false), today), "today");
+        // Not started yet: it keeps its future date.
+        assert_eq!(task_bucket_spanning(&mk(Some(102), Some(105), false), today), "week");
+        // Past its end: overdue wins, so a span can't hide a missed deadline.
+        assert_eq!(task_bucket_spanning(&mk(Some(90), Some(95), false), today), "overdue");
+        // Open-ended work that has started is also now. (Defensive: `tasks()`
+        // requires a `due::` to emit anything, so a start-only task cannot reach
+        // the agenda today — if that ever changes, this arm is already correct.)
+        assert_eq!(task_bucket_spanning(&mk(Some(90), None, false), today), "today");
+
+        // live_on is the day-shaped question: is this on me on that day?
+        let span = mk(Some(98), Some(105), false);
+        assert!(!span.live_on(97), "before it starts");
+        assert!(span.live_on(98) && span.live_on(101) && span.live_on(105));
+        assert!(span.live_on(200), "an unfinished deadline keeps applying");
+        let finished = mk(Some(98), Some(105), true);
+        assert!(!finished.live_on(101), "done is never live");
+    }
+
     /// The Agenda's shortcuts write real dates, and a month is a calendar month:
     /// 31 January + 1 month is the end of February, not the 3rd of March.
     #[test]

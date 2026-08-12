@@ -423,6 +423,26 @@ GET /api/export?format=<fmt>
 `format` defaults to `markdown`. `pdf` is a paginated A4 document; `png`/`gif`
 are a single rendered image of the document text. Decode `base64` to get the file.
 
+### Card links — `[[#id]]`
+
+`[[Some Basket]]` and `[[42]]` link to a **basket**, as they always have.
+**`[[#1391]]` links to a card.** The `#` prefix is how card ids are written
+everywhere else (the docs, the Ctrl+O palette), so it reads the way it is spoken.
+
+Card links matter most in a journal-shaped document: every card written on one day
+shares a basket, so `[[Tuesday 8/11/2026]]` names the day, not the thing that
+happened in it. `[[#1391]]` names the thing.
+
+```
+GET /api/cards/{cid}/backlinks
+  → 200 {"card":1391,"node":63,"hits":[{node,card,node_title,node_path,snippet}]}
+  | 404 (card not found)
+```
+
+A link written in a **table cell** counts for backlinks (it always has — cell text
+is scanned), though it is not clickable there; links render as clickable in text
+card bodies.
+
 ### Backlinks
 `[[Node Title]]` (or `[[id]]`, or `[[Target|shown text]]`) written in a card is a
 wiki-link; in the app it renders as a clickable link that navigates to that node.
@@ -529,9 +549,60 @@ record of *what happened* on a given day, that is a journal entry (see
 [Daily notes](#daily-notes)), which is a different thing from a task and should
 not carry `due::`.
 
+### A long task list is ONE card, not many
+
+**A checklist item carrying its own `due::` is its own task.** This is how you keep
+twenty live tasks without adding twenty cards — the unit of work is the *line*, and
+the card is just the container:
+
+```sh
+curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' -d '{
+ "kind":"checklist","title":"HARD 8/15 track","fit":true,
+ "items":[
+  {"done":false,"text":"Model list: remove Claude  start:: 2026-08-11  due:: 2026-08-15"},
+  {"done":false,"text":"Page-gen benchmark  due:: 2026-08-15"},
+  {"done":true, "text":"Default model bumped  due:: 2026-08-12"}
+ ]}' $API/nodes/$NID/cards
+```
+
+Each dated line becomes its own row on the Agenda and the Kanban, with its own
+date and its own done state. **The checkbox is the done signal** — ticking it is
+enough, and `status:: done` on the line says the same thing.
+
+A checklist whose items carry dates is **not** also listed as one task in its own
+right, so a list never double-counts itself. A checklist with no dated items keeps
+behaving exactly as before: the card is the task.
+
+**Every item has a stable `id`**, returned by `GET` on the card and by `/api/tasks`.
+Address the line, not its position:
+
+```sh
+POST   /api/nodes/{id}/cards/{cid}/items/{item}/property {key, value}
+DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due
+POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done}
+```
+
+**Why ids matter:** an item used to be identified by its position, so reordering a
+list silently renamed every task in it. Ids are what let a line be linked to,
+rescheduled, and followed over time. A wholesale `PATCH {"items":[…]}` **carries
+existing ids across by position**, so editing text or ticking a box preserves
+identity — but rewriting the array in a different order tells the API these are
+different lines, and it will treat them that way. Use the item routes above to
+change one line.
+
+### `start::` — a task that spans days
+
+`start:: 2026-08-11  due:: 2026-08-15` means the work is **in flight for those five
+days**, not just due on the last one. A started task reads as **today** on the
+Agenda every day until it is done or overdue — so multi-day work stays visible
+instead of hiding under a future date until it is already late.
+
+`/api/tasks` returns `start` and `live_today` alongside `due` and `bucket`. A task
+with no `start::` behaves exactly as it always has.
+
 **Sub-steps belong inside the task card**, as a checklist, not as separate cards —
 unless a sub-step has a real due date of its own, in which case make it a card and
-link the two with `[[wiki-links]]` so each shows up in the other's backlinks.
+link the two with `[[#id]]` so each shows up in the other's backlinks.
 
 **Before creating a task card, check whether it already exists.**
 `GET /api/query?q=...` or `GET /api/search?q=...` costs one call and is the

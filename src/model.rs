@@ -11,6 +11,9 @@ use std::collections::HashMap;
 
 pub type NodeId = u64;
 pub type CardId = u64;
+/// Identifies one checklist item within the document. Unique like a card id,
+/// so an item can be linked to and tracked on its own.
+pub type ItemId = u64;
 pub type GroupId = u64;
 
 /// Shared accent-color palette used by the card, group and node color menus.
@@ -44,10 +47,30 @@ pub struct CardGroup {
 }
 
 /// One line of a checklist card.
+///
+/// The `id` is what makes a checklist line a *thing* rather than a position.
+/// Without it an item is identified by its index, so reordering the list silently
+/// renames every task in it, a link can't point at one, the change log can't say
+/// which moved, and nothing can follow an item across time. Identity is the
+/// prerequisite for treating items as tasks at all.
+///
+/// `#[serde(default)]` means every checklist saved before this loads with `id: 0`
+/// — the "not assigned yet" value — and [`Document::ensure_item_ids`] fills them
+/// in on load. Old documents are never rewritten by hand.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChecklistItem {
+    #[serde(default)]
+    pub id: ItemId,
     pub done: bool,
     pub text: String,
+}
+
+impl ChecklistItem {
+    /// A new item with no id yet — `ensure_item_ids` assigns one. Used where a
+    /// card is being built before it belongs to a document.
+    pub fn new(text: impl Into<String>) -> Self {
+        ChecklistItem { id: 0, done: false, text: text.into() }
+    }
 }
 
 /// One cell of a Table card: text plus optional background / font colors.
@@ -1433,6 +1456,8 @@ pub struct Document {
     next_node_id: NodeId,
     next_card_id: CardId,
     #[serde(default = "default_next_id")]
+    next_item_id: ItemId,
+    #[serde(default = "default_next_id")]
     next_group_id: GroupId,
 }
 
@@ -1447,6 +1472,7 @@ impl Default for Document {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_item_id: 1,
             next_group_id: 1,
         };
         let root = doc.add_node(None, "Welcome to Trellis".to_string());
@@ -1477,6 +1503,7 @@ impl Document {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_item_id: 1,
             next_group_id: 1,
         }
     }
@@ -1577,6 +1604,55 @@ impl Document {
             }
         }
         self.add_node(Some(parent), title.to_string())
+    }
+
+    /// Mint an item id. Document-wide like card ids, so an item is addressable
+    /// on its own rather than only as "the third line of card 10167".
+    pub fn mint_item_id(&mut self) -> ItemId {
+        let id = self.next_item_id;
+        self.next_item_id += 1;
+        id
+    }
+
+    /// Give every checklist item an id, and keep the counter ahead of them all.
+    ///
+    /// Runs after loading a document: items written before ids existed arrive as
+    /// `0`, and items added by code paths that had no document to hand are also
+    /// `0`. Idempotent, so calling it more than once costs a walk and changes
+    /// nothing. Returns how many it assigned, which is what makes it testable.
+    pub fn ensure_item_ids(&mut self) -> usize {
+        // First pass: never re-use an id that is already out there, including in
+        // a document written by a newer build with a higher counter.
+        let mut highest = 0;
+        for n in self.nodes.values() {
+            for c in &n.cards {
+                if let CardKind::Checklist { items } = &c.kind {
+                    for i in items {
+                        highest = highest.max(i.id);
+                    }
+                }
+            }
+        }
+        if self.next_item_id <= highest {
+            self.next_item_id = highest + 1;
+        }
+        let mut next = self.next_item_id;
+        let mut assigned = 0;
+        for n in self.nodes.values_mut() {
+            for c in &mut n.cards {
+                if let CardKind::Checklist { items } = &mut c.kind {
+                    for i in items {
+                        if i.id == 0 {
+                            i.id = next;
+                            next += 1;
+                            assigned += 1;
+                        }
+                    }
+                }
+            }
+        }
+        self.next_item_id = next;
+        assigned
     }
 
     /// Which basket holds this card? Card ids are unique across the document, so
@@ -2888,6 +2964,66 @@ impl Document {
         true
     }
 
+    /// One checklist item, by id, wherever it sits in the list.
+    ///
+    /// By id and never by index: an index is a position, and positions move when
+    /// the list is edited, which is exactly what item ids exist to stop.
+    pub fn item_mut(&mut self, node: NodeId, card: CardId, item: ItemId)
+        -> Option<&mut ChecklistItem>
+    {
+        match &mut self.card_mut(node, card)?.kind {
+            CardKind::Checklist { items } => items.iter_mut().find(|i| i.id == item),
+            _ => None,
+        }
+    }
+
+    /// Set a `key:: value` property on one checklist item, rewriting it in place
+    /// if it is already there.
+    pub fn set_item_property(
+        &mut self, node: NodeId, card: CardId, item: ItemId, key: &str, value: &str,
+    ) -> bool {
+        let key = key.to_lowercase();
+        let Some(it) = self.item_mut(node, card, item) else { return false };
+        let marker = format!("{key}:: ");
+        if let Some(pos) = it.text.to_lowercase().find(&marker) {
+            let after = &it.text[pos + marker.len()..];
+            let end = after.find(char::is_whitespace).unwrap_or(after.len());
+            let tail = after[end..].to_string();
+            it.text = format!("{}{key}:: {value}{tail}", &it.text[..pos]);
+        } else {
+            if !it.text.ends_with(' ') && !it.text.is_empty() {
+                it.text.push_str("  ");
+            }
+            it.text.push_str(&format!("{key}:: {value}"));
+        }
+        true
+    }
+
+    /// Remove a `key:: value` property from one checklist item.
+    pub fn clear_item_property(
+        &mut self, node: NodeId, card: CardId, item: ItemId, key: &str,
+    ) -> bool {
+        let key = key.to_lowercase();
+        let Some(it) = self.item_mut(node, card, item) else { return false };
+        let marker = format!("{key}:: ");
+        let Some(pos) = it.text.to_lowercase().find(&marker) else { return false };
+        let after = &it.text[pos + marker.len()..];
+        let end = after.find(char::is_whitespace).unwrap_or(after.len());
+        let joined = format!("{}{}", &it.text[..pos], &after[end..]);
+        it.text = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+        true
+    }
+
+    /// Tick or untick one checklist item.
+    pub fn set_item_done(
+        &mut self, node: NodeId, card: CardId, item: ItemId, done: bool,
+    ) -> bool {
+        match self.item_mut(node, card, item) {
+            Some(it) => { it.done = done; true }
+            None => false,
+        }
+    }
+
     /// Remove an inline `key:: value` line entirely.
     ///
     /// Distinct from setting it empty, which leaves `due:: ` behind — a property
@@ -3018,15 +3154,72 @@ impl Document {
 
     /// Resolve a `[[wiki-link]]` target to a node: a numeric id, else the first
     /// node whose title matches case-insensitively.
+    ///
+    /// Card links resolve to their **basket** here, so every existing caller —
+    /// the graph, the old backlinks — keeps working and simply sees the basket a
+    /// linked card lives in. Use [`resolve_link_target`] when you need to know
+    /// that a card specifically was named.
     pub fn resolve_link(&self, target: &str) -> Option<NodeId> {
+        match self.resolve_link_target(target)? {
+            LinkTarget::Node(id) => Some(id),
+            LinkTarget::Card { node, .. } => Some(node),
+        }
+    }
+
+    /// Resolve a `[[wiki-link]]` to whatever it names.
+    ///
+    /// `[[#1391]]` is a **card** — the `#` prefix is how card ids are written in
+    /// the docs and accepted by the Ctrl+O palette, so it reads the way it is
+    /// already spoken. `[[42]]` and `[[Some Basket]]` stay node links, unchanged,
+    /// because that is what every link written before this existed means.
+    pub fn resolve_link_target(&self, target: &str) -> Option<LinkTarget> {
         let t = target.trim();
+        if let Some(digits) = t.strip_prefix('#') {
+            let id: CardId = digits.trim().parse().ok()?;
+            let node = self.locate_card(id)?;
+            return Some(LinkTarget::Card { node, card: id });
+        }
         if let Ok(id) = t.parse::<NodeId>() {
             if self.nodes.contains_key(&id) {
-                return Some(id);
+                return Some(LinkTarget::Node(id));
             }
         }
         let tl = t.to_lowercase();
-        self.nodes.values().find(|n| n.title.to_lowercase() == tl).map(|n| n.id)
+        self.nodes
+            .values()
+            .find(|n| n.title.to_lowercase() == tl)
+            .map(|n| LinkTarget::Node(n.id))
+    }
+
+    /// Cards anywhere whose `[[links]]` point at one specific card.
+    ///
+    /// The counterpart of [`backlinks`], which answers for a whole basket. A
+    /// basket-level answer is useless in a document whose baskets are days: every
+    /// card written on the 11th shares one basket, so "what links here" would
+    /// return the day, not the thing.
+    pub fn backlinks_card(&self, node: NodeId, card: CardId) -> Vec<SearchHit> {
+        let mut hits = Vec::new();
+        for n in self.nodes.values() {
+            for c in &n.cards {
+                if c.id == card && n.id == node {
+                    continue; // a card linking to itself is noise, not a backlink
+                }
+                let hay = format!("{}\n{}", c.title, searchable_body(c));
+                let points_here = extract_wikilinks(&hay).iter().any(|t| {
+                    matches!(self.resolve_link_target(t),
+                             Some(LinkTarget::Card { card: tc, .. }) if tc == card)
+                });
+                if points_here {
+                    hits.push(SearchHit {
+                        node: n.id,
+                        card: Some(c.id),
+                        node_title: n.title.clone(),
+                        snippet: snippet_around(&hay, 0, 0),
+                    });
+                }
+            }
+        }
+        hits
     }
 
     /// The wiki-link graph: the nodes that participate in at least one link
@@ -3136,6 +3329,54 @@ impl Document {
         let mut out = Vec::new();
         for node in self.nodes.values() {
             for card in &node.cards {
+                // A checklist whose ITEMS carry their own dates is a list of
+                // tasks, not one task. Emitting per item is what keeps a long
+                // working list compact on the canvas while still reaching the
+                // agenda — the alternative is a card per line, which in a
+                // journal-shaped document doubles the document every day.
+                if let CardKind::Checklist { items } = &card.kind {
+                    let mut any = false;
+                    for it in items {
+                        let iprops = extract_properties(&it.text);
+                        let Some((_, due)) = iprops.iter().find(|(k, _)| k == "due") else {
+                            continue;
+                        };
+                        any = true;
+                        let root = self.root_of(node.id);
+                        out.push(TaskItem {
+                            node: node.id,
+                            node_title: node.title.clone(),
+                            node_path: self.node_path(node.id),
+                            root,
+                            root_title: self.nodes.get(&root).map(|n| n.title.clone()).unwrap_or_default(),
+                            card: card.id,
+                            item: Some(it.id),
+                            // The checkbox is the done signal, and a `status::`
+                            // on the line can say so too — either counts, so
+                            // ticking the box is never overruled by text.
+                            done: it.done
+                                || iprops.iter().any(|(k, v)| {
+                                    k == "status"
+                                        && matches!(v.to_lowercase().as_str(),
+                                                    "done" | "complete" | "completed" | "closed")
+                                }),
+                            title: strip_properties(&it.text),
+                            due: due.clone(),
+                            due_days: parse_ymd(due),
+                            start: iprops.iter().find(|(k, _)| k == "start").map(|(_, v)| v.clone()),
+                            start_days: iprops
+                                .iter()
+                                .find(|(k, _)| k == "start")
+                                .and_then(|(_, v)| parse_ymd(v)),
+                        });
+                    }
+                    // A checklist whose items carry dates has already spoken for
+                    // itself; falling through would list the card again as a
+                    // duplicate of its own contents.
+                    if any {
+                        continue;
+                    }
+                }
                 let props = card.properties();
                 let Some((_, due)) = props.iter().find(|(k, _)| k == "due") else { continue };
                 let done = props.iter().any(|(k, v)| {
@@ -3156,9 +3397,15 @@ impl Document {
                     root,
                     root_title: self.nodes.get(&root).map(|n| n.title.clone()).unwrap_or_default(),
                     card: card.id,
+                    item: None,
                     title,
                     due: due.clone(),
                     due_days: parse_ymd(due),
+                    start: props.iter().find(|(k, _)| k == "start").map(|(_, v)| v.clone()),
+                    start_days: props
+                        .iter()
+                        .find(|(k, _)| k == "start")
+                        .and_then(|(_, v)| parse_ymd(v)),
                     done,
                 });
             }
@@ -3283,6 +3530,37 @@ pub fn decode_link(s: &str) -> String {
 /// (or with parens) so a property can sit inside other text. Keys are lowercased;
 /// values are trimmed. Order is preserved; a later value for a key wins in
 /// [`Document::card_property`].
+/// The readable part of a checklist line: its text with the `key:: value`
+/// properties taken out.
+///
+/// A task row should read "Fix the CTE", not "Fix the CTE  due:: 2026-08-15
+/// status:: doing" — the properties are how the line is *tracked*, not what it
+/// says. They stay in the underlying text, which is what the user edits.
+pub(crate) fn strip_properties(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(":: ") {
+        // Walk back over the key to the whitespace that starts it.
+        let key_start = rest[..pos]
+            .rfind(char::is_whitespace)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let key = &rest[key_start..pos];
+        if key.is_empty() || !key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            // Not a property — keep the text up to here and carry on past it.
+            out.push_str(&rest[..pos + 3]);
+            rest = &rest[pos + 3..];
+            continue;
+        }
+        out.push_str(&rest[..key_start]);
+        let after = &rest[pos + 3..];
+        let end = after.find(char::is_whitespace).unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub(crate) fn extract_properties(text: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for line in text.lines() {
@@ -3396,12 +3674,43 @@ pub struct TaskItem {
     pub root: NodeId,
     pub root_title: String,
     pub card: CardId,
+    /// Set when the task is one **line of a checklist** rather than a whole
+    /// card. This is what lets a 23-item list be 23 tasks without becoming 23
+    /// cards — the unit of work is the line, and the card is the container.
+    pub item: Option<ItemId>,
     pub title: String,
     /// The raw `due` value as written (e.g. `2026-08-15`).
     pub due: String,
     /// `due` parsed to days since the Unix epoch, or `None` if unparseable.
     pub due_days: Option<i64>,
+    /// `start:: YYYY-MM-DD` — when the task becomes live. A task with a start
+    /// **occupies a range of days** rather than a single deadline, which is what
+    /// makes it appear on every day it is actually in flight instead of only on
+    /// the day it is due. `None` = a plain deadline, as before.
+    pub start: Option<String>,
+    pub start_days: Option<i64>,
     pub done: bool,
+}
+
+impl TaskItem {
+    /// Is this task live on `day` (days since epoch)?
+    ///
+    /// With a `start::` it is live from that day through its due date; without
+    /// one it is live only on its due date. Overdue work counts as live on every
+    /// later day too, because an unfinished deadline does not stop applying just
+    /// because the date passed — that is the difference between a calendar and
+    /// a task list.
+    pub fn live_on(&self, day: i64) -> bool {
+        if self.done {
+            return false;
+        }
+        match (self.start_days, self.due_days) {
+            (Some(s), Some(d)) => day >= s && (day <= d || d < day),
+            (Some(s), None) => day >= s,
+            (None, Some(d)) => day >= d,
+            (None, None) => false,
+        }
+    }
 }
 
 /// A card on the Kanban board — its status column plus the bits the board shows.
@@ -3421,6 +3730,17 @@ pub struct KanbanCard {
     pub due: Option<String>,
     /// `#tags` on the card, in first-seen order.
     pub tags: Vec<String>,
+}
+
+/// What a `[[wiki-link]]` names.
+///
+/// Card links exist because a basket is not always a meaningful destination: in a
+/// journal-shaped document every card written on one day shares a basket, so
+/// linking to the day says nothing about the thing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    Node(NodeId),
+    Card { node: NodeId, card: CardId },
 }
 
 /// The calendar day a journal node stands for, plus the names to write.
@@ -4198,6 +4518,236 @@ mod tests {
         assert!(md_to_html("line one\nline two").contains("<br"));
     }
 
+    /// The point of the whole design: a compact list of many tasks, in ONE card.
+    #[test]
+    fn a_checklist_item_with_a_date_is_its_own_task() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Open Items".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist {
+            items: vec![
+                ChecklistItem::new("Fix the CTE  due:: 2026-08-15"),
+                ChecklistItem::new("Ship the switchover  due:: 2026-08-15  status:: doing"),
+                ChecklistItem::new("no date on this one — not a task"),
+                ChecklistItem { id: 0, done: true, text: "Already done  due:: 2026-08-12".into() },
+            ],
+        }).unwrap();
+        doc.ensure_item_ids();
+
+        let tasks = doc.tasks();
+        assert_eq!(tasks.len(), 3, "one task per dated ITEM, and the undated line is not one");
+        assert!(tasks.iter().all(|t| t.card == c && t.item.is_some()));
+
+        // The row reads as the work, not as the metadata.
+        let cte = tasks.iter().find(|t| t.title.starts_with("Fix the CTE")).unwrap();
+        assert_eq!(cte.title, "Fix the CTE");
+        assert_eq!(cte.due, "2026-08-15");
+        assert!(!cte.done);
+
+        // The checkbox is the done signal.
+        let done = tasks.iter().find(|t| t.due == "2026-08-12").unwrap();
+        assert!(done.done, "a ticked box means done");
+
+        // Every task has a distinct identity, so they can be told apart.
+        let ids: Vec<_> = tasks.iter().map(|t| t.item.unwrap()).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids[0] != ids[1] && ids[1] != ids[2]);
+    }
+
+    /// A checklist that carries dates on its ITEMS must not ALSO be listed as
+    /// one task in its own right — that would double-count every list.
+    #[test]
+    fn a_dated_checklist_is_not_counted_twice() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist {
+            items: vec![ChecklistItem::new("a  due:: 2026-08-15")],
+        }).unwrap();
+        // The card itself also carries a date, the old way.
+        doc.card_mut(n, c).unwrap().title = "Sprint  due:: 2026-08-20".into();
+        doc.ensure_item_ids();
+
+        let tasks = doc.tasks();
+        assert_eq!(tasks.len(), 1, "the items speak for the card");
+        assert_eq!(tasks[0].due, "2026-08-15");
+        assert!(tasks[0].item.is_some());
+    }
+
+    /// A checklist with no dated items keeps behaving exactly as before, so
+    /// every existing checklist in every document is unaffected.
+    #[test]
+    fn an_undated_checklist_still_behaves_the_old_way() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist {
+            items: vec![ChecklistItem::new("one"), ChecklistItem { id: 0, done: true, text: "two".into() }],
+        }).unwrap();
+        // A checklist card's properties are read from its title and items —
+        // never its body, which a checklist doesn't use.
+        doc.card_mut(n, c).unwrap().title = "Sprint  due:: 2026-08-15".into();
+        doc.ensure_item_ids();
+
+        let tasks = doc.tasks();
+        assert_eq!(tasks.len(), 1, "the card is the task, as it always was");
+        assert_eq!(tasks[0].item, None);
+        assert!(!tasks[0].done, "not every box is ticked");
+    }
+
+    #[test]
+    fn strip_properties_leaves_the_readable_half() {
+        assert_eq!(strip_properties("Fix the CTE  due:: 2026-08-15"), "Fix the CTE");
+        assert_eq!(
+            strip_properties("Ship it  due:: 2026-08-15  status:: doing"),
+            "Ship it"
+        );
+        assert_eq!(strip_properties("no properties here"), "no properties here");
+        // Whatever `extract_properties` calls a property, this must remove —
+        // the two have to agree or a row would show text the parser had already
+        // claimed. Both treat any alphanumeric run before ":: " as a key.
+        for probe in ["see:: ", "ratio 3:: 4", "x  due:: 2026-08-15"] {
+            let props = extract_properties(probe);
+            let left = strip_properties(probe);
+            for (k, _) in &props {
+                assert!(
+                    !left.contains(&format!("{k}:: ")),
+                    "{probe:?}: {k} was parsed as a property but left in {left:?}"
+                );
+            }
+        }
+    }
+
+    /// Identity is the whole point: a checklist line has to survive being
+    /// edited, ticked and reordered, or it cannot be a task, a link target, or
+    /// anything that spans time.
+    #[test]
+    fn item_ids_are_assigned_once_and_survive_edits() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        // As a document written before ids existed would load: all zero.
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist {
+            items: vec![ChecklistItem::new("a"), ChecklistItem::new("b"), ChecklistItem::new("c")],
+        }).unwrap();
+
+        assert_eq!(doc.ensure_item_ids(), 3, "three items needed ids");
+        let ids: Vec<ItemId> = match &doc.card(n, c).unwrap().kind {
+            CardKind::Checklist { items } => items.iter().map(|i| i.id).collect(),
+            _ => unreachable!(),
+        };
+        assert!(ids.iter().all(|&i| i != 0), "no item left unassigned");
+        assert_eq!(ids.len(), 3);
+        assert!(ids[0] != ids[1] && ids[1] != ids[2], "ids must be distinct");
+
+        // Idempotent: running again assigns nothing and changes nothing.
+        assert_eq!(doc.ensure_item_ids(), 0);
+        let again: Vec<ItemId> = match &doc.card(n, c).unwrap().kind {
+            CardKind::Checklist { items } => items.iter().map(|i| i.id).collect(),
+            _ => unreachable!(),
+        };
+        assert_eq!(ids, again, "a second pass must not renumber anything");
+
+        // A new item added later gets an id no existing one holds.
+        let fresh = doc.mint_item_id();
+        assert!(!ids.contains(&fresh));
+    }
+
+    /// The counter must never hand out an id that is already in the document —
+    /// including one written by a newer build with a higher counter.
+    #[test]
+    fn ensure_item_ids_never_reuses_an_existing_id() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist {
+            items: vec![
+                ChecklistItem { id: 900, done: false, text: "from the future".into() },
+                ChecklistItem::new("needs one"),
+            ],
+        }).unwrap();
+        doc.ensure_item_ids();
+        let ids: Vec<ItemId> = match &doc.card(n, c).unwrap().kind {
+            CardKind::Checklist { items } => items.iter().map(|i| i.id).collect(),
+            _ => unreachable!(),
+        };
+        assert_eq!(ids[0], 900, "an existing id is left alone");
+        assert!(ids[1] > 900, "the new one must clear everything already used");
+        assert!(doc.mint_item_id() > ids[1]);
+    }
+
+    /// `[[#id]]` names a card; the older forms keep meaning a node, because
+    /// that is what every link written before card links existed meant.
+    #[test]
+    fn a_hash_link_names_a_card_and_the_old_forms_still_name_nodes() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "Project Falcon".into());
+        let b = doc.add_node(None, "Other".into());
+        let c1 = doc.add_card(a, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        assert_eq!(doc.resolve_link_target("Project Falcon"), Some(LinkTarget::Node(a)));
+        assert_eq!(doc.resolve_link_target(&a.to_string()), Some(LinkTarget::Node(a)));
+        assert_eq!(
+            doc.resolve_link_target(&format!("#{c1}")),
+            Some(LinkTarget::Card { node: a, card: c1 })
+        );
+        // Whitespace and a missing card are both handled without panicking.
+        assert_eq!(
+            doc.resolve_link_target(&format!("# {c1} ")),
+            Some(LinkTarget::Card { node: a, card: c1 })
+        );
+        assert_eq!(doc.resolve_link_target("#999999"), None);
+        assert_eq!(doc.resolve_link_target("#notanumber"), None);
+        let _ = b;
+
+        // Old callers see the card's basket, so the graph and node backlinks
+        // keep working rather than silently dropping card links.
+        assert_eq!(doc.resolve_link(&format!("#{c1}")), Some(a));
+    }
+
+    /// Card backlinks must answer for the card, not its day — the whole reason
+    /// they exist in a journal-shaped document.
+    #[test]
+    fn card_backlinks_find_the_card_not_its_basket() {
+        let mut doc = Document::empty();
+        let day = doc.add_node(None, "Tuesday 8/11/2026".into());
+        let target = doc.add_card(day, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let sibling = doc.add_card(day, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let other = doc.add_node(None, "Elsewhere".into());
+        let linker = doc.add_card(other, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(other, linker).unwrap().body = format!("same failure as [[#{target}]]");
+
+        let hits = doc.backlinks_card(day, target);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].card, Some(linker));
+
+        // The sibling shares the basket and is NOT a backlink of the target.
+        assert!(doc.backlinks_card(day, sibling).is_empty());
+
+        // A card linking to itself is noise, not a backlink.
+        doc.card_mut(day, target).unwrap().body = format!("see [[#{target}]]");
+        assert_eq!(doc.backlinks_card(day, target).len(), 1, "still just the real linker");
+    }
+
+    /// A link written in a TABLE CELL already counted for backlinks before this
+    /// change; it must keep counting, and now resolve to a card.
+    #[test]
+    fn a_link_inside_a_table_cell_still_counts() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "A".into());
+        let target = doc.add_card(a, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let t = doc.add_card(a, egui::pos2(0.0, 0.0), CardKind::Table {
+            table: TableData {
+                rows: vec![vec![TableCell {
+                    text: format!("see [[#{target}]]"),
+                    ..Default::default()
+                }]],
+                col_widths: vec![],
+                header: false,
+                chart: None,
+                rules: vec![],
+            },
+        }).unwrap();
+        let hits = doc.backlinks_card(a, target);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].card, Some(t));
+    }
+
     /// Clearing a property must remove the line, not blank it. A `due::` with
     /// nothing after it is still a property: the card stays on the agenda under
     /// "No date" instead of leaving it, which is the opposite of what "clear"
@@ -4401,7 +4951,7 @@ mod tests {
         doc.card_mut(day, c1).unwrap().title = "Journal".into();
         let sub = doc.add_node(Some(day), "Meeting".into());
         doc.add_card(sub, egui::pos2(20.0, 20.0), CardKind::Checklist {
-            items: vec![ChecklistItem { done: true, text: "ship it".into() }],
+            items: vec![ChecklistItem { id: 0, done: true, text: "ship it".into() }],
         })
         .unwrap();
 
@@ -4459,7 +5009,7 @@ mod tests {
         // and wide enough that the text isn't clipped.
         let long = "buy oat milk, eggs, bread, coffee, and a birthday card for mum";
         let mut cl = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Checklist {
-            items: vec![ChecklistItem { done: false, text: long.into() }],
+            items: vec![ChecklistItem { id: 0, done: false, text: long.into() }],
         });
         cl.title = "Groceries".into();
         let sz = cl.fit_size().expect("checklist fits");
@@ -5095,6 +5645,7 @@ mod tests {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_item_id: 1,
             next_group_id: 1,
         };
         let a = doc.add_node(None, "a".into());
@@ -5153,6 +5704,7 @@ mod tests {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_item_id: 1,
             next_group_id: 1,
         };
         let a = doc.add_node(None, "a".into());
@@ -5172,6 +5724,7 @@ mod tests {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_item_id: 1,
             next_group_id: 1,
         };
         let n = doc.add_node(None, "Node & <title>".into());
@@ -5182,7 +5735,7 @@ mod tests {
                 n,
                 egui::pos2(0.0, 0.0),
                 CardKind::Checklist {
-                    items: vec![ChecklistItem { done: true, text: "done item".into() }],
+                    items: vec![ChecklistItem { id: 0, done: true, text: "done item".into() }],
                 },
             )
             .unwrap();
@@ -5201,6 +5754,7 @@ mod tests {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_item_id: 1,
             next_group_id: 1,
         };
         let id = doc.import_as_node("page".into(), "<h1>Hi</h1><p>there</p>", true);
@@ -5370,8 +5924,8 @@ mod tests {
         let cid = doc
             .add_card(n, egui::pos2(5.0, 5.0), CardKind::Checklist {
                 items: vec![
-                    ChecklistItem { done: true, text: "a".into() },
-                    ChecklistItem { done: false, text: "b".into() },
+                    ChecklistItem { id: 0, done: true, text: "a".into() },
+                    ChecklistItem { id: 0, done: false, text: "b".into() },
                 ],
             })
             .unwrap();
@@ -5411,6 +5965,7 @@ mod tests {
             roots: Vec::new(),
             next_node_id: 1,
             next_card_id: 1,
+            next_item_id: 1,
             next_group_id: 1,
         };
         let n = doc.add_node(None, "Groceries".into());
@@ -5439,9 +5994,9 @@ mod tests {
         let mut doc = Document::empty();
         let n = doc.add_node(None, "n".into());
         let items = vec![
-            ChecklistItem { done: false, text: "a".into() },
-            ChecklistItem { done: false, text: "b".into() },
-            ChecklistItem { done: false, text: "c".into() },
+            ChecklistItem { id: 0, done: false, text: "a".into() },
+            ChecklistItem { id: 0, done: false, text: "b".into() },
+            ChecklistItem { id: 0, done: false, text: "c".into() },
         ];
         let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist { items }).unwrap();
         // Move "c" (idx 2) to the front (before idx 0).
@@ -5485,6 +6040,7 @@ mod tests {
         let wide = doc
             .add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist {
                 items: vec![ChecklistItem {
+                    id: 0,
                     done: false,
                     text: "a genuinely long checklist item that needs a wide card".into(),
                 }],

@@ -6,6 +6,55 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.90.0]
+
+Tasks stop being a thing you copy and start being a thing that exists.
+
+### Added
+- **A checklist item with its own `due::` is its own task.** Twenty live tasks now
+  cost **one card**, not twenty — each dated line gets its own row on the Agenda
+  and Kanban, with its own date and its own checkbox as the done signal.
+
+  This is the shape a working list already had; it just wasn't connected to
+  anything. A 23-row list was one task at best, so five real deadlines could sit
+  in a card with nothing tracking them. A checklist whose items carry dates is no
+  longer listed as a task in its own right (no double-counting), and a checklist
+  with no dated items behaves exactly as it always did.
+
+- **Checklist items have stable ids.** An item used to be identified by its
+  *position*, so reordering a list silently renamed every task in it, nothing
+  could link to a line, and the change log couldn't say which one moved. Identity
+  is the prerequisite for a task that survives being edited — and for one that
+  spans time at all.
+
+  Documents written before this load unchanged and are backfilled on open. A
+  wholesale `PATCH {"items":[…]}` **carries existing ids across by position**, so
+  the common edits (change text, tick a box, append) preserve identity.
+
+  New: `POST/DELETE …/cards/{cid}/items/{item}/property` and
+  `POST …/items/{item}/done` to change one line rather than the whole card.
+
+- **`start::` — tasks that span days.** `start:: 2026-08-11  due:: 2026-08-15` is
+  work *in flight for five days*, not work due on the last one. A started task
+  reads as **today** on the Agenda every day until it's done or overdue, so
+  multi-day work stays visible instead of hiding under a future date until it is
+  already late. The card never moves; the window does. `/api/tasks` gains `start`
+  and `live_today`.
+
+- **Card links — `[[#1391]]`.** Wiki-links could only ever name a *basket*. In a
+  journal-shaped document every card written on one day shares a basket, so
+  `[[Tuesday 8/11/2026]]` names the day rather than the thing that happened in it,
+  and the workaround was writing "card 9895" as prose. `[[#id]]` names the card,
+  and following one lands **on** it — recentred and flashing — not merely in its
+  basket. `[[Basket]]` and `[[42]]` are unchanged.
+
+  New: **`GET /api/cards/{cid}/backlinks`** — what refers to this card. The
+  basket-level answer is useless when the basket is a day.
+
+  A link in a **table cell** already counted for backlinks and still does; it
+  renders clickable in text card bodies.
+
+
 ## [0.89.0]
 
 ### Added

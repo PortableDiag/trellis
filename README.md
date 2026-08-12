@@ -286,6 +286,22 @@ and the setting belongs to that instance, so a work document can keep a journal
 while a personal one never grows one. Agents get the same thing at
 `POST /api/daily`.
 
+**A long task list is one card.** A **checklist item** carrying its own
+`due:: 2026-08-15` is its own task — so twenty live tasks cost one card, not
+twenty, and each line gets its own row on the Agenda and Kanban with its own date
+and its own checkbox. A checklist with no dated items behaves exactly as before.
+
+**`start::` makes a task span days.** `start:: 2026-08-11  due:: 2026-08-15` is
+work *in flight for five days*, not work due on the last one — it reads as **today**
+every day until it's done, instead of hiding under a future date until it's already
+late. The card never moves; the window does.
+
+**Link to a card, not just a basket.** `[[#1391]]` points at a card;
+`[[Some Basket]]` and `[[42]]` still point at baskets. In a journal every card
+written on one day shares a basket, so linking to the day says nothing about the
+thing — `[[#1391]]` says it. Right-click a card → Copy → Card id, or find one with
+Ctrl+O.
+
 **Reschedule from the Agenda.** Right-click any task row for *Today / Tomorrow /
 In 3 days / Next week / Next month / Clear date* — the dates are shown, so you
 pick a day rather than compute one. Moving a task used to mean opening the card

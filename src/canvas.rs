@@ -423,7 +423,7 @@ pub fn ui(
         if ui.button("Checklist").clicked() {
             actions.push(CanvasAction::AddCard(
                 CardKind::Checklist {
-                    items: vec![ChecklistItem { done: false, text: String::new() }],
+                    items: vec![ChecklistItem::new("")],
                 },
                 cp,
             ));
@@ -3256,8 +3256,8 @@ mod tests {
         assert_eq!(copyable_text(&card).as_deref(), Some("hello **world**"));
 
         let items = vec![
-            ChecklistItem { done: true, text: "done item".into() },
-            ChecklistItem { done: false, text: "todo item".into() },
+            ChecklistItem { id: 0, done: true, text: "done item".into() },
+            ChecklistItem { id: 0, done: false, text: "todo item".into() },
         ];
         let cl = Card::new(2, egui::pos2(0.0, 0.0), CardKind::Checklist { items });
         assert_eq!(

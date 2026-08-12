@@ -2058,6 +2058,13 @@ impl TrellisApp {
             // `fit` in the request is applied by `process` from an estimate.
             // Note the target before the request is consumed, then re-measure
             // below with the real fonts — we're on the UI thread here.
+            // An API-created checklist arrives with `id: 0` items (the API
+            // thread has no counter). Backfill after the command applies, so an
+            // item is never visible to anything without an identity.
+            let needs_item_ids = matches!(
+                cmd.req,
+                api::ApiRequest::AddCard { .. } | api::ApiRequest::UpdateCard { .. }
+            );
             let fit_target = api::fit_request(&cmd.req);
             // Same reason as `fit_request`: the request is consumed below, and
             // reading the document *now* catches the pre-change state — a
@@ -2092,6 +2099,9 @@ impl TrellisApp {
             }
             let change = api::change_of(&cmd.req, &self.doc);
             let (changed, resp) = api::process(&mut self.doc, cmd.req);
+            if needs_item_ids && changed {
+                self.doc.ensure_item_ids();
+            }
             if let Some((node, card)) = fit_target {
                 // On create the id only exists now, in the response.
                 let card = card.or_else(|| {
@@ -3596,9 +3606,13 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::ChecklistAdd(cid) => {
+                    // Mint before borrowing the card: an item without an id is a
+                    // position, not a task, and everything downstream depends on
+                    // it having one from the moment it exists.
+                    let id = self.doc.mint_item_id();
                     if let Some(c) = self.doc.card_mut(node, cid) {
                         if let CardKind::Checklist { items } = &mut c.kind {
-                            items.push(ChecklistItem { done: false, text: String::new() });
+                            items.push(ChecklistItem { id, done: false, text: String::new() });
                         }
                     }
                 }
@@ -5845,6 +5859,10 @@ impl TrellisApp {
                         "GET    /api/nodes/{id}/cards",
                         "GET    /api/nodes/{id}/cards/{cid}        (one card, without the whole basket)",
                         "GET    /api/cards/{cid}                   (find a card from its id alone → {node, node_path, card})",
+                        "GET    /api/cards/{cid}/backlinks         (cards whose [[#id]] links point at this card)",
+                        "POST   /api/nodes/{id}/cards/{cid}/items/{item}/property {key, value}   (one checklist LINE)",
+                        "DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due",
+                        "POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done}   (tick a line)",
                         "POST   /api/daily  {date?}                (a day's journal node, created on demand; opt-in per instance)",
                         "GET    /api/daily                         (is it on, and which node is the journal root)",
                         "POST   /api/daily/root {node}   /   DELETE /api/daily/root   (turn it on / off)",
@@ -6433,7 +6451,7 @@ impl TrellisApp {
         let mut jump: Option<(NodeId, CardId)> = None;
         // (node, card, new due) — `None` clears the date. Applied after the
         // panel closes, since the panel borrows the document to draw itself.
-        let mut reschedule: Option<(NodeId, CardId, Option<String>)> = None;
+        let mut reschedule: Option<(NodeId, CardId, Option<crate::model::ItemId>, Option<String>)> = None;
         egui::SidePanel::right("agenda").resizable(true).default_width(320.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Agenda");
@@ -6521,7 +6539,7 @@ impl TrellisApp {
                 ] {
                     let group: Vec<&crate::model::TaskItem> = tasks
                         .iter()
-                        .filter(|t| crate::api::task_bucket(t.due_days, today) == key)
+                        .filter(|t| crate::api::task_bucket_spanning(t, today) == key)
                         .collect();
                     if group.is_empty() {
                         continue;
@@ -6574,7 +6592,7 @@ impl TrellisApp {
                             ] {
                                 let when = crate::api::date_from_today(days, months);
                                 if ui.button(format!("{text}  ({when})")).clicked() {
-                                    reschedule = Some((t.node, t.card, Some(when)));
+                                    reschedule = Some((t.node, t.card, t.item, Some(when)));
                                     ui.close_menu();
                                 }
                             }
@@ -6587,7 +6605,7 @@ impl TrellisApp {
                                 )
                                 .clicked()
                             {
-                                reschedule = Some((t.node, t.card, None));
+                                reschedule = Some((t.node, t.card, t.item, None));
                                 ui.close_menu();
                             }
                             if ui.button("Open the card").clicked() {
@@ -6626,10 +6644,14 @@ impl TrellisApp {
                 }
             });
         });
-        if let Some((node, card, due)) = reschedule {
-            let changed = match &due {
-                Some(d) => self.doc.set_card_property(node, card, "due", d),
-                None => self.doc.clear_card_property(node, card, "due"),
+        if let Some((node, card, item, due)) = reschedule {
+            // A checklist line carries its own date, so the edit has to land on
+            // the line — writing to the card would move every task in the list.
+            let changed = match (item, &due) {
+                (Some(i), Some(d)) => self.doc.set_item_property(node, card, i, "due", d),
+                (Some(i), None) => self.doc.clear_item_property(node, card, i, "due"),
+                (None, Some(d)) => self.doc.set_card_property(node, card, "due", d),
+                (None, None) => self.doc.clear_card_property(node, card, "due"),
             };
             if changed {
                 // note_card stamps `touched` and marks the document dirty; doing
@@ -7006,11 +7028,24 @@ impl TrellisApp {
 
     /// Navigate a clicked `[[wiki-link]]` (its URL-encoded target) to the node
     /// it names, or report that no such node exists.
-    fn follow_wikilink(&mut self, encoded: &str) {
+    fn follow_wikilink(&mut self, ctx: &egui::Context, encoded: &str) {
         let target = crate::model::decode_link(encoded);
-        match self.doc.resolve_link(&target) {
-            Some(id) => self.jump_to_node(id),
-            None => self.status = format!("No node named \"{target}\" to link to"),
+        match self.doc.resolve_link_target(&target) {
+            Some(crate::model::LinkTarget::Node(id)) => self.jump_to_node(id),
+            // A card link lands *on the card* — recentre and flash — not merely
+            // in its basket. In a journal-shaped document the basket is a day
+            // holding twenty other cards, so "opened the right basket" is not
+            // an answer.
+            Some(crate::model::LinkTarget::Card { node, card }) => {
+                self.jump_to_card(ctx, node, card)
+            }
+            None => {
+                self.status = if target.starts_with('#') {
+                    format!("No card {target} in this document")
+                } else {
+                    format!("No node named \"{target}\" to link to")
+                }
+            }
         }
     }
 
@@ -7404,7 +7439,7 @@ impl eframe::App for TrellisApp {
             if let Some(t) = url.strip_prefix("trellis:") {
                 let target = t.to_string();
                 ctx.output_mut(|o| o.open_url = None);
-                self.follow_wikilink(&target);
+                self.follow_wikilink(ctx, &target);
             }
         }
     }
@@ -7894,7 +7929,13 @@ fn read_document(path: &std::path::Path) -> Result<Document, String> {
     } else {
         String::from_utf8(bytes).map_err(|e| e.to_string())?
     };
-    ron::from_str::<Document>(&text).map_err(|e| e.to_string())
+    let mut doc = ron::from_str::<Document>(&text).map_err(|e| e.to_string())?;
+    // Every checklist written before items had ids arrives with `id: 0`. Assign
+    // them here, once, so the rest of the app can assume an item *is* something
+    // rather than a position. Idempotent, and it leaves the file alone until the
+    // document is next saved for its own reasons.
+    doc.ensure_item_ids();
+    Ok(doc)
 }
 
 /// The Settings status line describing where the API is listening.
