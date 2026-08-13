@@ -391,6 +391,16 @@ POST /api/nodes/{id}/cards/{cid}/table  [{op, …}, {op, …}]   several, applie
 | `autofit_cols` | `col`? | size columns to their content — every column, or just `col` |
 | `set_header` | `header` | set the header-row flag (bool) |
 
+Since v0.102.0 the arguments in that table are **required**, and an unknown
+field is a 400 naming it — the same rule as every other endpoint since v0.86.0,
+which this one had been missed by. Omitting an argument used to substitute a
+default silently: `set_cell` with no `text` wrote an empty string over the cell
+and answered 200, no `row`/`col` wrote over `0,0`, and `remove_row` with no `at`
+deleted the first row. `autofit_cols`'s `col` is the one optional (absent = every
+column), and an absent or null `color` still means *clear it*. In a batch the
+whole list is checked before anything is applied, so a malformed op leaves the
+table untouched rather than half-edited.
+
 Columns are **110px** until something changes them, and cell text does not wrap —
 so a table built from `rows` clips anything longer than that. **`autofit_cols`
 after filling a table** and the columns size themselves to their longest cell

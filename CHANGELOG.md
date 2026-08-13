@@ -6,6 +6,31 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.102.0]
+
+### Fixed
+- **Table ops are strict, like every other endpoint.** Reported by an agent
+  working through the API: unknown *ops* were a 400, but an unknown *field* on a
+  valid op passed silently — so `set_cell` with a misspelt `text` wrote an empty
+  string over the cell and returned **200**. The v0.86.0 rule (*an unknown field
+  is a 400 naming it*) was applied to every input struct except this one, and
+  the docs have been claiming it ever since.
+
+  Looking at it found the larger half: **every** argument was
+  `unwrap_or(default)`, so an omission silently edited something else. No `text`
+  blanked a cell. No `row`/`col` wrote over `0,0` — usually the header. No `at`
+  made `remove_row` **delete the first row**. None of those defaults were ever
+  documented; API.md has always listed these fields as the op's arguments. They
+  are required now, and the 400 names the op and the field.
+
+  A batch is validated **in full before anything is applied**, so a malformed op
+  leaves the table untouched instead of half-edited. `autofit_cols`'s `col` stays
+  optional (absent = every column) and an absent or null `color` still clears.
+  `SketchOpInput` had the same gap and is closed with it.
+
+  Minor bump, not a patch: a caller relying on an undocumented default will now
+  get a 400 — which is the point.
+
 ## [0.101.1]
 
 ### Fixed

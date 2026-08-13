@@ -745,8 +745,15 @@ struct AddImageInput {
 }
 
 /// One fine-grained table edit. `op` selects the operation; the other fields
-/// carry its arguments (unused ones are ignored).
+/// carry its arguments (ones the op does not use are ignored).
+///
+/// **Strict, like every other API input since v0.86.0.** This struct was the one
+/// that was missed, and the hole was reported from use: the *op* name was
+/// checked but its *fields* were not, so `set_cell` with a misspelt `text`
+/// parsed, defaulted to the empty string, wrote a blank cell and answered 200.
+/// A silent success that destroys data is worse than the typo it came from.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TableOpInput {
     /// Conditional-formatting rules for `set_rules`. Replaces the whole list, so
     /// sending `[]` clears the formatting.
@@ -796,6 +803,44 @@ impl TableOpBody {
 }
 
 impl TableOpInput {
+    /// The arguments this op needs, or a 400 saying which one is missing.
+    ///
+    /// Every argument used to be `unwrap_or(default)`, which turned an omission
+    /// into a silent edit of something else: `set_cell` with no `text` blanked a
+    /// cell, with no `row`/`col` wrote over `0,0` — usually a header — and
+    /// `remove_row` with no `at` deleted the first row. None of those defaults
+    /// were ever documented; API.md has always listed these fields as the op's
+    /// arguments. `autofit_cols` is the sole documented optional (`col?` = every
+    /// column), and a `color` that is absent or null is the documented way to
+    /// clear one.
+    fn validate(&self) -> Result<(), String> {
+        let need = |ok: bool, field: &str| {
+            if ok { Ok(()) } else { Err(format!("table op `{}` needs `{field}`", self.op)) }
+        };
+        match self.op.as_str() {
+            "set_cell" => {
+                need(self.row.is_some(), "row")?;
+                need(self.col.is_some(), "col")?;
+                need(self.text.is_some(), "text")
+            }
+            "set_bg" | "set_fg" => {
+                need(self.row.is_some(), "row")?;
+                need(self.col.is_some(), "col")
+            }
+            "insert_row" | "remove_row" | "insert_col" | "remove_col" => {
+                need(self.at.is_some(), "at")
+            }
+            "set_col_width" => {
+                need(self.col.is_some(), "col")?;
+                need(self.width.is_some(), "width")
+            }
+            "set_header" => need(self.header.is_some(), "header"),
+            "set_rules" => need(self.rules.is_some(), "rules"),
+            "autofit_cols" => Ok(()),
+            other => Err(format!("unknown table op: {other}")),
+        }
+    }
+
     /// The sub-operation's name, for the change log's `table.<op>` field.
     pub fn name(&self) -> &str {
         &self.op
@@ -804,6 +849,7 @@ impl TableOpInput {
 
 /// One edit to a Sketch card. `op` is `add_stroke` | `undo` | `clear`.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SketchOpInput {
     op: String,
     /// Stroke color for `add_stroke` (array/hex/name); defaults to black.
@@ -2218,6 +2264,21 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             if ops.is_empty() {
                 return (false, ApiResponse::err(400, "no table ops given"));
             }
+            // Check the whole batch before touching the card. A malformed op is
+            // knowable without applying anything, so it must not be discovered
+            // half way through — that would leave the earlier edits in place and
+            // the table in a state nobody asked for.
+            for (i, op) in ops.iter().enumerate() {
+                if let Err(e) = op.validate() {
+                    return (
+                        false,
+                        ApiResponse::err(
+                            400,
+                            &format!("table op {}/{}: {e} (nothing was applied)", i + 1, ops.len()),
+                        ),
+                    );
+                }
+            }
             // Applied in order, stopping at the first failure and saying which
             // one — a batch that half-applies and reports plain success is
             // exactly the failure this batching was added to prevent.
@@ -3106,6 +3167,68 @@ mod tests {
         assert_eq!(table.rows[0][0].text, "hi");
         assert!(table.header);
         assert_eq!(table.rows[0][0].bg, Some([239, 68, 68]));
+    }
+
+    /// Reported from use: the *op* was checked but its *fields* were not, so a
+    /// misspelt argument parsed, defaulted, and destroyed the cell it claimed to
+    /// set — returning 200. Both halves are pinned here: an unknown field is
+    /// refused by name, and a missing one is refused by name.
+    #[test]
+    fn a_table_op_refuses_a_typo_instead_of_writing_a_blank_cell() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "B".into());
+        let c = doc
+            .add_card(n, emath::pos2(0.0, 0.0), CardKind::Table { table: crate::model::TableData::empty(3, 3) })
+            .unwrap();
+        let path = format!("/api/nodes/{n}/cards/{c}/table");
+        // Put something there, so a silent blanking would be visible.
+        let req = route(&Method::Post, &path, "", r#"{"op":"set_cell","row":1,"col":1,"text":"keep"}"#).unwrap();
+        assert_eq!(process(&mut doc, req).1.status, 200);
+
+        let cell = |doc: &Document| {
+            let CardKind::Table { table } = &doc.card(n, c).unwrap().kind else { panic!() };
+            table.rows[1][1].text.clone()
+        };
+        assert_eq!(cell(&doc), "keep");
+
+        // `value` is not a field — the 400 must name it.
+        let bad = r#"{"op":"set_cell","row":1,"col":1,"value":"oops"}"#;
+        match route(&Method::Post, &path, "", bad) {
+            Err((status, msg)) => {
+                assert_eq!(status, 400);
+                assert!(msg.contains("value"), "the error did not name the field: {msg}");
+            }
+            Ok(req) => {
+                let (_, resp) = process(&mut doc, req);
+                assert_eq!(resp.status, 400, "an unknown field was accepted: {}", resp.body);
+            }
+        }
+        assert_eq!(cell(&doc), "keep", "the cell was written anyway");
+
+        // Right field names, one missing: still refused, and named.
+        let req = route(&Method::Post, &path, "", r#"{"op":"set_cell","row":1,"col":1}"#).unwrap();
+        let (changed, resp) = process(&mut doc, req);
+        assert_eq!(resp.status, 400, "a set_cell with no text was accepted");
+        assert!(resp.body.contains("text"), "{}", resp.body);
+        assert!(!changed);
+        assert_eq!(cell(&doc), "keep", "the cell was blanked");
+
+        // The same for the destructive ones: no `at` used to mean row 0.
+        let req = route(&Method::Post, &path, "", r#"{"op":"remove_row"}"#).unwrap();
+        let (_, resp) = process(&mut doc, req);
+        assert_eq!(resp.status, 400, "remove_row with no index deleted a row");
+        assert!(resp.body.contains("at"), "{}", resp.body);
+
+        // A bad op in a batch stops the whole batch before anything is applied.
+        let batch = r#"[{"op":"set_cell","row":0,"col":0,"text":"first"},
+                        {"op":"set_cell","row":0,"col":1}]"#;
+        let req = route(&Method::Post, &path, "", batch).unwrap();
+        let (changed, resp) = process(&mut doc, req);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("nothing was applied"), "{}", resp.body);
+        assert!(!changed);
+        let CardKind::Table { table } = &doc.card(n, c).unwrap().kind else { panic!() };
+        assert_eq!(table.rows[0][0].text, "", "the first op of a rejected batch landed");
     }
 
     /// A single op object must keep working exactly as before — every existing
