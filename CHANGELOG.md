@@ -6,6 +6,29 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.100.0]
+
+### Added
+- **Fix overlapping cards** — right-click a basket, or
+  `POST /api/nodes/{id}/overlaps`; `GET` the same path asks *which* cards cover
+  each other without changing anything.
+
+  This closes the longest-standing known hazard. **`fit: true` sizes a card to
+  its content — width as well as height** — so a card grown by an edit can end
+  up sitting on its neighbour with nothing to say so, and the only repair was
+  Autosort, which throws the whole arrangement away. That made it useless on
+  exactly the baskets that matter: the ones someone arranged on purpose.
+
+  **It keeps the layout.** Every card's `x` is preserved, so columns survive;
+  cards move *down* only far enough to clear, in the order they already sat in;
+  a basket with nothing overlapping is not touched. Cards that travel together —
+  a group, a dock stack — are treated as one block, so the check does not cry
+  wolf on docking and the repair cannot pull a stack apart.
+
+  Measured against the real personal document: **312 baskets, 177 overlapping
+  pairs across 53 of them.** The two worst went to zero with every column
+  byte-identical, and running it again moved nothing.
+
 ## [0.99.2]
 
 ### Fixed

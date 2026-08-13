@@ -436,6 +436,23 @@ Arrange a node's cards into a tidy, non-overlapping grid (the same as the app's
 POST /api/nodes/{id}/autosort  → 200 {"sorted":<id>}   | 404 (no node / no cards)
 ```
 
+### Overlapping cards
+`fit: true` sizes a card to its content — **width as well as height** — so a card
+grown by an edit can end up covering its neighbour, with nothing to say so. This
+is the check to run after a batch of edits, and the repair.
+```
+GET  /api/nodes/{id}/overlaps  → 200 {"node":<id>,"overlaps":[{"a":<cid>,"b":<cid>}, …]}
+POST /api/nodes/{id}/overlaps  → 200 {"node":<id>,"moved":<n>}
+```
+The repair **keeps the layout**: every card's `x` is preserved, so columns
+survive, and cards move down only far enough to stop overlapping, in the order
+they already sat in. A basket with no overlaps is not touched (`moved: 0`).
+
+This is not [autosort](#autosort), which throws the arrangement away and lays a
+grid — the wrong tool for a basket someone arranged on purpose. Cards that travel
+together (a group, a dock stack) are treated as one block and never reported
+against each other.
+
 ### Export
 Export the **whole document** in a portable format.
 ```

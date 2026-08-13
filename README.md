@@ -21,6 +21,9 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 - Expand / collapse; right-click → **Expand all** / **Collapse all** to open or
   fold a whole branch at once for working with big node sets, or the **⊟** / **⊞**
   buttons in the tree header to fold or open the **whole tree** in one click
+- Right-click a basket → **Fix overlapping cards**: pushes covered cards down
+  until nothing is hidden, keeping the arrangement (every card's left edge stays
+  put) — unlike Autosort, which replaces a layout with a grid
 - Per-node color tags and a per-node **basket background color** (right-click →
   **Basket color**; the black grid stays the default)
 - Right-click → **Copy** a node's **id** (for the agent API, `/api/nodes/{id}`)

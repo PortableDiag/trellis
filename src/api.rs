@@ -116,6 +116,9 @@ pub enum ApiRequest {
     GetImage { node: NodeId, card: u64, index: usize },
     // Arrange a node's cards into a tidy non-overlapping grid.
     Autosort(NodeId),
+    // Which cards in a basket cover each other, and the repair for it.
+    Overlaps(NodeId),
+    ResolveOverlaps(NodeId),
     // Whole-document export.
     Export(String),
     Search(String),
@@ -202,7 +205,9 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::Backlinks(id)
         | ApiRequest::ListCards(id)
         | ApiRequest::ListGroups(id)
-        | ApiRequest::Autosort(id) => Some(*id),
+        | ApiRequest::Autosort(id)
+        | ApiRequest::Overlaps(id)
+        | ApiRequest::ResolveOverlaps(id) => Some(*id),
         ApiRequest::GetCard { node, .. }
         | ApiRequest::AddCard { node, .. }
         | ApiRequest::UpdateCard { node, .. }
@@ -1227,6 +1232,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::DeleteGroup { node: pid(nid)?, group: pid(gid)? })
         }
         (Method::Post, ["api", "nodes", id, "autosort"]) => Ok(ApiRequest::Autosort(pid(id)?)),
+        (Method::Get, ["api", "nodes", id, "overlaps"]) => Ok(ApiRequest::Overlaps(pid(id)?)),
+        (Method::Post, ["api", "nodes", id, "overlaps"]) => {
+            Ok(ApiRequest::ResolveOverlaps(pid(id)?))
+        }
         (Method::Get, ["api", "export"]) => {
             Ok(ApiRequest::Export(query_get(query, "format").unwrap_or_else(|| "markdown".into())))
         }
@@ -2334,6 +2343,24 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 None => (false, ApiResponse::err(404, "card/image not found or not an image card")),
             }
         }
+        ApiRequest::Overlaps(node) => {
+            if !doc.nodes.contains_key(&node) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            let pairs: Vec<Value> = doc
+                .overlapping_cards(node)
+                .into_iter()
+                .map(|(a, b)| json!({ "a": a, "b": b }))
+                .collect();
+            (false, ApiResponse::ok(json!({ "node": node, "overlaps": pairs })))
+        }
+        ApiRequest::ResolveOverlaps(node) => {
+            if !doc.nodes.contains_key(&node) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            let moved = doc.resolve_overlaps(node);
+            (moved > 0, ApiResponse::ok(json!({ "node": node, "moved": moved })))
+        }
         ApiRequest::Autosort(node) => {
             if doc.autosort(node) {
                 (true, ApiResponse::ok(json!({ "sorted": node })))
@@ -2963,6 +2990,11 @@ mod tests {
             (ApiRequest::DeleteCard { node: 3, card: 1 }, Some(3)),
             (ApiRequest::SetCardProperty { node: 4, card: 1, key: "k".into(), value: "v".into() }, Some(4)),
             (ApiRequest::Autosort(5), Some(5)),
+            (ApiRequest::Overlaps(5), Some(5)),
+            (ApiRequest::ResolveOverlaps(5), Some(5)),
+            // Whole-document, so a confined token is refused rather than
+            // silently allowed to fold someone else's tree.
+            (ApiRequest::SetAllExpanded { expanded: true }, None),
             (ApiRequest::CreateNode { parent: Some(2), title: "x".into() }, Some(2)),
             // A root-level create belongs to no subtree, so it must not resolve.
             (ApiRequest::CreateNode { parent: None, title: "x".into() }, None),

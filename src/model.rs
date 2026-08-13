@@ -2286,6 +2286,153 @@ impl Document {
         }
     }
 
+    /// The pairs of cards in a basket whose rectangles overlap, as
+    /// `(a, b)` with `a` before `b` in card order.
+    ///
+    /// Cards that travel together — a dock stack, a group — are *expected* to
+    /// sit on top of each other, so they are never reported against each other.
+    pub fn overlapping_cards(&self, node: NodeId) -> Vec<(CardId, CardId)> {
+        let Some(n) = self.nodes.get(&node) else { return Vec::new() };
+        let cluster = self.card_clusters(node);
+        let mut out = Vec::new();
+        for (i, a) in n.cards.iter().enumerate() {
+            for b in n.cards.iter().skip(i + 1) {
+                if cluster.get(&a.id) == cluster.get(&b.id) {
+                    continue;
+                }
+                if rects_overlap(a.pos, a.size, b.pos, b.size) {
+                    out.push((a.id, b.id));
+                }
+            }
+        }
+        out
+    }
+
+    /// Which cards move together: a group, or a card and everything docked to
+    /// it. Returns a cluster key per card id.
+    fn card_clusters(&self, node: NodeId) -> std::collections::HashMap<CardId, CardId> {
+        let mut key: std::collections::HashMap<CardId, CardId> = std::collections::HashMap::new();
+        let Some(n) = self.nodes.get(&node) else { return key };
+        for c in &n.cards {
+            key.insert(c.id, c.id);
+        }
+        // Resolve to the lowest id in each connected set, iterating until stable
+        // — a dock chain and a group can link three cards in any order.
+        loop {
+            let mut changed = false;
+            let mut link = |key: &mut std::collections::HashMap<CardId, CardId>, a: CardId, b: CardId| {
+                let (ka, kb) = (key[&a], key[&b]);
+                if ka != kb {
+                    let lo = ka.min(kb);
+                    for v in key.values_mut() {
+                        if *v == ka || *v == kb {
+                            *v = lo;
+                        }
+                    }
+                    changed = true;
+                }
+            };
+            for c in &n.cards {
+                if let Some(p) = c.docked_to {
+                    if key.contains_key(&p) {
+                        link(&mut key, c.id, p);
+                    }
+                }
+            }
+            for (i, a) in n.cards.iter().enumerate() {
+                if let Some(g) = a.group {
+                    for b in n.cards.iter().skip(i + 1) {
+                        if b.group == Some(g) {
+                            link(&mut key, a.id, b.id);
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        key
+    }
+
+    /// Push overlapping cards **down** until nothing in the basket covers
+    /// anything else, and return how many cards moved.
+    ///
+    /// This is the counterpart to [`Document::autosort`], not a variant of it.
+    /// Autosort throws a layout away and lays a grid; this keeps the layout —
+    /// every `x` is preserved, so columns survive, and cards move only far
+    /// enough to stop overlapping, in the order they already sat in. A basket
+    /// that does not overlap is not touched at all.
+    ///
+    /// It exists because **`fit: true` changes a card's width as well as its
+    /// height**, so a card grown to fit its content can silently end up over its
+    /// neighbour — with nothing to warn you. Deliberate layouts (a roadmap, a
+    /// board) could not be repaired with autosort without destroying them.
+    pub fn resolve_overlaps(&mut self, node: NodeId) -> usize {
+        const GAP: f32 = 12.0;
+        let cluster = self.card_clusters(node);
+        let Some(n) = self.nodes.get_mut(&node) else { return 0 };
+        // One box per cluster, in reading order: top edge, then left edge.
+        let mut boxes: Vec<(CardId, egui::Pos2, egui::Vec2)> = Vec::new();
+        for c in n.cards.iter() {
+            let k = cluster[&c.id];
+            match boxes.iter_mut().find(|(bk, ..)| *bk == k) {
+                Some((_, pos, size)) => {
+                    let max = egui::pos2(
+                        (pos.x + size.x).max(c.pos.x + c.size.x),
+                        (pos.y + size.y).max(c.pos.y + c.size.y),
+                    );
+                    pos.x = pos.x.min(c.pos.x);
+                    pos.y = pos.y.min(c.pos.y);
+                    *size = max - *pos;
+                }
+                None => boxes.push((k, c.pos, c.size)),
+            }
+        }
+        boxes.sort_by(|a, b| {
+            a.1.y.partial_cmp(&b.1.y).unwrap_or(std::cmp::Ordering::Equal).then(
+                a.1.x.partial_cmp(&b.1.x).unwrap_or(std::cmp::Ordering::Equal),
+            )
+        });
+        let mut placed: Vec<(egui::Pos2, egui::Vec2)> = Vec::new();
+        let mut shift: std::collections::HashMap<CardId, f32> = std::collections::HashMap::new();
+        for (k, pos, size) in boxes {
+            let mut pos = pos;
+            // Repeat: dropping below one card can land on the next one down.
+            loop {
+                let hit = placed
+                    .iter()
+                    .filter(|(p, s)| rects_overlap(pos, size, *p, *s))
+                    .map(|(p, s)| p.y + s.y)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                if hit == f32::NEG_INFINITY {
+                    break;
+                }
+                pos.y = hit + GAP;
+            }
+            placed.push((pos, size));
+            shift.insert(k, pos.y);
+        }
+        let mut moved = 0;
+        // Re-derive each cluster's original top so the delta is applied to every
+        // member, keeping the shape of a group or a dock stack intact.
+        let mut top: std::collections::HashMap<CardId, f32> = std::collections::HashMap::new();
+        for c in n.cards.iter() {
+            let k = cluster[&c.id];
+            let e = top.entry(k).or_insert(f32::INFINITY);
+            *e = e.min(c.pos.y);
+        }
+        for c in n.cards.iter_mut() {
+            let k = cluster[&c.id];
+            let delta = shift[&k] - top[&k];
+            if delta.abs() > 0.01 {
+                c.pos.y += delta;
+                moved += 1;
+            }
+        }
+        moved
+    }
+
     /// Lay every card in a node out in a tidy, non-overlapping grid. Cards are
     /// clustered by group so a group stays contiguous; docking is cleared (a
     /// grid means nothing stacks). Returns false if the node is empty/missing.
@@ -4233,6 +4380,16 @@ fn snippet_around(text: &str, pos: usize, len: usize) -> String {
     let _ = chars;
     let trimmed = slice.replace('\n', " ");
     format!("…{}…", trimmed.trim())
+}
+
+/// Do two card rectangles cover any of the same canvas? Touching edges don't
+/// count — a card placed exactly against another is a layout, not a collision.
+fn rects_overlap(ap: egui::Pos2, asz: egui::Vec2, bp: egui::Pos2, bsz: egui::Vec2) -> bool {
+    const EPS: f32 = 0.5;
+    ap.x + asz.x - EPS > bp.x
+        && bp.x + bsz.x - EPS > ap.x
+        && ap.y + asz.y - EPS > bp.y
+        && bp.y + bsz.y - EPS > ap.y
 }
 
 fn md_to_html(md: &str) -> String {
@@ -6563,6 +6720,61 @@ mod tests {
         let out = html_blocks_to_md("<h2>Title</h2>");
         assert!(out.contains("Title"));
         assert!(!out.contains("<h2>"), "{out:?}");
+    }
+
+    /// The repair has to keep the layout, or it is just autosort with extra
+    /// steps: every `x` survives, cards only ever move down, and a basket that
+    /// does not overlap is not touched at all.
+    #[test]
+    fn resolve_overlaps_pushes_down_and_keeps_every_column() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let a = doc.add_card(n, egui::pos2(40.0, 40.0), CardKind::Text).unwrap();
+        let b = doc.add_card(n, egui::pos2(40.0, 60.0), CardKind::Text).unwrap();
+        let far = doc.add_card(n, egui::pos2(900.0, 40.0), CardKind::Text).unwrap();
+        for (id, size) in [(a, [200.0, 100.0]), (b, [200.0, 100.0]), (far, [200.0, 100.0])] {
+            doc.card_mut(n, id).unwrap().size = egui::vec2(size[0], size[1]);
+        }
+        assert_eq!(doc.overlapping_cards(n), vec![(a, b)], "a and b cover each other");
+
+        let moved = doc.resolve_overlaps(n);
+        assert_eq!(moved, 1, "only the card in the way moves");
+        assert!(doc.overlapping_cards(n).is_empty(), "still overlapping");
+        // The column is the layout: x is never touched, and nothing moves up.
+        assert_eq!(doc.card(n, a).unwrap().pos, egui::pos2(40.0, 40.0), "the first card held still");
+        assert_eq!(doc.card(n, b).unwrap().pos.x, 40.0, "b left its column");
+        assert!(doc.card(n, b).unwrap().pos.y >= 140.0, "b did not clear a");
+        assert_eq!(doc.card(n, far).unwrap().pos, egui::pos2(900.0, 40.0), "an innocent card moved");
+
+        // Idempotent: a tidy basket is left exactly as it is.
+        assert_eq!(doc.resolve_overlaps(n), 0);
+    }
+
+    /// Cards that travel together are *meant* to sit on each other. Reporting a
+    /// dock stack as an overlap would make the check cry wolf on every basket
+    /// that uses docking, and "repairing" it would tear the stack apart.
+    #[test]
+    fn a_dock_stack_is_one_block_not_an_overlap() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let host = doc.add_card(n, egui::pos2(40.0, 40.0), CardKind::Text).unwrap();
+        let stuck = doc.add_card(n, egui::pos2(50.0, 50.0), CardKind::Text).unwrap();
+        for id in [host, stuck] {
+            doc.card_mut(n, id).unwrap().size = egui::vec2(200.0, 100.0);
+        }
+        doc.dock_card(n, stuck, host);
+        assert!(doc.overlapping_cards(n).is_empty(), "the stack reported itself");
+        assert_eq!(doc.resolve_overlaps(n), 0, "the stack was pulled apart");
+
+        // A third card landing on the stack is a real overlap, and the stack
+        // keeps its shape when the intruder is pushed clear.
+        let other = doc.add_card(n, egui::pos2(60.0, 60.0), CardKind::Text).unwrap();
+        doc.card_mut(n, other).unwrap().size = egui::vec2(200.0, 100.0);
+        assert!(!doc.overlapping_cards(n).is_empty());
+        doc.resolve_overlaps(n);
+        assert!(doc.overlapping_cards(n).is_empty());
+        let (h, s) = (doc.card(n, host).unwrap().pos, doc.card(n, stuck).unwrap().pos);
+        assert_eq!(s - h, egui::vec2(10.0, 10.0), "the stack lost its shape");
     }
 
     /// Collapse-all is recursive, which is the whole decision: it must reach

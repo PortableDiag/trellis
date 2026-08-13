@@ -5093,6 +5093,28 @@ impl TrellisApp {
                         ui.close_menu();
                     }
                     if ui
+                        .add_enabled(self.selected.is_some(), egui::Button::new("Fix overlapping cards"))
+                        .on_hover_text(
+                            "Push overlapping cards down until nothing is covered, keeping the \
+                             layout — every card's left edge stays put. Use this instead of \
+                             Autosort on a basket you arranged yourself.",
+                        )
+                        .clicked()
+                    {
+                        if let Some(sel) = self.selected {
+                            self.push_undo(sel);
+                            let moved = self.doc.resolve_overlaps(sel);
+                            if moved > 0 {
+                                self.mark_dirty();
+                                self.status = format!("Moved {moved} card(s) clear");
+                            } else {
+                                self.undo.pop(); // nothing changed; drop the snapshot
+                                self.status = "Nothing overlaps in this basket".to_string();
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
                         .add_enabled(self.selected.is_some(), egui::Button::new("Snip to card…"))
                         .on_hover_text("Capture a screen region into an image card in this basket")
                         .clicked()
@@ -6318,6 +6340,8 @@ impl TrellisApp {
                         "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}    (GET / DELETE …/images/{idx})",
                         "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",
                         "POST   /api/nodes/{id}/autosort",
+                        "GET    /api/nodes/{id}/overlaps           (which cards cover each other)",
+                        "POST   /api/nodes/{id}/overlaps           (push them clear, keeping x)",
                         "GET    /api/search?q=...                  (hits carry node + card)",
                         "GET    /api/tags[?name=<tag>]             (all tags / cards with a tag)",
                         "GET    /api/properties[?key=<k>&value=<v>]   (keys / matching cards)",
