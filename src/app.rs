@@ -82,6 +82,21 @@ const SNAP_MODE_KEY: &str = "snap_mode";
 /// there fails silently, and a link that does nothing is indistinguishable from
 /// the feature not existing.
 const URL_SCHEME_REGISTERED_KEY: &str = "url_scheme_registered";
+/// Panel state the user expects to survive a restart.
+///
+/// Whether a panel is open is a *setting*, not a transient: the Agenda is easy to
+/// forget exists when it closes itself every launch, and re-ticking "Show
+/// completed" every time is the kind of small friction that makes a view feel
+/// unreliable.
+const AGENDA_OPEN_KEY: &str = "agenda_open";
+const AGENDA_DONE_KEY: &str = "agenda_show_done";
+const AGENDA_PLACE_KEY: &str = "agenda_placement";
+const KANBAN_OPEN_KEY: &str = "kanban_open";
+const KANBAN_DONE_KEY: &str = "kanban_show_done";
+const KANBAN_PLACE_KEY: &str = "kanban_placement";
+const TAGS_OPEN_KEY: &str = "tags_open";
+const FIND_OPEN_KEY: &str = "find_open";
+const BACKLINKS_OPEN_KEY: &str = "backlinks_open";
 const DEPTH_MODE_KEY: &str = "depth_mode";
 const TIME_MODE_KEY: &str = "time_mode";
 const MINIMAP_KEY: &str = "minimap";
@@ -742,6 +757,10 @@ pub struct TrellisApp {
     selected: Option<NodeId>,
     /// Per-node canvas view (pan + zoom), so each basket remembers its position.
     views: HashMap<NodeId, TSTransform>,
+    /// Camera orbit per basket, in screen pixels (Alt+drag). Per basket for the
+    /// same reason the pan/zoom is: an angle you chose to read one arrangement
+    /// should not follow you into another.
+    eyes: HashMap<NodeId, egui::Vec2>,
     md_cache: CommonMarkCache,
     tex_cache: TextureCache,
     renaming: Option<(NodeId, String)>,
@@ -827,6 +846,7 @@ pub struct TrellisApp {
     /// Agenda panel: open tasks (`due::` dates) grouped by when they're due.
     agenda_open: bool,
     agenda_show_done: bool,
+    agenda_placement: Placement,
     /// Agenda filter: show only tasks under this project (top-level node).
     /// `None` = every project. Persisted, since it's a working context you'd
     /// rather not reset on every launch.
@@ -838,6 +858,7 @@ pub struct TrellisApp {
     backlinks_open: bool,
     /// Kanban board window: cards grouped by `status::`, drag between columns.
     kanban_open: bool,
+    kanban_placement: Placement,
     /// Kanban: show the `done` column (it piles up; hide it to focus on active work).
     kanban_show_done: bool,
     /// Link-graph window state (force-directed layout, rebuilt when opened).
@@ -1201,6 +1222,7 @@ impl TrellisApp {
             doc,
             selected,
             views: HashMap::new(),
+            eyes: HashMap::new(),
             md_cache: CommonMarkCache::default(),
             tex_cache: TextureCache::default(),
             renaming: None,
@@ -1239,15 +1261,36 @@ impl TrellisApp {
             focus_window: false,
             highlight_card: None,
             highlight_until: 0.0,
-            tags_open: false,
+            tags_open: cc
+                .storage
+                .and_then(|s| s.get_string(TAGS_OPEN_KEY))
+                .map(|s| s == "true")
+                .unwrap_or(false),
             tag_selected: None,
-            find_open: false,
+            find_open: cc
+                .storage
+                .and_then(|s| s.get_string(FIND_OPEN_KEY))
+                .map(|s| s == "true")
+                .unwrap_or(false),
             find_tag: None,
             find_key: None,
             find_value: String::new(),
             find_text: String::new(),
-            agenda_open: false,
-            agenda_show_done: false,
+            agenda_open: cc
+                .storage
+                .and_then(|s| s.get_string(AGENDA_OPEN_KEY))
+                .map(|s| s == "true")
+                .unwrap_or(false),
+            agenda_show_done: cc
+                .storage
+                .and_then(|s| s.get_string(AGENDA_DONE_KEY))
+                .map(|s| s == "true")
+                .unwrap_or(false),
+            agenda_placement: cc
+                .storage
+                .and_then(|s| s.get_string(AGENDA_PLACE_KEY))
+                .map(|s| Placement::from_str(&s))
+                .unwrap_or(Placement::Docked),
             agenda_project: cc
                 .storage
                 .and_then(|st| st.get_string(AGENDA_PROJECT_KEY))
@@ -1256,9 +1299,26 @@ impl TrellisApp {
                 .storage
                 .and_then(|st| st.get_string(KANBAN_PROJECT_KEY))
                 .and_then(|v| v.parse().ok()),
-            backlinks_open: false,
-            kanban_open: false,
-            kanban_show_done: true,
+            backlinks_open: cc
+                .storage
+                .and_then(|s| s.get_string(BACKLINKS_OPEN_KEY))
+                .map(|s| s == "true")
+                .unwrap_or(false),
+            kanban_open: cc
+                .storage
+                .and_then(|s| s.get_string(KANBAN_OPEN_KEY))
+                .map(|s| s == "true")
+                .unwrap_or(false),
+            kanban_show_done: cc
+                .storage
+                .and_then(|s| s.get_string(KANBAN_DONE_KEY))
+                .map(|s| s == "true")
+                .unwrap_or(true),
+            kanban_placement: cc
+                .storage
+                .and_then(|s| s.get_string(KANBAN_PLACE_KEY))
+                .map(|s| Placement::from_str(&s))
+                .unwrap_or(Placement::Docked),
             graph_open: false,
             graph_built: false,
             graph_layout: HashMap::new(),
@@ -3306,6 +3366,7 @@ impl TrellisApp {
             | CanvasAction::ToggleSnapMode
             | CanvasAction::ToggleDepthMode
             | CanvasAction::ToggleTimeMode
+            | CanvasAction::FollowLink(_)
             | CanvasAction::RevealElsewhere(..)
             | CanvasAction::SaveAsTemplate(_)
             | CanvasAction::UpdateTemplate(..)
@@ -3960,6 +4021,11 @@ impl TrellisApp {
                 CanvasAction::ToggleSnapMode => self.snap_mode = !self.snap_mode,
                 CanvasAction::ToggleDepthMode => self.depth_mode = !self.depth_mode,
                 CanvasAction::ToggleTimeMode => self.time_mode = !self.time_mode,
+                CanvasAction::FollowLink(target) => {
+                    // Same resolution as a link in a text card: `#id` is a card,
+                    // an integer is a node, then a title match.
+                    self.follow_link_target(ctx, &target);
+                }
                 CanvasAction::RevealElsewhere(home, cid) => {
                     // Go to where the card actually lives and reveal it there —
                     // the same path the Agenda and a [[#id]] link already use.
@@ -4008,6 +4074,9 @@ impl TrellisApp {
                 CanvasAction::DetachCard(cid) => self.doc.detach_card(node, cid),
                 CanvasAction::ResetView => {
                     self.views.insert(node, TSTransform::IDENTITY);
+                    // Reset view means *straight on* as well as unzoomed —
+                    // otherwise an orbit you cannot undo is one click away.
+                    self.eyes.insert(node, egui::Vec2::ZERO);
                 }
             }
         }
@@ -6745,213 +6814,265 @@ impl TrellisApp {
 
     /// Right-side panel: every open task (a card with a `due::` date) across the
     /// tree, grouped by when it's due. Click a task to jump to its basket.
+    /// Every open task across the tree, grouped by when it is due.
+    ///
+    /// Rendered into whatever container the placement asks for — the right-hand
+    /// panel, or a window of its own — so the two cannot drift apart in what
+    /// they show.
     fn agenda_panel(&mut self, ctx: &egui::Context) {
+        if self.agenda_placement == Placement::Window {
+            let vid = egui::ViewportId::from_hash_of("agenda-window");
+            let builder = egui::ViewportBuilder::default()
+                .with_title("Trellis — Agenda")
+                .with_inner_size([420.0, 700.0]);
+            let mut closed = false;
+            ctx.show_viewport_immediate(vid, builder, |vctx, _| {
+                egui::CentralPanel::default().show(vctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.agenda_body(ui));
+                });
+                // Closing the OS window closes the panel; it must not linger as an
+                // invisible open panel that the View menu then refuses to reopen.
+                if vctx.input(|i| i.viewport().close_requested()) {
+                    closed = true;
+                }
+            });
+            if closed {
+                self.agenda_open = false;
+            }
+            return;
+        }
+        // **A capped width.** A panel sized by its content is a panel that one bad
+        // value can stretch across the whole window — which is what a `due::` that
+        // had swallowed a sentence did. The parser no longer produces one; this
+        // makes it unable to matter again.
+        egui::SidePanel::right("agenda")
+            .resizable(true)
+            .default_width(320.0)
+            .max_width(560.0)
+            .show(ctx, |ui| self.agenda_body(ui));
+    }
+
+    /// The Agenda itself, container-agnostic.
+    fn agenda_body(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let today = crate::api::today_days();
         let mut tasks = self.doc.tasks();
         let mut jump: Option<(NodeId, CardId)> = None;
         // (node, card, new due) — `None` clears the date. Applied after the
         // panel closes, since the panel borrows the document to draw itself.
         let mut reschedule: Option<(NodeId, CardId, Option<crate::model::ItemId>, Option<String>)> = None;
-        egui::SidePanel::right("agenda").resizable(true).default_width(320.0).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Agenda");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("×").clicked() {
-                        self.agenda_open = false;
+        ui.horizontal(|ui| {
+            ui.heading("Agenda");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("×").clicked() {
+                    self.agenda_open = false;
+                }
+                if ui
+                    .button(self.agenda_placement.label())
+                    .on_hover_text(
+                        "Move the Agenda between the side panel and a window of its own — which \
+                         can go on another monitor. Remembered next launch.",
+                    )
+                    .clicked()
+                {
+                    self.agenda_placement = self.agenda_placement.toggled();
+                }
+            });
+        });
+        ui.checkbox(&mut self.agenda_show_done, "Show completed");
+
+        // Filter to one project. Projects are the top-level nodes, so this
+        // is "whose tasks am I looking at" — the thing a bare due-date list
+        // can't tell you.
+        let mut projects: Vec<(NodeId, String)> = Vec::new();
+        for t in &tasks {
+            if !projects.iter().any(|(id, _)| *id == t.root) {
+                projects.push((t.root, t.root_title.clone()));
+            }
+        }
+        // Keep the tree's own order rather than first-seen, so the menu reads
+        // the same way the left panel does.
+        projects.sort_by_key(|(id, _)| {
+            self.doc.roots.iter().position(|r| r == id).unwrap_or(usize::MAX)
+        });
+        // A project that no longer exists (deleted, or a different document)
+        // must not silently hide every task.
+        if self.agenda_project.is_some_and(|p| !projects.iter().any(|(id, _)| *id == p)) {
+            self.agenda_project = None;
+        }
+        let current = self
+            .agenda_project
+            .and_then(|p| projects.iter().find(|(id, _)| *id == p))
+            .map(|(_, t)| t.clone())
+            .unwrap_or_else(|| "All projects".to_string());
+        ui.horizontal(|ui| {
+            ui.label("Project");
+            egui::ComboBox::from_id_salt("agenda_project")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(self.agenda_project.is_none(), "All projects")
+                        .clicked()
+                    {
+                        self.agenda_project = None;
+                    }
+                    for (id, title) in &projects {
+                        let on = self.agenda_project == Some(*id);
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(10.0, 10.0),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().circle_filled(
+                                rect.center(),
+                                4.0,
+                                project_color(&self.doc, *id),
+                            );
+                            if ui.selectable_label(on, title).clicked() {
+                                self.agenda_project = Some(*id);
+                            }
+                        });
                     }
                 });
-            });
-            ui.checkbox(&mut self.agenda_show_done, "Show completed");
-
-            // Filter to one project. Projects are the top-level nodes, so this
-            // is "whose tasks am I looking at" — the thing a bare due-date list
-            // can't tell you.
-            let mut projects: Vec<(NodeId, String)> = Vec::new();
-            for t in &tasks {
-                if !projects.iter().any(|(id, _)| *id == t.root) {
-                    projects.push((t.root, t.root_title.clone()));
-                }
-            }
-            // Keep the tree's own order rather than first-seen, so the menu reads
-            // the same way the left panel does.
-            projects.sort_by_key(|(id, _)| {
-                self.doc.roots.iter().position(|r| r == id).unwrap_or(usize::MAX)
-            });
-            // A project that no longer exists (deleted, or a different document)
-            // must not silently hide every task.
-            if self.agenda_project.is_some_and(|p| !projects.iter().any(|(id, _)| *id == p)) {
+            if self.agenda_project.is_some() && ui.small_button("×").on_hover_text("Show every project").clicked() {
                 self.agenda_project = None;
             }
-            let current = self
-                .agenda_project
-                .and_then(|p| projects.iter().find(|(id, _)| *id == p))
-                .map(|(_, t)| t.clone())
-                .unwrap_or_else(|| "All projects".to_string());
-            ui.horizontal(|ui| {
-                ui.label("Project");
-                egui::ComboBox::from_id_salt("agenda_project")
-                    .selected_text(current)
-                    .show_ui(ui, |ui| {
+        });
+        ui.separator();
+        tasks.retain(|t| self.agenda_show_done || !t.done);
+        if let Some(p) = self.agenda_project {
+            tasks.retain(|t| t.root == p);
+        }
+        tasks.sort_by_key(|t| t.due_days.unwrap_or(i64::MAX));
+        if tasks.is_empty() {
+            ui.weak("No tasks yet. Add `due:: 2026-08-15` to any card to see it here.");
+        }
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for (label, key) in [
+                ("Overdue", "overdue"),
+                ("Today", "today"),
+                ("This week", "week"),
+                ("Later", "later"),
+                ("No date", "nodate"),
+            ] {
+                let group: Vec<&crate::model::TaskItem> = tasks
+                    .iter()
+                    .filter(|t| crate::api::task_bucket_spanning(t, today) == key)
+                    .collect();
+                if group.is_empty() {
+                    continue;
+                }
+                let color = match key {
+                    "overdue" => egui::Color32::from_rgb(220, 90, 90),
+                    "today" => egui::Color32::from_rgb(230, 170, 60),
+                    _ => ui.visuals().weak_text_color(),
+                };
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(label).strong().color(color));
+                for t in group {
+                    // A task's text can be long — a checklist line often
+                    // carries its context with it, and a 300-character row
+                    // turns the agenda into a wall. Show the first line's
+                    // worth and keep the whole thing on hover; the card
+                    // itself is where the full text belongs.
+                    let shown = elide(&t.title, 80);
+                    let title = if t.done {
+                        egui::RichText::new(&shown).strikethrough().weak()
+                    } else {
+                        egui::RichText::new(&shown)
+                    };
+                    let pcolor = project_color(&self.doc, t.root);
+                    let row = ui.horizontal(|ui| {
+                        // A dot in the project's colour, so a glance down the
+                        // list groups by project without reading a word.
+                        let (rect, _) = ui
+                            .allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 4.0, pcolor);
+                        // Elided like the title. A date is ten characters;
+                        // anything longer is a value that has gone wrong, and the
+                        // panel must not be the thing that reports it — by
+                        // growing to the width of the window.
+                        ui.add(
+                            egui::Label::new(format!("{}  ", elide(&t.due, 12)))
+                                .sense(egui::Sense::click()),
+                        )
+                    });
+                    let mut label =
+                        ui.add(egui::Label::new(title).sense(egui::Sense::click()));
+                    if shown.len() < t.title.len() {
+                        label = label.on_hover_text(&t.title);
+                    }
+                    if label.clicked() || row.inner.clicked() {
+                        jump = Some((t.node, t.card));
+                    }
+                    // Move a task without leaving the list. Editing the
+                    // `due::` line by hand was the only way, and that
+                    // friction is exactly what makes people copy a task card
+                    // to the next day instead — which silently creates a
+                    // second task.
+                    label.context_menu(|ui| {
+                        ui.label(egui::RichText::new(&t.title).strong());
+                        ui.small(egui::RichText::new(format!("due {}", t.due)).weak());
+                        ui.separator();
+                        for (text, days, months) in [
+                            ("Today", 0i64, 0u32),
+                            ("Tomorrow", 1, 0),
+                            ("In 3 days", 3, 0),
+                            ("Next week", 7, 0),
+                            ("Next month", 0, 1),
+                        ] {
+                            let when = crate::api::date_from_today(days, months);
+                            if ui.button(format!("{text}  ({when})")).clicked() {
+                                reschedule = Some((t.node, t.card, t.item, Some(when)));
+                                ui.close_menu();
+                            }
+                        }
+                        ui.separator();
                         if ui
-                            .selectable_label(self.agenda_project.is_none(), "All projects")
+                            .button("Clear date")
+                            .on_hover_text(
+                                "Removes the due:: line — the task moves to \"No date\" \
+                                 rather than leaving the agenda",
+                            )
                             .clicked()
                         {
-                            self.agenda_project = None;
+                            reschedule = Some((t.node, t.card, t.item, None));
+                            ui.close_menu();
                         }
-                        for (id, title) in &projects {
-                            let on = self.agenda_project == Some(*id);
-                            ui.horizontal(|ui| {
-                                let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(10.0, 10.0),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().circle_filled(
-                                    rect.center(),
-                                    4.0,
-                                    project_color(&self.doc, *id),
-                                );
-                                if ui.selectable_label(on, title).clicked() {
-                                    self.agenda_project = Some(*id);
-                                }
-                            });
+                        if ui.button("Open the card").clicked() {
+                            jump = Some((t.node, t.card));
+                            ui.close_menu();
                         }
                     });
-                if self.agenda_project.is_some() && ui.small_button("×").on_hover_text("Show every project").clicked() {
-                    self.agenda_project = None;
-                }
-            });
-            ui.separator();
-            tasks.retain(|t| self.agenda_show_done || !t.done);
-            if let Some(p) = self.agenda_project {
-                tasks.retain(|t| t.root == p);
-            }
-            tasks.sort_by_key(|t| t.due_days.unwrap_or(i64::MAX));
-            if tasks.is_empty() {
-                ui.weak("No tasks yet. Add `due:: 2026-08-15` to any card to see it here.");
-            }
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                for (label, key) in [
-                    ("Overdue", "overdue"),
-                    ("Today", "today"),
-                    ("This week", "week"),
-                    ("Later", "later"),
-                    ("No date", "nodate"),
-                ] {
-                    let group: Vec<&crate::model::TaskItem> = tasks
-                        .iter()
-                        .filter(|t| crate::api::task_bucket_spanning(t, today) == key)
-                        .collect();
-                    if group.is_empty() {
-                        continue;
-                    }
-                    let color = match key {
-                        "overdue" => egui::Color32::from_rgb(220, 90, 90),
-                        "today" => egui::Color32::from_rgb(230, 170, 60),
-                        _ => ui.visuals().weak_text_color(),
+                    // Full breadcrumb, not just the parent: "Open Items"
+                    // exists under more than one project, and the bare name
+                    // has had agents attribute a task to the wrong one. The
+                    // project half carries its colour so it reads at a glance.
+                    let mut job = egui::text::LayoutJob::default();
+                    let small = egui::TextStyle::Small.resolve(ui.style());
+                    let (proj, rest) = match t.node_path.split_once(" › ") {
+                        Some((a, b)) => (a.to_string(), format!(" › {b}")),
+                        None => (t.node_path.clone(), String::new()),
                     };
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(label).strong().color(color));
-                    for t in group {
-                        // A task's text can be long — a checklist line often
-                        // carries its context with it, and a 300-character row
-                        // turns the agenda into a wall. Show the first line's
-                        // worth and keep the whole thing on hover; the card
-                        // itself is where the full text belongs.
-                        let shown = elide(&t.title, 80);
-                        let title = if t.done {
-                            egui::RichText::new(&shown).strikethrough().weak()
-                        } else {
-                            egui::RichText::new(&shown)
-                        };
-                        let pcolor = project_color(&self.doc, t.root);
-                        let row = ui.horizontal(|ui| {
-                            // A dot in the project's colour, so a glance down the
-                            // list groups by project without reading a word.
-                            let (rect, _) = ui
-                                .allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                            ui.painter().circle_filled(rect.center(), 4.0, pcolor);
-                            ui.add(
-                                egui::Label::new(format!("{}  ", t.due))
-                                    .sense(egui::Sense::click()),
-                            )
-                        });
-                        let mut label =
-                            ui.add(egui::Label::new(title).sense(egui::Sense::click()));
-                        if shown.len() < t.title.len() {
-                            label = label.on_hover_text(&t.title);
-                        }
-                        if label.clicked() || row.inner.clicked() {
-                            jump = Some((t.node, t.card));
-                        }
-                        // Move a task without leaving the list. Editing the
-                        // `due::` line by hand was the only way, and that
-                        // friction is exactly what makes people copy a task card
-                        // to the next day instead — which silently creates a
-                        // second task.
-                        label.context_menu(|ui| {
-                            ui.label(egui::RichText::new(&t.title).strong());
-                            ui.small(egui::RichText::new(format!("due {}", t.due)).weak());
-                            ui.separator();
-                            for (text, days, months) in [
-                                ("Today", 0i64, 0u32),
-                                ("Tomorrow", 1, 0),
-                                ("In 3 days", 3, 0),
-                                ("Next week", 7, 0),
-                                ("Next month", 0, 1),
-                            ] {
-                                let when = crate::api::date_from_today(days, months);
-                                if ui.button(format!("{text}  ({when})")).clicked() {
-                                    reschedule = Some((t.node, t.card, t.item, Some(when)));
-                                    ui.close_menu();
-                                }
-                            }
-                            ui.separator();
-                            if ui
-                                .button("Clear date")
-                                .on_hover_text(
-                                    "Removes the due:: line — the task moves to \"No date\" \
-                                     rather than leaving the agenda",
-                                )
-                                .clicked()
-                            {
-                                reschedule = Some((t.node, t.card, t.item, None));
-                                ui.close_menu();
-                            }
-                            if ui.button("Open the card").clicked() {
-                                jump = Some((t.node, t.card));
-                                ui.close_menu();
-                            }
-                        });
-                        // Full breadcrumb, not just the parent: "Open Items"
-                        // exists under more than one project, and the bare name
-                        // has had agents attribute a task to the wrong one. The
-                        // project half carries its colour so it reads at a glance.
-                        let mut job = egui::text::LayoutJob::default();
-                        let small = egui::TextStyle::Small.resolve(ui.style());
-                        let (proj, rest) = match t.node_path.split_once(" › ") {
-                            Some((a, b)) => (a.to_string(), format!(" › {b}")),
-                            None => (t.node_path.clone(), String::new()),
-                        };
+                    job.append(
+                        &proj,
+                        0.0,
+                        egui::TextFormat { font_id: small.clone(), color: pcolor, ..Default::default() },
+                    );
+                    if !rest.is_empty() {
                         job.append(
-                            &proj,
+                            &rest,
                             0.0,
-                            egui::TextFormat { font_id: small.clone(), color: pcolor, ..Default::default() },
+                            egui::TextFormat {
+                                font_id: small,
+                                color: ui.visuals().weak_text_color(),
+                                ..Default::default()
+                            },
                         );
-                        if !rest.is_empty() {
-                            job.append(
-                                &rest,
-                                0.0,
-                                egui::TextFormat {
-                                    font_id: small,
-                                    color: ui.visuals().weak_text_color(),
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                        ui.label(job);
                     }
+                    ui.label(job);
                 }
-            });
+            }
         });
         if let Some((node, card, item, due)) = reschedule {
             // A checklist line carries its own date, so the edit has to land on
@@ -6973,7 +7094,7 @@ impl TrellisApp {
             }
         }
         if let Some((node, card)) = jump {
-            self.jump_to_card(ctx, node, card);
+            self.jump_to_card(&ctx, node, card);
         }
     }
 
@@ -7163,8 +7284,42 @@ impl TrellisApp {
 
     /// Kanban board: cards that have a `status::` property, in columns by status.
     /// Drag a card to another column to rewrite its `status`. Click to jump.
+    /// The Kanban board, in whichever container the placement asks for.
+    ///
+    /// A window *inside* the app window cannot be moved to another monitor or
+    /// left beside the canvas, which is most of what a board is for — so it can
+    /// be detached into a real OS window.
     fn kanban_window(&mut self, ctx: &egui::Context) {
+        if self.kanban_placement == Placement::Window {
+            let vid = egui::ViewportId::from_hash_of("kanban-window");
+            let builder = egui::ViewportBuilder::default()
+                .with_title("Trellis — Kanban")
+                .with_inner_size([1000.0, 620.0]);
+            let mut closed = false;
+            ctx.show_viewport_immediate(vid, builder, |vctx, _| {
+                egui::CentralPanel::default().show(vctx, |ui| self.kanban_body(ui));
+                if vctx.input(|i| i.viewport().close_requested()) {
+                    closed = true;
+                }
+            });
+            if closed {
+                self.kanban_open = false;
+            }
+            return;
+        }
         let mut open = self.kanban_open;
+        egui::Window::new("Kanban board")
+            .open(&mut open)
+            .default_size([900.0, 560.0])
+            .resizable(true)
+            .show(ctx, |ui| self.kanban_body(ui));
+        self.kanban_open = open;
+    }
+
+    /// The board itself, container-agnostic.
+    fn kanban_body(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        // (the container owns whether the board is open)
         let mut board = self.doc.cards_by_status();
         // Projects present on the board, in tree order so the menu reads like
         // the left panel.
@@ -7215,99 +7370,104 @@ impl TrellisApp {
             .collect();
         let mut jump: Option<(NodeId, CardId)> = None;
         let mut moves: Vec<(NodeId, CardId, String)> = Vec::new();
-        egui::Window::new("Kanban board")
-            .open(&mut open)
-            .default_size([900.0, 560.0])
-            .resizable(true)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.small("Cards with a status:: property. Drag a card between columns to change its status.");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.checkbox(&mut show_done, "Show done");
-                        ui.separator();
-                        if project_pick.is_some() && ui.small_button("×").on_hover_text("Show every project").clicked() {
-                            project_pick = None;
-                        }
-                        let current = project_pick
-                            .and_then(|p| projects.iter().find(|(id, _)| *id == p))
-                            .map(|(_, t)| t.clone())
-                            .unwrap_or_else(|| "All projects".to_string());
-                        egui::ComboBox::from_id_salt("kanban_project")
-                            .selected_text(current)
-                            .show_ui(ui, |ui| {
-                                if ui.selectable_label(project_pick.is_none(), "All projects").clicked() {
-                                    project_pick = None;
-                                }
-                                for (id, title) in &projects {
-                                    let on = project_pick == Some(*id);
-                                    ui.horizontal(|ui| {
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(10.0, 10.0),
-                                            egui::Sense::hover(),
-                                        );
-                                        ui.painter().circle_filled(rect.center(), 4.0, pcolors[id]);
-                                        if ui.selectable_label(on, title).clicked() {
-                                            project_pick = Some(*id);
-                                        }
-                                    });
-                                }
-                            });
-                        ui.label("Project");
-                    });
-                });
-                if board.is_empty() {
-                    ui.weak("No cards have a status:: property yet. Add `status:: todo` to a card.");
-                }
-                ui.separator();
-
-                // Columns divide the window width so they fit without scrolling;
-                // only scroll horizontally once there are more columns than fit
-                // (each floored at 180px).
-                let n = cols.len().max(1) as f32;
-                let gap = ui.spacing().item_spacing.x;
-                let col_w = (((ui.available_width() - gap * (n - 1.0)) / n) - 2.0).max(180.0);
-                let col_h = ui.available_height().max(140.0);
-
-                egui::ScrollArea::horizontal().show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        let empty = Vec::new();
-                        for col in &cols {
-                            let cards = board.get(col).unwrap_or(&empty);
-                            // top_down layout so cards stack vertically (the group
-                            // would otherwise inherit this row's horizontal layout).
-                            let resp = ui
-                                .allocate_ui_with_layout(
-                                    egui::vec2(col_w, col_h),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| {
-                                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                                            ui.set_width(col_w - 12.0);
-                                            ui.set_min_height(col_h - 8.0);
-                                            ui.strong(format!("{col}  ({})", cards.len()));
-                                            ui.separator();
-                                            // Each column scrolls its own cards, so a
-                                            // tall column never overflows the board.
-                                            egui::ScrollArea::vertical()
-                                                .id_salt(("kbcol", col))
-                                                .auto_shrink([false, false])
-                                                .show(ui, |ui| {
-                                                    for kc in cards {
-                                                        let pc = pcolors.get(&kc.root).copied().unwrap_or(egui::Color32::GRAY);
-                                                        kanban_card_ui(ui, kc, today, pc, &mut jump);
-                                                    }
-                                                });
-                                        });
-                                    },
-                                )
-                                .response;
-                            if let Some(p) = resp.dnd_release_payload::<(NodeId, CardId)>() {
-                                moves.push((p.0, p.1, col.clone()));
+            ui.horizontal(|ui| {
+                ui.small("Cards with a status:: property. Drag a card between columns to change its status.");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(self.kanban_placement.label())
+                        .on_hover_text(
+                            "Move the board between a window inside Trellis and one of its own — \
+                             which can go on another monitor. Remembered next launch.",
+                        )
+                        .clicked()
+                    {
+                        self.kanban_placement = self.kanban_placement.toggled();
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut show_done, "Show done");
+                    ui.separator();
+                    if project_pick.is_some() && ui.small_button("×").on_hover_text("Show every project").clicked() {
+                        project_pick = None;
+                    }
+                    let current = project_pick
+                        .and_then(|p| projects.iter().find(|(id, _)| *id == p))
+                        .map(|(_, t)| t.clone())
+                        .unwrap_or_else(|| "All projects".to_string());
+                    egui::ComboBox::from_id_salt("kanban_project")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(project_pick.is_none(), "All projects").clicked() {
+                                project_pick = None;
                             }
-                        }
-                    });
+                            for (id, title) in &projects {
+                                let on = project_pick == Some(*id);
+                                ui.horizontal(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(10.0, 10.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().circle_filled(rect.center(), 4.0, pcolors[id]);
+                                    if ui.selectable_label(on, title).clicked() {
+                                        project_pick = Some(*id);
+                                    }
+                                });
+                            }
+                        });
+                    ui.label("Project");
                 });
             });
-        self.kanban_open = open;
+            if board.is_empty() {
+                ui.weak("No cards have a status:: property yet. Add `status:: todo` to a card.");
+            }
+            ui.separator();
+
+            // Columns divide the window width so they fit without scrolling;
+            // only scroll horizontally once there are more columns than fit
+            // (each floored at 180px).
+            let n = cols.len().max(1) as f32;
+            let gap = ui.spacing().item_spacing.x;
+            let col_w = (((ui.available_width() - gap * (n - 1.0)) / n) - 2.0).max(180.0);
+            let col_h = ui.available_height().max(140.0);
+
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    let empty = Vec::new();
+                    for col in &cols {
+                        let cards = board.get(col).unwrap_or(&empty);
+                        // top_down layout so cards stack vertically (the group
+                        // would otherwise inherit this row's horizontal layout).
+                        let resp = ui
+                            .allocate_ui_with_layout(
+                                egui::vec2(col_w, col_h),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                                        ui.set_width(col_w - 12.0);
+                                        ui.set_min_height(col_h - 8.0);
+                                        ui.strong(format!("{col}  ({})", cards.len()));
+                                        ui.separator();
+                                        // Each column scrolls its own cards, so a
+                                        // tall column never overflows the board.
+                                        egui::ScrollArea::vertical()
+                                            .id_salt(("kbcol", col))
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                for kc in cards {
+                                                    let pc = pcolors.get(&kc.root).copied().unwrap_or(egui::Color32::GRAY);
+                                                    kanban_card_ui(ui, kc, today, pc, &mut jump);
+                                                }
+                                            });
+                                    });
+                                },
+                            )
+                            .response;
+                        if let Some(p) = resp.dnd_release_payload::<(NodeId, CardId)>() {
+                            moves.push((p.0, p.1, col.clone()));
+                        }
+                    }
+                });
+            });
+        // whether the board is open is the container's business, not the body's
         self.kanban_show_done = show_done;
         self.kanban_project = project_pick;
         for (n, c, status) in moves {
@@ -7331,7 +7491,7 @@ impl TrellisApp {
             }
         }
         if let Some((node, card)) = jump {
-            self.jump_to_card(ctx, node, card);
+            self.jump_to_card(&ctx, node, card);
         }
     }
 
@@ -7339,6 +7499,16 @@ impl TrellisApp {
     /// it names, or report that no such node exists.
     fn follow_wikilink(&mut self, ctx: &egui::Context, encoded: &str) {
         let target = crate::model::decode_link(encoded);
+        self.follow_link_target(ctx, &target);
+    }
+
+    /// Go where a `[[link]]` points, given the **raw** target.
+    ///
+    /// Split out because a table cell already has the target in hand — it never
+    /// went through a URL — so encoding it just to decode it again would be a
+    /// round trip that could only introduce a difference between the two paths.
+    fn follow_link_target(&mut self, ctx: &egui::Context, target: &str) {
+        let target = target.to_string();
         match self.doc.resolve_link_target(&target) {
             Some(crate::model::LinkTarget::Node(id)) => self.jump_to_node(id),
             // A card link lands *on the card* — recentre and flash — not merely
@@ -7674,6 +7844,7 @@ impl eframe::App for TrellisApp {
                     } else {
                         Vec::new()
                     };
+                    let mut eye = self.eyes.get(&sel).copied().unwrap_or_default();
                     let node = self.doc.nodes.get(&sel).unwrap();
                     let actions = canvas::ui(
                         ui,
@@ -7685,6 +7856,7 @@ impl eframe::App for TrellisApp {
                         self.dock_mode,
                         self.snap_mode,
                         self.depth_mode,
+                        &mut eye,
                         self.time_mode,
                         &projected,
                         &mut env,
@@ -7696,6 +7868,7 @@ impl eframe::App for TrellisApp {
                     // Never let a temporary export reframe overwrite the real view.
                     if framing_card.is_none() && basket_target.is_none() {
                         self.views.insert(sel, view);
+                        self.eyes.insert(sel, eye);
                     }
                     let pointer_down = ui.input(|i| i.pointer.any_down());
                     self.apply_canvas(ctx, sel, actions, pointer_down);
@@ -7817,6 +7990,15 @@ impl eframe::App for TrellisApp {
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
         storage.set_string(DEPTH_MODE_KEY, self.depth_mode.to_string());
         storage.set_string(TIME_MODE_KEY, self.time_mode.to_string());
+        storage.set_string(AGENDA_OPEN_KEY, self.agenda_open.to_string());
+        storage.set_string(AGENDA_DONE_KEY, self.agenda_show_done.to_string());
+        storage.set_string(AGENDA_PLACE_KEY, self.agenda_placement.as_str().to_string());
+        storage.set_string(KANBAN_OPEN_KEY, self.kanban_open.to_string());
+        storage.set_string(KANBAN_DONE_KEY, self.kanban_show_done.to_string());
+        storage.set_string(KANBAN_PLACE_KEY, self.kanban_placement.as_str().to_string());
+        storage.set_string(TAGS_OPEN_KEY, self.tags_open.to_string());
+        storage.set_string(FIND_OPEN_KEY, self.find_open.to_string());
+        storage.set_string(BACKLINKS_OPEN_KEY, self.backlinks_open.to_string());
         storage.set_string(
             URL_SCHEME_REGISTERED_KEY,
             self.url_scheme_registered.clone().unwrap_or_default(),
@@ -7932,6 +8114,42 @@ fn register_url_scheme() -> Result<String, String> {
         .args(["default", &format!("{scheme}-url.desktop"), &format!("x-scheme-handler/{scheme}")])
         .status();
     Ok(file.display().to_string())
+}
+
+/// Where a panel lives: inside the main window, or in one of its own.
+///
+/// A window inside a window cannot be moved to a second monitor, put beside the
+/// canvas, or left open while you work — which is the whole point of a board you
+/// glance at. egui's viewports make it a real OS window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    Docked,
+    Window,
+}
+
+impl Placement {
+    fn from_str(s: &str) -> Self {
+        if s == "window" { Self::Window } else { Self::Docked }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Window => "window",
+            Self::Docked => "docked",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            // Says what clicking it does, not what state you are in.
+            Self::Docked => "⧉ Detach",
+            Self::Window => "⧉ Dock",
+        }
+    }
+    fn toggled(self) -> Self {
+        match self {
+            Self::Docked => Self::Window,
+            Self::Window => Self::Docked,
+        }
+    }
 }
 
 fn setup_fonts(ctx: &egui::Context) {

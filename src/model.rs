@@ -3490,6 +3490,52 @@ pub(crate) fn extract_wikilinks(text: &str) -> Vec<String> {
 /// Rewrite `[[Target]]` / `[[Target|Display]]` into Markdown links
 /// `[Display](trellis:<encoded target>)` so the card renderer shows them as
 /// clickable links; the app intercepts the `trellis:` scheme to navigate.
+/// Split text into runs of plain text and `[[wiki-links]]`.
+///
+/// `wikilinks_to_md` exists for renderers that understand Markdown. A table cell
+/// is painted as a single galley with no Markdown anywhere in sight, so it needs
+/// the *pieces* — what to draw, and which parts are a link — rather than a
+/// rewritten string.
+///
+/// Each item is `(display text, Some(target))` for a link, or
+/// `(text, None)` for ordinary text. Same rules as `wikilinks_to_md`: `|` splits
+/// display from target, both are trimmed, and an empty target is not a link.
+pub fn wikilink_segments(text: &str) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    let mut plain = String::new();
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if i + 1 < b.len() && b[i] == b'[' && b[i + 1] == b'[' {
+            if let Some(end) = text[i + 2..].find("]]") {
+                let inner = &text[i + 2..i + 2 + end];
+                let mut parts = inner.splitn(2, '|');
+                let target = parts.next().unwrap_or("").trim();
+                let display = parts
+                    .next()
+                    .map(|d| d.trim())
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or(target);
+                if !target.is_empty() {
+                    if !plain.is_empty() {
+                        out.push((std::mem::take(&mut plain), None));
+                    }
+                    out.push((display.to_string(), Some(target.to_string())));
+                    i = i + 2 + end + 2;
+                    continue;
+                }
+            }
+        }
+        let ch = text[i..].chars().next().unwrap();
+        plain.push(ch);
+        i += ch.len_utf8();
+    }
+    if !plain.is_empty() {
+        out.push((plain, None));
+    }
+    out
+}
+
 pub fn wikilinks_to_md(text: &str) -> String {
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -3630,7 +3676,23 @@ pub(crate) fn extract_properties(text: &str) -> Vec<(String, String)> {
             } else {
                 line.len()
             };
-            let value = line[vs..ve].trim().to_string();
+            let mut value = line[vs..ve].trim().to_string();
+            // **A date is one token.** `due`, `start` and `date` hold a calendar
+            // date, so a value running to the end of the line is always a
+            // sentence that happens to begin with one — `due:: 2026-08-15 — RUN
+            // 1 DONE 8/12: …` is a real line from a real checklist. Taking the
+            // whole tail failed *twice over*: it does not parse as a date, so the
+            // task silently lost its deadline and fell into "No date"; and the
+            // Agenda then rendered 300 characters where a date goes, which drove
+            // the panel to the full width of the window.
+            //
+            // Only these keys. A free-text property (`status:: in progress`,
+            // `owner:: Jane Doe`) legitimately has spaces in it.
+            if matches!(key.as_str(), "due" | "start" | "date") {
+                if let Some(first) = value.split_whitespace().next() {
+                    value = first.to_string();
+                }
+            }
             if !value.is_empty() {
                 out.push((key, value));
             }
@@ -5209,6 +5271,50 @@ mod tests {
     }
 
     #[test]
+    /// A date property takes its first token, so prose after the date does not
+    /// swallow it.
+    ///
+    /// From a real checklist line on the work document. Two failures in one: the
+    /// value did not parse as a date, so a task with a deadline was bucketed
+    /// under "No date" and its owner could not see it was due; and the Agenda
+    /// drew the whole sentence where a date goes, which stretched the panel over
+    /// the entire window.
+    #[test]
+    fn a_date_property_stops_at_the_date() {
+        let p = extract_properties(
+            "Page-gen benchmark → pick default  due:: 2026-08-15 — RUN 1 DONE 8/12: claude 4/4",
+        );
+        assert!(p.contains(&("due".to_string(), "2026-08-15".to_string())), "{p:?}");
+        assert!(parse_ymd("2026-08-15").is_some());
+
+        let s = extract_properties("in flight  start:: 2026-08-11  due:: 2026-08-15  notes here");
+        assert!(s.contains(&("start".to_string(), "2026-08-11".to_string())), "{s:?}");
+        assert!(s.contains(&("due".to_string(), "2026-08-15".to_string())), "{s:?}");
+
+        // A free-text property still keeps its spaces — only dates are one token.
+        let f = extract_properties("status:: in progress");
+        assert!(f.contains(&("status".to_string(), "in progress".to_string())), "{f:?}");
+    }
+
+    #[test]
+    fn wikilink_segments_split_text_from_links() {
+        let segs = wikilink_segments("see [[#10215]] and [[Roadmap|the plan]] end");
+        assert_eq!(segs[0], ("see ".to_string(), None));
+        assert_eq!(segs[1], ("#10215".to_string(), Some("#10215".to_string())));
+        assert_eq!(segs[2], (" and ".to_string(), None));
+        assert_eq!(segs[3], ("the plan".to_string(), Some("Roadmap".to_string())));
+        assert_eq!(segs[4], (" end".to_string(), None));
+
+        // No links at all is one plain run — the common case, and it must not
+        // allocate a link section for a cell full of ordinary text.
+        let plain = wikilink_segments("just a value");
+        assert_eq!(plain.len(), 1);
+        assert!(plain[0].1.is_none());
+
+        // An empty target is not a link; the brackets stay as written.
+        assert_eq!(wikilink_segments("[[]]")[0].0, "[[]]");
+    }
+
     fn extract_properties_parses_fields_not_code() {
         let p = extract_properties("due:: 2026-08-15\npriority:: high\nsee std::fmt for [status:: done] end");
         assert!(p.contains(&("due".to_string(), "2026-08-15".to_string())));

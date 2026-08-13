@@ -135,6 +135,9 @@ pub enum CanvasAction {
     SetZ(CardId, f32),
     ToggleDepthMode,
     ToggleTimeMode,
+    /// A `[[wiki-link]]` clicked inside a table cell. Carries the raw target;
+    /// the app resolves it exactly as it resolves one clicked in a text card.
+    FollowLink(String),
     /// Go to a card that is *projected* into this day but lives elsewhere —
     /// the only interaction a projection offers, because it is a view of a card
     /// and the card is where you edit it.
@@ -255,6 +258,9 @@ pub fn ui(
     dock_mode: bool,
     snap_mode: bool,
     depth_mode: bool,
+    // `eye`: camera offset from straight-on, in screen pixels — the orbit.
+    // Alt+drag moves it; Reset view returns it to zero.
+    eye: &mut egui::Vec2,
     time_mode: bool,
     // `projected`: cards that live in another basket but are live on this day,
     // with the basket they actually live in. Empty unless Time is on and this
@@ -327,12 +333,30 @@ pub fn ui(
 
     // Pan by dragging empty canvas (screen-space delta) — unless the minimap has
     // claimed this drag.
-    if canvas_resp.dragged_by(egui::PointerButton::Primary) && !minimap_active {
+    // Alt+drag is the camera orbit, so it must not pan as well — otherwise the
+    // two cancel out into a plain pan and depth looks like it does nothing.
+    let orbiting = depth_mode && ui.input(|i| i.modifiers.alt);
+    if canvas_resp.dragged_by(egui::PointerButton::Primary) && !minimap_active && !orbiting {
         view.translation += canvas_resp.drag_delta();
     }
 
     // Wheel over empty canvas pans; Ctrl+wheel (and pinch) zoom instead — egui
     // routes Ctrl+scroll into zoom_delta and out of smooth_scroll_delta.
+    // Alt+drag orbits the camera. It has to be read from raw input rather than
+    // from `canvas_resp`, because the drag usually starts over a card — which is
+    // exactly where you want to grab when you are trying to look *around* it.
+    if depth_mode {
+        let (alt, down, delta) = ui.input(|i| {
+            (i.modifiers.alt, i.pointer.primary_down(), i.pointer.delta())
+        });
+        if alt && down && delta != egui::Vec2::ZERO {
+            // Clamped: past this the near cards leave the viewport entirely and
+            // the only way back is Reset view.
+            *eye = (*eye + delta).clamp(egui::vec2(-600.0, -600.0), egui::vec2(600.0, 600.0));
+            ui.ctx().request_repaint();
+        }
+    }
+
     // Shift+scroll is the Z gesture in depth mode, so it must not also pan —
     // otherwise pushing a card away drags the whole basket with it.
     let depth_scroll = depth_mode && ui.input(|i| i.modifiers.shift_only());
@@ -669,7 +693,7 @@ pub fn ui(
             // Nearest first: reverse of the draw order.
             if let Some(&i) = order.iter().rev().find(|&&i| {
                 let c = &node.cards[i];
-                let t = depth_transform(to_screen, canvas_rect.center(), c.z, depth_mode);
+                let t = depth_transform(to_screen, canvas_rect.center() + *eye, c.z, depth_mode);
                 t.mul_rect(world_rect(c)).contains(pp)
             }) {
                 let c = &node.cards[i];
@@ -686,7 +710,7 @@ pub fn ui(
     // *view* of a card, and offering an edit here would be the second place a
     // task can be changed — which is the exact thing this design exists to avoid.
     for (home, home_path, card) in projected {
-        let t = depth_transform(to_screen, canvas_rect.center(), card.z, depth_mode);
+        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, depth_mode);
         let r = t.mul_rect(world_rect(card));
         if !canvas_rect.intersects(r) {
             continue;
@@ -748,7 +772,7 @@ pub fn ui(
     }
     for &i in &order {
         let card = &node.cards[i];
-        let t = depth_transform(to_screen, canvas_rect.center(), card.z, depth_mode);
+        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, depth_mode);
         env.card_rects.insert(card.id, t.mul_rect(world_rect(card)));
         card_ui(
             ui,
@@ -930,7 +954,7 @@ pub fn ui(
         canvas_rect.left_bottom() + egui::vec2(8.0, -6.0),
         egui::Align2::LEFT_BOTTOM,
         if depth_mode {
-            "double-click: text card · right-click: any card · drag title: move · ctrl+click: select · ctrl+scroll: zoom · shift+scroll over a card: slide it in Z"
+            "drag title: move · ctrl+scroll: zoom · shift+scroll over a card: slide it in Z · alt+drag: look around (parallax) · Reset view: straight on"
         } else {
             "double-click: text card · right-click: any card · drag title: move · ctrl+click: select · drag group header: move group · ctrl+scroll: zoom"
         },
@@ -972,6 +996,13 @@ fn depth_transform(base: TSTransform, focus: egui::Pos2, z: f32, depth_mode: boo
     if !depth_mode || z == 0.0 {
         return base;
     }
+    // `focus` is the point the camera looks through. Moving it is what an orbit
+    // *is* here: cards at `z = 0` do not move at all, near ones swing one way and
+    // far ones the other. That opposite motion — parallax — is the only thing
+    // that makes depth legible on a flat screen without head tracking, which is
+    // why a static perspective looks like nothing more than "some cards are
+    // bigger".
+
     // Positive z is toward the viewer, so it shortens the camera distance.
     let s = (CAMERA_DIST / (CAMERA_DIST - z.clamp(Z_MIN, Z_MAX))).clamp(0.05, 20.0);
     // Scale the whole mapping about `focus`, the point on screen the camera looks
@@ -1167,7 +1198,10 @@ fn card_ui(
             actions.push(CanvasAction::ClearSelection);
         }
     }
-    if handle.dragged() {
+    // Alt+drag is the camera, so a drag that starts on a title bar with Alt held
+    // orbits instead of moving the card. Without this the card you are trying to
+    // look behind is the one thing that follows the pointer.
+    if handle.dragged() && !ui.input(|i| i.modifiers.alt) {
         let grab = ui.memory(|m| m.data.get_temp::<egui::Vec2>(grab_key));
         match (snap_others, handle.interact_pointer_pos(), grab) {
             (Some(others), Some(pp), Some(grab)) => {
@@ -2799,27 +2833,72 @@ fn table_ui(
                     }
                 } else {
                     let clipped = ui.painter_at(rect.shrink2(egui::vec2(4.0 * zoom, 0.0)));
-                    let galley = ui.fonts(|f| {
-                        f.layout_no_wrap(
-                            cell.text.clone(),
-                            egui::TextStyle::Body.resolve(ui.style()),
-                            fg.unwrap_or_else(|| {
-                                if table.header && r == 0 {
-                                    ui.visuals().strong_text_color()
-                                } else {
-                                    ui.visuals().text_color()
-                                }
-                            }),
-                        )
+                    let base = fg.unwrap_or_else(|| {
+                        if table.header && r == 0 {
+                            ui.visuals().strong_text_color()
+                        } else {
+                            ui.visuals().text_color()
+                        }
                     });
-                    clipped.galley(
-                        egui::pos2(
-                            rect.left() + 4.0 * zoom,
-                            rect.center().y - galley.size().y / 2.0,
-                        ),
-                        galley,
-                        ui.visuals().text_color(),
+                    // A cell is painted as one galley with no Markdown involved,
+                    // so `[[…]]` used to render as its own brackets — which made
+                    // a table of evidence links a table of literal text. Build
+                    // the runs instead: link runs get the link colour and an
+                    // underline, and a click that lands on one follows it.
+                    let segments = crate::model::wikilink_segments(&cell.text);
+                    let has_link = segments.iter().any(|(_, t)| t.is_some());
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    let galley = if !has_link {
+                        ui.fonts(|f| f.layout_no_wrap(cell.text.clone(), font.clone(), base))
+                    } else {
+                        let link_col = ui.visuals().hyperlink_color;
+                        let mut job = egui::text::LayoutJob::default();
+                        job.wrap.max_width = f32::INFINITY;
+                        for (text, target) in &segments {
+                            job.append(
+                                text,
+                                0.0,
+                                egui::TextFormat {
+                                    font_id: font.clone(),
+                                    color: if target.is_some() { link_col } else { base },
+                                    underline: if target.is_some() {
+                                        egui::Stroke::new(1.0, link_col)
+                                    } else {
+                                        egui::Stroke::NONE
+                                    },
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        ui.fonts(|f| f.layout_job(job))
+                    };
+                    let origin = egui::pos2(
+                        rect.left() + 4.0 * zoom,
+                        rect.center().y - galley.size().y / 2.0,
                     );
+                    if has_link {
+                        if let Some(pos) = cell_resp.interact_pointer_pos() {
+                            if cell_resp.clicked() {
+                                // Which run did the click land in? Ask the galley
+                                // for the character, then walk the runs — far
+                                // safer than measuring x offsets by hand, and it
+                                // stays right at any zoom.
+                                let idx = galley.cursor_from_pos(pos - origin).ccursor.index;
+                                let mut at = 0usize;
+                                for (text, target) in &segments {
+                                    let n = text.chars().count();
+                                    if idx >= at && idx < at + n {
+                                        if let Some(t) = target {
+                                            actions.push(CanvasAction::FollowLink(t.clone()));
+                                        }
+                                        break;
+                                    }
+                                    at += n;
+                                }
+                            }
+                        }
+                    }
+                    clipped.galley(origin, galley, base);
                     // A card that isn't in edit mode paints its cells, so there
                     // is no text to select and no way to get a value out.
                     // Right-click gives one — cell, row or column, to both the

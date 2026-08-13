@@ -6,6 +6,40 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.94.0]
+
+### Fixed
+- **A date property stops at the date.** `due:: 2026-08-15 — RUN 1 DONE 8/12: …`
+  is a real line from a real checklist, and the value ran to the end of it. That
+  failed **twice**: the value did not parse as a date, so a task with a deadline
+  was filed under *No date* and its owner could not see it was due; and the
+  Agenda then drew a 300-character string where a date goes, which stretched the
+  panel across the entire window. `due`, `start` and `date` now take their first
+  token — a date has no spaces. Other properties keep theirs (`status:: in
+  progress` still works).
+- **The Agenda cannot be stretched by its contents.** The panel has a maximum
+  width and the date is elided like the title. The parser no longer produces a
+  runaway value; this makes one unable to matter again.
+- **`[[wiki-links]] in table cells are links.** A cell is painted as a single
+  run of text with no Markdown involved, so an evidence column full of `[[#10215]]`
+  rendered as its own brackets. Link runs are now drawn in the link colour,
+  underlined, and clicking one follows it — resolved exactly as a link in a text
+  card is.
+
+### Added
+- **The Agenda and the Kanban remember themselves.** Whether each is open, each
+  *Show completed* toggle, and where each lives all persist. An Agenda that closes
+  itself every launch is one you forget exists.
+- **Both can be detached into a real window.** *Detach* / *Dock* in each header.
+  A window inside the app window cannot be moved to a second monitor or left
+  beside the canvas, which is most of what a board is for. The choice is
+  remembered, and closing the detached window closes the panel.
+- **Alt+drag looks around a depth arrangement.** Moving the eye is what makes
+  depth legible on a flat screen: cards at `z = 0` stay put while near and far
+  ones swing in opposite directions. *Reset view* returns to straight on, and the
+  angle is per basket, like pan and zoom. It is also the first half of the camera
+  **pose** that VR needs.
+
 ## [0.93.0]
 
 ### Added

@@ -525,6 +525,11 @@ A basket is a **volume**, and a task can **occupy a range of days**. Both axes a
 **off by default** (canvas buttons *Depth* and *Time*, beside Dock and Snap), and
 both are **view** settings — the data is on the card either way.
 
+**Alt+drag looks around.** With Depth on, Alt+drag moves the eye: `z = 0` stays
+put while near and far cards swing opposite ways. That parallax is what makes
+depth legible on a flat screen — a static perspective just looks like "some cards
+are bigger". *Reset view* returns to straight on; the angle is per basket.
+
 **`z` — depth.** Same units as `pos`; positive is toward the viewer. Clamped to
 `[-1600, 1200]`. With Depth **on** a card is projected through a camera: nearer
 cards are larger and cover further ones, and a click lands on the nearest. With
@@ -609,6 +614,14 @@ Agent API → Register now* and *Tools → Register trellis:// links…* are the
 explicit controls. It will **not** overwrite a working registration, so a
 development build cannot hijack the handler. The `http://127.0.0.1` form needs
 none of this and works today — which is why it exists.
+
+**A date property stops at the date.** `due`, `start` and `date` take the first
+token of their value, because a date has no spaces. Write
+`due:: 2026-08-15 — still blocked` and the date is `2026-08-15`; the prose after
+it is ignored rather than swallowing the value. Before v0.94.0 the whole tail was
+the value, which did not parse as a date, so the task lost its deadline silently
+and was filed under *No date*. Other properties keep their spaces —
+`status:: in progress` is one value.
 
 ### Tracking work — read this before creating task cards
 

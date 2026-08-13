@@ -61,6 +61,11 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   full-text searchable. **Right-click → Download** saves an image back out to a
   file (or **All N images…** into a folder) to share or reuse.
 
+**Agenda and Kanban** remember whether they were open, their *Show completed*
+setting, and where they live — and either can be **detached into its own window**
+(*Detach* / *Dock* in its header), so a board can sit on a second monitor instead
+of inside the app. Table cells render `[[wiki-links]]` as links you can click.
+
 **Links** — `trellis://7374/card/1391` opens that card in the instance serving
 that port (`GET /api/cards/{cid}/link` mints one). The port is the address, so it
 works with several instances running; `?doc=Personal.ron` is an optional check,
