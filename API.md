@@ -568,6 +568,50 @@ Two deliberate limits, both learned by running it against a real document:
   they share the journal's coordinate space. A task in a project basket belongs
   to the Agenda, which is what `/api/tasks` is for.
 
+### Diagrams — a figure is an image card plus its script
+
+**You can already do this**; nothing new is needed in the API. Render a PNG
+locally, create an `image` card, and POST the bytes:
+
+```sh
+# 1. the card
+CID=$(curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"kind":"image","title":"How the sync loop retries","pos":[40,40],"size":[900,540]}' \
+  $API/nodes/$NID/cards | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+
+# 2. its bytes (base64 in a JSON body — use a file, not a shell argument)
+python3 -c "import base64,json;print(json.dumps({'data_base64':base64.b64encode(open('fig.png','rb').read()).decode(),'name':'fig.png'}))" > img.json
+curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  --data-binary @img.json $API/nodes/$NID/cards/$CID/images
+
+# 3. the source, beside it, linked — an image alone cannot be edited
+curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d "{\"kind\":\"code\",\"lang\":\"python\",\"title\":\"Source — figure [[#$CID]]\",\"body\":\"…\",\"fit\":true}" \
+  $API/nodes/$NID/cards
+```
+
+**Both kinds of diagram are welcome, and they are the same mechanism** — a script
+that writes a PNG. What differs is which script you write:
+
+- **Auto-layout** (Graphviz, Mermaid, any DOT renderer) when the content really is
+  *what connects to what*: a state machine, a dependency graph, a call tree. The
+  algorithm places the nodes; you get a correct picture cheaply.
+- **Composed** (Pillow, or any drawing library, with coordinates you choose) when
+  the *arrangement itself carries meaning* — a timeline, a before/after, a layered
+  architecture, anything where "these two are side by side" or "this spans those"
+  is the point. An auto-layout engine cannot know that, so it will place things
+  in an order that is merely legal.
+
+A worked, commented example of the composed kind — the one that produced *The
+4th dimension* figure — is in **Build & Test Harness → *Diagram recipe***. Its
+header states the method: hand-placed geometry, a palette where every colour
+means something, four type sizes, and a caption that states the failure rather
+than only the happy path.
+
+**Always keep the script.** An image card is pixels; the script is the thing that
+can be corrected next month. Post it as a `code` card in the same basket and link
+the two with `[[#id]]` so each shows up in the other's backlinks.
+
 ### Links that open Trellis on a card
 
 An agent can hand over a **link**, not just an id. Clicking it opens the running
