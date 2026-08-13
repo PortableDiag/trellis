@@ -6,6 +6,27 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.101.1]
+
+### Fixed
+- **File → Restart works after an upgrade — which is the only time it is
+  used.** Reported: *"restart only works for the same version of trellis"*, and
+  it was exactly right. Restart relaunched `current_exe()`, which on Linux reads
+  `/proc/self/exe` — a link to the **inode** the process is running, not to the
+  path. Installing a new build unlinks that inode, so the link reads
+  `…/trellis (deleted)` and the relaunch failed with *No such file or
+  directory*. The one case the feature exists for was the one case it could not
+  do.
+
+  The marker is stripped and the path used only if a file is there now — that
+  file *is* the new build — with `argv[0]` as the fallback, since the desktop
+  entry and both launch scripts pass an absolute path. A bare `argv[0]` (a PATH
+  lookup rather than a file) is never spawned blind.
+
+  Verified by doing it: replaced the binary under a running instance, hit
+  Restart, and the new process came up on the same port with its `/proc/self/exe`
+  pointing at the replacement rather than the deleted inode.
+
 ## [0.101.0]
 
 ### Added

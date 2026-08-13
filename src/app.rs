@@ -648,6 +648,45 @@ fn kanban_card_ui(
     }
 }
 
+/// The binary to relaunch on **File → Restart**, which is only ever used
+/// *because* the binary has been replaced.
+///
+/// `current_exe()` alone gets this exactly backwards. On Linux it reads
+/// `/proc/self/exe`, which follows the **inode** the process is running, not the
+/// path — and installing a new build unlinks that inode, so the link reads
+/// `…/trellis (deleted)`. Restart then either fails with `No such file or
+/// directory` or relaunches the old build, which is how "Restart only works if
+/// the version hasn't changed" was reported: the one case it exists for was the
+/// one case it could not do.
+///
+/// So the deleted marker is stripped and the path taken only if something is
+/// there now — that file *is* the new build. `argv[0]` is the fallback, since a
+/// desktop entry and both launch scripts pass an absolute path.
+fn exe_for_restart() -> Option<std::path::PathBuf> {
+    pick_exe(
+        std::env::current_exe().ok().map(|p| p.to_string_lossy().to_string()),
+        std::env::args().next(),
+        |p| p.is_file(),
+    )
+}
+
+/// The choosing half of [`exe_for_restart`], with the filesystem passed in so
+/// the ordering and the `(deleted)` stripping can be tested.
+fn pick_exe(
+    current: Option<String>, argv0: Option<String>, exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(s) = current {
+        candidates.push(std::path::PathBuf::from(
+            s.strip_suffix(" (deleted)").unwrap_or(&s).to_string(),
+        ));
+    }
+    if let Some(a0) = argv0.filter(|a| a.contains('/')) {
+        candidates.push(std::path::PathBuf::from(a0));
+    }
+    candidates.into_iter().find(|p| exists(p))
+}
+
 /// What a template's *content* is, for telling an edited master from an
 /// untouched one.
 ///
@@ -1539,10 +1578,10 @@ impl TrellisApp {
         if self.dirty {
             self.save();
         }
-        let exe = match std::env::current_exe() {
-            Ok(e) => e,
-            Err(e) => {
-                self.status = format!("Restart failed: {e}");
+        let exe = match exe_for_restart() {
+            Some(e) => e,
+            None => {
+                self.status = "Restart failed: cannot find the Trellis binary".into();
                 return;
             }
         };
@@ -9253,5 +9292,42 @@ mod tests {
     fn download_name_falls_back_for_nameless_images() {
         assert_eq!(download_image_name("", 0), "image-1.png");
         assert_eq!(download_image_name("   ", 4), "image-5.png");
+    }
+
+    /// Restart exists for one reason — the binary was replaced — and that is
+    /// exactly when `/proc/self/exe` reads `… (deleted)`, because it follows the
+    /// inode the process is running rather than the path. Taking it literally
+    /// made Restart fail with `No such file or directory` on the only occasion
+    /// it was needed.
+    #[test]
+    fn restart_finds_the_replacement_binary_not_the_deleted_inode() {
+        use std::path::{Path, PathBuf};
+        let live = Path::new("/opt/trellis/trellis");
+        let here = |p: &Path| p == live;
+
+        // The reported case: upgraded under a running process.
+        assert_eq!(
+            pick_exe(Some("/opt/trellis/trellis (deleted)".into()), None, here),
+            Some(PathBuf::from("/opt/trellis/trellis")),
+            "the new build at the same path was not found"
+        );
+        // A path that genuinely ends in that text is not mangled into nothing:
+        // strip, find nothing there, fall back to argv[0].
+        assert_eq!(
+            pick_exe(
+                Some("/gone/trellis (deleted)".into()),
+                Some("/opt/trellis/trellis".into()),
+                here,
+            ),
+            Some(PathBuf::from("/opt/trellis/trellis"))
+        );
+        // Ordinary case: current_exe wins and argv[0] is never consulted.
+        assert_eq!(
+            pick_exe(Some("/opt/trellis/trellis".into()), Some("nonsense".into()), here),
+            Some(PathBuf::from("/opt/trellis/trellis"))
+        );
+        // A bare argv[0] is a PATH lookup, not a file — never spawn it blind.
+        assert_eq!(pick_exe(None, Some("trellis".into()), here), None);
+        assert_eq!(pick_exe(None, None, here), None);
     }
 }
