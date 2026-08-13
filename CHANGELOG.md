@@ -6,6 +6,31 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.96.0]
+
+### Fixed
+- **Writing about a property no longer creates one.** A card that *documents*
+  the syntax — a session report, a handoff, a release note — was acquiring the
+  properties it described. Four cards in the personal document were sitting on
+  the Agenda because of it, including the **Message board** itself and one whose
+  due date parsed as `` 2026-08-08`) ``. A `key:: value` inside an inline
+  `` `code span` `` or a fenced block is now read as what it is: text about a
+  property.
+
+  This also settles the one that could not be fixed by editing. A **mirrored**
+  session report discusses `due::` in its prose, and `PATCH` correctly refuses to
+  touch it (409) because the file on disk owns the body — so the only place the
+  fix could live was the parser, which is where it now is.
+
+  **Measured before it was written**, across both live documents: **801 real
+  properties, 13 false ones — and every false one was inside backticks or a
+  fence.** That measurement rejected the rule this started as. *"A property must
+  be on its own line"* is wrong: a checklist item carries its `due::` at the end
+  of the sentence it belongs to, so the rule would have silently dropped two live
+  deadlines. A **`code` card** is left alone for the same reason — its whole body
+  is code, and one in the work document is legitimately tracked with
+  `status:: done`.
+
 ## [0.95.1]
 
 ### Fixed

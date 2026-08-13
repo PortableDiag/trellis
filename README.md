@@ -199,7 +199,9 @@ from the main cluster, and click or drag on it to jump there without zooming out
   document-wide: the Tags panel lists every tag with a count; click one to see
   (and jump to) the cards that use it. Nested tags like `#work/urgent` work.
 - **Properties** — inline `key:: value` fields in a card (e.g. `due:: 2026-08-15`,
-  `status:: open`) are parsed as metadata you can query across the tree.
+  `status:: open`) are parsed as metadata you can query across the tree. Writing
+  *about* one doesn't create one: inside backticks or a fenced code block it is
+  quoted text, so notes that document the syntax stay off your agenda.
 - **Find cards** (View → Find cards) — a cross-tree query panel: pick a tag and/or
   a property (+ value) from dropdowns, optionally add text; results link back to
   their basket. No syntax to remember.

@@ -492,6 +492,14 @@ metadata — e.g. `due:: 2026-08-15`, `priority:: high`, `status:: open`. The `:
 must be followed by a space (so `std::fmt` and URLs aren't matched). Works as a
 whole line or bracketed inline (`[due:: 2026-08-15]`). Keys are lowercased. A
 card's parsed properties are included in its JSON as `properties:[{key,value}]`.
+
+**Code is not read** (since v0.96.0). A `key:: value` inside an inline
+`` `code span` `` or a fenced ```` ``` ```` block is text about a property, not a
+property — so a card that *documents* the syntax no longer acquires a due date
+and appear on the agenda. Everywhere else is unchanged: a property may sit
+mid-sentence, at the end of a checklist item, or on its own line. A **`code`
+card** is left alone entirely, because its whole body is code and one may still
+be tracked with `status:: done`.
 ```
 GET /api/properties                    → 200 {"properties":[{"key":"due","count":4}, …]}
 GET /api/properties?key=due            → 200 {"key":"due","value":null,"hits":[{node,card,node_title,snippet}, …]}

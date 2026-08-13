@@ -3609,32 +3609,89 @@ pub fn decode_link(s: &str) -> String {
 /// says. They stay in the underlying text, which is what the user edits.
 pub(crate) fn strip_properties(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(pos) = rest.find(":: ") {
-        // Walk back over the key to the whitespace that starts it.
-        let key_start = rest[..pos]
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let key = &rest[key_start..pos];
-        if key.is_empty() || !key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
-            // Not a property — keep the text up to here and carry on past it.
-            out.push_str(&rest[..pos + 3]);
-            rest = &rest[pos + 3..];
+    let mut in_fence = false;
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        // Code is left exactly as written, for the same reason
+        // [`extract_properties`] does not read properties out of it.
+        if is_code_fence(line) {
+            in_fence = !in_fence;
+            out.push_str(line);
             continue;
         }
-        out.push_str(&rest[..key_start]);
-        let after = &rest[pos + 3..];
-        let end = after.find(char::is_whitespace).unwrap_or(after.len());
-        rest = &after[end..];
+        if in_fence {
+            out.push_str(line);
+            continue;
+        }
+        let mut rest = line;
+        while let Some(pos) = rest.find(":: ") {
+            let base = line.len() - rest.len();
+            // Walk back over the key to the whitespace that starts it.
+            let key_start = rest[..pos]
+                .rfind(char::is_whitespace)
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let key = &rest[key_start..pos];
+            let is_prop = !key.is_empty()
+                && key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                && !in_code_span(line, base + key_start);
+            if !is_prop {
+                // Not a property — keep the text up to here and carry on past it.
+                out.push_str(&rest[..pos + 3]);
+                rest = &rest[pos + 3..];
+                continue;
+            }
+            out.push_str(&rest[..key_start]);
+            let after = &rest[pos + 3..];
+            let end = after.find(char::is_whitespace).unwrap_or(after.len());
+            rest = &after[end..];
+        }
+        out.push_str(rest);
     }
-    out.push_str(rest);
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Is byte offset `pos` inside an inline `` `code span` `` on this line?
+///
+/// Counts the backticks before it: an odd number means a span is open. Cheap,
+/// and it matches how the Markdown renderer treats the line closely enough —
+/// the case being caught is prose *quoting* the syntax, which is always written
+/// between backticks.
+fn in_code_span(line: &str, pos: usize) -> bool {
+    line[..pos].bytes().filter(|&c| c == b'`').count() % 2 == 1
+}
+
+/// Does this line open or close a fenced code block?
+fn is_code_fence(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("```") || t.starts_with("~~~")
 }
 
 pub(crate) fn extract_properties(text: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    // **Prose about a property is not a property.** A card that *documents* the
+    // syntax — a session report, a handoff, this changelog — was acquiring the
+    // properties it described: the card discussing `due:: 2026-08-15` grew a due
+    // date, landed on the Agenda and took its own Kanban column. Measured across
+    // both live documents: 801 real properties, 13 false ones, and every false
+    // one sat inside backticks or a fence.
+    //
+    // So code is skipped and **nothing else is** — the rule considered first,
+    // "a property must be on its own line", would have dropped two live
+    // deadlines, because a checklist item carries its `due::` at the end of the
+    // sentence it belongs to. A `Code` *card* is left alone for the same reason:
+    // one in the work document legitimately holds `status:: done`.
+    let mut in_fence = false;
     for line in text.lines() {
+        if is_code_fence(line) {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
         let b = line.as_bytes();
         // Pass 1: find every `key:: ` marker on the line.
         // (key_start, colon_index, value_start, opener_byte)
@@ -3651,7 +3708,7 @@ pub(crate) fn extract_properties(text: &str) -> Vec<(String, String)> {
                         break;
                     }
                 }
-                if ks < i {
+                if ks < i && !in_code_span(line, ks) {
                     let opener = if ks > 0 { b[ks - 1] } else { 0 };
                     let mut vs = i + 2;
                     while vs < b.len() && (b[vs] == b' ' || b[vs] == b'\t') {
@@ -4760,6 +4817,63 @@ mod tests {
                     "{probe:?}: {k} was parsed as a property but left in {left:?}"
                 );
             }
+        }
+    }
+
+    /// Prose *about* a property is not a property. Every line here is real text
+    /// from the two live documents; before this, each one gave its card a due
+    /// date or a status it never asked for.
+    #[test]
+    fn a_property_quoted_in_code_is_not_a_property() {
+        let quoted = [
+            "`due:: 2026-08-15 — RUN 1 DONE …` made the whole sentence the value",
+            "nine task cards carrying `status:: todo`, two with `due::` dates",
+            "(bracketed `[status:: …]` in the title).",
+            "a card in **[[Test Requests & Handoffs]]** with `due::`",
+        ];
+        for line in quoted {
+            assert!(
+                extract_properties(line).is_empty(),
+                "{line:?} was read as carrying {:?}",
+                extract_properties(line)
+            );
+            // …and the text is left exactly as written, backticks and all.
+            assert_eq!(strip_properties(line), line.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+
+        // A fenced block is code too — the `\n` cases the recipe card hits.
+        let fenced = "due:: 2026-08-15\n```\nstart:: 8/11\n```\nstatus:: done";
+        let props = extract_properties(fenced);
+        assert_eq!(props, vec![
+            ("due".into(), "2026-08-15".to_string()),
+            ("status".into(), "done".to_string()),
+        ]);
+    }
+
+    /// The other half of the same call: everything real keeps working. These are
+    /// live lines too — the ones the rejected "a property must be on its own
+    /// line" rule would have silently dropped.
+    #[test]
+    fn a_real_property_still_parses_wherever_it_sits() {
+        let real = [
+            // One space, mid-sentence, at the end of a checklist item.
+            ("… pageGen stays claude meanwhile. due:: 2026-08-15", "due", "2026-08-15"),
+            // The app writes two spaces; both must work.
+            ("F. Switchover verify: suites re-baselined  due:: 2026-08-15", "due", "2026-08-15"),
+            // A value with spaces in it is still a value.
+            ("#prod-verify #boss-flows status:: in progress", "status", "in progress"),
+            // Its own line, and bracketed inline — the documented forms.
+            ("status:: done", "status", "done"),
+            ("#handoff  [date:: 2026-08-04]", "date", "2026-08-04"),
+            // A backtick *after* the property does not reach back over it.
+            ("due:: 2026-08-15 see `status:: x`", "due", "2026-08-15"),
+        ];
+        for (line, key, value) in real {
+            let props = extract_properties(line);
+            assert!(
+                props.iter().any(|(k, v)| k == key && v == value),
+                "{line:?} lost {key}:: {value} — parsed {props:?}"
+            );
         }
     }
 
