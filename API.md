@@ -303,6 +303,12 @@ Open or fold a node in the sidebar. `recursive` applies it to the whole subtree
 POST /api/nodes/{id}/expand  {expanded:true|false, recursive?:false}
     → 200 {"id":<id>, "expanded":<bool>, "changed":<n>}    | 404
 ```
+The whole tree at once — every root and everything under it (the `⊟` / `⊞`
+buttons in the tree header). Always recursive:
+```
+POST /api/expand  {expanded:true|false}
+    → 200 {"expanded":<bool>, "changed":<n>}
+```
 (`GET /api/nodes/{id}` now includes the node's `expanded` flag.)
 
 ### Reorder a card

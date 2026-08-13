@@ -2353,6 +2353,21 @@ impl Document {
         changed
     }
 
+    /// Fold or open the **whole tree**: every root and everything under it.
+    /// Returns how many nodes actually changed.
+    ///
+    /// Recursive, matching the per-node *Expand all* / *Collapse all* and the
+    /// Android toolbar. The alternative — fold the roots and leave each
+    /// subtree's inner shape alone — means the tree remembers a state you cannot
+    /// see, so reopening a project gives you a shape you did not ask for.
+    pub fn set_all_expanded(&mut self, expanded: bool) -> usize {
+        self.roots
+            .clone()
+            .into_iter()
+            .map(|r| self.set_subtree_expanded(r, expanded, true))
+            .sum()
+    }
+
     /// Remove a node and its whole subtree; detaches it from its parent/roots.
     pub fn remove_node(&mut self, id: NodeId) {
         let parent = self.nodes.get(&id).and_then(|n| n.parent);
@@ -6461,5 +6476,26 @@ mod tests {
         doc.raise_group(n, g);
         let order: Vec<CardId> = doc.nodes[&n].cards.iter().map(|c| c.id).collect();
         assert_eq!(order, vec![b, a, c]);
+    }
+
+    /// Collapse-all is recursive, which is the whole decision: it must reach
+    /// nodes that are not roots, or reopening a project shows a shape nobody
+    /// chose. `changed` counts what actually moved, so a second call is 0.
+    #[test]
+    fn set_all_expanded_folds_every_root_and_everything_under_it() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "a".into());
+        let b = doc.add_node(None, "b".into());
+        let a1 = doc.add_node(Some(a), "a1".into());
+        let a2 = doc.add_node(Some(a1), "a2".into());
+
+        assert_eq!(doc.set_all_expanded(true), 0, "new nodes are already expanded");
+        let changed = doc.set_all_expanded(false);
+        assert_eq!(changed, 4, "both roots and both descendants");
+        for id in [a, b, a1, a2] {
+            assert!(!doc.nodes[&id].expanded, "{id} was left open");
+        }
+        assert_eq!(doc.set_all_expanded(false), 0, "nothing left to fold");
+        assert_eq!(doc.set_all_expanded(true), 4);
     }
 }

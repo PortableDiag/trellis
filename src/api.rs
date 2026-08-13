@@ -69,6 +69,8 @@ pub enum ApiRequest {
     MoveNode { id: NodeId, mv: MoveNodeInput },
     // Expand or collapse a node (optionally its whole subtree).
     SetExpanded { id: NodeId, expanded: bool, recursive: bool },
+    // Expand or collapse every root and everything under it.
+    SetAllExpanded { expanded: bool },
     AddCard { node: NodeId, input: AddCardInput },
     UpdateCard { node: NodeId, card: u64, patch: UpdateCardInput },
     // ↑ Both accept `fit`. `process` applies `Card::fit_size`, which is only an
@@ -287,6 +289,9 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
         ApiRequest::SetExpanded { id, .. } => {
             ch(E::Node, Op::Updated, *id).titled(node_title(id)).field("expanded")
         }
+        // Touches every node, so it is reported once against the document
+        // rather than as N separate node updates.
+        ApiRequest::SetAllExpanded { .. } => ch(E::Node, Op::Updated, 0).field("expanded.all"),
         ApiRequest::Autosort(id) => {
             // Moves every card in the basket, so it is reported against the
             // basket rather than as N separate card moves.
@@ -526,6 +531,12 @@ struct ExpandInput {
     /// Apply to the whole subtree (node + all descendants), not just this node.
     #[serde(default)]
     recursive: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExpandAllInput {
+    expanded: bool,
 }
 
 #[derive(Deserialize)]
@@ -1064,6 +1075,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "nodes", id, "expand"]) => {
             let i: ExpandInput = parse(body)?;
             Ok(ApiRequest::SetExpanded { id: pid(id)?, expanded: i.expanded, recursive: i.recursive })
+        }
+        (Method::Post, ["api", "expand"]) => {
+            let i: ExpandAllInput = parse(body)?;
+            Ok(ApiRequest::SetAllExpanded { expanded: i.expanded })
         }
         (Method::Get, ["api", "nodes", id, "backlinks"]) => Ok(ApiRequest::Backlinks(pid(id)?)),
         (Method::Get, ["api", "nodes", id, "cards"]) => Ok(ApiRequest::ListCards(pid(id)?)),
@@ -1746,6 +1761,10 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 c
             };
             (changed > 0, ApiResponse::ok(json!({ "id": id, "expanded": expanded, "changed": changed })))
+        }
+        ApiRequest::SetAllExpanded { expanded } => {
+            let changed = doc.set_all_expanded(expanded);
+            (changed > 0, ApiResponse::ok(json!({ "expanded": expanded, "changed": changed })))
         }
         ApiRequest::AddCard { node, input } => {
             if !doc.nodes.contains_key(&node) {

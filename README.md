@@ -19,7 +19,8 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 - Add root / child / sibling nodes; inline rename (double-click); delete subtrees
 - Reorder siblings (move up/down), indent / outdent to reshape the hierarchy
 - Expand / collapse; right-click → **Expand all** / **Collapse all** to open or
-  fold a whole branch at once for working with big node sets
+  fold a whole branch at once for working with big node sets, or the **⊟** / **⊞**
+  buttons in the tree header to fold or open the **whole tree** in one click
 - Per-node color tags and a per-node **basket background color** (right-click →
   **Basket color**; the black grid stays the default)
 - Right-click → **Copy** a node's **id** (for the agent API, `/api/nodes/{id}`)

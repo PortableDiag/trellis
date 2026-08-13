@@ -6,6 +6,25 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.97.0]
+
+### Added
+- **Fold the whole tree in one click.** `⊟` and `⊞` in the tree header, and
+  `POST /api/expand {expanded}` for parity. Right-click → *Expand all* /
+  *Collapse all* has always worked on one node, including a root; what was
+  missing was doing it to every root at once, which with 38 top-level projects
+  was 38 right-clicks.
+
+  **Recursive**, matching the per-node menu and the Android toolbar (which has
+  had this since v0.10.0 — this is desktop parity, not new ground). The
+  alternative, folding the roots and leaving each subtree's inner shape alone,
+  makes the tree remember a state you cannot see: reopening a project gives you
+  a shape you never chose.
+
+  `expanded` is document state, so this marks the document dirty and writes a
+  version-history snapshot — already true of the per-node toggle. It is one
+  change-log entry for the tree, not one per node.
+
 ## [0.96.0]
 
 ### Fixed

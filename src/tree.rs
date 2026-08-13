@@ -36,6 +36,8 @@ pub enum TreeAction {
     ToggleExpand(NodeId),
     /// Expand (`true`) or collapse (`false`) a node and its whole subtree.
     SetSubtreeExpanded(NodeId, bool),
+    /// Expand or collapse *every* root and everything under it.
+    SetAllExpanded(bool),
     MoveUp(NodeId),
     MoveDown(NodeId),
     MoveToTop(NodeId),
@@ -80,6 +82,18 @@ pub fn ui(
                 .clicked()
             {
                 actions.push(TreeAction::ToggleReorder);
+            }
+            // Right-click → Expand all / Collapse all has always worked on one
+            // node, including a root. Doing it to the whole tree was the missing
+            // part: with 38 top-level projects, folding the tree was 38
+            // right-clicks. Small icon buttons — the header already carries two.
+            // Laid out right-to-left, so expand is pushed first to draw second:
+            // the pair reads ⊟ ⊞ on screen, collapse before expand.
+            if ui.small_button("⊞").on_hover_text("Expand the whole tree").clicked() {
+                actions.push(TreeAction::SetAllExpanded(true));
+            }
+            if ui.small_button("⊟").on_hover_text("Collapse the whole tree").clicked() {
+                actions.push(TreeAction::SetAllExpanded(false));
             }
         });
     });

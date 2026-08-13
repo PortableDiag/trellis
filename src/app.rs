@@ -3316,6 +3316,8 @@ impl TrellisApp {
             TreeAction::SetSubtreeExpanded(id, _) => {
                 ch(Op::Updated, *id).titled(title(id)).field("expanded.subtree")
             }
+            // One entry for the whole tree, not one per node.
+            TreeAction::SetAllExpanded(_) => ch(Op::Updated, 0).field("expanded.all"),
             TreeAction::SetColor(id, _) => ch(Op::Updated, *id).titled(title(id)).field("color"),
             TreeAction::SetBg(id, _) => ch(Op::Updated, *id).titled(title(id)).field("bg"),
             TreeAction::MoveUp(id)
@@ -3482,6 +3484,9 @@ impl TrellisApp {
                 }
                 TreeAction::SetSubtreeExpanded(id, expanded) => {
                     self.doc.set_subtree_expanded(id, expanded, true);
+                }
+                TreeAction::SetAllExpanded(expanded) => {
+                    self.doc.set_all_expanded(expanded);
                 }
                 TreeAction::MoveUp(id) => self.doc.move_sibling(id, true),
                 TreeAction::MoveDown(id) => self.doc.move_sibling(id, false),
@@ -6258,6 +6263,7 @@ impl TrellisApp {
                         "DELETE /api/nodes/{id}",
                         "POST   /api/nodes/{id}/move     {before|after|index|to, parent?}",
                         "POST   /api/nodes/{id}/expand   {expanded, recursive?}",
+                        "POST   /api/expand              {expanded}   (the whole tree)",
                         "GET    /api/nodes/{id}/backlinks          (cards that [[link]] here)",
                         "GET    /api/graph                         (wiki-link nodes + edges)",
                         "GET    /api/nodes/{id}/cards",
