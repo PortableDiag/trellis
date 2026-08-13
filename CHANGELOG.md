@@ -6,6 +6,25 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.99.1]
+
+### Fixed
+- **A stuck window no longer walks off the screen.** v0.99.0 nudged a detached
+  panel by the main window's frame-to-frame delta, measured from the panel's own
+  reported position. Both readings lag the window manager, and `OuterPosition`
+  is answered with a position that differs from the one asked for by the
+  window's decoration inset — so every move left a residue, the next move added
+  to it, and the Agenda drifted sideways until it was off the desktop.
+  **Chasing a moving target with a measurement of where you already are cannot
+  converge.**
+
+  It now holds a *target* instead: the target moves with the main window, and
+  the command is sent **once per target**, so a stale or offset reading can
+  never feed back into it. Dragging the panel yourself re-teaches the offset,
+  guarded by a short settle window so the panel moving *because Trellis moved
+  it* is not mistaken for you moving it. As a backstop the target is clamped to
+  the monitor: a panel that cannot be seen cannot be used.
+
 ## [0.99.0]
 
 ### Added

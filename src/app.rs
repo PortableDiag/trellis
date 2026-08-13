@@ -870,6 +870,9 @@ pub struct TrellisApp {
     /// one. A detached window is nudged by the same delta.
     last_main_pos: Option<egui::Pos2>,
     main_move_delta: egui::Vec2,
+    /// Per-panel follow state; see [`StickState`].
+    agenda_stick: StickState,
+    kanban_stick: StickState,
     /// Kanban: show the `done` column (it piles up; hide it to focus on active work).
     kanban_show_done: bool,
     /// Link-graph window state (force-directed layout, rebuilt when opened).
@@ -1309,6 +1312,8 @@ impl TrellisApp {
                 .unwrap_or(true),
             last_main_pos: None,
             main_move_delta: egui::Vec2::ZERO,
+            agenda_stick: StickState::default(),
+            kanban_stick: StickState::default(),
             agenda_project: cc
                 .storage
                 .and_then(|st| st.get_string(AGENDA_PROJECT_KEY))
@@ -6893,7 +6898,7 @@ impl TrellisApp {
                 egui::CentralPanel::default().show(vctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| self.agenda_body(ui));
                 });
-                follow_main_window(vctx, stick, delta);
+                follow_main_window(vctx, stick, delta, &mut self.agenda_stick);
                 // Closing the OS window closes the panel; it must not linger as an
                 // invisible open panel that the View menu then refuses to reopen.
                 if vctx.input(|i| i.viewport().close_requested()) {
@@ -7368,7 +7373,7 @@ impl TrellisApp {
             let delta = self.main_move_delta;
             ctx.show_viewport_immediate(vid, builder, |vctx, _| {
                 egui::CentralPanel::default().show(vctx, |ui| self.kanban_body(ui));
-                follow_main_window(vctx, stick, delta);
+                follow_main_window(vctx, stick, delta, &mut self.kanban_stick);
                 if vctx.input(|i| i.viewport().close_requested()) {
                     closed = true;
                 }
@@ -8219,24 +8224,83 @@ fn stick_toggle(ui: &mut egui::Ui, stick: &mut bool) {
     }
 }
 
-/// Move a detached panel's window by the same amount the main window just
-/// moved, so it keeps the place you put it relative to the canvas.
+/// Where a stuck window is *meant* to be, so it can be told absolutely instead
+/// of nudged.
 ///
-/// **Relative, not anchored.** Dragging the app to the other side of the desk
-/// should bring its board along; it should not yank a board you parked on a
-/// second monitor into a fixed slot. Moving by the delta does both — the offset
-/// you chose is the offset you keep, whichever monitor it lands on.
+/// **Why this is not a delta.** The first version added the main window's frame
+/// delta to the panel's own reported position. Both readings lag the window
+/// manager by a frame or more, and `OuterPosition` is answered with a position
+/// that differs from what was asked by the window's decoration inset — so every
+/// move left a small residue, the next move added to it, and the panel walked
+/// off the side of the screen. Chasing a moving target with a measurement of
+/// where you already are cannot converge.
 ///
-/// A zero delta sends nothing, so the window manager is left alone on the
-/// frames where nothing moved (which is nearly all of them), and dragging the
-/// detached window itself is never fought over.
-fn follow_main_window(vctx: &egui::Context, stick: bool, delta: egui::Vec2) {
-    if !stick || delta == egui::Vec2::ZERO {
+/// Holding a *target* fixes it: the target moves with the main window, and the
+/// command is sent **once per target**. A stale or offset reading can no longer
+/// feed back into it, because nothing is ever measured to produce it.
+#[derive(Default)]
+struct StickState {
+    /// Where this panel should sit.
+    target: Option<egui::Pos2>,
+    /// The last target actually sent, so an identical one is never re-sent —
+    /// that is what stops a per-frame tug-of-war with the window manager.
+    sent: Option<egui::Pos2>,
+    /// Where the panel was last seen, to notice the user dragging it.
+    seen: Option<egui::Pos2>,
+    /// Frames to ignore movement for after commanding one, while the window
+    /// manager catches up. Without it, the window moving *because we moved it*
+    /// reads as the user moving it.
+    settle: u8,
+}
+
+/// Keep a detached panel at its offset from the main window.
+///
+/// **Relative, not anchored.** Dragging the app across the desk brings its
+/// board along; a board parked on a second monitor keeps the offset you gave
+/// it rather than being pulled into a fixed slot. Dragging the panel itself
+/// re-teaches the offset — that is what the settle counter protects.
+fn follow_main_window(
+    vctx: &egui::Context, stick: bool, delta: egui::Vec2, st: &mut StickState,
+) {
+    let Some(rect) = vctx.input(|i| i.viewport().outer_rect) else { return };
+    let measured = rect.min;
+    if !stick {
+        // Forget everything, so switching it back on adopts wherever the panel
+        // is now instead of teleporting it to a stale target.
+        *st = StickState::default();
         return;
     }
-    if let Some(rect) = vctx.input(|i| i.viewport().outer_rect) {
-        vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(rect.min + delta));
+    if st.settle > 0 {
+        st.settle -= 1;
+    } else if let Some(prev) = st.seen {
+        // The user dragged this window: that is the new offset to keep.
+        if (measured - prev).length() > 1.0 {
+            st.target = Some(measured);
+            st.sent = None;
+        }
     }
+    st.seen = Some(measured);
+    let target = st.target.get_or_insert(measured);
+    if delta != egui::Vec2::ZERO {
+        *target += delta;
+    }
+    let target = *target;
+    if st.sent == Some(target) {
+        return;
+    }
+    // A panel that cannot be seen cannot be used: never let the follow put it
+    // where the monitor isn't. Half of it must stay on-screen.
+    let target = match vctx.input(|i| i.viewport().monitor_size) {
+        Some(m) => egui::pos2(
+            target.x.clamp(-rect.width() / 2.0, (m.x - rect.width() / 2.0).max(0.0)),
+            target.y.clamp(0.0, (m.y - rect.height() / 2.0).max(0.0)),
+        ),
+        None => target,
+    };
+    st.target = Some(target);
+    st.sent = Some(target);
+    st.settle = 8;
+    vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target));
 }
 
 /// Where a panel lives: inside the main window, or in one of its own.
