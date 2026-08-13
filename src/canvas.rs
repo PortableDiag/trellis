@@ -915,29 +915,67 @@ pub fn ui(
                 {
                     actions.push(CanvasAction::ToggleSnapMode);
                 }
-                if ui
-                    .selectable_label(time_mode, "Time")
-                    .on_hover_text(
-                        "Time: a task carrying start:: and due:: is shown in every day it \
-                         spans, as the same card — not a copy. Click one to go to where it \
-                         lives and edit it there. Off, a day shows only its own cards.",
-                    )
-                    .clicked()
-                {
-                    actions.push(CanvasAction::ToggleTimeMode);
-                }
-                if ui
-                    .selectable_label(depth_mode, "Depth")
-                    .on_hover_text(
-                        "Depth: the basket is a volume, not a plane. Shift+scroll over a card \
-                         to slide it toward or away from you. Turning this off flattens the \
-                         view — it never discards depth, and a flat basket looks exactly as \
-                         it does now.",
-                    )
-                    .clicked()
-                {
-                    actions.push(CanvasAction::ToggleDepthMode);
-                }
+                // The two axes that turn a basket from a plane into a hypercube,
+                // grouped and named as such. The group's own state is **derived**
+                // — lit only when both are on — rather than stored, so there is
+                // no third setting that can disagree with the two real ones.
+                egui::Frame::group(ui.style())
+                    .inner_margin(egui::Margin::symmetric(6.0, 1.0))
+                    .show(ui, |ui| {
+                        let both = depth_mode && time_mode;
+                        if ui
+                            .selectable_label(both, "Hypercube")
+                            .on_hover_text(
+                                "A basket is x and y. **Depth** adds z, and **Time** adds the \
+                                 axis beyond it — a card is present on every day it spans. \
+                                 Together they make a basket a hypercube.\n\nClick to turn \
+                                 both on, or off if both are already on. Each still toggles \
+                                 on its own.",
+                            )
+                            .clicked()
+                        {
+                            // Both on unless both already are, in which case both
+                            // off. Anything cleverer (toggle each independently)
+                            // makes one click do two different things depending
+                            // on a state you cannot see.
+                            if both {
+                                actions.push(CanvasAction::ToggleDepthMode);
+                                actions.push(CanvasAction::ToggleTimeMode);
+                            } else {
+                                if !depth_mode {
+                                    actions.push(CanvasAction::ToggleDepthMode);
+                                }
+                                if !time_mode {
+                                    actions.push(CanvasAction::ToggleTimeMode);
+                                }
+                            }
+                        }
+                        if ui
+                            .selectable_label(depth_mode, "Depth")
+                            .on_hover_text(
+                                "Depth (z): the basket is a volume, not a plane. Shift+scroll \
+                                 over a card slides it toward or away from you, and Alt+drag \
+                                 looks around. Turning this off flattens the view — it never \
+                                 discards depth, and a flat basket looks exactly as it does \
+                                 now.",
+                            )
+                            .clicked()
+                        {
+                            actions.push(CanvasAction::ToggleDepthMode);
+                        }
+                        if ui
+                            .selectable_label(time_mode, "Time")
+                            .on_hover_text(
+                                "Time: a task carrying start:: and due:: is shown in every day \
+                                 it spans, as the same card — not a copy. Click one to go to \
+                                 where it lives and edit it there. Off, a day shows only its \
+                                 own cards.",
+                            )
+                            .clicked()
+                        {
+                            actions.push(CanvasAction::ToggleTimeMode);
+                        }
+                    });
                 if selection.len() >= 2
                     && ui
                         .button(format!("Group {} cards", selection.len()))

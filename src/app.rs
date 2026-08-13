@@ -4968,6 +4968,37 @@ impl TrellisApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    // The two axes live together here as well as on the canvas —
+                    // named, so the pair has a reason to be a pair.
+                    ui.menu_button("Hypercube", |ui| {
+                        ui.label(
+                            egui::RichText::new("A basket is x and y. These add z and time.")
+                                .weak()
+                                .small(),
+                        );
+                        ui.separator();
+                        ui.checkbox(&mut self.depth_mode, "Depth (z) — a basket is a volume")
+                            .on_hover_text(
+                                "Shift+scroll over a card slides it in z; Alt+drag looks \
+                                 around. Off, z is the stacking order and nothing is lost.",
+                            );
+                        ui.checkbox(&mut self.time_mode, "Time — a task spans the days it covers")
+                            .on_hover_text(
+                                "A card with start:: and due:: appears in every day between \
+                                 them — the same card, not a copy.",
+                            );
+                        ui.separator();
+                        let both = self.depth_mode && self.time_mode;
+                        if ui
+                            .button(if both { "Turn both off" } else { "Turn both on" })
+                            .clicked()
+                        {
+                            self.depth_mode = !both;
+                            self.time_mode = !both;
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
                     ui.menu_button("Themes", |ui| {
                         for (t, label) in Theme::ALL {
                             if ui.selectable_label(self.theme == t, label).clicked() {
@@ -6079,7 +6110,13 @@ impl TrellisApp {
                     );
                 ui.checkbox(&mut self.snap_mode, "Snap mode (align card edges while dragging)")
                     .on_hover_text("When on, a dragged card's edges snap to nearby cards' edges.");
-                ui.checkbox(&mut self.depth_mode, "Depth — the basket is a volume (true Z)")
+                ui.label(
+                    egui::RichText::new(
+                        "Hypercube — a basket is x and y; these two add z and time.",
+                    )
+                    .strong(),
+                );
+                ui.checkbox(&mut self.depth_mode, "Depth (z) — the basket is a volume")
                     .on_hover_text(
                         "Cards get a real depth instead of a stacking order: near ones are \
                          larger and cover far ones, and Shift+scroll over a card slides it \

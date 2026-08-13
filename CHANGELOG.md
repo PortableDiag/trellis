@@ -6,6 +6,27 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.95.0]
+
+### Changed
+- **Depth and Time are named: together they make a basket a *hypercube*.** They
+  are grouped under that word on the canvas and in a new **View → Hypercube**
+  submenu, where one click turns both on or both off.
+
+  The buttons keep their own plain names, because a label should say what it
+  does — someone looking for "make cards overlap in 3-D" scans for *Depth*, not
+  for a numbered mode. The group exists to give the pair a reason to be a pair.
+
+  **The group's state is derived, not stored:** it is lit only when both are on.
+  A third setting that could disagree with the two real ones would be a bug
+  waiting to happen.
+
+  The model, stated in the docs so it stops being ambiguous: a **basket** is the
+  space — `x`, `y`, then `z`, then time. The **tree is not a dimension**, it is
+  the index over baskets. And a basket is not "a trellis": the trellis is the
+  whole lattice, tree and baskets. The app is still **Trellis**; a hypercube is
+  what one of its baskets becomes.
+
 ## [0.94.0]
 
 ### Fixed

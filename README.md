@@ -74,8 +74,12 @@ worth adding to anything durable because card ids repeat across documents. The
 **File → Restart** brings this same instance back on the same port after an
 upgrade.
 
-**Depth and time** — two axes the canvas can be given, both **off by default**,
-toggled by **Depth** and **Time** beside Dock and Snap. **Depth** makes a basket a
+**Depth and time — the hypercube.** A **basket** is the space: `x` and `y`
+always, `z` when **Depth** is on, and a time axis when **Time** is on — at which
+point a basket is a hypercube. (The tree is not a dimension; it is the index over
+baskets. And a basket is not "a trellis" — the trellis is the whole lattice, tree
+*and* baskets.) Both are **off by default**, grouped as **Hypercube** beside Dock
+and Snap, and under **View → Hypercube**, where one click turns both on. **Depth** makes a basket a
 volume: cards have a real `z`, nearer ones are larger and cover further ones, a
 click lands on the nearest, and **Shift+scroll over a card** slides it toward or
 away from you. It is a camera rather than a drawing trick, which is what makes VR

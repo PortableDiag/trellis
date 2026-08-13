@@ -519,11 +519,23 @@ GET /api/query?tag=todo&key=status&value=open&text=release
 ```
 All params optional, but at least one of `tag`/`key`/`text` is needed (else empty).
 
-### Depth and time
+### Depth and time — the hypercube
 
-A basket is a **volume**, and a task can **occupy a range of days**. Both axes are
-**off by default** (canvas buttons *Depth* and *Time*, beside Dock and Snap), and
-both are **view** settings — the data is on the card either way.
+**Trellis** is a tree of baskets. A **basket** is the space: `x` and `y` always,
+**`z`** when Depth is on, and a **time** axis when Time is on — at which point a
+basket is a **hypercube**, and that is the word the app uses for the pair.
+
+Two things the name does *not* mean, because getting this wrong makes the model
+harder to explain than it is:
+
+- **The tree is not a dimension.** It is the index *over* baskets — discrete
+  containers, not an axis anything moves along. Nodes add no axes.
+- **A basket is not "a trellis".** The trellis is the whole lattice: tree *and*
+  baskets.
+
+Both axes are **off by default** (canvas group *Hypercube: Depth · Time*, beside
+Dock and Snap; also **View → Hypercube**), and both are **view** settings — the
+data is on the card either way.
 
 **Alt+drag looks around.** With Depth on, Alt+drag moves the eye: `z = 0` stays
 put while near and far cards swing opposite ways. That parallax is what makes
