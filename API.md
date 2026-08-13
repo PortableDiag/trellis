@@ -984,7 +984,9 @@ master instead of cloning it. Deleting a template removes its master too.
 The snapshot in config is the authority — `insert` always stamps *it*, never the
 master — so editing a master changes nothing until you `update`. That is
 deliberate: a stray edit to a master must not silently change every future
-insert.
+insert. Since v0.101.0 the app **says so**: a master that no longer matches its
+snapshot is marked **✎ edited** on its title bar, and its right-click menu offers
+*Update template “name” from this card* directly.
 
 The config, not the document, is where templates live, so a library is **per
 instance, not per document**: instances started with different `--data-dir`s have

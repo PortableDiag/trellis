@@ -648,6 +648,30 @@ fn kanban_card_ui(
     }
 }
 
+/// What a template's *content* is, for telling an edited master from an
+/// untouched one.
+///
+/// Size and depth are excluded on purpose: dragging a master, or letting Fit
+/// resize it, is layout rather than a change to the template. Image bytes are
+/// excluded because comparing megabytes of base64 on every frame to learn what
+/// the file name already says is not worth it — so swapping in a different
+/// picture under the same name is the one edit this will not notice.
+fn template_key(e: &crate::model::CardExport) -> String {
+    let mut e = e.clone();
+    e.size = [0.0, 0.0];
+    e.z = 0.0;
+    for img in &mut e.inline_images {
+        img.data.clear();
+    }
+    if let crate::model::CardKind::Image { data, extra, .. } = &mut e.kind {
+        data.clear();
+        for x in extra.iter_mut() {
+            x.data.clear();
+        }
+    }
+    serde_json::to_string(&e).unwrap_or_default()
+}
+
 /// Title of the basket that holds template master cards. Created on demand the
 /// first time a template is registered, and reused thereafter.
 const TEMPLATES_NODE_TITLE: &str = "Templates";
@@ -2382,6 +2406,45 @@ impl TrellisApp {
     ///
     /// If the source card already lives in the Templates basket it becomes the
     /// master as-is — registering from a master must not clone it.
+    /// The template master cards living in `node`, as
+    /// `card → (template index, name, edited?)`.
+    ///
+    /// **Why "edited" has to be shown.** The stored snapshot is the authority —
+    /// inserting stamps *it*, never the master — which is deliberate, so that a
+    /// stray edit cannot silently change every future insert. But nothing said
+    /// the two had diverged, so editing a master looked like editing the
+    /// template and wasn't: the insert kept producing the old content, with no
+    /// error and nothing to notice. Reported from use.
+    ///
+    /// Only masters in the basket being drawn are considered, so this costs
+    /// nothing anywhere except inside the Templates basket itself.
+    fn master_states(&self, node: NodeId) -> HashMap<CardId, (usize, String, bool)> {
+        let mut out = HashMap::new();
+        for (i, t) in self.templates.iter().enumerate() {
+            let Some(m) = &t.master else { continue };
+            if m.node != node || self.doc.card(m.node, m.card).is_none() {
+                continue;
+            }
+            let name = if t.card.title.trim().is_empty() {
+                t.card.kind.label().to_string()
+            } else {
+                t.card.title.clone()
+            };
+            let edited = match self
+                .doc
+                .export_card_json(m.node, m.card)
+                .and_then(|j| crate::model::parse_card_export(&j))
+            {
+                Some(now) => template_key(&now) != template_key(&t.card),
+                // A master that cannot be exported cannot be compared; claiming
+                // it is edited would put a warning on a card nobody can fix.
+                None => false,
+            };
+            out.insert(m.card, (i, name, edited));
+        }
+        out
+    }
+
     fn register_template(
         &mut self,
         node: NodeId,
@@ -7906,11 +7969,13 @@ impl eframe::App for TrellisApp {
                     let template_names: Vec<String> =
                         self.templates.iter().map(|t| t.card.title.clone()).collect();
                     let card_plugins = self.plugins_for(crate::plugins::Trigger::CardMenu);
+                    let masters = self.master_states(sel);
                     let mut env = Env {
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
                         card_rects: &mut self.card_rects,
                         templates: &template_names,
+                        masters: &masters,
                         card_plugins: &card_plugins,
                         inline_sent: &mut self.inline_sent,
                         inline_epoch: self.inline_epoch,

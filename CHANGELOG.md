@@ -6,6 +6,31 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.101.0]
+
+### Added
+- **An edited template master says so.** A master card that no longer matches
+  its stored snapshot is marked **✎ edited** on its title bar, and its
+  right-click menu offers *Update template “name” from this card* — its own
+  slot, rather than a list of every template to pick out of.
+
+  Reported from use, and the report is the whole design note: a template was
+  created from an old card, the values were deleted from the **master** in the
+  Templates basket, and inserting it *still produced the original values*.
+  Nothing was broken — the stored snapshot is the authority and inserting stamps
+  it, exactly as intended, so that a stray edit cannot silently change every
+  future insert. But nothing said the two had diverged, so an edited master
+  looked authoritative and wasn't: the insert kept producing old content, with
+  no error and nothing to notice. The rule stays; it is now visible.
+
+  Size and depth are ignored when comparing — dragging a master, or letting Fit
+  resize it, is layout rather than a change to the template. Image bytes are
+  ignored too, so replacing a picture with a different one under the same name
+  is the single edit this will not spot; comparing megabytes of base64 every
+  frame to learn what the file name already says is not worth it. The check runs
+  only for masters in the basket being drawn, so it costs nothing outside the
+  Templates basket.
+
 ## [0.100.0]
 
 ### Added

@@ -24,6 +24,14 @@ pub struct Env<'a> {
     pub card_rects: &'a mut HashMap<CardId, egui::Rect>,
     /// Names of the user's saved card templates, for the "Insert template" menu.
     pub templates: &'a [String],
+    /// Template master cards in this basket: card id → (template index, name,
+    /// whether the master has been edited away from the stored snapshot).
+    ///
+    /// A master is what you *edit*; the stored snapshot is what *inserts*. That
+    /// is deliberate — a stray edit must not silently change every future
+    /// insert — but it left no sign that the two had diverged, so an edited
+    /// master looked authoritative and wasn't.
+    pub masters: &'a HashMap<CardId, (usize, String, bool)>,
     /// Approved plugins offering the `card-menu` trigger, as (index, title).
     pub card_plugins: &'a [(usize, String)],
     /// `bytes://` URIs already registered with egui this session, so a text
@@ -1201,6 +1209,19 @@ fn card_ui(
             egui::Stroke::new((2.0 * zoom).max(1.5), egui::Color32::from_rgb(0xff, 0xd1, 0x66)),
         );
     }
+    // A template master that no longer matches its stored snapshot says so, on
+    // the card. Without this the divergence is invisible: the master reads as
+    // the template, while inserts keep stamping the old snapshot.
+    if env.masters.get(&card.id).is_some_and(|(_, _, stale)| *stale) {
+        let galley = ui.painter().layout_no_wrap(
+            "✎ edited".to_owned(),
+            egui::FontId::proportional(10.0 * zoom),
+            egui::Color32::from_rgb(0xff, 0xd1, 0x66),
+        );
+        let at = title_rect.right_center()
+            - egui::vec2(galley.size().x + 84.0 * zoom, galley.size().y / 2.0);
+        p.galley(at, galley, egui::Color32::PLACEHOLDER);
+    }
     // Small marker on a docked card's title bar.
     if card.docked_to.is_some() {
         p.circle_filled(
@@ -1266,7 +1287,7 @@ fn card_ui(
         actions.push(CanvasAction::SetEditing(card.id, !card.editing));
     }
     handle.context_menu(|ui| {
-        card_menu(ui, card, node_path, env.templates, env.card_plugins, actions)
+        card_menu(ui, card, node_path, env.templates, env.masters, env.card_plugins, actions)
     });
 
     // Title label.
@@ -2016,6 +2037,7 @@ fn card_menu(
     card: &Card,
     node_path: &str,
     templates: &[String],
+    masters: &HashMap<CardId, (usize, String, bool)>,
     card_plugins: &[(usize, String)],
     actions: &mut Vec<CanvasAction>,
 ) {
@@ -2074,6 +2096,26 @@ fn card_menu(
     {
         actions.push(CanvasAction::SaveAsTemplate(card.id));
         ui.close_menu();
+    }
+    // This card *is* a template's master. Offer its own slot directly, rather
+    // than making someone pick it out of a list of every template — and say so
+    // when it has been edited, which is the whole point of the marker.
+    if let Some((i, name, stale)) = masters.get(&card.id) {
+        let label = if *stale {
+            format!("✎ Update template “{name}” from this card")
+        } else {
+            format!("Update template “{name}” from this card")
+        };
+        let btn = ui.button(label).on_hover_text(if *stale {
+            "This master has been edited. Inserting the template still stamps the \
+             stored snapshot until you do this."
+        } else {
+            "Re-snapshot this template from its master card."
+        });
+        if btn.clicked() {
+            actions.push(CanvasAction::UpdateTemplate(*i, card.id));
+            ui.close_menu();
+        }
     }
     // Overwrite an existing template from this (edited) card — the "template
     // editor" flow: keep a master in a Templates node, tweak it, then update.

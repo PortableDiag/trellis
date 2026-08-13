@@ -136,7 +136,10 @@ from the main cluster, and click or drag on it to jump there without zooming out
   fresh copy at the click point. Saving a template also puts a **master card** for it in a
   root-level **Templates** basket (created the first time), so your templates are something
   you can see and edit rather than an invisible setting: tweak the master, right-click →
-  **Update template**, and every later copy you stamp uses the new version. Deleting a
+  **Update template**, and every later copy you stamp uses the new version. **Editing the
+  master alone changes nothing** — the saved snapshot is what gets stamped, so a stray edit
+  can't quietly rewrite every future copy — and a master that has been edited says so on its
+  title bar (**✎ edited**), with *Update template* offered for that exact slot. Deleting a
   template removes its master too, and **Tools → Rebuild Templates basket** fills in masters
   for templates saved before the basket existed. Templates persist across restarts; they're
   stored with the app's settings rather than in the document, so each instance (see
