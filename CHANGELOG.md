@@ -6,6 +6,32 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.99.2]
+
+### Fixed
+- **Sticking now actually tracks — measured, on a real desktop.** v0.99.1 fixed
+  the runaway but two guards were wrong, and only running it showed that.
+
+  **The monitor clamp did the opposite of its job.** `monitor_size` describes one
+  monitor while window positions are in whole-desktop coordinates, so on a
+  multi-monitor desk it pinned the panel near the origin: the main window moved
+  200px and the panel moved 117, or none at all. egui exposes no origin for a
+  monitor, so the guard cannot be written correctly and it is gone. A wrong
+  guard is worse than none — the runaway it insured against is fixed at its
+  cause.
+
+  **The settle guard counted frames.** egui only repaints when something
+  happens, so an idle app draws almost none and a counter set to 8 was still
+  armed minutes later, eating exactly the event it existed to let through:
+  dragging the panel yourself was ignored, and the next move of the main window
+  yanked it back to where it used to be. It is wall-clock now (400 ms), and the
+  guard that does the real work is simply asking whether the panel is sitting
+  where we last put it.
+
+  Verified by driving both windows: the panel matches the main window's movement
+  exactly, keeps a new offset after you drag it, still tracks after an idle, and
+  does not move at all with 📌 off.
+
 ## [0.99.1]
 
 ### Fixed

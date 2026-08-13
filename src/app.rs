@@ -8247,10 +8247,16 @@ struct StickState {
     sent: Option<egui::Pos2>,
     /// Where the panel was last seen, to notice the user dragging it.
     seen: Option<egui::Pos2>,
-    /// Frames to ignore movement for after commanding one, while the window
-    /// manager catches up. Without it, the window moving *because we moved it*
-    /// reads as the user moving it.
-    settle: u8,
+    /// How long to keep ignoring movement after commanding one, while the
+    /// window manager catches up — otherwise the panel moving *because Trellis
+    /// moved it* reads as the user moving it.
+    ///
+    /// **Wall-clock, not a frame count.** Counting frames looks equivalent and
+    /// is not: egui only repaints when something happens, so an idle app draws
+    /// almost none, and a counter set to 8 was still armed the next time the
+    /// window was touched — minutes later. It ate exactly the event it was
+    /// meant to let through.
+    settle_until: Option<std::time::Instant>,
 }
 
 /// Keep a detached panel at its offset from the main window.
@@ -8258,7 +8264,7 @@ struct StickState {
 /// **Relative, not anchored.** Dragging the app across the desk brings its
 /// board along; a board parked on a second monitor keeps the offset you gave
 /// it rather than being pulled into a fixed slot. Dragging the panel itself
-/// re-teaches the offset — that is what the settle counter protects.
+/// re-teaches the offset, which is what the two guards below protect.
 fn follow_main_window(
     vctx: &egui::Context, stick: bool, delta: egui::Vec2, st: &mut StickState,
 ) {
@@ -8270,13 +8276,18 @@ fn follow_main_window(
         *st = StickState::default();
         return;
     }
-    if st.settle > 0 {
-        st.settle -= 1;
-    } else if let Some(prev) = st.seen {
-        // The user dragged this window: that is the new offset to keep.
-        if (measured - prev).length() > 1.0 {
-            st.target = Some(measured);
-            st.sent = None;
+    // Is the panel simply sitting where we last put it? Then this position is
+    // ours, not a move to learn from. This is the guard that matters; the timer
+    // only covers the moment between asking and the window manager obeying.
+    let ours = st.sent.is_some_and(|s| (measured - s).length() <= 2.0);
+    let settling = st.settle_until.is_some_and(|t| std::time::Instant::now() < t);
+    if !ours && !settling {
+        if let Some(prev) = st.seen {
+            // The user dragged this window: that is the new offset to keep.
+            if (measured - prev).length() > 1.0 {
+                st.target = Some(measured);
+                st.sent = None;
+            }
         }
     }
     st.seen = Some(measured);
@@ -8288,18 +8299,16 @@ fn follow_main_window(
     if st.sent == Some(target) {
         return;
     }
-    // A panel that cannot be seen cannot be used: never let the follow put it
-    // where the monitor isn't. Half of it must stay on-screen.
-    let target = match vctx.input(|i| i.viewport().monitor_size) {
-        Some(m) => egui::pos2(
-            target.x.clamp(-rect.width() / 2.0, (m.x - rect.width() / 2.0).max(0.0)),
-            target.y.clamp(0.0, (m.y - rect.height() / 2.0).max(0.0)),
-        ),
-        None => target,
-    };
+    // **No clamp to the monitor.** The obvious backstop — keep the panel on
+    // screen — was measured doing the opposite: `monitor_size` describes one
+    // monitor while window positions are in whole-desktop coordinates, so on a
+    // multi-monitor desk it pinned the panel to a box near the origin and the
+    // follow visibly stopped part-way. egui exposes no origin for a monitor, so
+    // the check cannot be written correctly, and a wrong guard is worse than
+    // none: the runaway it was insuring against is fixed at its cause.
     st.target = Some(target);
     st.sent = Some(target);
-    st.settle = 8;
+    st.settle_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
     vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target));
 }
 
