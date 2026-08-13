@@ -24,10 +24,17 @@ Trellis — a hierarchical, spatial note-taking app.
 
 USAGE:
     trellis [FILE] [OPTIONS]
+    trellis <URL>
 
 ARGS:
     <FILE>    Document to open. If the path doesn't exist yet, Trellis starts a
               new document and saves it there.
+    <URL>     A link — trellis://<port>/card/<id> or .../node/<id>, with an
+              optional ?doc=<file> the receiving instance verifies. Hands the
+              link to whichever instance is serving that port and exits, so a
+              link never opens a second window on an open document. hypercube://
+              is accepted too. Ask an instance for a link with
+              GET /api/cards/{cid}/link.
 
 OPTIONS:
     -p, --port <PORT>     Port for the agent HTTP API (default 7373). Overrides
@@ -46,6 +53,17 @@ and settings — so an agent reaches a given document by its port:
     trellis ~/personal.ron --port 7374 --data-dir ~/.local/share/trellis-personal
 
 GET /api/instance reports which document an instance is serving.
+
+ENVIRONMENT:
+    TRELLIS_EMOJI_FONT        Colour-emoji font to use instead of the ones
+                              searched for (Noto Color Emoji on Linux, Apple
+                              Color Emoji on macOS). Settings -> Canvas names
+                              the file in use, or says none was found.
+    TRELLIS_RESTART_DELAY_MS  Milliseconds to wait before starting. Set by
+                              File -> Restart so the new process does not race
+                              the old one for the API port; a failed bind is not
+                              fatal, which would leave an instance running with
+                              no API at all.
 ";
 
 /// Startup overrides parsed from the command line. Deliberately tiny — enough to

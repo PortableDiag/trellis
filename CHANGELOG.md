@@ -6,6 +6,17 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.95.1]
+
+### Fixed
+- **`--help` describes the whole binary again.** It has accepted a
+  `trellis://…` link as its first argument since v0.93.0 — that is what the
+  registered URL handler runs — and honoured `TRELLIS_EMOJI_FONT` and
+  `TRELLIS_RESTART_DELAY_MS`, none of which it mentioned. `--help` is a
+  documentation surface, and a stale one is the same defect as a stale runbook:
+  the Android release runbook said `assembleDebug` long after that was wrong,
+  which is how six releases went out debug-signed.
+
 ## [0.95.0]
 
 ### Changed

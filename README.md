@@ -408,6 +408,7 @@ on native runners for each platform, triggered by pushing a `vX.Y.Z` tag.
 
 ```
 trellis [FILE] [-p|--port PORT] [-d|--data-dir DIR]
+trellis trellis://<port>/card/<id>          # follow a link
 ```
 
 `FILE` is the document to open (a path that doesn't exist yet starts a new
@@ -415,6 +416,15 @@ document saved there). `--port` sets the agent API port for that run, and
 `--data-dir` gives the instance its **own settings** — API key, port, theme,
 backup config and autosave slot — under that directory. `trellis --help` for the
 full text; with no arguments Trellis reopens the last document as before.
+
+Given a **link** instead of a file — `trellis://<port>/card/<id>`, or
+`.../node/<id>`, with an optional `?doc=<file>` the receiving instance verifies —
+it hands the link to whichever instance is serving that port and exits, so
+following a link never opens a second window on a document you already have open.
+That is what the registered `trellis://` handler runs. Two environment variables
+are read: `TRELLIS_EMOJI_FONT` (a colour-emoji font to use instead of the ones
+searched for) and `TRELLIS_RESTART_DELAY_MS` (set by **File → Restart**, so the
+new process doesn't race the old one for the API port).
 
 ### Separate documents, side by side
 
