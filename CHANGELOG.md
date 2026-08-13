@@ -6,6 +6,29 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.98.0]
+
+### Fixed
+- **HTML in a text card renders instead of vanishing.** CommonMark passes a raw
+  HTML block straight through and the card renderer draws no HTML, so a table
+  pasted from a page — or anything the web clipper could not translate — was
+  **dropped on the floor**: not shown, not an error, just gone. Block HTML is now
+  converted to Markdown for display.
+
+  **Converted, not implemented.** `html2md` was already a dependency (File →
+  Import HTML uses it), and going through Markdown means headings, lists, tables,
+  links and emphasis all arrive already supported. Rendering an HTML *subset*
+  instead would mean choosing which tags to honour and re-answering that question
+  every time someone pastes a new one.
+
+  **Inline HTML is deliberately untouched**, because `<span style="color:…">` is
+  how a card's text colour is stored — converting it would throw the colour away.
+  A test pins that.
+
+  The body on disk is never rewritten; this is a view. The PDF/PNG text layer
+  converts too, so the searchable text no longer says `<table>` beside a page
+  showing a table.
+
 ## [0.97.0]
 
 ### Added

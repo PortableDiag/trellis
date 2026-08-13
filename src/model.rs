@@ -3502,6 +3502,63 @@ pub(crate) fn extract_wikilinks(text: &str) -> Vec<String> {
     out
 }
 
+/// Convert **block** HTML in a card body into Markdown, so a card that holds
+/// HTML renders as content instead of vanishing.
+///
+/// CommonMark says a raw HTML block passes straight through, and the card
+/// renderer draws no HTML at all — so a table pasted from a page, or anything
+/// the web clipper could not translate, was **dropped on the floor**: not shown,
+/// not an error, just gone.
+///
+/// Converting rather than *implementing* HTML is the whole point. `html2md` is
+/// already a dependency (File → Import HTML uses it), and going through Markdown
+/// means headings, lists, tables, links and emphasis all arrive already
+/// supported by the renderer — where an HTML subset would mean picking which
+/// tags to honour and re-answering that question forever.
+///
+/// **Inline HTML is deliberately untouched.** `<span style="color:…">` is how a
+/// card's text colour is stored, and the renderer honours it directly; running
+/// it through a converter would throw the colour away. Only `HtmlBlock` spans
+/// are rewritten.
+///
+/// The body on disk is never changed — this is a view, applied at render.
+pub fn html_blocks_to_md(text: &str) -> std::borrow::Cow<'_, str> {
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    // The overwhelmingly common card has no HTML at all; don't parse it twice.
+    if !text.contains('<') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+    for (ev, range) in Parser::new_ext(text, Options::all()).into_offset_iter() {
+        if matches!(ev, Event::Start(Tag::HtmlBlock)) {
+            spans.push(range);
+        }
+    }
+    if spans.is_empty() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for r in spans {
+        // Nested spans can't happen, but a defensive skip keeps the splice sane.
+        if r.start < last {
+            continue;
+        }
+        out.push_str(&text[last..r.start]);
+        let md = html2md::parse_html(&text[r.clone()]);
+        let md = md.trim();
+        // An HTML block that carries no text (a comment, a stray `<div>`) turns
+        // into nothing; leave the gap rather than the markup.
+        if !md.is_empty() {
+            out.push_str(md);
+            out.push('\n');
+        }
+        last = r.end;
+    }
+    out.push_str(&text[last..]);
+    std::borrow::Cow::Owned(out)
+}
+
 /// Rewrite `[[Target]]` / `[[Target|Display]]` into Markdown links
 /// `[Display](trellis:<encoded target>)` so the card renderer shows them as
 /// clickable links; the app intercepts the `trellis:` scheme to navigate.
@@ -4351,7 +4408,10 @@ fn card_lines(card: &Card) -> Vec<ExportLine> {
         CardKind::Text => {
             // The selectable text layer carries the words; inline images become
             // their alt text (the picture shows on the WYSIWYG screenshot page).
+            // Block HTML is converted here too, or the searchable text would say
+            // `<table>` where the page beside it shows a table.
             let stripped = strip_inline_markers(&card.body);
+            let stripped = html_blocks_to_md(&stripped);
             let body = stripped.trim_end();
             if !body.is_empty() {
                 out.push(ExportLine { text: body.to_string(), size: 10.5 });
@@ -6476,6 +6536,33 @@ mod tests {
         doc.raise_group(n, g);
         let order: Vec<CardId> = doc.nodes[&n].cards.iter().map(|c| c.id).collect();
         assert_eq!(order, vec![b, a, c]);
+    }
+
+    /// A card holding HTML showed nothing at all before this: CommonMark passes
+    /// a raw HTML block through, and the card renderer draws no HTML.
+    #[test]
+    fn block_html_becomes_markdown_and_inline_html_is_left_alone() {
+        use std::borrow::Cow;
+        // Nothing to do — and cheaply, without a second parse.
+        assert!(matches!(html_blocks_to_md("plain **markdown**"), Cow::Borrowed(_)));
+        assert!(matches!(html_blocks_to_md("2 < 3 and 4 > 1"), Cow::Borrowed(_)));
+
+        // The colour span is how a card stores its text colour. If this is ever
+        // converted, every coloured card loses its colour.
+        let colored = r#"<span style="color:#ff0000">red</span> text"#;
+        assert!(matches!(html_blocks_to_md(colored), Cow::Borrowed(_)), "inline HTML was rewritten");
+
+        let table = "before\n\n<table><tr><th>a</th></tr><tr><td>1</td></tr></table>\n\nafter";
+        let out = html_blocks_to_md(table);
+        assert!(out.starts_with("before"), "{out:?}");
+        assert!(out.trim_end().ends_with("after"), "{out:?}");
+        assert!(!out.contains("<table>"), "the markup survived: {out:?}");
+        assert!(out.contains('a') && out.contains('1'), "the content was lost: {out:?}");
+
+        // A heading is the simplest proof the conversion is real, not a strip.
+        let out = html_blocks_to_md("<h2>Title</h2>");
+        assert!(out.contains("Title"));
+        assert!(!out.contains("<h2>"), "{out:?}");
     }
 
     /// Collapse-all is recursive, which is the whole decision: it must reach

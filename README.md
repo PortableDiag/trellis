@@ -35,6 +35,9 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   `-`/`1.`/`- [ ]` marker; empty item ends the list). **Drag an image onto a
   text card** (or right-click in edit mode) to embed it **inline** in the body;
   it exports as a data URI in HTML/Markdown and shows on the card's PDF page.
+  **HTML in the body renders** — a block of HTML (a table pasted from a page,
+  anything the clipper couldn't translate) is converted to Markdown for display
+  instead of being silently dropped. What you typed is left untouched on disk.
 - **Code** — dedicated code editor with a language selector and highlighting.
 - **Checklist** — real checkboxes with add/remove/edit per item; drag the grip
   to reorder items.
