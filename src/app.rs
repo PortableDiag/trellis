@@ -94,6 +94,8 @@ const AGENDA_PLACE_KEY: &str = "agenda_placement";
 const KANBAN_OPEN_KEY: &str = "kanban_open";
 const KANBAN_DONE_KEY: &str = "kanban_show_done";
 const KANBAN_PLACE_KEY: &str = "kanban_placement";
+/// Do detached panels follow the main window when it moves?
+const STICK_WINDOWS_KEY: &str = "stick_windows";
 const TAGS_OPEN_KEY: &str = "tags_open";
 const FIND_OPEN_KEY: &str = "find_open";
 const BACKLINKS_OPEN_KEY: &str = "backlinks_open";
@@ -859,6 +861,15 @@ pub struct TrellisApp {
     /// Kanban board window: cards grouped by `status::`, drag between columns.
     kanban_open: bool,
     kanban_placement: Placement,
+    /// Detached Agenda / Kanban windows follow the main window when it moves,
+    /// keeping the offset you put them at. On by default: a board you detached
+    /// to sit beside the canvas is no use if it stays behind when the canvas
+    /// moves, and the relative move keeps working across monitors.
+    stick_windows: bool,
+    /// The main window's outer position last frame, and how far it moved this
+    /// one. A detached window is nudged by the same delta.
+    last_main_pos: Option<egui::Pos2>,
+    main_move_delta: egui::Vec2,
     /// Kanban: show the `done` column (it piles up; hide it to focus on active work).
     kanban_show_done: bool,
     /// Link-graph window state (force-directed layout, rebuilt when opened).
@@ -1291,6 +1302,13 @@ impl TrellisApp {
                 .and_then(|s| s.get_string(AGENDA_PLACE_KEY))
                 .map(|s| Placement::from_str(&s))
                 .unwrap_or(Placement::Docked),
+            stick_windows: cc
+                .storage
+                .and_then(|s| s.get_string(STICK_WINDOWS_KEY))
+                .map(|s| s == "true")
+                .unwrap_or(true),
+            last_main_pos: None,
+            main_move_delta: egui::Vec2::ZERO,
             agenda_project: cc
                 .storage
                 .and_then(|st| st.get_string(AGENDA_PROJECT_KEY))
@@ -6869,10 +6887,13 @@ impl TrellisApp {
                 .with_title("Trellis — Agenda")
                 .with_inner_size([420.0, 700.0]);
             let mut closed = false;
+            let stick = self.stick_windows;
+            let delta = self.main_move_delta;
             ctx.show_viewport_immediate(vid, builder, |vctx, _| {
                 egui::CentralPanel::default().show(vctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| self.agenda_body(ui));
                 });
+                follow_main_window(vctx, stick, delta);
                 // Closing the OS window closes the panel; it must not linger as an
                 // invisible open panel that the View menu then refuses to reopen.
                 if vctx.input(|i| i.viewport().close_requested()) {
@@ -6919,6 +6940,10 @@ impl TrellisApp {
                     .clicked()
                 {
                     self.agenda_placement = self.agenda_placement.toggled();
+                }
+                // Only meaningful once it is a window of its own.
+                if self.agenda_placement == Placement::Window {
+                    stick_toggle(ui, &mut self.stick_windows);
                 }
             });
         });
@@ -7339,8 +7364,11 @@ impl TrellisApp {
                 .with_title("Trellis — Kanban")
                 .with_inner_size([1000.0, 620.0]);
             let mut closed = false;
+            let stick = self.stick_windows;
+            let delta = self.main_move_delta;
             ctx.show_viewport_immediate(vid, builder, |vctx, _| {
                 egui::CentralPanel::default().show(vctx, |ui| self.kanban_body(ui));
+                follow_main_window(vctx, stick, delta);
                 if vctx.input(|i| i.viewport().close_requested()) {
                     closed = true;
                 }
@@ -7425,6 +7453,10 @@ impl TrellisApp {
                         .clicked()
                     {
                         self.kanban_placement = self.kanban_placement.toggled();
+                    }
+                    // Only meaningful once it is a window of its own.
+                    if self.kanban_placement == Placement::Window {
+                        stick_toggle(ui, &mut self.stick_windows);
                     }
                     ui.separator();
                     ui.checkbox(&mut show_done, "Show done");
@@ -7620,6 +7652,16 @@ impl eframe::App for TrellisApp {
 
         // Keep the window title on the open document (New/Open/Save As change it).
         self.sync_window_title(ctx);
+
+        // How far the main window moved since the last frame, so a stuck
+        // detached panel can be nudged by the same amount. Read before anything
+        // draws, because the viewport closures that use it run during the frame.
+        let main_pos = ctx.input(|i| i.viewport().outer_rect.map(|r| r.min));
+        self.main_move_delta = match (self.last_main_pos, main_pos) {
+            (Some(prev), Some(now)) => now - prev,
+            _ => egui::Vec2::ZERO,
+        };
+        self.last_main_pos = main_pos;
 
         // Apply any API requests from the server thread first.
         self.pump_api();
@@ -8039,6 +8081,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(KANBAN_OPEN_KEY, self.kanban_open.to_string());
         storage.set_string(KANBAN_DONE_KEY, self.kanban_show_done.to_string());
         storage.set_string(KANBAN_PLACE_KEY, self.kanban_placement.as_str().to_string());
+        storage.set_string(STICK_WINDOWS_KEY, self.stick_windows.to_string());
         storage.set_string(TAGS_OPEN_KEY, self.tags_open.to_string());
         storage.set_string(FIND_OPEN_KEY, self.find_open.to_string());
         storage.set_string(BACKLINKS_OPEN_KEY, self.backlinks_open.to_string());
@@ -8157,6 +8200,43 @@ fn register_url_scheme() -> Result<String, String> {
         .args(["default", &format!("{scheme}-url.desktop"), &format!("x-scheme-handler/{scheme}")])
         .status();
     Ok(file.display().to_string())
+}
+
+/// The Stick toggle, drawn in a detached panel's header. One setting covers
+/// both panels — someone who wants their windows to travel with the app wants
+/// it for the Agenda and the board alike, and two switches for one idea is two
+/// things to find.
+fn stick_toggle(ui: &mut egui::Ui, stick: &mut bool) {
+    if ui
+        .selectable_label(*stick, "📌")
+        .on_hover_text(
+            "Stick to the main window: detached panels move with Trellis, keeping \
+             the offset you put them at. Applies to the Agenda and the Kanban board.",
+        )
+        .clicked()
+    {
+        *stick = !*stick;
+    }
+}
+
+/// Move a detached panel's window by the same amount the main window just
+/// moved, so it keeps the place you put it relative to the canvas.
+///
+/// **Relative, not anchored.** Dragging the app to the other side of the desk
+/// should bring its board along; it should not yank a board you parked on a
+/// second monitor into a fixed slot. Moving by the delta does both — the offset
+/// you chose is the offset you keep, whichever monitor it lands on.
+///
+/// A zero delta sends nothing, so the window manager is left alone on the
+/// frames where nothing moved (which is nearly all of them), and dragging the
+/// detached window itself is never fought over.
+fn follow_main_window(vctx: &egui::Context, stick: bool, delta: egui::Vec2) {
+    if !stick || delta == egui::Vec2::ZERO {
+        return;
+    }
+    if let Some(rect) = vctx.input(|i| i.viewport().outer_rect) {
+        vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(rect.min + delta));
+    }
 }
 
 /// Where a panel lives: inside the main window, or in one of its own.

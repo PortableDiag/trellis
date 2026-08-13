@@ -68,7 +68,9 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 **Agenda and Kanban** remember whether they were open, their *Show completed*
 setting, and where they live — and either can be **detached into its own window**
 (*Detach* / *Dock* in its header), so a board can sit on a second monitor instead
-of inside the app. Table cells render `[[wiki-links]]` as links you can click.
+of inside the app. A detached window **sticks to the main one** (📌 in its
+header, on by default): move Trellis and its panels come along, keeping the
+offset you gave them. Table cells render `[[wiki-links]]` as links you can click.
 
 **Links** — `trellis://7374/card/1391` opens that card in the instance serving
 that port (`GET /api/cards/{cid}/link` mints one). The port is the address, so it

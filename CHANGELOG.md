@@ -6,6 +6,26 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.99.0]
+
+### Added
+- **A detached Agenda or Kanban sticks to the main window.** Move Trellis and
+  its detached panels come with it, keeping the offset you put them at — 📌 in
+  the panel header, on by default, remembered next launch.
+
+  **Relative, not anchored.** The panel moves by the same delta the main window
+  moved, so dragging the app across the desk brings its board along, while a
+  board parked on a second monitor stays where you parked it instead of being
+  yanked into a fixed slot. Nothing is sent on a frame where the main window did
+  not move, so dragging the detached window itself is never fought over.
+
+  One switch covers both panels: someone who wants their windows to travel with
+  the app wants it for the Agenda and the board alike.
+
+  Positioning a window from inside the app is an X11/Windows/macOS capability —
+  under Wayland the compositor owns window placement, so the toggle is there but
+  the move is ignored.
+
 ## [0.98.0]
 
 ### Fixed
