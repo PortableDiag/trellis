@@ -6,6 +6,24 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.103.1]
+
+### Changed
+- **A `trellis://` link also asks for attention, not just focus.** Following a
+  link raises the window, and a raise can be *refused* — focus-stealing
+  prevention (KWin's is on by default) ignores one from an app the user was not
+  just interacting with, which is exactly this case, since the click was in a
+  terminal. The window would jump to the card silently and the link would look
+  like it had done nothing. `RequestUserAttention` is the sanctioned way to say
+  so: whatever the policy, the taskbar entry lights up, and window managers
+  clear it the moment the window is focused.
+
+  **Insurance, not a diagnosis.** This was written for a report of a clicked
+  link that fired and changed nothing — but measuring it here showed the raise
+  *succeeding* (a minimized instance un-minimized and took focus), so refusal
+  was not that cause. It is still the right thing to send for a navigation the
+  user triggered from another application.
+
 ## [0.103.0]
 
 ### Fixed

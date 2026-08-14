@@ -8185,6 +8185,19 @@ impl eframe::App for TrellisApp {
         }
         if std::mem::take(&mut self.focus_window) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            // **A raise can be refused, and usually is.** Focus-stealing
+            // prevention (KWin's is on by default) ignores a raise from an app
+            // the user was not just interacting with — which is exactly this
+            // case, since the click was in a terminal. The window then jumps to
+            // the card silently and the link looks like it did nothing.
+            //
+            // Asking for *attention* is the sanctioned way to say so: whatever
+            // the policy, the taskbar entry lights up. Window managers clear it
+            // as soon as the window is focused, so it costs nothing when the
+            // raise does go through.
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Critical,
+            ));
             ctx.request_repaint();
         }
 
