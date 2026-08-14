@@ -9074,7 +9074,7 @@ mod tests {
         {
             let mut g = grants.lock().unwrap();
             g.push(Grant {
-                plugin: "ALICE".into(),
+                plugin: "SCOUT".into(),
                 token: "agent_a".into(),
                 scope: Scope { read_only: false, subtree: Some(7) },
                 standalone: true,
@@ -9087,14 +9087,14 @@ mod tests {
             });
             // A *plugin* that happens to share a name with an agent.
             g.push(Grant {
-                plugin: "ALICE".into(),
+                plugin: "SCOUT".into(),
                 token: "plug_x".into(),
                 scope: Scope::default(),
                 standalone: false,
             });
         }
         // Revoking the agent leaves the other agent and the plugin alone.
-        grants.lock().unwrap().retain(|g| !(g.standalone && g.plugin == "ALICE"));
+        grants.lock().unwrap().retain(|g| !(g.standalone && g.plugin == "SCOUT"));
         let left = grants.lock().unwrap();
         let tokens: Vec<&str> = left.iter().map(|g| g.token.as_str()).collect();
         assert!(!tokens.contains(&"agent_a"), "the agent's token is gone");
@@ -9108,9 +9108,9 @@ mod tests {
     fn a_scoped_token_describes_itself_by_basket_name() {
         use crate::plugins::Scope;
         let s = Scope { read_only: false, subtree: Some(7) };
-        assert_eq!(s.describe_named("Personal.ron", Some("ALICE")), "read and change ALICE and everything under it");
+        assert_eq!(s.describe_named("Personal.ron", Some("SCOUT")), "read and change SCOUT and everything under it");
         let ro = Scope { read_only: true, subtree: Some(7) };
-        assert_eq!(ro.describe_named("Personal.ron", Some("ALICE")), "read ALICE and everything under it");
+        assert_eq!(ro.describe_named("Personal.ron", Some("SCOUT")), "read SCOUT and everything under it");
         let whole = Scope::default();
         assert_eq!(
             whole.describe_named("Personal.ron", None),

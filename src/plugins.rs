@@ -62,7 +62,7 @@ impl Scope {
     }
 
     /// The same sentence, but naming the basket. Used where the basket is known
-    /// — "read and change **ALICE** and everything under it" is a far better
+    /// — "read and change **SCOUT** and everything under it" is a far better
     /// thing to check a token against than "one basket".
     pub fn describe_named(&self, doc_title: &str, basket: Option<&str>) -> String {
         let what = if self.read_only { "read" } else { "read and change" };

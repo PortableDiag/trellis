@@ -2,7 +2,7 @@
 
 use crate::model::{Document, NodeId};
 
-/// Root-to-node breadcrumb of titles, e.g. `HOUSE › ATTIC › VELUX WINDOW`.
+/// Root-to-node breadcrumb of titles, e.g. `PROJECT › AREA › ITEM`.
 pub(crate) fn node_path(doc: &Document, id: NodeId) -> String {
     doc.node_path(id)
 }

@@ -3301,7 +3301,7 @@ impl Document {
         false
     }
 
-    /// Root-to-node breadcrumb of titles, e.g. `Super Weapon News › Open Items`.
+    /// Root-to-node breadcrumb of titles, e.g. `Newsletter › Open Items`.
     ///
     /// Task and Kanban views need this, not just the parent's title: basket names
     /// like "Open Items" repeat across projects, and the bare name gives no clue
@@ -4962,8 +4962,8 @@ mod tests {
         let n = doc.add_node(None, "Open Items".into());
         let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Checklist {
             items: vec![
-                ChecklistItem::new("Fix the CTE  due:: 2026-08-15"),
-                ChecklistItem::new("Ship the switchover  due:: 2026-08-15  status:: doing"),
+                ChecklistItem::new("Fix the importer  due:: 2026-08-15"),
+                ChecklistItem::new("Ship the migration  due:: 2026-08-15  status:: doing"),
                 ChecklistItem::new("no date on this one — not a task"),
                 ChecklistItem { id: 0, done: true, text: "Already done  due:: 2026-08-12".into() },
             ],
@@ -4975,10 +4975,10 @@ mod tests {
         assert!(tasks.iter().all(|t| t.card == c && t.item.is_some()));
 
         // The row reads as the work, not as the metadata.
-        let cte = tasks.iter().find(|t| t.title.starts_with("Fix the CTE")).unwrap();
-        assert_eq!(cte.title, "Fix the CTE");
-        assert_eq!(cte.due, "2026-08-15");
-        assert!(!cte.done);
+        let fix = tasks.iter().find(|t| t.title.starts_with("Fix the importer")).unwrap();
+        assert_eq!(fix.title, "Fix the importer");
+        assert_eq!(fix.due, "2026-08-15");
+        assert!(!fix.done);
 
         // The checkbox is the done signal.
         let done = tasks.iter().find(|t| t.due == "2026-08-12").unwrap();
@@ -5091,7 +5091,7 @@ mod tests {
             // One space, mid-sentence, at the end of a checklist item.
             ("… the decision is parked meanwhile. due:: 2026-08-15", "due", "2026-08-15"),
             // The app writes two spaces; both must work.
-            ("F. Verify the switchover: suites re-baselined  due:: 2026-08-15", "due", "2026-08-15"),
+            ("F. Second pass: everything re-checked  due:: 2026-08-15", "due", "2026-08-15"),
             // A value with spaces in it is still a value.
             ("#verify #flows status:: in progress", "status", "in progress"),
             // Its own line, and bracketed inline — the documented forms.
@@ -5616,19 +5616,18 @@ mod tests {
         assert_eq!(bl[0].node, other);
     }
 
-    #[test]
     /// A date property takes its first token, so prose after the date does not
     /// swallow it.
     ///
-    /// From a real checklist line on the work document. Two failures in one: the
-    /// value did not parse as a date, so a task with a deadline was bucketed
+    /// Two failures in one: the value did not parse as a date, so a task with
+    /// a deadline was bucketed
     /// under "No date" and its owner could not see it was due; and the Agenda
     /// drew the whole sentence where a date goes, which stretched the panel over
     /// the entire window.
     #[test]
     fn a_date_property_stops_at_the_date() {
         let p = extract_properties(
-            "Page-gen benchmark → pick default  due:: 2026-08-15 — RUN 1 DONE 8/12: claude 4/4",
+            "Benchmark → pick a default  due:: 2026-08-15 — first pass done, 4/4",
         );
         assert!(p.contains(&("due".to_string(), "2026-08-15".to_string())), "{p:?}");
         assert!(parse_ymd("2026-08-15").is_some());
@@ -5746,7 +5745,6 @@ mod tests {
         assert!(grown.y > base.y + 150.0, "image should add height: {base:?} -> {grown:?}");
     }
 
-    #[test]
     /// The time axis is *containment*, and only between days.
     ///
     /// Both halves were found by running it: without containment a day fills
@@ -5869,8 +5867,8 @@ mod tests {
         // Two projects, each with an "Open Items" basket — the case that had an
         // agent attribute a task to the wrong project.
         let mut doc = Document::empty();
-        let a = doc.add_node(None, "LANAgent".into());
-        let b = doc.add_node(None, "Super Weapon News".into());
+        let a = doc.add_node(None, "Backend".into());
+        let b = doc.add_node(None, "Newsletter".into());
         let a_open = doc.add_node(Some(a), "Open Items".into());
         let b_open = doc.add_node(Some(b), "Open Items".into());
         for (n, t) in [(a_open, "ship the agent"), (b_open, "publish the piece")] {
@@ -5887,13 +5885,13 @@ mod tests {
         // The path tells them apart, and names the project first.
         let mut paths: Vec<&str> = tasks.iter().map(|t| t.node_path.as_str()).collect();
         paths.sort();
-        assert_eq!(paths, vec!["LANAgent › Open Items", "Super Weapon News › Open Items"]);
+        assert_eq!(paths, vec!["Backend › Open Items", "Newsletter › Open Items"]);
 
         let board = doc.cards_by_status();
         let doing = board.get("doing").expect("both cards are status:: doing");
         let mut kpaths: Vec<&str> = doing.iter().map(|c| c.node_path.as_str()).collect();
         kpaths.sort();
-        assert_eq!(kpaths, vec!["LANAgent › Open Items", "Super Weapon News › Open Items"]);
+        assert_eq!(kpaths, vec!["Backend › Open Items", "Newsletter › Open Items"]);
     }
 
     #[test]
@@ -6113,12 +6111,12 @@ mod tests {
 
         // Width is measured per glyph, not per character: the same number of
         // characters needs far more room in capitals than in narrow lowercase.
-        // A flat average clipped "GATEWAY" and "WWWWW MMMMM QQQQQ" on screen.
+        // A flat average clipped "UPGRADE" and "WWWWW MMMMM QQQQQ" on screen.
         assert!(
             cell_text_width("WWWWW") > cell_text_width("iiiii") * 2.0,
             "wide glyphs must not be averaged away"
         );
-        assert!(cell_text_width("GATEWAY") + 12.0 < 110.0, "sanity: still a narrow column");
+        assert!(cell_text_width("UPGRADE") + 12.0 < 110.0, "sanity: still a narrow column");
 
         // Bounded: a pathological cell can't produce an unusable card.
         doc.table_set_cell(n, c, 1, 1, "x".repeat(500));

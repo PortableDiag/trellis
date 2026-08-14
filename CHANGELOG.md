@@ -6,6 +6,22 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.103.3]
+
+### Changed
+- **Examples and fixtures are written from shapes, not from anyone's notes.**
+  v0.103.2 replaced six test strings that had been copied out of a live document
+  and stopped there: it never looked outside the two test functions it was
+  editing, so a fixture further down the same file, the worked examples in
+  API.md and a quoted line in this changelog were left as they were. All of them
+  now use invented names and invented work — host names, project names, basket
+  paths, task lines. Nothing about the tests changed; they pin the same shapes.
+
+### Fixed
+- **Two dead `#[test]` attributes.** A stray `#[test]` sat above the doc comment
+  of a test that already had one, which rustc reports as `duplicated attribute`.
+  That is the same warning that once hid a test which had not run since v0.71.1.
+
 ## [0.103.2]
 
 ### Changed
@@ -319,8 +335,8 @@ All notable changes to Trellis. Format loosely follows
 ## [0.94.0]
 
 ### Fixed
-- **A date property stops at the date.** `due:: 2026-08-15 — RUN 1 DONE 8/12: …`
-  is a real line from a real checklist, and the value ran to the end of it. That
+- **A date property stops at the date.** In `due:: 2026-08-15 — <prose>` the
+  value ran to the end of the line. That
   failed **twice**: the value did not parse as a date, so a task with a deadline
   was filed under *No date* and its owner could not see it was due; and the
   Agenda then drew a 300-character string where a date goes, which stretched the
@@ -725,7 +741,7 @@ Tasks stop being a thing you copy and start being a thing that exists.
   This replaces handing out the instance key, which is unrestricted and can only
   be revoked by regenerating it — breaking every other client at once. Each token
   revokes on its own, and the list says in plain words what each one can reach:
-  *"ALICE can read and change ALICE and everything under it."*
+  *"SCOUT can read and change SCOUT and everything under it."*
 
   **The confinement is enforced on the way in.** A request naming a basket
   outside the scope is refused, and so is one that names **no** basket — which
@@ -1248,8 +1264,8 @@ Tasks stop being a thing you copy and start being a thing that exists.
   "Open Items" under two different projects, a task read simply as "Open Items"
   with nothing to say which project it belonged to. That is not hypothetical: it
   led an agent to treat another project's task as its own, and someone had
-  already worked around it by renaming a basket "LANAgent Open Items" by hand.
-  Rows now read `Super Weapon News › Open Items`.
+  already worked around it by renaming a basket by hand.
+  Rows now read `Newsletter › Open Items`.
 - **`GET /api/tasks` and `GET /api/kanban` gained `node_path`** alongside
   `node_title`, so anything reading the API can attribute a task correctly.
   `node_title` is unchanged, so existing clients keep working — but `node_path`
@@ -2062,7 +2078,7 @@ Agents can now do everything the GUI can to a card:
 ### Added
 - **Copy node id / path** — right-click a tree node → **Copy** → **Node id**
   (the identifier the agent API uses, `/api/nodes/{id}`) or **Node path** (the
-  root-to-node breadcrumb, e.g. `HOUSE › ATTIC › VELUX WINDOW`). Both copy to the
+  root-to-node breadcrumb, e.g. `PROJECT › AREA › ITEM`). Both copy to the
   clipboard and the X11 primary selection, so you can tell an agent exactly which
   node you're working on.
 

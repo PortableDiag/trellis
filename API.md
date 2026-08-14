@@ -744,7 +744,7 @@ Do this instead:
 #    The properties are ordinary text in the body. The `::` needs a trailing
 #    space, or it is not parsed as a property.
 curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-  -d '{"kind":"text","title":"Migrate the gateway to the new host",
+  -d '{"kind":"text","title":"Migrate the service to the new host",
        "body":"status:: todo\ndue:: 2026-08-15\n#infra\n\nContext, links, whatever."}' \
   $API/nodes/$NID/cards
 
@@ -781,11 +781,11 @@ the card is just the container:
 
 ```sh
 curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' -d '{
- "kind":"checklist","title":"HARD 8/15 track","fit":true,
+ "kind":"checklist","title":"Release week","fit":true,
  "items":[
-  {"done":false,"text":"Model list: remove Claude  start:: 2026-08-11  due:: 2026-08-15"},
-  {"done":false,"text":"Page-gen benchmark  due:: 2026-08-15"},
-  {"done":true, "text":"Default model bumped  due:: 2026-08-12"}
+  {"done":false,"text":"Drop the legacy path  start:: 2026-08-11  due:: 2026-08-15"},
+  {"done":false,"text":"Benchmark the two options  due:: 2026-08-15"},
+  {"done":true, "text":"Default bumped  due:: 2026-08-12"}
  ]}' $API/nodes/$NID/cards
 ```
 
@@ -873,7 +873,7 @@ GET /api/tasks?all=true  → include completed tasks too (default excludes them)
 it belongs to. `?project=<node id>` filters to one; it accepts any node, not just
 a root, so you can narrow to a sub-branch with the same parameter.
 
-**`node_path` is the root-to-basket breadcrumb** (`Super Weapon News › Open
+**`node_path` is the root-to-basket breadcrumb** (`Newsletter › Open
 Items`), and it is what you should show or reason about — **`node_title` alone is
 ambiguous**. Basket names like "Open Items" or "Session Handoffs" repeat under
 every project, so the bare title cannot say which project a task belongs to, and
@@ -1307,7 +1307,7 @@ curl -s -H "X-API-Key: $TOKEN" $API/tree
 MINE=$(curl -s -H "X-API-Key: $TOKEN" $API/tree \
        | python3 -c 'import sys,json
 t=json.load(sys.stdin)
-print(next(r["id"] for r in t["roots"] if r["title"]=="ALICE"))')
+print(next(r["id"] for r in t["roots"] if r["title"]=="SCOUT"))')
 
 curl -s -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
   -d '{"kind":"text","title":"Nightly check","body":"status:: done\ndue:: 2026-08-20"}' \
@@ -1509,8 +1509,8 @@ curl -s -H "X-API-Key: $KEY" -d "{\"node\":$NID,\"card\":$CID}" $API/templates/$
 # long cells are clipped, because cell text does not wrap.
 CID=$(curl -s -H "X-API-Key: $KEY" -d '{"kind":"table","title":"Deploy verification",
       "rows":[["Host","Check","Result"],
-              ["ALICE","crypto heartbeat","clean, no fatal errors since 12:53"],
-              ["GATEWAY","memory","last OOM cycling was mid-June"]]}' \
+              ["HOST-1","heartbeat","clean, no fatal errors since 12:53"],
+              ["HOST-2","memory","last OOM cycling was mid-June"]]}' \
       $API/nodes/$NID/cards | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 curl -s -H "X-API-Key: $KEY" -d '{"op":"autofit_cols"}' $API/nodes/$NID/cards/$CID/table
 curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"fit":true}' $API/nodes/$NID/cards/$CID

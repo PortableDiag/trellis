@@ -225,7 +225,7 @@ from the main cluster, and click or drag on it to jump there without zooming out
   remembers its own filter between launches — they answer different questions, so
   you can scope them differently.
 - Both the **Agenda** and the **Kanban board** show each task's **full basket
-  path** (`Super Weapon News › Open Items`), not just the basket name — project
+  path** (`Newsletter › Open Items`), not just the basket name — project
   folders reuse names like "Open Items", so the bare name can't tell you which
   project a task belongs to.
 - **Task agenda** (View → Agenda) — every card with a `due:: <date>` becomes a

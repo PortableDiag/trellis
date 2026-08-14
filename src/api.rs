@@ -988,7 +988,7 @@ fn handle(
                         let is_read = method == Method::Get;
                         if !g.scope.allows_method(is_read) {
                             // Name the holder, not the kind: the same grant list
-                            // now carries plugins and agent tokens, and "'ALICE'
+                            // now carries plugins and agent tokens, and "'SCOUT'
                             // has read-only access" is what tells whoever reads
                             // the log which credential to go and look at.
                             return ApiResponse::err(
@@ -3963,7 +3963,7 @@ mod tests {
             .add_card(nid, egui::pos2(0.0, 0.0), CardKind::Table {
                 table: crate::model::TableData::from_values(vec![
                     vec!["Host".into(), "Result".into()],
-                    vec!["ALICE".into(), "a verdict far too long for 110 pixels".into()],
+                    vec!["HOST-1".into(), "a verdict far too long for 110 pixels".into()],
                 ]),
             })
             .unwrap();
