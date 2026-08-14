@@ -1427,6 +1427,10 @@ curl -s -X POST -H "$K" -H 'Content-Type: application/json' \
        {"op":"set_fg","row":1,"col":0,"color":"blue"},
        {"op":"autofit_cols"}]' \
   "$B/nodes/$NODE/cards/$CID/table"
+# Every argument the op table lists is REQUIRED, and an unknown field is a 400
+# naming it. There are no silent defaults: a `set_cell` with no `text` used to
+# blank the cell and answer 200, and a `remove_row` with no `at` deleted row 0.
+# A batch is checked in full before anything is applied.
 # If one fails the response says which and how many already applied:
 #   {"error":"table op 3/4 (set_bg) failed …; 2 earlier op(s) were applied"}
 # **Check the status code.** curl exits 0 on a 400, so `curl` succeeding is not
@@ -1447,6 +1451,19 @@ curl -s -H "X-API-Key: $KEY" -d '{"group":1}' $API/nodes/$NID/cards/3/group
 
 # Tidy the basket: arrange all its cards into a non-overlapping grid
 curl -s -H "X-API-Key: $KEY" -X POST $API/nodes/$NID/autosort
+
+# ...but on a basket someone arranged on purpose, autosort destroys the layout.
+# Ask what actually collides, then repair it in place: `x` is preserved and cards
+# only ever move down. Run this after any batch of `fit: true` edits, because fit
+# grows a card's WIDTH as well as its height.
+curl -s -H "X-API-Key: $KEY" $API/nodes/$NID/overlaps
+# → {"node":63,"overlaps":[{"a":1391,"b":1402}, …]}
+curl -s -H "X-API-Key: $KEY" -X POST $API/nodes/$NID/overlaps
+# → {"node":63,"moved":4}          ("moved":0 = nothing was covering anything)
+
+# Fold the whole tree, or open it (the ⊟ / ⊞ buttons in the tree header)
+curl -s -H "X-API-Key: $KEY" -X POST -d '{"expanded":false}' $API/expand
+# → {"expanded":false,"changed":242}
 
 # Draw a stroke on a sketch card (card 1)
 curl -s -H "X-API-Key: $KEY" \

@@ -6,6 +6,21 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.103.2]
+
+### Changed
+- **Test fixtures no longer quote real notes.** The v0.96.0 property tests were
+  written from lines lifted verbatim out of the live documents — which is what
+  made them good tests, and what made them the wrong thing to commit: this repo
+  is public and those documents are not. Replaced with neutral lines of the same
+  *shape*, which is all the tests were ever pinning (a `due::` after one space at
+  the end of a sentence, the two-space form the app writes, a free-text value
+  with spaces in it, and a property quoted inside backticks).
+- **Docs: worked examples for the calls added this week** —
+  `GET`/`POST /api/nodes/{id}/overlaps` and `POST /api/expand` now appear in
+  API.md's *Examples*, not just its reference, and the table-op example states
+  that arguments are required and unknown fields are refused.
+
 ## [0.103.1]
 
 ### Changed

@@ -5058,10 +5058,10 @@ mod tests {
     #[test]
     fn a_property_quoted_in_code_is_not_a_property() {
         let quoted = [
-            "`due:: 2026-08-15 — RUN 1 DONE …` made the whole sentence the value",
-            "nine task cards carrying `status:: todo`, two with `due::` dates",
+            "`due:: 2026-08-15 — still blocked` made the whole sentence the value",
+            "nine cards carrying `status:: todo`, two with `due::` dates",
             "(bracketed `[status:: …]` in the title).",
-            "a card in **[[Test Requests & Handoffs]]** with `due::`",
+            "a card in **[[Some Basket]]** with `due::`",
         ];
         for line in quoted {
             assert!(
@@ -5089,11 +5089,11 @@ mod tests {
     fn a_real_property_still_parses_wherever_it_sits() {
         let real = [
             // One space, mid-sentence, at the end of a checklist item.
-            ("… pageGen stays claude meanwhile. due:: 2026-08-15", "due", "2026-08-15"),
+            ("… the decision is parked meanwhile. due:: 2026-08-15", "due", "2026-08-15"),
             // The app writes two spaces; both must work.
-            ("F. Switchover verify: suites re-baselined  due:: 2026-08-15", "due", "2026-08-15"),
+            ("F. Verify the switchover: suites re-baselined  due:: 2026-08-15", "due", "2026-08-15"),
             // A value with spaces in it is still a value.
-            ("#prod-verify #boss-flows status:: in progress", "status", "in progress"),
+            ("#verify #flows status:: in progress", "status", "in progress"),
             // Its own line, and bracketed inline — the documented forms.
             ("status:: done", "status", "done"),
             ("#handoff  [date:: 2026-08-04]", "date", "2026-08-04"),
