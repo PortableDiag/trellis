@@ -3356,7 +3356,7 @@ dependencies = [
 
 [[package]]
 name = "trellis"
-version = "0.103.4"
+version = "0.103.5"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",

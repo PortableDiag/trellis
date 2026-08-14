@@ -6,6 +6,32 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.103.5]
+
+### Fixed
+- **The X11 selection could switch itself off for the rest of the session.**
+  `set_primary_selection` took its owner mutex with `let Ok(..) else { return }`,
+  so a single panic anywhere on that thread left the lock poisoned and every
+  later selection returned at that line. Copying by selection would simply stop
+  working, with nothing logged and nothing visible — which is exactly what "my
+  clipboard broke" looks like. A poisoned lock is now recovered: what it guards
+  is one process handle, and the worst a panic can leave is a handle to a process
+  that has already exited.
+- **A zombie helper per selection, sitting under Trellis until the next one.**
+  `xclip` and `xsel` **daemonize by forking**: the process Trellis spawns writes
+  the selection, forks, and exits, and the fork — re-parented to init — is what
+  actually serves PRIMARY. So the handle Trellis kept was normally a corpse, and
+  it was only reaped when the *next* selection came along. Measured on a live
+  instance: a defunct `xclip` parented by Trellis, 1h58m old. The child is now
+  reaped where it is spawned, and the handle kept only when the helper really did
+  stay in the foreground.
+
+  **This is not the v0.85.1 bug returning, and the investigation is the reason
+  to say so.** Giving PRIMARY to a new owner sends the old one `SelectionClear`
+  and `xclip` exits by itself, so one live helper survives a whole session's
+  dragging rather than one per character. The leak is still fixed; what was left
+  was corpses, which hold no selection and break nothing on their own.
+
 ## [0.103.4]
 
 ### Changed

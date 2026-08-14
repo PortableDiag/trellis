@@ -3519,7 +3519,19 @@ fn set_primary_selection(ui: &egui::Ui, text: &str) {
         use std::process::{Command, Stdio};
         // Retire the previous owner first. Held across the spawn so two rapid
         // selections can't both get past the check and leave one orphaned.
-        let Ok(mut owner) = PRIMARY_OWNER.lock() else { return };
+        //
+        // **A poisoned lock must not disable the clipboard.** This used to be
+        // `let Ok(..) else { return }`, so one panicking thread anywhere in here
+        // would leave the mutex poisoned and every later selection would return
+        // at this line — the primary selection silently dead for the rest of the
+        // session, with nothing logged and nothing to see. What the lock guards
+        // is a single process handle, and the worst a panic can leave behind is
+        // a handle to a process that has already exited, so recovering is safe
+        // and the alternative is a feature that turns itself off.
+        let mut owner = match PRIMARY_OWNER.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if let Some(mut old) = owner.take() {
             let _ = old.kill();
             let _ = old.wait(); // reap it, or we trade daemons for zombies
@@ -3538,13 +3550,49 @@ fn set_primary_selection(ui: &egui::Ui, text: &str) {
                 if let Some(mut si) = child.stdin.take() {
                     let _ = si.write_all(text.as_bytes());
                 }
-                // Do NOT wait: the process stays alive to serve the selection.
-                // Keep the handle so the next change can retire exactly this one.
-                *owner = Some(child);
+                // **Both tools daemonize by forking**, and that changes what this
+                // handle means. `xclip` writes the selection, forks, and the
+                // process we spawned exits at once; the fork — re-parented to
+                // init — is what actually serves PRIMARY. So the handle is
+                // normally a *corpse*, and holding it until the next selection
+                // left a zombie sitting under Trellis for as long as nobody
+                // selected anything (measured at 1h58m on a live instance).
+                //
+                // Reap it here instead. Retiring the real daemon is X11's job
+                // and it does it: giving PRIMARY to a new owner sends the old
+                // one SelectionClear and `xclip` exits on its own — which is why
+                // one live helper survives a whole session's dragging rather
+                // than one per character.
+                //
+                // Only keep the handle when the child is still running after a
+                // moment, i.e. a tool that stayed in the foreground and really
+                // is the owner. Then the next change must kill it, exactly as
+                // before. Never block the UI: this is a detached thread, and the
+                // wait is bounded.
+                *owner = reap_or_keep(child);
                 return;
             }
         }
     });
+}
+
+/// Wait briefly for a just-spawned selection helper to fork away and exit.
+///
+/// Returns `None` once it has (it was only the fork's parent — reaped, no
+/// zombie), or the handle if it is still alive after the grace period, in which
+/// case it is the process serving the selection and the caller must retire it
+/// next time. 250 ms is far longer than a fork-and-exit takes and short enough
+/// that nothing notices; the loop exits the moment the child is gone.
+#[cfg(target_os = "linux")]
+fn reap_or_keep(mut child: std::process::Child) -> Option<std::process::Child> {
+    for _ in 0..25 {
+        match child.try_wait() {
+            Ok(Some(_)) => return None, // exited and reaped by try_wait
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(_) => return None, // unwaitable: dropping the handle is all we can do
+        }
+    }
+    Some(child)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -3863,5 +3911,38 @@ mod tests {
         let (out, sel) = make_link("site", (0, 4));
         assert_eq!(out, "[site](url)");
         assert_eq!(range(&sel), (7, 10)); // "url"
+    }
+
+    /// The clipboard helper's handle is normally a corpse, and the corpse must
+    /// not be left lying around.
+    ///
+    /// `xclip` forks to serve the selection and the process we spawned exits at
+    /// once; holding that handle until the next selection left a zombie under
+    /// Trellis for as long as nobody selected anything. `true` stands in for it
+    /// here — spawn, exit, and the handle must come back reaped rather than
+    /// retained.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_helper_that_forks_away_is_reaped_not_retained() {
+        use std::process::{Command, Stdio};
+        let child = Command::new("true").stdout(Stdio::null()).spawn().unwrap();
+        assert!(
+            super::reap_or_keep(child).is_none(),
+            "a helper that exited must be reaped here, not left for the next selection"
+        );
+    }
+
+    /// The other half: a tool that really stays in the foreground *is* the
+    /// selection owner, so its handle is kept and the next change kills it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_helper_that_stays_resident_is_kept_so_it_can_be_retired() {
+        use std::process::{Command, Stdio};
+        let child = Command::new("sleep").arg("30").stdout(Stdio::null()).spawn().unwrap();
+        let kept = super::reap_or_keep(child);
+        assert!(kept.is_some(), "a live helper is the owner and must be retained");
+        let mut kept = kept.unwrap();
+        let _ = kept.kill();
+        let _ = kept.wait();
     }
 }
