@@ -475,6 +475,11 @@ GET /api/export?format=<fmt>
 are a single rendered image of the document text. Decode `base64` to get the file.
 
 ### Card links — `[[#id]]`
+A link works in a card's **body**, in a **table cell**, and (since v0.103.0) in a
+card's **title** — which is where the diagram recipe puts one, to tie a figure to
+the script that drew it. Titles were already read by the backlink index, so a
+title link counted as a link and simply could not be followed; now it renders and
+clicks like any other.
 
 `[[Some Basket]]` and `[[42]]` link to a **basket**, as they always have.
 **`[[#1391]]` links to a card.** The `#` prefix is how card ids are written

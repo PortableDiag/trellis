@@ -1290,19 +1290,80 @@ fn card_ui(
         card_menu(ui, card, node_path, env.templates, env.masters, env.card_plugins, actions)
     });
 
-    // Title label.
+    // Title label. A title is painted as one galley with no Markdown involved,
+    // so `[[…]]` rendered as its own brackets — the same gap table cells had
+    // before v0.94.0. It matters here because the link is already *real*: the
+    // backlink index reads titles, so `GET /api/cards/{cid}/backlinks` finds a
+    // title link that the card itself would not let you follow. A figure titled
+    // "… (source: [[#10239]])" is exactly the case, and it is the pattern the
+    // diagram recipe teaches.
     let title_text = if card.title.is_empty() {
         card.kind.label().to_string()
     } else {
         card.title.clone()
     };
-    p.text(
-        title_rect.left_center() + egui::vec2(8.0 * zoom, 0.0),
-        egui::Align2::LEFT_CENTER,
-        title_text,
-        egui::FontId::proportional(13.0 * zoom),
-        title_text_color(ui.visuals(), title_bg),
-    );
+    let title_col = title_text_color(ui.visuals(), title_bg);
+    let title_font = egui::FontId::proportional(13.0 * zoom);
+    let segments = crate::model::wikilink_segments(&title_text);
+    let title_has_link = segments.iter().any(|(_, t)| t.is_some());
+    let title_origin = title_rect.left_center() + egui::vec2(8.0 * zoom, 0.0);
+    if !title_has_link {
+        p.text(
+            title_origin,
+            egui::Align2::LEFT_CENTER,
+            title_text,
+            title_font,
+            title_col,
+        );
+    } else {
+        let link_col = ui.visuals().hyperlink_color;
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = f32::INFINITY;
+        for (text, target) in &segments {
+            job.append(
+                text,
+                0.0,
+                egui::TextFormat {
+                    font_id: title_font.clone(),
+                    color: if target.is_some() { link_col } else { title_col },
+                    underline: if target.is_some() {
+                        egui::Stroke::new(1.0, link_col)
+                    } else {
+                        egui::Stroke::NONE
+                    },
+                    ..Default::default()
+                },
+            );
+        }
+        let galley = ui.fonts(|f| f.layout_job(job));
+        let at = title_origin - egui::vec2(0.0, galley.size().y / 2.0);
+        p.galley(at, galley.clone(), egui::Color32::PLACEHOLDER);
+        // The title bar is also the drag handle, so only a click that lands on
+        // a link run follows it — a drag from anywhere still moves the card.
+        let hit = ui.interact(
+            egui::Rect::from_min_size(at, galley.size()),
+            ui.id().with(("card_title_link", card.id)),
+            egui::Sense::click(),
+        );
+        if let Some(pos) = hit.interact_pointer_pos() {
+            if hit.clicked() {
+                // Ask the galley which character was hit, then walk the runs —
+                // safer than measuring x offsets, and right at any zoom.
+                let idx = galley.cursor_from_pos(pos - at).ccursor.index;
+                let mut seen = 0usize;
+                for (text, target) in &segments {
+                    let n = text.chars().count();
+                    if idx >= seen && idx < seen + n {
+                        if let Some(t) = target {
+                            actions.push(CanvasAction::FollowLink(t.clone()));
+                        }
+                        break;
+                    }
+                    seen += n;
+                }
+            }
+        }
+    }
 
     // Edit/view toggle button on the right of the title bar (for text/code).
     if supports_edit(&card.kind) {

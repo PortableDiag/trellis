@@ -6,6 +6,25 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.103.0]
+
+### Fixed
+- **A `[[wiki-link]]` in a card title is a link.** Spotted in the work document:
+  an agent titled a figure *"Dry at a glance … (source: [[#10239]])"* and titled
+  its script *"Source — figure [[#10238]]"* — the pattern the diagram recipe
+  teaches, tying a picture to the code that drew it. Both rendered as their own
+  brackets.
+
+  What made it a defect rather than a missing feature: **the link was already
+  real.** The backlink index reads titles, so `GET /api/cards/10238/backlinks`
+  returned that hit — the card was linked, and the one place you could not
+  follow the link was the card itself.
+
+  Fixed the way table cells were in v0.94.0: a title is laid out as runs, link
+  runs get the link colour and an underline, and a click that lands on one
+  follows it. Only a click *on the link text* does — a drag from anywhere on the
+  title bar still moves the card.
+
 ## [0.102.0]
 
 ### Fixed
