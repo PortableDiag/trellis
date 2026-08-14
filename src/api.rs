@@ -317,6 +317,9 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
                 (patch.lang.is_some(), "lang"),
                 (patch.pos.is_some(), "pos"),
                 (patch.z.is_some(), "z"),
+                (patch.emphasis.is_some(), "emphasis"),
+                (patch.emphasis_intensity.is_some(), "emphasis_intensity"),
+                (patch.emphasis_minutes.is_some(), "emphasis_until"),
                 (patch.size.is_some(), "size"),
                 (patch.items.is_some(), "items"),
                 (patch.rows.is_some(), "rows"),
@@ -590,6 +593,22 @@ pub struct AddCardInput {
     /// never look at.
     #[serde(default)]
     z: Option<f32>,
+    /// Attention: `"none"`, `"glow"` or `"pulse"`.
+    ///
+    /// A separate channel from `color`, because the accent is how a *person*
+    /// organises a basket and borrowing it to shout destroys that organisation.
+    /// There is no flash on purpose: above about 3 Hz it is a seizure risk.
+    #[serde(default, deserialize_with = "de_emphasis_opt")]
+    emphasis: Option<String>,
+    /// Halo strength, 0.0–1.0 (clamped). Defaults to 1.0.
+    #[serde(default)]
+    emphasis_intensity: Option<f32>,
+    /// Minutes until the emphasis lapses. **Set this.** Emphasis that never
+    /// expires accumulates until every card is shouting and none of them mean
+    /// anything; `0` or omitting the field with `emphasis` set to `none` clears
+    /// it outright.
+    #[serde(default)]
+    emphasis_minutes: Option<i64>,
     /// Card size (width, height).
     #[serde(default)]
     size: Option<[f32; 2]>,
@@ -670,6 +689,22 @@ pub struct UpdateCardInput {
     /// never look at.
     #[serde(default)]
     z: Option<f32>,
+    /// Attention: `"none"`, `"glow"` or `"pulse"`.
+    ///
+    /// A separate channel from `color`, because the accent is how a *person*
+    /// organises a basket and borrowing it to shout destroys that organisation.
+    /// There is no flash on purpose: above about 3 Hz it is a seizure risk.
+    #[serde(default, deserialize_with = "de_emphasis_opt")]
+    emphasis: Option<String>,
+    /// Halo strength, 0.0–1.0 (clamped). Defaults to 1.0.
+    #[serde(default)]
+    emphasis_intensity: Option<f32>,
+    /// Minutes until the emphasis lapses. **Set this.** Emphasis that never
+    /// expires accumulates until every card is shouting and none of them mean
+    /// anything; `0` or omitting the field with `emphasis` set to `none` clears
+    /// it outright.
+    #[serde(default)]
+    emphasis_minutes: Option<i64>,
     /// Card size (width, height).
     #[serde(default)]
     size: Option<[f32; 2]>,
@@ -1482,6 +1517,22 @@ where
     color_from_value(&v).map_err(serde::de::Error::custom)
 }
 
+/// Reject an emphasis name at parse time, so a typo is a 400 that lists what was
+/// expected rather than a field that silently does nothing — the same rule the
+/// rest of the API's input has followed since v0.86.0.
+fn de_emphasis_opt<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    if crate::model::Emphasis::from_key(&s).is_none() {
+        return Err(serde::de::Error::custom(format!(
+            "unknown emphasis {s:?} (expected \"none\", \"glow\" or \"pulse\")"
+        )));
+    }
+    Ok(Some(s))
+}
+
 /// Deserialize a present `parent` field into `Some(..)` so the handler can tell
 /// it apart from an omitted one (which `#[serde(default)]` leaves as `None`):
 /// `parent: null` → `Some(None)` (top level), `parent: 5` → `Some(Some(5))`.
@@ -1879,6 +1930,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         if let Some(z) = input.z {
                             c.z = z.clamp(crate::canvas::Z_MIN, crate::canvas::Z_MAX);
                         }
+                        apply_emphasis(
+                            c,
+                            input.emphasis.as_deref(),
+                            input.emphasis_intensity,
+                            input.emphasis_minutes,
+                        );
                         if let Some(fs) = input.font_scale {
                             c.font_scale = fs.clamp(0.25, 4.0);
                         }
@@ -1999,6 +2056,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     // both are ways of losing a card the user cannot easily undo.
                     c.z = z.clamp(crate::canvas::Z_MIN, crate::canvas::Z_MAX);
                 }
+                apply_emphasis(
+                    c,
+                    patch.emphasis.as_deref(),
+                    patch.emphasis_intensity,
+                    patch.emphasis_minutes,
+                );
                 if let Some([w, h]) = patch.size {
                     c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
                 }
@@ -2694,6 +2757,20 @@ pub(crate) fn card_json(c: &Card) -> Value {
         "docked_to": c.docked_to,
         "font_scale": c.font_scale,
     });
+    // Only when it is set, so a document full of ordinary cards does not grow a
+    // field per card in every response.
+    if c.emphasis != crate::model::Emphasis::None {
+        v["emphasis"] = json!(c.emphasis.key());
+        v["emphasis_intensity"] = json!(c.emphasis_intensity);
+        if let Some(until) = c.emphasis_until {
+            v["emphasis_until"] = json!(until);
+            // Say whether it is still in force, so a reader does not have to know
+            // what the clock says here — the same reason `/api/tasks` buckets
+            // dates rather than handing them over raw.
+            v["emphasis_live"] =
+                json!(c.live_emphasis(crate::changelog::now_secs() as i64).key());
+        }
+    }
     // Only when there is one: a card never edited since this existed reports no
     // time rather than a made-up one.
     if let Some(t) = c.touched {
@@ -2775,6 +2852,46 @@ pub(crate) fn card_json(c: &Card) -> Value {
         }
     }
     v
+}
+
+/// Apply the three emphasis inputs to a card, as one unit.
+///
+/// Shared by create and PATCH so the rules cannot drift between them — which is
+/// the failure the table ops had before v0.102.0, where each path grew its own
+/// quiet defaults.
+///
+/// **An unknown value is ignored rather than refused here** only because the
+/// field is validated at parse time; anything reaching this is already one of
+/// the three names. Intensity is clamped rather than rejected: a caller asking
+/// for 3.0 wants "as loud as possible", and there is no reading of that which
+/// should fail the whole request.
+fn apply_emphasis(
+    c: &mut crate::model::Card,
+    emphasis: Option<&str>,
+    intensity: Option<f32>,
+    minutes: Option<i64>,
+) {
+    use crate::model::Emphasis;
+    if let Some(name) = emphasis {
+        if let Some(e) = Emphasis::from_key(name) {
+            c.emphasis = e;
+            if e == Emphasis::None {
+                // Turning it off clears the expiry too: a lapsed timer on a card
+                // with no emphasis is a trap for whoever reads it next.
+                c.emphasis_until = None;
+            }
+        }
+    }
+    if let Some(v) = intensity {
+        c.emphasis_intensity = v.clamp(0.0, 1.0);
+    }
+    if let Some(m) = minutes {
+        c.emphasis_until = if m <= 0 {
+            None
+        } else {
+            Some(crate::changelog::now_secs() as i64 + m * 60)
+        };
+    }
 }
 
 #[cfg(test)]

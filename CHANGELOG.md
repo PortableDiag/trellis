@@ -6,6 +6,37 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.105.0]
+
+### Added
+- **Emphasis: a card can ask to be looked at.** Right-click → **Emphasis** →
+  *Glow* (a steady accent halo) or *Pulse* (the same halo breathing over 1.8s),
+  and `emphasis` / `emphasis_intensity` / `emphasis_minutes` on card create and
+  PATCH.
+
+  **Three decisions worth recording, because they are what makes it usable
+  rather than a novelty.**
+
+  - **It is a separate channel from `color`.** The accent is how a *person*
+    organises a basket, so an agent borrowing it to shout destroys the
+    organisation it is shouting about.
+  - **There is no flash, and there will not be one.** Anything above about 3 Hz
+    is a photosensitive-seizure risk — the one visual effect here that can
+    actually hurt somebody. `Pulse` is a slow sine that never dims below 40%: it
+    reads as alive rather than as an alarm.
+  - **It expires.** `emphasis_minutes` sets a lapse time, and agents are told to
+    always send it: emphasis that never expires accumulates until every card is
+    shouting and none of them mean anything. Expiry is evaluated **at draw
+    time**, so a lapsed highlight costs no edit, no `touched` and no change-log
+    entry — a card that stopped being urgent is not a card that was modified.
+
+  One field rather than three flags (`flash`/`pulse`/`glow` would be eight
+  states, most meaningless, and every renderer would have to answer for all of
+  them). An unknown value is a **400 naming it**, like the rest of the API's
+  input since v0.86.0. A pulsing card asks for a repaint **only while it is on
+  screen**, because egui redraws on request and an unconditional timer would burn
+  a core on an idle window for ever.
+
 ## [0.104.0]
 
 ### Added

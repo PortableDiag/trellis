@@ -150,6 +150,8 @@ pub enum CanvasAction {
     /// Slide a card along Z (Shift+scroll over its title bar). The value is the
     /// new absolute depth, already clamped by the canvas.
     SetZ(CardId, f32),
+    /// Set a card's attention emphasis (right-click → Emphasis).
+    SetEmphasis(CardId, crate::model::Emphasis),
     ToggleDepthMode,
     ToggleTimeMode,
     /// A `[[wiki-link]]` clicked inside a table cell. Carries the raw target;
@@ -1029,6 +1031,10 @@ pub fn ui(
 /// this feature, so the default leans conservative.
 pub const CAMERA_DIST: f32 = 2000.0;
 
+/// One breath of a pulsing card, in seconds. Slow on purpose: this is a heartbeat,
+/// not a strobe, and 1.8s is well under the 3 Hz that makes flashing a hazard.
+pub const PULSE_PERIOD_S: f64 = 1.8;
+
 /// Clamp for `z`. Beyond these a card is either through the camera or too small
 /// to read, and both are ways of losing a card that the user cannot easily undo.
 pub const Z_MIN: f32 = -1600.0;
@@ -1132,6 +1138,39 @@ fn card_ui(
     let panel = ui.visuals().panel_fill;
     let title_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), title_h));
     let bevel_c = 18.0 * zoom; // Futuristic corner-cut (bigger = more skewed)
+
+    // Per-card attention halo, independent of the theme's glow. Drawn first so
+    // the theme's own rings (if any) sit inside it.
+    //
+    // **Pulse is a slow sine that never reaches zero** — 40% to 100% over 1.8s.
+    // Anything faster than about 3 Hz is a photosensitive-seizure risk, and a
+    // halo that blinks fully off reads as a fault rather than as attention.
+    let live = card.live_emphasis(crate::changelog::now_secs() as i64);
+    if live != crate::model::Emphasis::None {
+        let base = card.emphasis_intensity.clamp(0.0, 1.0);
+        let amount = if live == crate::model::Emphasis::Pulse {
+            let t = ui.input(|i| i.time);
+            let phase = (t * std::f64::consts::TAU / PULSE_PERIOD_S).sin() as f32;
+            base * (0.7 + 0.3 * phase)
+        } else {
+            base
+        };
+        for i in (1..=7).rev() {
+            let grow = i as f32 * 2.6 * zoom;
+            let a = amount * (0.10 + 0.05 * (7 - i) as f32);
+            p.rect_stroke(
+                rect.expand(grow),
+                r + grow,
+                egui::Stroke::new(2.4 * zoom, accent.gamma_multiply(a)),
+            );
+        }
+        // Keep animating — but only because a pulsing card is on screen right
+        // now. egui only redraws when something asks it to, so an unconditional
+        // request here would burn a core on an idle window for ever.
+        if live == crate::model::Emphasis::Pulse {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        }
+    }
 
     // Radiant glow behind the frame — concentric accent rings, brightest at the
     // edge, fading outward (the neon themes: Futuristic / SynthWave).
@@ -2184,6 +2223,24 @@ fn card_menu(
             ui.close_menu();
         }
     }
+    ui.menu_button("Emphasis", |ui| {
+        ui.label(
+            egui::RichText::new("A halo that says \"look here\" without taking the accent colour, which is how you organise the basket.")
+                .weak()
+                .small(),
+        );
+        ui.separator();
+        for (e, label) in [
+            (crate::model::Emphasis::None, "None"),
+            (crate::model::Emphasis::Glow, "Glow — a steady halo"),
+            (crate::model::Emphasis::Pulse, "Pulse — a slow breath"),
+        ] {
+            if ui.selectable_label(card.emphasis == e, label).clicked() {
+                actions.push(CanvasAction::SetEmphasis(card.id, e));
+                ui.close_menu();
+            }
+        }
+    });
     if ui.button("Duplicate").clicked() {
         actions.push(CanvasAction::Duplicate(card.id));
         ui.close_menu();

@@ -688,6 +688,24 @@ pub struct Card {
     /// every card at `0.0`, i.e. coplanar, i.e. exactly what it looks like today.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub z: f32,
+    /// Attention: none, a steady glow, or a slow pulse. See [`Emphasis`].
+    #[serde(default, skip_serializing_if = "is_no_emphasis")]
+    pub emphasis: Emphasis,
+    /// How strong the halo is, 0.0–1.0. Clamped on read as well as on write.
+    #[serde(default = "default_intensity", skip_serializing_if = "is_full_intensity")]
+    pub emphasis_intensity: f32,
+    /// Unix seconds after which the emphasis stops being drawn, or `None` for
+    /// "until someone turns it off".
+    ///
+    /// **This is the field that decides whether the feature is any good.** An
+    /// agent that can shout permanently produces a document where everything
+    /// shouts, and then nothing does. Agents set an expiry; a person setting it
+    /// by hand does not have to. Expiry is evaluated at draw time and the field
+    /// is left alone — a card that lapsed is not a card that was edited, and
+    /// rewriting the document to un-highlight things would touch `touched` and
+    /// spam the change log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emphasis_until: Option<i64>,
     pub size: egui::Vec2,
     pub title: String,
     /// Markdown / code text. Unused by image and checklist cards.
@@ -748,6 +766,63 @@ pub struct Card {
     pub editing: bool,
 }
 
+/// How loudly a card asks to be looked at.
+///
+/// **Why this exists at all.** An agent working in a document has one way to say
+/// "this one matters": the accent colour, which is also how a human organises a
+/// basket, so using it for attention destroys the organisation. This is a
+/// separate channel, and it is deliberately a *small* one.
+///
+/// **Why it is one field rather than three.** Flashing, pulsing and glowing as
+/// independent flags is eight states, most of them meaningless, and every
+/// renderer — desktop, phone, PDF — has to answer for all of them.
+///
+/// **Why there is no flash.** Anything above about 3 Hz is a photosensitive
+/// seizure risk, and it is the one visual effect here that can actually hurt
+/// somebody. `Pulse` is a slow sine that never reaches zero: it reads as alive
+/// rather than as an alarm.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Emphasis {
+    #[default]
+    None,
+    /// A steady accent halo.
+    Glow,
+    /// The same halo, breathing between 40% and 100%.
+    Pulse,
+}
+
+impl Emphasis {
+    pub fn key(self) -> &'static str {
+        match self {
+            Emphasis::None => "none",
+            Emphasis::Glow => "glow",
+            Emphasis::Pulse => "pulse",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<Emphasis> {
+        match s {
+            "none" | "" => Some(Emphasis::None),
+            "glow" => Some(Emphasis::Glow),
+            "pulse" => Some(Emphasis::Pulse),
+            _ => None,
+        }
+    }
+}
+
+fn is_no_emphasis(e: &Emphasis) -> bool {
+    *e == Emphasis::None
+}
+
+fn default_intensity() -> f32 {
+    1.0
+}
+
+fn is_full_intensity(v: &f32) -> bool {
+    (*v - 1.0).abs() < f32::EPSILON
+}
+
 fn default_font_scale() -> f32 {
     1.0
 }
@@ -759,6 +834,18 @@ fn is_zero(v: &f32) -> bool {
 }
 
 impl Card {
+    /// The emphasis actually in force at `now` (unix seconds), after expiry.
+    ///
+    /// Everything that draws attention goes through this rather than reading the
+    /// field, so a lapsed highlight is invisible everywhere at once — canvas,
+    /// minimap, phone — without anyone having to remember to check.
+    pub fn live_emphasis(&self, now: i64) -> Emphasis {
+        match self.emphasis_until {
+            Some(t) if now > t => Emphasis::None,
+            _ => self.emphasis,
+        }
+    }
+
     /// This card's inline `key:: value` properties (parsed from title + body).
     pub fn properties(&self) -> Vec<(String, String)> {
         extract_properties(&format!("{}\n{}", self.title, searchable_body(self)))
@@ -774,6 +861,9 @@ impl Card {
             id,
             pos,
             z: 0.0,
+            emphasis: Emphasis::None,
+            emphasis_intensity: 1.0,
+            emphasis_until: None,
             // A brand-new card has never been *changed*; the first edit stamps it.
             touched: None,
             source: None,
@@ -6794,5 +6884,42 @@ mod tests {
         }
         assert_eq!(doc.set_all_expanded(false), 0, "nothing left to fold");
         assert_eq!(doc.set_all_expanded(true), 4);
+    }
+
+    /// Emphasis lapses on its own, and that is the whole point of the field.
+    ///
+    /// An agent that can highlight for ever produces a document where everything
+    /// is highlighted, so `emphasis_until` is checked at draw time rather than
+    /// trusted from the field.
+    #[test]
+    fn emphasis_expires_without_the_document_being_rewritten() {
+        let mut c = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Text);
+        c.emphasis = Emphasis::Pulse;
+        c.emphasis_until = Some(1_000);
+
+        assert_eq!(c.live_emphasis(999), Emphasis::Pulse, "still inside its window");
+        assert_eq!(c.live_emphasis(1_000), Emphasis::Pulse, "the last second counts");
+        assert_eq!(c.live_emphasis(1_001), Emphasis::None, "lapsed");
+        // The field itself is untouched: a lapse is not an edit, and rewriting it
+        // would stamp `touched` and fill the change log with things nobody did.
+        assert_eq!(c.emphasis, Emphasis::Pulse);
+
+        // No expiry means "until someone turns it off" — what a person setting it
+        // by hand gets.
+        c.emphasis_until = None;
+        assert_eq!(c.live_emphasis(i64::MAX), Emphasis::Pulse);
+    }
+
+    /// A card written before emphasis existed loads with none of it, and a card
+    /// with none of it writes nothing — the file does not grow for a feature
+    /// nobody used.
+    #[test]
+    fn emphasis_is_absent_from_a_card_that_has_none() {
+        let c = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Text);
+        let ron = ron::ser::to_string(&c).unwrap();
+        assert!(!ron.contains("emphasis"), "{ron}");
+        let back: Card = ron::from_str(&ron).unwrap();
+        assert_eq!(back.emphasis, Emphasis::None);
+        assert_eq!(back.emphasis_intensity, 1.0, "the default survives a round trip");
     }
 }

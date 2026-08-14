@@ -265,6 +265,12 @@ from the main cluster, and click or drag on it to jump there without zooming out
     Terminal Green on purpose — that one is a console, this one is an instrument.
 
   Futuristic, SynthWave and Phosphor draw a soft accent **glow** behind each card.
+- **Emphasis** (right-click a card → **Emphasis**) — a **Glow** or a slow
+  **Pulse** halo that says *look at this* without spending the accent colour,
+  which is how you organise a basket. Agents can set it over the API **with an
+  expiry**, so a highlight fades on its own instead of accumulating until every
+  card shouts. There is deliberately no flash: anything above about 3 Hz is a
+  photosensitive-seizure risk, and a pulse never dims below 40%.
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN
   access** in Settings for phones/other devices) with full parity to the app:

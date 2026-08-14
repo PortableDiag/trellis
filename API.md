@@ -68,6 +68,9 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `size` | all | `[w,h]` in canvas units |
 | `color` | all | title-bar accent — set as `[r,g,b]` (0–255), a hex string (`"#ef4444"`, `"#e44"`), or a name (`"red"`, `"green"`, `"blue"`, …) |
 | `font_scale` | text, code | body font-size multiplier (1.0 = default; clamped 0.25–4.0) |
+| `emphasis` | all | attention: `"glow"` (a steady accent halo) or `"pulse"` (the same halo breathing, 1.8s). Omitted when the card has none. **Separate from `color` on purpose** — the accent is how a person organises a basket, so borrowing it to shout destroys the organisation. There is no flash: above ~3 Hz it is a photosensitive-seizure risk |
+| `emphasis_intensity` | all | halo strength `0.0`–`1.0` (clamped; default `1.0`) |
+| `emphasis_until` | all | unix seconds after which it lapses. Present only when set; `emphasis_live` beside it says what is in force **now**, so a reader needn't consult its own clock |
 | `group` | all | group id this card belongs to, or null — set via the group sub-resource (below) |
 | `docked_to` | all | id of the card this one is docked to, or null — set via the dock sub-resource |
 | `body` | text, code | Markdown (text) or source (code) |
@@ -1381,6 +1384,26 @@ curl -s -X POST -H "$K" -H 'Content-Type: application/json' -d '{
 curl -s -H "X-API-Key: $KEY" \
   -d '{"kind":"text","title":"Important","body":"read me","color":"red","size":[300,180]}' \
   $API/nodes/$NID/cards
+
+# Say "look at this" without taking the accent colour, which is how the basket is
+# organised. Two looks: `glow` (steady) and `pulse` (a slow breath — there is no
+# flash, because above ~3 Hz it is a seizure risk).
+curl -s -X PATCH -H "X-API-Key: $KEY" \
+  -d '{"emphasis":"pulse","emphasis_intensity":0.9,"emphasis_minutes":30}' \
+  $API/nodes/$NID/cards/$CID
+# → {"emphasis":"pulse","emphasis_intensity":0.9,"emphasis_until":1786741084,
+#    "emphasis_live":"pulse", …}
+#
+# **Always send `emphasis_minutes` from an agent.** Emphasis that never expires
+# accumulates until every card is shouting and none of them mean anything; the
+# expiry is what keeps the channel worth having. It is evaluated when the card is
+# drawn, so a lapsed highlight costs no edit, no `touched` and no change-log entry.
+# Omit it (or send 0) only for a highlight a *person* asked for.
+#
+# Turn it off — this also clears any expiry, so no stale timer is left behind:
+curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"emphasis":"none"}' $API/nodes/$NID/cards/$CID
+# An unknown value is refused rather than ignored:
+#   {"error":"invalid JSON body: unknown emphasis \"strobe\" (expected \"none\", \"glow\" or \"pulse\")"}
 
 # Find something
 curl -s -H "X-API-Key: $KEY" "$API/search?q=agenda"

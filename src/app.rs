@@ -3657,6 +3657,7 @@ impl TrellisApp {
             CanvasAction::Remove(c) => card(Op::Deleted, *c).titled(title(c)),
             CanvasAction::MoveCard(c, _) => card(Op::Moved, *c).titled(title(c)).field("pos"),
             CanvasAction::SetZ(c, _) => card(Op::Moved, *c).titled(title(c)).field("z"),
+            CanvasAction::SetEmphasis(c, _) => upd(c, "emphasis"),
             CanvasAction::RaiseCard(c) => card(Op::Moved, *c).titled(title(c)).field("order"),
             CanvasAction::ResizeCard(c, _) => upd(c, "size"),
             CanvasAction::FitCard(c) => upd(c, "size"),
@@ -4298,6 +4299,7 @@ impl TrellisApp {
                 CanvasAction::ToggleSnapMode => self.snap_mode = !self.snap_mode,
                 CanvasAction::ToggleDepthMode => self.depth_mode = !self.depth_mode,
                 CanvasAction::ToggleTimeMode => self.time_mode = !self.time_mode,
+
                 CanvasAction::FollowLink(target) => {
                     // Same resolution as a link in a text card: `#id` is a card,
                     // an integer is a node, then a title match.
@@ -4311,6 +4313,15 @@ impl TrellisApp {
                 CanvasAction::SetZ(cid, z) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {
                         c.z = z;
+                    }
+                }
+                CanvasAction::SetEmphasis(cid, e) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        c.emphasis = e;
+                        // Set by hand, so it never lapses. The expiry exists to
+                        // stop *agents* accumulating permanent noise; a person
+                        // turning one on has just said what they meant.
+                        c.emphasis_until = None;
                     }
                 }
                 CanvasAction::GroupSelected => {
@@ -6593,7 +6604,7 @@ impl TrellisApp {
                         "GET    /api/daily                         (is it on, and which node is the journal root)",
                         "POST   /api/daily/root {node}   /   DELETE /api/daily/root   (turn it on / off)",
                         "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, fit?, image_base64?, inline_images?, source?}",
-                        "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, z?, size?, items?, source?, …}",
+                        "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, z?, size?, items?, source?, emphasis?, emphasis_intensity?, emphasis_minutes?, …}",
                         "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
                         "DELETE /api/nodes/{id}/cards/{cid}",
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
