@@ -6,6 +6,21 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.103.4]
+
+### Changed
+- **Folding the whole tree moved from the tree header into the View menu.**
+  Reported from use: the `⊟` / `⊞` buttons sat directly beneath the menu bar, in
+  the path of a pointer heading for **Edit** or **View**, and were being clicked
+  by accident. That is an expensive misclick — it re-folds every node in the
+  document at once — and it happened while reaching for something else, which is
+  the worst kind. They are now **View → Collapse the whole tree** and **Expand
+  the whole tree**, above *Hypercube*.
+
+  Nothing else changed: the same `TreeAction`, the same one change-log entry for
+  the whole tree, and `POST /api/expand {expanded}` is untouched. The tree header
+  keeps **Reorder** and **+**, which are the two it had before v0.97.0.
+
 ## [0.103.3]
 
 ### Changed

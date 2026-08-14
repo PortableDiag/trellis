@@ -83,18 +83,10 @@ pub fn ui(
             {
                 actions.push(TreeAction::ToggleReorder);
             }
-            // Right-click → Expand all / Collapse all has always worked on one
-            // node, including a root. Doing it to the whole tree was the missing
-            // part: with 38 top-level projects, folding the tree was 38
-            // right-clicks. Small icon buttons — the header already carries two.
-            // Laid out right-to-left, so expand is pushed first to draw second:
-            // the pair reads ⊟ ⊞ on screen, collapse before expand.
-            if ui.small_button("⊞").on_hover_text("Expand the whole tree").clicked() {
-                actions.push(TreeAction::SetAllExpanded(true));
-            }
-            if ui.small_button("⊟").on_hover_text("Collapse the whole tree").clicked() {
-                actions.push(TreeAction::SetAllExpanded(false));
-            }
+            // Folding the whole tree lives in **View**, not here. As buttons they
+            // sat directly under the menu bar, in the path of a pointer heading
+            // for Edit or View, and got clicked by accident — an expensive
+            // misclick, because it moves every node in the document at once.
         });
     });
     ui.separator();

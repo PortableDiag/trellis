@@ -303,8 +303,8 @@ Open or fold a node in the sidebar. `recursive` applies it to the whole subtree
 POST /api/nodes/{id}/expand  {expanded:true|false, recursive?:false}
     → 200 {"id":<id>, "expanded":<bool>, "changed":<n>}    | 404
 ```
-The whole tree at once — every root and everything under it (the `⊟` / `⊞`
-buttons in the tree header). Always recursive:
+The whole tree at once — every root and everything under it (**View → Collapse /
+Expand the whole tree**). Always recursive:
 ```
 POST /api/expand  {expanded:true|false}
     → 200 {"expanded":<bool>, "changed":<n>}
@@ -1461,7 +1461,7 @@ curl -s -H "X-API-Key: $KEY" $API/nodes/$NID/overlaps
 curl -s -H "X-API-Key: $KEY" -X POST $API/nodes/$NID/overlaps
 # → {"node":63,"moved":4}          ("moved":0 = nothing was covering anything)
 
-# Fold the whole tree, or open it (the ⊟ / ⊞ buttons in the tree header)
+# Fold the whole tree, or open it (View → Collapse / Expand the whole tree)
 curl -s -H "X-API-Key: $KEY" -X POST -d '{"expanded":false}' $API/expand
 # → {"expanded":false,"changed":242}
 

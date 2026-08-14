@@ -5098,6 +5098,26 @@ impl TrellisApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    // Whole-tree folding: a menu item, not a header button. It
+                    // moves every node in the document, which is not something a
+                    // stray click on the way to a menu should be able to do.
+                    if ui
+                        .button("Collapse the whole tree")
+                        .on_hover_text("Fold every root and everything under it")
+                        .clicked()
+                    {
+                        self.apply_tree(vec![TreeAction::SetAllExpanded(false)]);
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("Expand the whole tree")
+                        .on_hover_text("Open every root and everything under it")
+                        .clicked()
+                    {
+                        self.apply_tree(vec![TreeAction::SetAllExpanded(true)]);
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     // The two axes live together here as well as on the canvas —
                     // named, so the pair has a reason to be a pair.
                     ui.menu_button("Hypercube", |ui| {
