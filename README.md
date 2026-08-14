@@ -247,12 +247,24 @@ from the main cluster, and click or drag on it to jump there without zooming out
   `due::` date (red when overdue), and its `#tags`. Drag a card between columns to
   change its status, or click one to jump straight to it on its basket; toggle
   **Show done** to hide the finished pile. Reads the same properties as the agenda.
-- **View → Themes** — Trellis (default), Light, Terminal Green, **Sticky Notes**
-  (solid single-color paper cards — yellow by default, the whole note takes the
-  color you give it — on a cork board), **Futuristic** (a Minority-Report teal HUD
-  with beveled tech-panel cards), or **SynthWave** (a dark, near-black
-  Hotline-Miami interface with hot pink + electric cyan used only as *accents*).
-  The two neon themes draw a soft accent **glow** behind each card.
+- **View → Themes** — nine, and each one paints the *cards*, not just the
+  chrome. Trellis (default), Light, Terminal Green, **Sticky Notes** (solid
+  single-color paper cards — yellow by default, the whole note takes the color
+  you give it — on a cork board), **Futuristic** (a teal HUD with beveled
+  tech-panel cards), **SynthWave** (near-black with hot pink + electric cyan used
+  only as *accents*), and three drawn from instruments rather than interfaces:
+  - **Blueprint** — cyan linework on Prussian blue. Cards are drawing sheets:
+    square corners, a thin rule, a **title block** under the heading and
+    registration ticks at each corner. Everything reads by its edges, which is
+    what makes it the easiest of the dark themes on the eyes for long reading.
+  - **Silkscreen** — white legend and gold pads on solder-mask green. Each card
+    is a part with a **pin-1 dot** in its corner, and the title clears the pad
+    the way a real legend does.
+  - **Phosphor** — a storage oscilloscope: P31 blue-green traces on a graticule,
+    no fills anywhere, and a bright beam rule under each title. Distinct from
+    Terminal Green on purpose — that one is a console, this one is an instrument.
+
+  Futuristic, SynthWave and Phosphor draw a soft accent **glow** behind each card.
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN
   access** in Settings for phones/other devices) with full parity to the app:

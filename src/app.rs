@@ -129,16 +129,22 @@ enum Theme {
     StickyNotes,
     Futuristic,
     SynthWave,
+    Blueprint,
+    Silkscreen,
+    Phosphor,
 }
 
 impl Theme {
-    const ALL: [(Theme, &'static str); 6] = [
+    const ALL: [(Theme, &'static str); 9] = [
         (Theme::Trellis, "Trellis"),
         (Theme::Light, "Light"),
         (Theme::TerminalGreen, "Terminal Green"),
         (Theme::StickyNotes, "Sticky Notes"),
         (Theme::Futuristic, "Futuristic"),
         (Theme::SynthWave, "SynthWave"),
+        (Theme::Blueprint, "Blueprint"),
+        (Theme::Silkscreen, "Silkscreen"),
+        (Theme::Phosphor, "Phosphor"),
     ];
 
     fn from_key(s: &str) -> Theme {
@@ -148,6 +154,9 @@ impl Theme {
             "StickyNotes" => Theme::StickyNotes,
             "Futuristic" => Theme::Futuristic,
             "SynthWave" => Theme::SynthWave,
+            "Blueprint" => Theme::Blueprint,
+            "Silkscreen" => Theme::Silkscreen,
+            "Phosphor" => Theme::Phosphor,
             // "Dark" is the pre-rename key for the default look; keep it mapping
             // to Trellis so existing settings load unchanged.
             _ => Theme::Trellis,
@@ -162,6 +171,9 @@ impl Theme {
             Theme::StickyNotes => "StickyNotes",
             Theme::Futuristic => "Futuristic",
             Theme::SynthWave => "SynthWave",
+            Theme::Blueprint => "Blueprint",
+            Theme::Silkscreen => "Silkscreen",
+            Theme::Phosphor => "Phosphor",
         }
     }
 
@@ -173,8 +185,143 @@ impl Theme {
             Theme::StickyNotes => sticky_notes_visuals(),
             Theme::Futuristic => futuristic_visuals(),
             Theme::SynthWave => synthwave_visuals(),
+            Theme::Blueprint => blueprint_visuals(),
+            Theme::Silkscreen => silkscreen_visuals(),
+            Theme::Phosphor => phosphor_visuals(),
         }
     }
+}
+
+/// Drafting board: cyan linework on Prussian blue.
+///
+/// The canvas is already a board you arrange things on, so the metaphor is not
+/// borrowed — it is what the app is. Everything is line, not fill: a drawing
+/// reads by its edges, which is also why this stays legible for long reading
+/// where the neon themes tire.
+fn blueprint_visuals() -> egui::Visuals {
+    use egui::{Color32, Stroke};
+    let ink = Color32::from_rgb(0xdc, 0xef, 0xff); // near-white linework
+    let line = Color32::from_rgb(0x7d, 0xc3, 0xf0); // cyan rule
+    let dim = Color32::from_rgb(0x4a, 0x86, 0xb4);
+    let board = Color32::from_rgb(0x0b, 0x2a, 0x43); // Prussian blue ground
+    let sheet = Color32::from_rgb(0x11, 0x38, 0x57); // the drawing sheet
+
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(ink);
+    v.hyperlink_color = Color32::from_rgb(0x9f, 0xdc, 0xff);
+    v.panel_fill = sheet;
+    v.window_fill = sheet;
+    v.extreme_bg_color = board;
+    v.faint_bg_color = Color32::from_rgb(0x15, 0x42, 0x66);
+    v.code_bg_color = Color32::from_rgb(0x09, 0x24, 0x3a);
+    v.window_stroke = Stroke::new(1.0, line);
+    v.selection.bg_fill = line.gamma_multiply(0.28);
+    v.selection.stroke = Stroke::new(1.0, line);
+
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = sheet;
+    w.noninteractive.weak_bg_fill = sheet;
+    w.noninteractive.fg_stroke = Stroke::new(1.0, dim);
+    w.inactive.bg_fill = Color32::from_rgb(0x15, 0x42, 0x66);
+    w.inactive.weak_bg_fill = Color32::from_rgb(0x15, 0x42, 0x66);
+    w.inactive.fg_stroke = Stroke::new(1.0, ink);
+    w.hovered.bg_fill = Color32::from_rgb(0x1b, 0x51, 0x7c);
+    w.hovered.weak_bg_fill = Color32::from_rgb(0x1b, 0x51, 0x7c);
+    w.hovered.fg_stroke = Stroke::new(1.5, ink);
+    w.hovered.bg_stroke = Stroke::new(1.0, line);
+    w.active.bg_fill = Color32::from_rgb(0x22, 0x63, 0x96);
+    w.active.weak_bg_fill = Color32::from_rgb(0x22, 0x63, 0x96);
+    w.active.fg_stroke = Stroke::new(1.5, ink);
+    w.active.bg_stroke = Stroke::new(1.0, line);
+    w.open.fg_stroke = Stroke::new(1.0, ink);
+    v
+}
+
+/// Solder mask and silkscreen: gold on dark board green.
+///
+/// The one theme where the *structure* is visible in the look — a docked or
+/// grouped card is a part with a trace running to it, which is exactly what
+/// docking means.
+fn silkscreen_visuals() -> egui::Visuals {
+    use egui::{Color32, Stroke};
+    let silk = Color32::from_rgb(0xf2, 0xf4, 0xef); // white silkscreen legend
+    let gold = Color32::from_rgb(0xd9, 0xa8, 0x2b); // ENIG pad / trace
+    let dim = Color32::from_rgb(0x8f, 0x6f, 0x22);
+    let mask = Color32::from_rgb(0x0a, 0x2e, 0x1e); // solder mask green
+    let board = Color32::from_rgb(0x06, 0x1f, 0x15);
+
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(silk);
+    v.hyperlink_color = Color32::from_rgb(0xf0, 0xc8, 0x62);
+    v.panel_fill = mask;
+    v.window_fill = mask;
+    v.extreme_bg_color = board;
+    v.faint_bg_color = Color32::from_rgb(0x0e, 0x3a, 0x27);
+    v.code_bg_color = board;
+    v.window_stroke = Stroke::new(1.0, dim);
+    v.selection.bg_fill = gold.gamma_multiply(0.24);
+    v.selection.stroke = Stroke::new(1.0, gold);
+
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = mask;
+    w.noninteractive.weak_bg_fill = mask;
+    w.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(0xb9, 0xc6, 0xbd));
+    w.inactive.bg_fill = Color32::from_rgb(0x0e, 0x3a, 0x27);
+    w.inactive.weak_bg_fill = Color32::from_rgb(0x0e, 0x3a, 0x27);
+    w.inactive.fg_stroke = Stroke::new(1.0, silk);
+    w.hovered.bg_fill = Color32::from_rgb(0x14, 0x4a, 0x33);
+    w.hovered.weak_bg_fill = Color32::from_rgb(0x14, 0x4a, 0x33);
+    w.hovered.fg_stroke = Stroke::new(1.5, silk);
+    w.hovered.bg_stroke = Stroke::new(1.0, gold);
+    w.active.bg_fill = Color32::from_rgb(0x1a, 0x5c, 0x40);
+    w.active.weak_bg_fill = Color32::from_rgb(0x1a, 0x5c, 0x40);
+    w.active.fg_stroke = Stroke::new(1.5, silk);
+    w.active.bg_stroke = Stroke::new(1.0, gold);
+    w.open.fg_stroke = Stroke::new(1.0, silk);
+    v
+}
+
+/// A storage oscilloscope: P31 blue-green traces on a graticule.
+///
+/// Distinct from Terminal Green on purpose — that is a *console*, this is an
+/// *instrument*: no fill anywhere, everything drawn as a trace, and the grid
+/// read as a graticule rather than as a background texture.
+fn phosphor_visuals() -> egui::Visuals {
+    use egui::{Color32, Stroke};
+    let trace = Color32::from_rgb(0x7a, 0xf7, 0xd4); // P31 blue-green
+    let dim = Color32::from_rgb(0x3f, 0xa8, 0x92);
+    let bg = Color32::from_rgb(0x02, 0x0a, 0x09);
+    let panel = Color32::from_rgb(0x05, 0x14, 0x11);
+
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(trace);
+    v.hyperlink_color = Color32::from_rgb(0xa8, 0xff, 0xe6);
+    v.panel_fill = panel;
+    v.window_fill = panel;
+    v.extreme_bg_color = bg;
+    v.faint_bg_color = Color32::from_rgb(0x07, 0x1c, 0x18);
+    v.code_bg_color = bg;
+    v.window_stroke = Stroke::new(1.0, dim);
+    v.selection.bg_fill = trace.gamma_multiply(0.20);
+    v.selection.stroke = Stroke::new(1.0, trace);
+
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = panel;
+    w.noninteractive.weak_bg_fill = panel;
+    w.noninteractive.fg_stroke = Stroke::new(1.0, dim);
+    w.inactive.bg_fill = Color32::from_rgb(0x08, 0x20, 0x1b);
+    w.inactive.weak_bg_fill = Color32::from_rgb(0x08, 0x20, 0x1b);
+    w.inactive.fg_stroke = Stroke::new(1.0, trace);
+    w.hovered.bg_fill = Color32::from_rgb(0x0b, 0x2c, 0x25);
+    w.hovered.weak_bg_fill = Color32::from_rgb(0x0b, 0x2c, 0x25);
+    w.hovered.fg_stroke = Stroke::new(1.5, trace);
+    w.hovered.bg_stroke = Stroke::new(1.0, dim);
+    w.active.bg_fill = Color32::from_rgb(0x0f, 0x38, 0x2f);
+    w.active.weak_bg_fill = Color32::from_rgb(0x0f, 0x38, 0x2f);
+    w.active.fg_stroke = Stroke::new(1.5, trace);
+    w.active.bg_stroke = Stroke::new(1.0, trace);
+    w.open.fg_stroke = Stroke::new(1.0, trace);
+    v
 }
 
 /// A phosphor green-on-black terminal scheme.
@@ -8045,9 +8192,12 @@ impl eframe::App for TrellisApp {
                         style: match self.theme {
                             Theme::StickyNotes => canvas::CardStyle::Sticky,
                             Theme::Futuristic => canvas::CardStyle::Futuristic,
+                            Theme::Blueprint => canvas::CardStyle::Blueprint,
+                            Theme::Silkscreen => canvas::CardStyle::Silkscreen,
+                            Theme::Phosphor => canvas::CardStyle::Phosphor,
                             _ => canvas::CardStyle::Normal,
                         },
-                        glow: matches!(self.theme, Theme::Futuristic | Theme::SynthWave),
+                        glow: matches!(self.theme, Theme::Futuristic | Theme::SynthWave | Theme::Phosphor),
                     };
                     let can_paste = self.card_clipboard.is_some();
                     let node_path = crate::tree::node_path(&self.doc, sel);

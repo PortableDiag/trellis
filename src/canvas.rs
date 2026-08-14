@@ -59,11 +59,20 @@ pub struct Env<'a> {
 /// look (panel-fill body + accent title bar). `Sticky` paints the whole card one
 /// solid paper color — header and body the same, like a real sticky note.
 /// `Futuristic` gives it a beveled tech-panel frame.
+///
+/// The three added in v0.104.0 each take one real object seriously rather than
+/// recolouring the default: `Blueprint` is a drawing sheet with a title block,
+/// `Silkscreen` is a board part with a pin-1 mark, `Phosphor` is a trace on an
+/// instrument — no fill at all, because a scope draws light, it does not paint
+/// surfaces.
 #[derive(Clone, Copy, PartialEq)]
 pub enum CardStyle {
     Normal,
     Sticky,
     Futuristic,
+    Blueprint,
+    Silkscreen,
+    Phosphor,
 }
 
 /// The default accent a fresh card is created with (`model::Card::new`). In the
@@ -1194,6 +1203,67 @@ fn card_ui(
                 egui::Stroke::new(2.2 * zoom, accent),
             );
         }
+        CardStyle::Blueprint => {
+            // A drawing sheet: square corners, a thin rule around it, and a
+            // *title block* — the double rule under the title is the whole
+            // convention, so it is drawn rather than implied by a fill.
+            title_bg = mix(panel, accent, 0.18);
+            p.rect_filled(rect, 0.0, panel);
+            p.rect_stroke(rect, 0.0, egui::Stroke::new(1.0 * zoom.max(0.6), accent));
+            p.rect_filled(title_rect, 0.0, accent.gamma_multiply(0.16));
+            let y = title_rect.bottom();
+            for (i, w) in [(0.0, 1.4), (2.5 * zoom, 0.7)] {
+                p.line_segment(
+                    [
+                        egui::pos2(rect.left(), y + i),
+                        egui::pos2(rect.right(), y + i),
+                    ],
+                    egui::Stroke::new(w * zoom.max(0.6), accent),
+                );
+            }
+            // Corner ticks, the way a sheet is registered on a board.
+            let t = 7.0 * zoom;
+            for (c, dx, dy) in [
+                (rect.left_top(), 1.0, 1.0),
+                (rect.right_top(), -1.0, 1.0),
+                (rect.left_bottom(), 1.0, -1.0),
+                (rect.right_bottom(), -1.0, -1.0),
+            ] {
+                let s = egui::Stroke::new(1.0 * zoom.max(0.6), accent.gamma_multiply(0.8));
+                p.line_segment([c, egui::pos2(c.x + dx * t, c.y)], s);
+                p.line_segment([c, egui::pos2(c.x, c.y + dy * t)], s);
+            }
+        }
+        CardStyle::Silkscreen => {
+            // A part on a board: mask-coloured body, gold outline, and the
+            // **pin-1 dot** that says which way round it goes. Small, and the
+            // one detail that makes the theme read as a board rather than as
+            // "green".
+            title_bg = mix(panel, accent, 0.28);
+            p.rect_filled(rect, r * 0.5, panel);
+            p.rect_stroke(rect, r * 0.5, egui::Stroke::new(1.4 * zoom.max(0.6), accent));
+            p.rect_filled(title_rect, r * 0.5, accent.gamma_multiply(0.26));
+            p.circle_filled(
+                egui::pos2(rect.left() + 7.0 * zoom, rect.top() + 7.0 * zoom),
+                2.6 * zoom,
+                accent,
+            );
+        }
+        CardStyle::Phosphor => {
+            // An instrument draws light, so there is no fill: the card is a
+            // trace over the graticule, with a brighter run under the title —
+            // the beam, not a header bar.
+            title_bg = panel;
+            p.rect_filled(rect, r, panel.gamma_multiply(0.82));
+            p.rect_stroke(rect, r, egui::Stroke::new(1.2 * zoom.max(0.6), accent));
+            p.line_segment(
+                [
+                    egui::pos2(rect.left() + 2.0 * zoom, title_rect.bottom()),
+                    egui::pos2(rect.right() - 2.0 * zoom, title_rect.bottom()),
+                ],
+                egui::Stroke::new(1.6 * zoom.max(0.6), accent),
+            );
+        }
         CardStyle::Normal => {
             title_bg = mix(panel, accent, 0.35);
             p.rect_filled(rect, r, panel);
@@ -1306,7 +1376,12 @@ fn card_ui(
     let title_font = egui::FontId::proportional(13.0 * zoom);
     let segments = crate::model::wikilink_segments(&title_text);
     let title_has_link = segments.iter().any(|(_, t)| t.is_some());
-    let title_origin = title_rect.left_center() + egui::vec2(8.0 * zoom, 0.0);
+    // Silkscreen puts a pin-1 dot in the top-left corner, which is exactly
+    // where a title starts. Indent past it rather than drawing the two on top of
+    // each other — on a real board the legend clears the pad for the same
+    // reason.
+    let title_inset = if env.style == CardStyle::Silkscreen { 16.0 } else { 8.0 };
+    let title_origin = title_rect.left_center() + egui::vec2(title_inset * zoom, 0.0);
     if !title_has_link {
         p.text(
             title_origin,

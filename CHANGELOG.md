@@ -6,6 +6,29 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.104.0]
+
+### Added
+- **Three themes drawn from instruments rather than interfaces.** Each paints the
+  card itself, because a theme that only recolours the chrome is a palette, not a
+  look.
+  - **Blueprint** — cyan linework on Prussian blue. A card is a drawing sheet:
+    square corners, a thin rule, a **title block** (the double rule under the
+    heading is the whole convention, so it is drawn rather than implied) and
+    registration ticks at each corner. The canvas was already a board you arrange
+    things on, so the metaphor is not borrowed — it is what the app is.
+  - **Silkscreen** — white legend and gold pads on solder-mask green, each card a
+    part with a **pin-1 dot**. The title indents past the pad rather than sitting
+    on top of it, which is what a real legend does and what the first attempt
+    got wrong on screen.
+  - **Phosphor** — a storage oscilloscope: P31 blue-green on a graticule, no
+    fills, a bright beam rule under each title, and the accent glow the neon
+    themes use. Deliberately not another Terminal Green: that is a console, this
+    is an instrument.
+
+  All three are `Theme` variants with their own `CardStyle`, so they cost the
+  same as the six that came before and nothing else changed shape.
+
 ## [0.103.5]
 
 ### Fixed
