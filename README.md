@@ -247,6 +247,16 @@ from the main cluster, and click or drag on it to jump there without zooming out
   `due::` date (red when overdue), and its `#tags`. Drag a card between columns to
   change its status, or click one to jump straight to it on its basket; toggle
   **Show done** to hide the finished pile. Reads the same properties as the agenda.
+- **Claims** (View → Claims) — the panel for notes that state how something *is*.
+  A card that says "both instances run v0.109.0", or "the keystore is backed up",
+  was true when it was written; nothing else in a document distinguishes a fact
+  from a fact **as of a date**. Give such a card a `verify:: <date>` — when it
+  should be re-checked — and optionally a `check:: <how>` naming the command or
+  endpoint that settles it. The panel lists them worst first, the View menu shows
+  the count needing a check, and `GET /api/claims` plus a `stale_claims` count on
+  `/api/instance` tell an agent the same thing **before** it reads the workspace
+  and repeats something out of date. It is deliberately not `due::`: a task is
+  finished once and leaves the agenda, while a claim only ever goes stale.
 - **View → Themes** — nine, and each one paints the *cards*, not just the
   chrome. Trellis (default), Light, Terminal Green, **Sticky Notes** (solid
   single-color paper cards — yellow by default, the whole note takes the color
@@ -315,7 +325,8 @@ from the main cluster, and click or drag on it to jump there without zooming out
   **reorder and reparent nodes** (`/nodes/{id}/move`), **reorder cards** within a
   basket (`/cards/{cid}/move`), **expand/collapse** subtrees, query the tree by
   `#tags` / `key:: value` properties / due-date **agenda** (`/tasks`) / **Kanban**
-  columns (`/kanban`) / wiki-link **graph**, register · insert · **update**
+  columns (`/kanban`) / **stale claims** (`/claims` — which stated facts are past
+  their `verify::` date) / wiki-link **graph**, register · insert · **update**
   reusable card **templates**, **read and change the app's own settings**
   (`/settings` — theme, canvas toggles, panels, notifications, tree sort,
   history retention; not the key, port, LAN flag or mirror policy, which a

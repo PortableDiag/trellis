@@ -147,11 +147,19 @@ on its own port), call this first to confirm you're driving the right one.
 GET /api/instance
   → 200 {"app":"trellis","version":"0.65.1","document":"work.ron",
          "path":"/home/you/work.ron","port":7373,"lan":false,
-         "nodes":42,"unsaved_changes":false}
+         "nodes":42,"unsaved_changes":false,"stale_claims":0}
 ```
 `document` is the file name (`"untitled"` for a never-saved document) and `path`
 is its full path, or `null` when untitled. `nodes` is the document's node count.
 Unlike `/api/health` this needs the key, since it reveals a file path.
+
+**`stale_claims` is a warning about the document you are about to read.** It
+counts the cards that state how something *is* and are past their own
+[`verify::` date](#claims--which-stated-facts-are-out-of-date). Anything above
+zero means part of this workspace is telling you something that was last
+confirmed too long ago — read `GET /api/claims?expired=true` before you quote it
+back to anyone. It rides on this endpoint because this is the call you already
+make first.
 
 ### Settings
 
@@ -940,6 +948,72 @@ GET /api/kanban?project=<node id>   only cards under that node (same filter as /
   | 400 (bad id)   | 404 (node not found)
 ```
 
+### Claims — which stated facts are out of date
+
+**Read this before you trust a workspace card.** A card that says *"both
+instances run v0.109.0"* or *"the operator still owes a bot token"* was true when
+someone wrote it. Nothing in a document distinguishes a fact from a fact **as of
+a date**, so an agent reads a year-old assertion in the same voice as a fresh
+one — which has cost real sessions: work redone, and the operator asked for
+something already delivered.
+
+A card that asserts state says when that assertion should be re-checked:
+
+```
+verify:: 2026-09-01
+check:: GET /api/instance
+```
+
+`verify::` is the date it goes out of date. `check::` is free text naming the
+command, endpoint or file that settles it — so re-establishing the claim is
+cheaper than doubting it. Both are ordinary `key:: value` properties (the `::`
+needs its trailing space), so they work in any card, need no migration, and are
+visible in the card itself rather than hidden in metadata.
+
+```
+GET /api/claims                    → 200 {"today_days":N,"count":<n>,"stale":<n>,
+                                          "claims":[{node,node_title,node_path,project,
+                                                     project_title,card,title,verify,check,
+                                                     touched,bucket}, …]}
+GET /api/claims?expired=true         only the ones not to be trusted
+GET /api/claims?project=<node id>    scope to one project (any node, as /api/tasks)
+  | 400 (bad id)   | 404 (node not found)
+```
+
+`bucket` is one of:
+
+| bucket | meaning |
+|---|---|
+| `expired` | past its `verify::` date — **do not repeat what this card says** |
+| `unparsed` | `verify::` is not a readable `YYYY-MM-DD`, so it has no expiry at all — counted as stale, never as fresh |
+| `today` | due for a check today |
+| `soon` | due within a week |
+| `ok` | current |
+
+Results come back **worst first**, and `stale` counts `expired` + `unparsed` —
+the same number `/api/instance` reports.
+
+**Why this is not `due::`.** A task is finished once and leaves the agenda; a
+claim about the world is never finished, it only goes out of date. Modelling
+currency as a task would fill the agenda with rows that can never be completed,
+and the Agenda's usefulness depends on things leaving it.
+
+**Why not just use `touched`.** `touched` moves when a card is *edited* — fixing
+a typo in a stale card would make it look freshly confirmed. Editing and
+confirming are different acts, and only one of them is evidence.
+
+**A checklist's items are not scanned.** A claim is the card's assertion, so the
+card is the unit — the opposite of `due::`, where the line is the unit of work.
+
+Two conventions worth keeping (they are what make the mechanism work rather than
+merely exist):
+
+- **Don't write down a fact that has an authoritative source** — a version, a
+  line count, a test count. Name the source instead. Where the value has to
+  appear, put the `check::` beside it.
+- **When two cards disagree, the fresher `verify::` wins**, and the stale one is
+  a defect to fix in the same visit — not a fact to repeat.
+
 ### OCR
 Run OCR (tesseract) over every image card that has images but no extracted text
 yet, so scans/screenshots become full-text searchable. Runs on a background
@@ -1380,7 +1454,27 @@ API=http://127.0.0.1:7373/api
 # Confirm which document this port is serving before writing to it — with an
 # instance per document (work on 7373, personal on 7374), the port is the address.
 curl -s -H "X-API-Key: $KEY" $API/instance
-# → {"app":"trellis","document":"work.ron","path":"/home/you/work.ron","port":7373,…}
+# → {"app":"trellis","document":"work.ron","path":"/home/you/work.ron","port":7373,
+#    "nodes":42,"unsaved_changes":false,"stale_claims":3}
+#
+# `stale_claims` above zero means this workspace is asserting things nobody has
+# confirmed lately. Find out WHICH before quoting any of it back:
+curl -s -H "X-API-Key: $KEY" "$API/claims?expired=true"
+# → {"count":3,"stale":3,"claims":[
+#      {"card":1246,"title":"Next steps — read this first","verify":"2026-08-14",
+#       "check":"GET /api/instance","bucket":"expired",
+#       "node_path":"Trellis › Trellis Open Items"}, …]}
+#
+# Re-check it, correct the card, and push the date out — the property endpoint
+# edits one line rather than rewriting the body:
+curl -s -X POST -H "X-API-Key: $KEY" \
+     -d '{"key":"verify","value":"2026-09-15"}' $API/nodes/63/cards/1246/property
+#
+# Mark a card of your own as a claim when you write one. Anything that states
+# how something IS — a version, a count, what somebody owes you — earns these
+# two lines, and the `::` needs its trailing space:
+#   verify:: 2026-09-15
+#   check:: GET /api/instance
 
 # See the whole tree
 curl -s -H "X-API-Key: $KEY" $API/tree

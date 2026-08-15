@@ -1,0 +1,22 @@
+{
+  "name": "currency",
+  "title": "Workspace currency",
+  "description": "Watches the cards that state how something IS. When a card's verify:: date passes, it says so — off-app, on a schedule — so a stale fact is caught by a check rather than by an agent repeating it. With no bot token it prints what it would have sent.",
+  "version": "1.0.0",
+  "command": "python3",
+  "args": ["currency.py"],
+  "triggers": ["manual", "schedule"],
+  "interval_mins": 720,
+  "debounce_secs": 60,
+  "scope": { "read_only": true },
+  "config": [
+    { "key": "telegram_token", "label": "Telegram bot token", "secret": true,
+      "help": "From @BotFather. The same bot as the notify plugin is fine. Leave empty to preview instead of sending." },
+    { "key": "telegram_chat_id", "label": "Telegram chat id",
+      "help": "Message your bot once, then open https://api.telegram.org/bot<TOKEN>/getUpdates to find it." },
+    { "key": "project", "label": "Only this basket id",
+      "help": "Optional. Limits the check to one project's claims." },
+    { "key": "quiet_when_clean", "label": "Stay silent when nothing is stale (yes/no)",
+      "help": "Default yes. Turn it off to get a confirmation that everything is current." }
+  ]
+}

@@ -99,6 +99,7 @@ const STICK_WINDOWS_KEY: &str = "stick_windows";
 const TAGS_OPEN_KEY: &str = "tags_open";
 const FIND_OPEN_KEY: &str = "find_open";
 const BACKLINKS_OPEN_KEY: &str = "backlinks_open";
+const CLAIMS_OPEN_KEY: &str = "claims_open";
 const DEPTH_MODE_KEY: &str = "depth_mode";
 const TIME_MODE_KEY: &str = "time_mode";
 const MINIMAP_KEY: &str = "minimap";
@@ -1054,6 +1055,9 @@ pub struct TrellisApp {
     /// The card to flash-highlight on the canvas, and the `ctx` time the flash ends.
     highlight_card: Option<CardId>,
     highlight_until: f64,
+    /// Claims panel: cards that assert state (`verify::`), worst first, so a
+    /// workspace that has gone out of date says so instead of being believed.
+    claims_open: bool,
     /// Tags panel: browse #tags and the cards that carry them.
     tags_open: bool,
     tag_selected: Option<String>,
@@ -1520,6 +1524,11 @@ impl TrellisApp {
             focus_window: false,
             highlight_card: None,
             highlight_until: 0.0,
+            claims_open: cc
+                .storage
+                .and_then(|s| s.get_string(CLAIMS_OPEN_KEY))
+                .map(|s| s == "true")
+                .unwrap_or(false),
             tags_open: cc
                 .storage
                 .and_then(|s| s.get_string(TAGS_OPEN_KEY))
@@ -3074,6 +3083,7 @@ impl TrellisApp {
             "kanban_show_done": self.kanban_show_done,
             "kanban_project": self.kanban_project,
             "tags_open": self.tags_open,
+            "claims_open": self.claims_open,
             "find_open": self.find_open,
             "backlinks_open": self.backlinks_open,
             "history_keep": self.history_keep,
@@ -3101,7 +3111,8 @@ impl TrellisApp {
                 "minimap" | "dock_mode" | "snap_mode" | "depth_mode" | "time_mode"
                 | "notify_digest" | "notify_agent" | "zoom_enabled" | "autosave"
                 | "stick_windows" | "agenda_open" | "agenda_show_done" | "kanban_open"
-                | "kanban_show_done" | "tags_open" | "find_open" | "backlinks_open" => {
+                | "kanban_show_done" | "tags_open" | "claims_open" | "find_open"
+                | "backlinks_open" => {
                     v.is_boolean()
                 }
                 // A project filter is a node id, or null for "all projects".
@@ -3118,7 +3129,8 @@ impl TrellisApp {
                          dock_mode, snap_mode, depth_mode, time_mode, notify_digest, \
                          notify_agent, zoom_enabled, autosave, stick_windows, agenda_open, \
                          agenda_show_done, agenda_project, kanban_open, kanban_show_done, \
-                         kanban_project, tags_open, find_open, backlinks_open, history_keep, \
+                         kanban_project, tags_open, claims_open, find_open, backlinks_open, \
+                         history_keep, \
                          history_gap_mins. Deliberately not settable over the API: the API \
                          key, port and LAN flag (a caller must not be able to widen its own \
                          reach), and the file-mirroring policy (same reason). Change those \
@@ -3151,6 +3163,7 @@ impl TrellisApp {
                 "kanban_open" => self.kanban_open = v.as_bool().unwrap_or(false),
                 "kanban_show_done" => self.kanban_show_done = v.as_bool().unwrap_or(false),
                 "tags_open" => self.tags_open = v.as_bool().unwrap_or(false),
+                "claims_open" => self.claims_open = v.as_bool().unwrap_or(false),
                 "find_open" => self.find_open = v.as_bool().unwrap_or(false),
                 "backlinks_open" => self.backlinks_open = v.as_bool().unwrap_or(false),
                 "agenda_project" => self.agenda_project = v.as_u64(),
@@ -3186,6 +3199,11 @@ impl TrellisApp {
                 "lan": self.api_lan,
                 "nodes": self.doc.nodes.len(),
                 "unsaved_changes": self.dirty,
+                // How many cards assert state that is past its check date.
+                // It rides on `/api/instance` because that is the call every
+                // agent already makes first — a workspace that has gone stale
+                // should say so before it is read, not after it is believed.
+                "stale_claims": api::stale_claim_count(&self.doc),
             }))),
             _ => None,
         }
@@ -5528,6 +5546,27 @@ impl TrellisApp {
                         self.tags_open = true;
                         ui.close_menu();
                     }
+                    {
+                        // Count it up front so the menu itself reports the
+                        // problem: a currency panel nobody opens is no better
+                        // than the stale card it was built to catch.
+                        let stale = api::stale_claim_count(&self.doc);
+                        let label = if stale > 0 {
+                            format!("Claims… ({stale} to re-check)")
+                        } else {
+                            "Claims…".to_string()
+                        };
+                        if ui
+                            .button(label)
+                            .on_hover_text(
+                                "Cards that assert state and say when to re-check it (verify::)",
+                            )
+                            .clicked()
+                        {
+                            self.claims_open = true;
+                            ui.close_menu();
+                        }
+                    }
                     if ui
                         .button("Find cards…")
                         .on_hover_text("Filter cards across the tree by tag, property, or text")
@@ -7018,6 +7057,7 @@ impl TrellisApp {
                         "GET    /api/query?tag=&key=&value=&text=  (combined card query)",
                         "GET    /api/tasks[?all=true][&project=<id>]  (due:: agenda, bucketed)",
                         "GET    /api/kanban[?project=<id>]         (cards grouped by status:: → columns)",
+                        "GET    /api/claims[?expired=true][&project=<id>]  (verify:: — which stated facts are out of date)",
                         "POST   /api/ocr                           (OCR all un-OCR'd images)",
                         "GET    /api/export?format=markdown|html|json|pdf|png|gif",
                         "GET    /api/wait?rev=<n>                  (long-poll: that something changed, + epoch)",
@@ -7484,6 +7524,97 @@ impl TrellisApp {
                     });
                 }
             }
+        });
+        if let Some((node, card)) = jump {
+            self.reveal_hit(ctx, node, card);
+        }
+    }
+
+    /// Right-side panel: every card that **asserts state**, worst first.
+    ///
+    /// This is the human half of `verify::`. The agent half is
+    /// `GET /api/claims` and the `stale_claims` count on `/api/instance`; this
+    /// panel exists so the person keeping the workspace can see the same thing
+    /// without being told by an agent that just wasted a session on it.
+    fn claims_panel(&mut self, ctx: &egui::Context) {
+        let mut jump: Option<(NodeId, Option<CardId>)> = None;
+        let today = api::today_days();
+        let mut claims = self.doc.claims();
+        let rank = |b: &str| match b {
+            "expired" => 0,
+            "unparsed" => 1,
+            "today" => 2,
+            "soon" => 3,
+            _ => 4,
+        };
+        claims.sort_by_key(|c| (rank(api::claim_bucket(c.verify_days, today)), c.verify_days));
+        egui::SidePanel::right("claims").resizable(true).default_width(300.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Claims");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("×").clicked() {
+                        self.claims_open = false;
+                    }
+                });
+            });
+            ui.separator();
+            if claims.is_empty() {
+                ui.weak(
+                    "No claims yet.\n\nA card that states how something IS — a version, a \
+                     count, what someone owes you — should say when that should be checked \
+                     again:\n\nverify:: 2026-09-01\ncheck:: GET /api/instance\n\nThey are \
+                     listed here, worst first, and the count rides on /api/instance so an \
+                     agent is warned before it believes the card.",
+                );
+                return;
+            }
+            let stale = claims
+                .iter()
+                .filter(|c| {
+                    matches!(api::claim_bucket(c.verify_days, today), "expired" | "unparsed")
+                })
+                .count();
+            if stale > 0 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 90, 90),
+                    format!("{stale} of {} need re-checking", claims.len()),
+                );
+            } else {
+                ui.weak(format!("{} claim(s), all current", claims.len()));
+            }
+            ui.separator();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for c in &claims {
+                    let bucket = api::claim_bucket(c.verify_days, today);
+                    let (mark, color) = match bucket {
+                        "expired" => ("expired", egui::Color32::from_rgb(220, 90, 90)),
+                        "unparsed" => ("unreadable date", egui::Color32::from_rgb(220, 150, 60)),
+                        "today" => ("due today", egui::Color32::from_rgb(220, 180, 60)),
+                        "soon" => ("this week", egui::Color32::from_rgb(150, 170, 90)),
+                        _ => ("ok", ui.visuals().weak_text_color()),
+                    };
+                    if ui
+                        .add(
+                            egui::Label::new(egui::RichText::new(&c.title).strong())
+                                .sense(egui::Sense::click()),
+                        )
+                        .clicked()
+                    {
+                        jump = Some((c.node, Some(c.card)));
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(color, format!("verify:: {} — {mark}", c.verify));
+                    });
+                    ui.small(&c.node_path);
+                    // The command that settles it, when the card said. Shown
+                    // rather than hidden behind a hover: the whole point is that
+                    // re-checking should be cheaper than doubting.
+                    if let Some(check) = &c.check {
+                        ui.small(egui::RichText::new(format!("check:: {check}")).italics());
+                    }
+                    ui.separator();
+                }
+            });
         });
         if let Some((node, card)) = jump {
             self.reveal_hit(ctx, node, card);
@@ -8517,6 +8648,9 @@ impl eframe::App for TrellisApp {
         if self.tags_open {
             self.tags_panel(ctx);
         }
+        if self.claims_open {
+            self.claims_panel(ctx);
+        }
         if self.find_open {
             self.find_panel(ctx);
         }
@@ -8813,6 +8947,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(KANBAN_PLACE_KEY, self.kanban_placement.as_str().to_string());
         storage.set_string(STICK_WINDOWS_KEY, self.stick_windows.to_string());
         storage.set_string(TAGS_OPEN_KEY, self.tags_open.to_string());
+        storage.set_string(CLAIMS_OPEN_KEY, self.claims_open.to_string());
         storage.set_string(FIND_OPEN_KEY, self.find_open.to_string());
         storage.set_string(BACKLINKS_OPEN_KEY, self.backlinks_open.to_string());
         storage.set_string(

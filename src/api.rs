@@ -131,6 +131,9 @@ pub enum ApiRequest {
     // Combined dropdown-style query across the tree, and the due-date agenda.
     QueryCards { tag: Option<String>, key: Option<String>, value: Option<String>, text: Option<String> },
     Tasks { include_done: bool, project: Option<NodeId> },
+    // Cards that assert state and say when to re-check it (`verify::`), so a
+    // reader is told which claims are out of date before it believes them.
+    Claims { expired_only: bool, project: Option<NodeId> },
     // Cards grouped by `status::` value — the Kanban board's columns.
     Kanban { project: Option<NodeId> },
     // Cards that [[link]] to a node.
@@ -1352,6 +1355,15 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
                 None => None,
             },
         }),
+        (Method::Get, ["api", "claims"]) => Ok(ApiRequest::Claims {
+            expired_only: query_get(query, "expired").as_deref() == Some("true"),
+            project: match query_get(query, "project") {
+                Some(v) => Some(
+                    v.parse().map_err(|_| (400, format!("bad project node id: {v}")))?,
+                ),
+                None => None,
+            },
+        }),
         (Method::Get, ["api", "kanban"]) => Ok(ApiRequest::Kanban {
             project: match query_get(query, "project") {
                 Some(v) => Some(
@@ -1513,6 +1525,35 @@ pub fn task_bucket_spanning(t: &crate::model::TaskItem, today: i64) -> &'static 
         (Some(s), None) if s <= today => "today",
         _ => task_bucket(t.due_days, today),
     }
+}
+
+/// Which currency bucket a `verify::` date falls in, relative to `today`.
+///
+/// The asymmetry with [`task_bucket`] is deliberate and is the whole point: an
+/// overdue task is *late*, an expired claim is **not to be trusted**. So the
+/// past tense is one bucket rather than three, and a date nobody can parse is
+/// `unparsed` rather than quietly counted as fresh — a claim whose expiry cannot
+/// be read has, in effect, no expiry at all, which is the thing this exists to
+/// stop.
+pub fn claim_bucket(verify_days: Option<i64>, today: i64) -> &'static str {
+    match verify_days {
+        None => "unparsed",
+        Some(d) if d < today => "expired",
+        Some(d) if d == today => "today",
+        Some(d) if d <= today + 7 => "soon",
+        Some(_) => "ok",
+    }
+}
+
+/// How many claims in `doc` are past their check date (or carry a date nobody
+/// can parse). This is the number [`ApiRequest::Instance`] reports, because
+/// `/api/instance` is the one call every agent already makes first.
+pub fn stale_claim_count(doc: &crate::model::Document) -> usize {
+    let today = today_days();
+    doc.claims()
+        .iter()
+        .filter(|c| matches!(claim_bucket(c.verify_days, today), "expired" | "unparsed"))
+        .count()
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, (u16, String)> {
@@ -2594,6 +2635,65 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .collect();
             (false, ApiResponse::ok(json!({ "today_days": today, "count": tasks.len(), "tasks": tasks })))
         }
+        ApiRequest::Claims { expired_only, project } => {
+            let today = today_days();
+            if let Some(p) = project {
+                if !doc.nodes.contains_key(&p) {
+                    return (false, ApiResponse::err(404, "project node not found"));
+                }
+            }
+            let mut claims: Vec<(&'static str, Value)> = doc
+                .claims()
+                .into_iter()
+                .filter(|c| project.map_or(true, |p| doc.is_under(c.node, p)))
+                .map(|c| {
+                    let bucket = claim_bucket(c.verify_days, today);
+                    (
+                        bucket,
+                        json!({
+                            "node": c.node,
+                            "node_title": c.node_title,
+                            "node_path": c.node_path,
+                            "project": c.root,
+                            "project_title": c.root_title,
+                            "card": c.card,
+                            "title": c.title,
+                            "verify": c.verify,
+                            // How to settle the claim, when the card said.
+                            "check": c.check,
+                            // When the card was last EDITED — not when anyone
+                            // confirmed it. The two are different questions and
+                            // conflating them is what makes a stale card look
+                            // fresh.
+                            "touched": c.touched,
+                            "bucket": bucket,
+                        }),
+                    )
+                })
+                .filter(|(b, _)| !expired_only || matches!(*b, "expired" | "unparsed"))
+                .collect();
+            // Worst first: whatever a caller does with this, the untrustworthy
+            // claims are the ones it must not miss.
+            let rank = |b: &str| match b {
+                "expired" => 0,
+                "unparsed" => 1,
+                "today" => 2,
+                "soon" => 3,
+                _ => 4,
+            };
+            claims.sort_by_key(|(b, _)| rank(b));
+            let stale = claims.iter().filter(|(b, _)| matches!(*b, "expired" | "unparsed")).count();
+            let out: Vec<Value> = claims.into_iter().map(|(_, v)| v).collect();
+            (
+                false,
+                ApiResponse::ok(json!({
+                    "today_days": today,
+                    "count": out.len(),
+                    "stale": stale,
+                    "claims": out,
+                })),
+            )
+        }
         ApiRequest::Kanban { project } => {
             let today = today_days();
             if let Some(p) = project {
@@ -3573,6 +3673,16 @@ mod tests {
             route(&Method::Get, "/api/cards/9", "", "").unwrap(),
             ApiRequest::LocateCard(9)
         ));
+        // Claims: the default is every claim, and `expired=true` narrows it to
+        // the ones a reader must not trust.
+        assert!(matches!(
+            route(&Method::Get, "/api/claims", "", "").unwrap(),
+            ApiRequest::Claims { expired_only: false, project: None }
+        ));
+        assert!(matches!(
+            route(&Method::Get, "/api/claims", "expired=true&project=7", "").unwrap(),
+            ApiRequest::Claims { expired_only: true, project: Some(7) }
+        ));
         // Daily notes: the action, and the setting behind it, both reachable.
         assert!(matches!(
             route(&Method::Post, "/api/daily", "", "").unwrap(),
@@ -3899,6 +4009,76 @@ mod tests {
         assert_eq!(resp.status, 404);
         let (_d, resp) = process(&mut doc, ApiRequest::GetCard { node: nid, card: 9999 });
         assert_eq!(resp.status, 404);
+    }
+
+    /// A claim's bucket, and the two rules that make it different from a task's:
+    /// everything in the past is one bucket, and a date nobody can parse counts
+    /// as stale rather than fresh.
+    #[test]
+    fn claim_bucket_treats_the_past_and_the_unreadable_as_stale() {
+        let today = 100;
+        assert_eq!(claim_bucket(Some(99), today), "expired");
+        assert_eq!(claim_bucket(Some(1), today), "expired", "long past is still one bucket");
+        assert_eq!(claim_bucket(Some(100), today), "today");
+        assert_eq!(claim_bucket(Some(107), today), "soon");
+        assert_eq!(claim_bucket(Some(108), today), "ok");
+        // The one that matters: `verify:: soon` parses to no date at all, and a
+        // claim with an unreadable expiry has, in effect, no expiry.
+        assert_eq!(claim_bucket(None, today), "unparsed");
+    }
+
+    /// The endpoint an agent is meant to call before believing a workspace:
+    /// stale claims first, `expired=true` narrowing to only those.
+    #[test]
+    fn claims_endpoint_reports_stale_first() {
+        use crate::model::{CardKind, Document};
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "Workspace".into()).into();
+        let mk = |doc: &mut Document, title: &str, body: &str| {
+            let cid = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+            let c = doc.card_mut(nid, cid).unwrap();
+            c.title = title.into();
+            c.body = body.into();
+            cid
+        };
+        // Yesterday, in the same units the endpoint compares against.
+        let today = today_days();
+        let past = crate::api::date_from_today(-1, 0);
+        let future = crate::api::date_from_today(30, 0);
+        let stale = mk(&mut doc, "Both instances run 0.109.0", &format!("verify:: {past}\ncheck:: GET /api/instance"));
+        let fresh = mk(&mut doc, "The keystore is backed up", &format!("verify:: {future}"));
+        // A card with no `verify::` is not a claim and must not appear —
+        // otherwise every card in the document becomes something to re-check.
+        mk(&mut doc, "ordinary note", "no properties here");
+
+        let (dirty, resp) = process(&mut doc, ApiRequest::Claims { expired_only: false, project: None });
+        assert!(!dirty, "a read must never mark the document dirty");
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["count"], 2, "only cards carrying verify:: are claims");
+        assert_eq!(v["stale"], 1);
+        assert_eq!(v["today_days"], today);
+        // Worst first, so a caller that reads only the head sees the problem.
+        assert_eq!(v["claims"][0]["card"], stale);
+        assert_eq!(v["claims"][0]["bucket"], "expired");
+        assert_eq!(v["claims"][0]["check"], "GET /api/instance");
+        assert_eq!(v["claims"][1]["card"], fresh);
+        assert_eq!(v["claims"][1]["bucket"], "ok");
+        // `check::` is optional and absent means null, not a missing field.
+        assert!(v["claims"][1]["check"].is_null());
+
+        let (_d, resp) = process(&mut doc, ApiRequest::Claims { expired_only: true, project: None });
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["claims"][0]["card"], stale);
+    }
+
+    /// A whole-document query names no basket, so a confined token is refused —
+    /// the same rule as `/api/tasks`, and for the same reason.
+    #[test]
+    fn claims_is_not_reachable_from_a_confined_token() {
+        let req = ApiRequest::Claims { expired_only: false, project: None };
+        assert!(target_node(&req).is_none());
+        assert!(!is_scope_neutral(&req));
     }
 
     /// The direction that was missing: an id, on its own, back to a card. An

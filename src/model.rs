@@ -3690,6 +3690,54 @@ impl Document {
         out
     }
 
+    /// Every card that **asserts state** and says when that assertion should be
+    /// re-checked — a `verify:: YYYY-MM-DD` property.
+    ///
+    /// This is deliberately *not* `due::`. A task is finished once and leaves
+    /// the agenda; a claim about the world is never finished, it only goes out
+    /// of date — "both instances run 0.109.0" was true when it was written and
+    /// false a release later, with nothing in the document to say so. Mixing the
+    /// two would put permanent entries in the agenda, where the whole point is
+    /// that things leave it.
+    ///
+    /// `check:: <how>` rides alongside as free text: the command, endpoint or
+    /// file that settles the claim (`check:: GET /api/instance`). A reader who
+    /// finds a claim expired then knows how to re-establish it rather than
+    /// having to guess, and a plugin can act on the checkable ones.
+    ///
+    /// A checklist's items are **not** scanned. A claim is the card's assertion
+    /// about the world, not a line's — the opposite of `due::`, where the line
+    /// is the unit of work.
+    pub fn claims(&self) -> Vec<Claim> {
+        let mut out = Vec::new();
+        for node in self.nodes.values() {
+            for card in &node.cards {
+                let props = card.properties();
+                let Some((_, verify)) = props.iter().find(|(k, _)| k == "verify") else { continue };
+                let title = if card.title.trim().is_empty() {
+                    searchable_body(card).lines().next().unwrap_or("").chars().take(60).collect()
+                } else {
+                    card.title.clone()
+                };
+                let root = self.root_of(node.id);
+                out.push(Claim {
+                    node: node.id,
+                    node_title: node.title.clone(),
+                    node_path: self.node_path(node.id),
+                    root,
+                    root_title: self.nodes.get(&root).map(|n| n.title.clone()).unwrap_or_default(),
+                    card: card.id,
+                    title,
+                    verify: verify.clone(),
+                    verify_days: parse_ymd(verify),
+                    check: props.iter().find(|(k, _)| k == "check").map(|(_, v)| v.clone()),
+                    touched: card.touched,
+                });
+            }
+        }
+        out
+    }
+
     /// Cards that have property `key` (optionally `= value`, case-insensitive),
     /// each as a search hit whose snippet is `key: value`.
     pub fn cards_with_property(&self, key: &str, value: Option<&str>) -> Vec<SearchHit> {
@@ -4143,6 +4191,36 @@ pub struct TaskItem {
     pub start: Option<String>,
     pub start_days: Option<i64>,
     pub done: bool,
+}
+
+/// A card that asserts state, and the date its assertion is next due a check.
+///
+/// The workspace failure this exists for: a card said "both instances serve
+/// 0.103.1" and an agent repeated it four releases later, because nothing in the
+/// document distinguished *a fact* from *a fact as of a date*. Every field here
+/// is about answering "how old is this claim, and how would I settle it?"
+/// without reading the card's prose.
+#[derive(Debug, Clone)]
+pub struct Claim {
+    pub node: NodeId,
+    pub node_title: String,
+    /// Root-to-basket breadcrumb, so a claim can be cited without a bare id.
+    pub node_path: String,
+    pub root: NodeId,
+    pub root_title: String,
+    pub card: CardId,
+    pub title: String,
+    /// The raw `verify` value as written (e.g. `2026-09-01`).
+    pub verify: String,
+    /// `verify` parsed to days since the Unix epoch, or `None` if unparseable —
+    /// which is itself reported rather than silently treated as fresh.
+    pub verify_days: Option<i64>,
+    /// `check:: <how>` — the command, endpoint or file that settles this claim.
+    pub check: Option<String>,
+    /// When the card was last edited. Deliberately separate from `verify`:
+    /// `touched` moves for a typo fix, so it says when the card changed, never
+    /// when anyone confirmed what it says.
+    pub touched: Option<u64>,
 }
 
 impl TaskItem {
@@ -5750,6 +5828,7 @@ mod tests {
         assert_eq!(wikilink_segments("[[]]")[0].0, "[[]]");
     }
 
+    #[test]
     fn extract_properties_parses_fields_not_code() {
         let p = extract_properties("due:: 2026-08-15\npriority:: high\nsee std::fmt for [status:: done] end");
         assert!(p.contains(&("due".to_string(), "2026-08-15".to_string())));
@@ -5912,6 +5991,7 @@ mod tests {
         assert_eq!(back.z, 5.0);
     }
 
+    #[test]
     fn card_export_round_trips_inline_images() {
         let mut doc = Document::empty();
         let n = doc.add_node(None, "n".into());

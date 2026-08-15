@@ -6,6 +6,48 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.110.0]
+
+### Added
+- **`verify::` — a card can say when what it claims should be re-checked**, and
+  **View → Claims** / **`GET /api/claims`** list the ones that are out of date.
+
+  **The problem is specific.** A card that states how something *is* — "both
+  instances run v0.109.0", "the operator still owes a bot token" — was true when
+  it was written. Nothing in a document distinguishes a fact from a fact *as of a
+  date*, so it is read in the same voice a year later. That has cost real
+  sessions: work redone against a stale runbook, and the operator asked for
+  something already delivered.
+
+  A card that asserts state now carries `verify:: 2026-09-01` (when to re-check)
+  and optionally `check:: GET /api/instance` (what settles it). Both are ordinary
+  `key:: value` properties, so nothing had to migrate and the dates are visible
+  in the card rather than hidden in metadata.
+
+  **`stale_claims` rides on `GET /api/instance`** — the one call every agent
+  already makes first — so a workspace that has gone out of date says so *before*
+  it is read rather than after it is believed. `GET /api/claims` returns every
+  claim worst-first with a `bucket`, `?expired=true` narrows it to the ones not
+  to be trusted, and `?project=<id>` scopes it like `/api/tasks`. The View menu
+  carries the count, because a currency panel nobody opens is no better than the
+  stale card it was built to catch.
+
+  **Deliberately not `due::`.** A task is finished once and leaves the agenda; a
+  claim is never finished, it only goes out of date — modelling one as the other
+  would fill the agenda with rows that can never be completed. **And deliberately
+  not `touched`**: that moves when a card is *edited*, so fixing a typo in a
+  stale card would make it look freshly confirmed. Editing and confirming are
+  different acts and only one is evidence. An unreadable `verify::` counts as
+  stale rather than fresh, since a claim whose expiry cannot be parsed has no
+  expiry at all.
+
+### Fixed
+- **Two more tests were not running.** `extract_properties_parses_fields_not_code`
+  and `card_export_round_trips_inline_images` had lost their `#[test]`
+  attributes, exactly as two others had in v0.103.3 — they compile, they read as
+  tests, and they never ran. Both pass. The suite reports **302** where it ran
+  295.
+
 ## [0.109.0]
 
 ### Added
