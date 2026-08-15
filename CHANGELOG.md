@@ -6,6 +6,22 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.110.2]
+
+### Fixed
+- **A link's port survives the desktop's URL parser.** `trellis://7374/card/9`
+  put the port where a URL keeps its **host**, and a bare integer is a legal IPv4
+  address — so KDE normalised `7374` to **`0.0.28.206`** (`0x00001CCE` as a
+  dotted quad) and the link failed on arrival with *"port and id must be
+  numbers"*. Links are now minted as
+  **`trellis://127.0.0.1:<port>/card/<id>`**, where nothing is left to rewrite.
+
+  **Every link already written still works.** A bare port is still accepted, and
+  so is the dotted quad a normaliser produces — it is unpacked back into the port
+  it came from. A link in a card or a session report is a durable thing and must
+  not stop opening because the format improved. Only loopback is accepted as a
+  host: a clicked link must never reach another machine.
+
 ## [0.110.1]
 
 ### Fixed

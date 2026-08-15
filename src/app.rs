@@ -2995,8 +2995,13 @@ impl TrellisApp {
                 // The bare form is what you paste. `verified` adds the check that
                 // turns "a different document is on this port" from a silent
                 // landing on the wrong real card into an error.
-                "link": format!("{scheme}://{port}/card/{cid}"),
-                "link_verified": format!("{scheme}://{port}/card/{cid}?doc={doc}"),
+                // `127.0.0.1:` is not decoration. Without a host the port sits
+                // in the URL's HOST position, where a bare integer is a legal
+                // IPv4 address — KDE's parser rewrote `7374` to `0.0.28.206`
+                // and the link arrived unusable. With the port in the port
+                // position there is nothing left to normalise.
+                "link": format!("{scheme}://127.0.0.1:{port}/card/{cid}"),
+                "link_verified": format!("{scheme}://127.0.0.1:{port}/card/{cid}?doc={doc}"),
                 // Works with nothing registered — a browser or a terminal can
                 // follow it today.
                 "http": format!("http://127.0.0.1:{port}/open/card/{cid}"),
@@ -5727,7 +5732,7 @@ impl TrellisApp {
                     if ui
                         .button(format!("Register {}:// links…", crate::URL_SCHEME))
                         .on_hover_text(
-                            "Teach this desktop to open a link like trellis://7374/card/1391 in \
+                            "Teach this desktop to open a link like trellis://127.0.0.1:7374/card/1391 in \
                              Trellis. Without it the links still work from a terminal, and the \
                              http://127.0.0.1 form works anywhere — this is what makes them \
                              clickable in a browser or a chat window.",

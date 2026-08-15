@@ -76,7 +76,7 @@ of inside the app. A detached window **sticks to the main one** (📌 in its
 header, on by default): move Trellis and its panels come along, keeping the
 offset you gave them. Table cells render `[[wiki-links]]` as links you can click.
 
-**Links** — `trellis://7374/card/1391` opens that card in the instance serving
+**Links** — `trellis://127.0.0.1:7374/card/1391` opens that card in the instance serving
 that port (`GET /api/cards/{cid}/link` mints one). The port is the address, so it
 works with several instances running; `?doc=Personal.ron` is an optional check,
 worth adding to anything durable because card ids repeat across documents. The
@@ -489,7 +489,7 @@ on native runners for each platform, triggered by pushing a `vX.Y.Z` tag.
 
 ```
 trellis [FILE] [-p|--port PORT] [-d|--data-dir DIR]
-trellis trellis://<port>/card/<id>          # follow a link
+trellis trellis://127.0.0.1:<port>/card/<id>   # follow a link
 ```
 
 `FILE` is the document to open (a path that doesn't exist yet starts a new
@@ -498,7 +498,7 @@ document saved there). `--port` sets the agent API port for that run, and
 backup config and autosave slot — under that directory. `trellis --help` for the
 full text; with no arguments Trellis reopens the last document as before.
 
-Given a **link** instead of a file — `trellis://<port>/card/<id>`, or
+Given a **link** instead of a file — `trellis://127.0.0.1:<port>/card/<id>`, or
 `.../node/<id>`, with an optional `?doc=<file>` the receiving instance verifies —
 it hands the link to whichever instance is serving that port and exits, so
 following a link never opens a second window on a document you already have open.

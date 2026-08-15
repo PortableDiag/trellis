@@ -733,11 +733,23 @@ An agent can hand over a **link**, not just an id. Clicking it opens the running
 instance on that exact card.
 
 ```
-trellis://<port>/card/<cid>               trellis://7374/card/1391
-trellis://<port>/node/<id>                trellis://7373/node/63
-trellis://<port>/card/<cid>?doc=<file>    optional, verified on arrival
-http://127.0.0.1:<port>/open/card/<cid>   the same thing, no registration needed
+trellis://127.0.0.1:<port>/card/<cid>            trellis://127.0.0.1:7374/card/1391
+trellis://127.0.0.1:<port>/node/<id>             trellis://127.0.0.1:7373/node/63
+trellis://127.0.0.1:<port>/card/<cid>?doc=<file> optional, verified on arrival
+http://127.0.0.1:<port>/open/card/<cid>          the same thing, no registration needed
 ```
+
+**Why `127.0.0.1:` is in there.** Links used to be minted as
+`trellis://7374/card/1391`, which puts the port where a URL keeps its **host** —
+and a bare integer is a legal IPv4 address, so a desktop URL handler is entitled
+to normalise it. KDE's does: `7374` arrives as **`0.0.28.206`** (that is
+`0x00001CCE` as a dotted quad) and the link fails. With the port in the port
+position there is nothing left to rewrite.
+
+**Old links still work.** A bare port, and the dotted-quad form a normaliser
+produces, are both accepted — a link written into a card or a session report a
+year ago has to keep opening. Only loopback is accepted as a host: a clicked link
+must never reach another machine.
 
 **Never build one by hand — ask for it:**
 
@@ -745,8 +757,8 @@ http://127.0.0.1:<port>/open/card/<cid>   the same thing, no registration needed
 curl -s -H "X-API-Key: $KEY" $API/cards/1391/link
 # → {"card":1391,"node":63,"node_path":"Trellis › Trellis Open Items",
 #    "document":"Personal.ron",
-#    "link":"trellis://7374/card/1391",
-#    "link_verified":"trellis://7374/card/1391?doc=Personal.ron",
+#    "link":"trellis://127.0.0.1:7374/card/1391",
+#    "link_verified":"trellis://127.0.0.1:7374/card/1391?doc=Personal.ron",
 #    "http":"http://127.0.0.1:7374/open/card/1391"}
 ```
 

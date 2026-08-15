@@ -30,7 +30,7 @@ USAGE:
 ARGS:
     <FILE>    Document to open. If the path doesn't exist yet, Trellis starts a
               new document and saves it there.
-    <URL>     A link — trellis://<port>/card/<id> or .../node/<id>, with an
+    <URL>     A link — trellis://127.0.0.1:<port>/card/<id> or .../node/<id>,
               optional ?doc=<file> the receiving instance verifies. Hands the
               link to whichever instance is serving that port and exits, so a
               link never opens a second window on an open document. hypercube://
@@ -104,7 +104,7 @@ fn main() -> eframe::Result<()> {
         if URL_SCHEMES.iter().any(|s| url.starts_with(&format!("{s}:"))) {
             let msg = format!(
                 "not a link I understand: {raw}\n\
-                 expected {URL_SCHEME}://<port>/card/<id> or {URL_SCHEME}://<port>/node/<id>"
+                 expected {URL_SCHEME}://127.0.0.1:<port>/card/<id> or .../node/<id>"
             );
             eprintln!("trellis: {msg}");
             link_failed(&msg);
@@ -223,11 +223,54 @@ fn clean_link_arg(raw: &str) -> &str {
 
 /// Hand a link URL to the instance that owns it.
 ///
-/// Format (see API.md): `trellis://<port>/card/<id>` or `.../node/<id>`, with an
+/// Format (see API.md): `trellis://127.0.0.1:<port>/card/<id>` or `.../node/<id>`, with an
 /// optional `?doc=<file>` the receiving instance verifies. The port is the
 /// address because one instance serves one document — so a link names the port,
 /// not a file path, and `doc=` is a check rather than a lookup.
 ///
+/// The port a link's authority names, in any form a URL parser may have left it.
+///
+/// **The original link format put the port where a URL keeps its host.**
+/// `trellis://7374/card/9` reads, to anything implementing RFC 3986, as host
+/// `7374` — and a bare integer is a perfectly legal IPv4 address. So a desktop
+/// URL handler is entitled to normalise it, and KDE's does: **7374 arrives as
+/// `0.0.28.206`**, which is `0x00001CCE` written as a dotted quad. The link then
+/// failed on "port and id must be numbers" for a link that was written
+/// correctly.
+///
+/// Three forms are therefore accepted:
+///
+/// - `127.0.0.1:7374` — what is minted now, and what no parser will rewrite,
+///   because the port is in the port position.
+/// - `7374` — every link written before this, including the ones already sitting
+///   in cards, session reports and chat logs. Those must keep working; a link
+///   is a durable thing.
+/// - `0.0.28.206` — the same link after a normaliser got to it. Reversed by
+///   packing the quad back into the integer it came from.
+///
+/// A real host is deliberately *not* supported: this only ever talks to loopback,
+/// and accepting one would turn a clicked link into a request to a machine
+/// somewhere else.
+fn port_from_authority(authority: &str) -> Option<u16> {
+    // host:port — the canonical form. Only loopback, and only a real port.
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        let ok = matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1" | "");
+        return ok.then(|| port.parse::<u16>().ok()).flatten();
+    }
+    // A bare port, as links were minted before 0.110.2.
+    if let Ok(p) = authority.parse::<u16>() {
+        return (p != 0).then_some(p);
+    }
+    // A dotted quad: the bare port after a URL parser normalised it. Only
+    // meaningful when it packs back into a valid port number.
+    let octets: Vec<u32> = authority.split('.').filter_map(|o| o.parse::<u32>().ok()).collect();
+    if octets.len() == 4 && octets.iter().all(|o| *o <= 255) {
+        let n = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+        return u16::try_from(n).ok().filter(|p| *p != 0);
+    }
+    None
+}
+
 /// Say that a link failed, somewhere the person who clicked it can see.
 ///
 /// **`eprintln!` alone is a message to nobody here.** The desktop file launches
@@ -252,11 +295,11 @@ fn follow_link(url: &str) -> i32 {
         None => (rest, None),
     };
     let parts: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
-    let (port, kind, id) = match parts.as_slice() {
-        [port, kind, id] => (*port, *kind, *id),
+    let (authority, kind, id) = match parts.as_slice() {
+        [authority, kind, id] => (*authority, *kind, *id),
         _ => {
             let m = format!("not a link I understand: {url}\nexpected \
-                             {scheme}://<port>/card/<id> or {scheme}://<port>/node/<id>");
+                             {scheme}://127.0.0.1:<port>/card/<id> or .../node/<id>");
             eprintln!("trellis: {m}");
             link_failed(&m);
             return 1;
@@ -268,8 +311,14 @@ fn follow_link(url: &str) -> i32 {
         link_failed(&m);
         return 1;
     }
-    if port.parse::<u16>().is_err() || id.parse::<u64>().is_err() {
-        let m = format!("port and id must be numbers: {url}");
+    let Some(port) = port_from_authority(authority) else {
+        let m = format!("no port in {url}\nexpected {scheme}://127.0.0.1:<port>/{kind}/<id>");
+        eprintln!("trellis: {m}");
+        link_failed(&m);
+        return 1;
+    };
+    if id.parse::<u64>().is_err() {
+        let m = format!("the id must be a number: {url}");
         eprintln!("trellis: {m}");
         link_failed(&m);
         return 1;
@@ -468,6 +517,34 @@ mod tests {
         for raw in ["<trellis://7374/card/1/>", "hypercube://7374/node/2."] {
             assert!(link_scheme(clean_link_arg(raw)).is_some(), "{raw:?} should follow as a link");
         }
+    }
+
+    /// The port arrives in whatever form a URL parser left it, and a link
+    /// written years ago has to keep working.
+    #[test]
+    fn a_port_survives_url_normalisation() {
+        // Minted now: the port is in the port position, so nothing rewrites it.
+        assert_eq!(port_from_authority("127.0.0.1:7374"), Some(7374));
+        assert_eq!(port_from_authority("localhost:7373"), Some(7373));
+        // Every link written before 0.110.2.
+        assert_eq!(port_from_authority("7374"), Some(7374));
+        // The same link after KDE normalised the bare integer as an IPv4 host:
+        // 7374 == 0x00001CCE == 0.0.28.206. This is the reported failure.
+        assert_eq!(port_from_authority("0.0.28.206"), Some(7374));
+        assert_eq!(port_from_authority("0.0.28.205"), Some(7373));
+        // Round-trips for every port a link can name.
+        for p in [1u16, 80, 7373, 7374, 8080, 65535] {
+            let n = p as u32;
+            let quad = format!("{}.{}.{}.{}", n >> 24, (n >> 16) & 255, (n >> 8) & 255, n & 255);
+            assert_eq!(port_from_authority(&quad), Some(p), "quad {quad}");
+        }
+        // A real host is refused: a clicked link must never reach another
+        // machine. (A quad that does not fit in a port is exactly that.)
+        assert_eq!(port_from_authority("192.168.0.51"), None);
+        assert_eq!(port_from_authority("example.com:7374"), None);
+        assert_eq!(port_from_authority("example.com"), None);
+        assert_eq!(port_from_authority("0"), None);
+        assert_eq!(port_from_authority(""), None);
     }
 
     /// The trimming must not eat characters that occur inside real links.
