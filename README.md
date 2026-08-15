@@ -271,6 +271,20 @@ from the main cluster, and click or drag on it to jump there without zooming out
   expiry**, so a highlight fades on its own instead of accumulating until every
   card shouts. There is deliberately no flash: anything above about 3 Hz is a
   photosensitive-seizure risk, and a pulse never dims below 40%.
+- **View → Sort projects** — order the **top-level projects** by name (A→Z or
+  Z→A), by **recently changed**, or by **open tasks**; **Manual** is the
+  document's own order. The choice is **remembered across restarts**.
+
+  It is a **view**, not a rewrite: the document keeps its own order, so a project
+  you add later simply **appears in the right place** instead of at the bottom
+  waiting to be dragged there — which is the point, and what a one-shot sort
+  would fix once and let rot on the next project. Sub-nodes are never sorted:
+  inside a project the order is usually meaning (phases, months), and sorting it
+  would destroy information rather than tidy it. Names sort
+  **case-insensitively**, so `apple.com` files with the a's instead of being
+  dumped after every capitalised title. Reordering a project by hand while a sort
+  is on simply turns the sort off — your move wins rather than being silently
+  undone.
 - **Select several cards at once** — **Shift+drag a box** round them on the
   canvas, then drag any one of them to move the whole set; **Esc** clears the
   selection, and Ctrl+click still adds or removes one card at a time. A box takes

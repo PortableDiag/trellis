@@ -107,6 +107,9 @@ const MINIMAP_KEY: &str = "minimap";
 /// to take.
 const NOTIFY_DIGEST_KEY: &str = "notify_digest";
 const NOTIFY_AGENT_KEY: &str = "notify_agent";
+/// How the root nodes are ordered in the tree. Persisted, because a sort you
+/// have to re-pick every launch is not an ordering, it is a chore.
+const TREE_SORT_KEY: &str = "tree_sort";
 /// Journal root for daily notes. Absent = the feature is off, which is the
 /// default and the whole point: a dated node must never appear unasked.
 const DAILY_ROOT_KEY: &str = "daily_root";
@@ -1159,6 +1162,8 @@ pub struct TrellisApp {
     /// Notify on startup with what is due, and when an agent edits.
     notify_digest: bool,
     notify_agent: bool,
+    /// Root ordering — a view over `doc.roots`, never a rewrite of it.
+    tree_sort: crate::tree::TreeSort,
     /// The change-log seq already reported, so one edit is announced once.
     notified_seq: crate::changelog::Seq,
     /// Set once the startup digest has been considered — it fires once per run,
@@ -1370,6 +1375,11 @@ impl TrellisApp {
             .and_then(|s| s.get_string(NOTIFY_AGENT_KEY))
             .map(|s| s == "true")
             .unwrap_or(false);
+        let tree_sort = cc
+            .storage
+            .and_then(|s| s.get_string(TREE_SORT_KEY))
+            .map(|s| crate::tree::TreeSort::from_key(&s))
+            .unwrap_or_default();
         let theme = cc
             .storage
             .and_then(|s| s.get_string(THEME_KEY))
@@ -1587,6 +1597,7 @@ impl TrellisApp {
             minimap_enabled,
             notify_digest,
             notify_agent,
+            tree_sort,
             notified_seq: 0,
             digest_done: false,
             daily_root: cc
@@ -3818,6 +3829,22 @@ impl TrellisApp {
         })
     }
 
+    /// Does this action reorder a **root**? Sorting only governs roots, so a
+    /// move inside a project must not switch it off.
+    fn reorders_a_root(&self, a: &TreeAction) -> bool {
+        let is_root = |id: &NodeId| {
+            self.doc.nodes.get(id).map(|n| n.parent.is_none()).unwrap_or(false)
+        };
+        match a {
+            TreeAction::MoveUp(id)
+            | TreeAction::MoveDown(id)
+            | TreeAction::MoveToTop(id)
+            | TreeAction::MoveToBottom(id) => is_root(id),
+            TreeAction::Reorder { moved, .. } => is_root(moved),
+            _ => false,
+        }
+    }
+
     fn apply_tree(&mut self, actions: Vec<TreeAction>) {
         // Describe the edits *before* applying them, so a removed node's title is
         // still there to record, then push the entries afterwards so a client
@@ -3871,6 +3898,23 @@ impl TrellisApp {
                 }
                 TreeAction::SetAllExpanded(expanded) => {
                     self.doc.set_all_expanded(expanded);
+                }
+                // Reordering by hand while a sort is on would look like it did
+                // nothing — the view would re-sort it straight back. The move is
+                // what was asked for, so the sort steps aside rather than
+                // silently winning.
+                TreeAction::MoveUp(_)
+                | TreeAction::MoveDown(_)
+                | TreeAction::MoveToTop(_)
+                | TreeAction::MoveToBottom(_)
+                | TreeAction::Reorder { .. }
+                    if self.tree_sort != crate::tree::TreeSort::Manual
+                        && self.reorders_a_root(&a) =>
+                {
+                    self.tree_sort = crate::tree::TreeSort::Manual;
+                    self.status =
+                        "Sorting off — projects are back in the order you arrange".to_string();
+                    self.apply_tree(vec![a]);
                 }
                 TreeAction::MoveUp(id) => self.doc.move_sibling(id, true),
                 TreeAction::MoveDown(id) => self.doc.move_sibling(id, false),
@@ -5391,6 +5435,42 @@ impl TrellisApp {
                         self.kanban_open = true;
                         ui.close_menu();
                     }
+                    ui.separator();
+                    ui.menu_button("Sort projects", |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Orders the top-level projects only. Sub-nodes keep the order \
+                                 you gave them — inside a project, order is usually meaning.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                        ui.separator();
+                        for (opt, label) in crate::tree::TreeSort::ALL {
+                            if ui
+                                .selectable_label(self.tree_sort == opt, label)
+                                .clicked()
+                            {
+                                self.tree_sort = opt;
+                                self.status = if opt == crate::tree::TreeSort::Manual {
+                                    "Projects back in the document's own order".to_string()
+                                } else {
+                                    format!("Projects sorted by {}", label.to_lowercase())
+                                };
+                                ui.close_menu();
+                            }
+                        }
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(
+                                "This is a view: the document keeps its own order, so a new \
+                                 project simply appears in the right place instead of at the \
+                                 bottom waiting to be dragged.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                    });
                     ui.separator();
                     // Whole-tree folding: a menu item, not a header button. It
                     // moves every node in the document, which is not something a
@@ -8331,6 +8411,7 @@ impl eframe::App for TrellisApp {
                     self.reorder_mode,
                     scroll_to,
                     &node_plugins,
+                    self.tree_sort,
                 );
                 self.apply_tree(actions);
             });
@@ -8605,6 +8686,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(MINIMAP_KEY, self.minimap_enabled.to_string());
         storage.set_string(NOTIFY_DIGEST_KEY, self.notify_digest.to_string());
         storage.set_string(NOTIFY_AGENT_KEY, self.notify_agent.to_string());
+        storage.set_string(TREE_SORT_KEY, self.tree_sort.key().to_string());
         // Absent rather than "0" when off: a stored root that points at nothing
         // would be indistinguishable from a deleted journal.
         storage.set_string(

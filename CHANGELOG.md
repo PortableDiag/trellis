@@ -6,6 +6,32 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.108.0]
+
+### Added
+- **View → Sort projects** — the top-level projects by name (A→Z, Z→A), by
+  **recently changed**, or by **open tasks**; **Manual** is the document's own
+  order. **Remembered across restarts**, because a sort you re-pick every launch
+  is a chore rather than an ordering.
+
+  **A view, not a rewrite, and that is the feature.** The reason this was wanted
+  is that a new project lands at the bottom and has to be dragged into place — so
+  a one-shot sort would fix it once and let it rot again on the very next
+  project. As a view it keeps fixing it: a project added while the sort is on
+  appears where it belongs, and the document's stored order is left alone for
+  everything else that reads the file.
+
+  **Roots only.** Sub-nodes keep the order they were given: inside a project the
+  order is usually meaning — phases, months of a journal — and sorting that
+  destroys information rather than tidying it.
+
+  Two smaller rules, each with a reason. Names sort **case-insensitively**,
+  because a byte sort files every lowercase title after every uppercase one and
+  clumped the domain-named projects at the end of the real document. And
+  reordering a project by hand while a sort is on **turns the sort off** — the
+  move is what was asked for, so the sort steps aside instead of silently putting
+  it back.
+
 ## [0.107.0]
 
 ### Added

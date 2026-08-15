@@ -56,6 +56,107 @@ pub enum TreeAction {
 }
 
 /// `renaming` holds the node currently being renamed inline and its edit buffer.
+/// How the **root** nodes are ordered in the tree.
+///
+/// **Roots only, and a view rather than a rewrite.** The point of this is that a
+/// new project lands where it belongs instead of at the bottom waiting to be
+/// dragged into place — which a one-shot sort would fix once and then let rot
+/// again on the next project. A view mode keeps fixing it, and it leaves the
+/// document's own order alone so nothing else that reads the file is surprised.
+///
+/// Sub-nodes keep the order they were given: inside a project, order is usually
+/// meaning (a checklist of phases, a journal by month), and sorting that would
+/// destroy information rather than tidy it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TreeSort {
+    /// The document's own order — drag, indent and move up/down decide it.
+    #[default]
+    Manual,
+    NameAsc,
+    NameDesc,
+    /// Most recently touched first, using the `touched` stamp a basket gets when
+    /// any card in it changes.
+    Recent,
+    /// Most open tasks first — "where is the work" answered at a glance.
+    Tasks,
+}
+
+impl TreeSort {
+    pub const ALL: [(TreeSort, &'static str); 5] = [
+        (TreeSort::Manual, "Manual (drag to order)"),
+        (TreeSort::NameAsc, "Name A → Z"),
+        (TreeSort::NameDesc, "Name Z → A"),
+        (TreeSort::Recent, "Recently changed"),
+        (TreeSort::Tasks, "Open tasks"),
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            TreeSort::Manual => "manual",
+            TreeSort::NameAsc => "name",
+            TreeSort::NameDesc => "name_desc",
+            TreeSort::Recent => "recent",
+            TreeSort::Tasks => "tasks",
+        }
+    }
+
+    pub fn from_key(s: &str) -> TreeSort {
+        match s {
+            "name" => TreeSort::NameAsc,
+            "name_desc" => TreeSort::NameDesc,
+            "recent" => TreeSort::Recent,
+            "tasks" => TreeSort::Tasks,
+            _ => TreeSort::Manual,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        Self::ALL.iter().find(|(t, _)| *t == self).map(|(_, l)| *l).unwrap_or("Manual")
+    }
+}
+
+/// The roots in display order.
+///
+/// Case-insensitive by name, because a raw byte sort files every lowercase title
+/// after every uppercase one — which put a handful of domain-named projects in a
+/// clump at the end of this document and looked like a bug. Ties fall back to
+/// the document's order so the list never shuffles between frames.
+pub fn sorted_roots(doc: &Document, sort: TreeSort) -> Vec<NodeId> {
+    let mut roots = doc.roots.clone();
+    if sort == TreeSort::Manual {
+        return roots;
+    }
+    let title = |id: &NodeId| {
+        doc.nodes.get(id).map(|n| n.title.to_lowercase()).unwrap_or_default()
+    };
+    match sort {
+        TreeSort::NameAsc => roots.sort_by_key(title),
+        TreeSort::NameDesc => {
+            roots.sort_by_key(title);
+            roots.reverse();
+        }
+        TreeSort::Recent => {
+            // Newest first; a basket that has never been touched sorts last
+            // rather than first, which is what "recently changed" means.
+            roots.sort_by_key(|id| {
+                std::cmp::Reverse(doc.nodes.get(id).and_then(|n| n.touched).unwrap_or(0))
+            });
+        }
+        TreeSort::Tasks => {
+            let mut open: std::collections::HashMap<NodeId, usize> =
+                std::collections::HashMap::new();
+            for t in doc.tasks() {
+                if !t.done {
+                    *open.entry(t.root).or_default() += 1;
+                }
+            }
+            roots.sort_by_key(|id| std::cmp::Reverse(open.get(id).copied().unwrap_or(0)));
+        }
+        TreeSort::Manual => {}
+    }
+    roots
+}
+
 pub fn ui(
     ui: &mut egui::Ui,
     doc: &Document,
@@ -67,6 +168,7 @@ pub fn ui(
     // approved ones are passed in — an unapproved plugin must not be one click
     // away from running.
     node_plugins: &[(usize, String)],
+    sort: TreeSort,
 ) -> Vec<TreeAction> {
     let mut actions = Vec::new();
 
@@ -94,7 +196,7 @@ pub fn ui(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let roots = doc.roots.clone();
+            let roots = sorted_roots(doc, sort);
             for root in roots {
                 node_ui(ui, doc, root, selected, renaming, reorder_mode, scroll_to, 0, node_plugins, &mut actions);
             }
@@ -375,5 +477,57 @@ fn node_ui(
         for child in children {
             node_ui(ui, doc, child, selected, renaming, reorder_mode, scroll_to, depth + 1, node_plugins, actions);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// Sorting governs the **roots** and nothing else: inside a project, order is
+    /// usually meaning — phases, months — and sorting it would destroy
+    /// information rather than tidy it.
+    #[test]
+    fn sorting_orders_roots_and_leaves_children_alone() {
+        use crate::model::Document;
+        let mut doc = Document::empty();
+        let zebra = doc.add_node(None, "Zebra".into());
+        let apple = doc.add_node(None, "apple.com".into());
+        let mango = doc.add_node(None, "Mango".into());
+        // Children, deliberately not alphabetical: this is the case that must
+        // survive untouched.
+        let c_z = doc.add_node(Some(zebra), "zzz first".into());
+        let c_a = doc.add_node(Some(zebra), "aaa second".into());
+
+        let manual = super::sorted_roots(&doc, super::TreeSort::Manual);
+        assert_eq!(manual, vec![zebra, apple, mango], "manual is the document's order");
+
+        // Case-insensitive: a byte sort files every lowercase title after every
+        // uppercase one, which clumped the domain-named projects at the end.
+        let by_name = super::sorted_roots(&doc, super::TreeSort::NameAsc);
+        assert_eq!(by_name, vec![apple, mango, zebra], "apple.com sorts with the a's");
+        assert_eq!(
+            super::sorted_roots(&doc, super::TreeSort::NameDesc),
+            vec![zebra, mango, apple]
+        );
+
+        // The children are untouched by any of it.
+        assert_eq!(doc.nodes.get(&zebra).unwrap().children, vec![c_z, c_a]);
+    }
+
+    /// Recently changed puts a basket that has never been touched **last**, not
+    /// first — "recently changed" has to mean what it says or the order is noise.
+    #[test]
+    fn recent_puts_the_never_touched_at_the_bottom() {
+        use crate::model::Document;
+        let mut doc = Document::empty();
+        let old = doc.add_node(None, "Old".into());
+        let fresh = doc.add_node(None, "Fresh".into());
+        let never = doc.add_node(None, "Never".into());
+        doc.nodes.get_mut(&old).unwrap().touched = Some(1_000);
+        doc.nodes.get_mut(&fresh).unwrap().touched = Some(2_000);
+        assert_eq!(
+            super::sorted_roots(&doc, super::TreeSort::Recent),
+            vec![fresh, old, never]
+        );
     }
 }
