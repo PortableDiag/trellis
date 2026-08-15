@@ -140,6 +140,11 @@ pub enum ApiRequest {
     // Which document this instance has open (and on which port), so an agent
     // driving several instances can check it has the right one.
     Instance,
+    /// Read the app-level settings — the ones that live in the instance's config
+    /// rather than in the document.
+    SettingsGet,
+    /// Change one or more of them. Unknown keys are refused by name.
+    SettingsSet(serde_json::Map<String, Value>),
     // Backup + version-history control — handled by the app loop (they need the
     // doc's on-disk path / config), not `process`, which only sees the Document.
     BackupStatus,
@@ -1356,6 +1361,15 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             },
         }),
         (Method::Get, ["api", "instance"]) => Ok(ApiRequest::Instance),
+        (Method::Get, ["api", "settings"]) => Ok(ApiRequest::SettingsGet),
+        (Method::Post, ["api", "settings"]) => {
+            let v: Value = serde_json::from_str(body)
+                .map_err(|e| (400, format!("invalid JSON body: {e}")))?;
+            match v {
+                Value::Object(m) if !m.is_empty() => Ok(ApiRequest::SettingsSet(m)),
+                _ => Err((400, "expected a JSON object of setting names to values".to_string())),
+            }
+        }
         (Method::Get, ["api", "backup"]) => Ok(ApiRequest::BackupStatus),
         (Method::Post, ["api", "backup", "run"]) => Ok(ApiRequest::BackupRun),
         (Method::Post, ["api", "ocr"]) => Ok(ApiRequest::OcrAll),
@@ -2646,6 +2660,8 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         // the backup config + document file). This is only reached if that
         // interception is ever missed — report it rather than silently no-op.
         ApiRequest::Instance
+        | ApiRequest::SettingsGet
+        | ApiRequest::SettingsSet(_)
         | ApiRequest::BackupStatus
         | ApiRequest::BackupRun
         | ApiRequest::HistoryList
@@ -4347,5 +4363,24 @@ mod tests {
             process(&mut doc, ApiRequest::CreateNode { parent: Some(42), title: "x".into() });
         assert!(!dirty);
         assert_eq!(resp.status, 400);
+    }
+
+    /// The settings routes exist and take the shape the app loop expects: an
+    /// object, and not an empty one — an empty patch is not a change.
+    #[test]
+    fn settings_routes_take_an_object() {
+        assert!(matches!(
+            route(&Method::Get, "/api/settings", "", "").unwrap(),
+            ApiRequest::SettingsGet
+        ));
+        assert!(matches!(
+            route(&Method::Post, "/api/settings", "", r#"{"theme":"Light"}"#).unwrap(),
+            ApiRequest::SettingsSet(_)
+        ));
+        assert!(route(&Method::Post, "/api/settings", "", "[]").is_err());
+        assert!(
+            route(&Method::Post, "/api/settings", "", "{}").is_err(),
+            "an empty patch changes nothing and should say so"
+        );
     }
 }

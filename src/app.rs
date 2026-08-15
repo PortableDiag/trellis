@@ -3041,8 +3041,142 @@ impl TrellisApp {
         })
     }
 
+    /// The app-level settings, as the API sees them.
+    ///
+    /// **Why these are an endpoint at all.** Everything a person can do in this
+    /// app, an agent can do — that is the rule the whole API is built on, and it
+    /// had quietly stopped being true: the theme, the canvas toggles and (as of
+    /// this session) notifications and project sort were reachable only by
+    /// clicking. An agent setting up a machine, or restoring one, could not put
+    /// it back the way it was.
+    ///
+    /// **These are instance settings, not document settings.** They live in the
+    /// config beside the key and the port, so they are per `--data-dir`: work and
+    /// personal can differ, and neither is written into the `.ron` file.
+    fn settings_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "theme": self.theme.key(),
+            "tree_sort": self.tree_sort.key(),
+            "minimap": self.minimap_enabled,
+            "dock_mode": self.dock_mode,
+            "snap_mode": self.snap_mode,
+            "depth_mode": self.depth_mode,
+            "time_mode": self.time_mode,
+            "notify_digest": self.notify_digest,
+            "notify_agent": self.notify_agent,
+            "zoom_enabled": self.zoom_enabled,
+            "autosave": self.autosave,
+            "stick_windows": self.stick_windows,
+            "agenda_open": self.agenda_open,
+            "agenda_show_done": self.agenda_show_done,
+            "agenda_project": self.agenda_project,
+            "kanban_open": self.kanban_open,
+            "kanban_show_done": self.kanban_show_done,
+            "kanban_project": self.kanban_project,
+            "tags_open": self.tags_open,
+            "find_open": self.find_open,
+            "backlinks_open": self.backlinks_open,
+            "history_keep": self.history_keep,
+            "history_gap_mins": self.history_gap_mins,
+        })
+    }
+
+    /// Apply a settings patch, refusing anything it does not know.
+    ///
+    /// An unknown key is a **400 naming it**, like every other input since
+    /// v0.86.0 — a typo that silently does nothing is the failure this API spent
+    /// a release removing everywhere else. A known key with the wrong type is
+    /// refused the same way rather than coerced.
+    fn apply_settings(&mut self, patch: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+        // Validate the whole patch before applying any of it, so a bad third key
+        // cannot leave the first two applied — the rule table ops learned in
+        // v0.102.0.
+        for (k, v) in patch {
+            let ok = match k.as_str() {
+                "theme" => v.as_str().map(|s| Theme::from_key(s).key() == s).unwrap_or(false),
+                "tree_sort" => v
+                    .as_str()
+                    .map(|s| crate::tree::TreeSort::from_key(s).key() == s)
+                    .unwrap_or(false),
+                "minimap" | "dock_mode" | "snap_mode" | "depth_mode" | "time_mode"
+                | "notify_digest" | "notify_agent" | "zoom_enabled" | "autosave"
+                | "stick_windows" | "agenda_open" | "agenda_show_done" | "kanban_open"
+                | "kanban_show_done" | "tags_open" | "find_open" | "backlinks_open" => {
+                    v.is_boolean()
+                }
+                // A project filter is a node id, or null for "all projects".
+                "agenda_project" | "kanban_project" => {
+                    v.is_null() || v.as_u64().is_some()
+                }
+                // Clamped rather than refused: the UI clamps these too, and the
+                // retention rules are the app's to enforce, not the caller's to
+                // get exactly right.
+                "history_keep" | "history_gap_mins" => v.as_u64().is_some(),
+                _ => {
+                    return Err(format!(
+                        "unknown setting {k:?}. Settable: theme, tree_sort, minimap, \
+                         dock_mode, snap_mode, depth_mode, time_mode, notify_digest, \
+                         notify_agent, zoom_enabled, autosave, stick_windows, agenda_open, \
+                         agenda_show_done, agenda_project, kanban_open, kanban_show_done, \
+                         kanban_project, tags_open, find_open, backlinks_open, history_keep, \
+                         history_gap_mins. Deliberately not settable over the API: the API \
+                         key, port and LAN flag (a caller must not be able to widen its own \
+                         reach), and the file-mirroring policy (same reason). Change those \
+                         in Tools -> Settings."
+                    ))
+                }
+            };
+            if !ok {
+                return Err(format!("setting {k:?}: {v} is not a value it accepts"));
+            }
+        }
+        for (k, v) in patch {
+            match k.as_str() {
+                "theme" => self.theme = Theme::from_key(v.as_str().unwrap_or("")),
+                "tree_sort" => {
+                    self.tree_sort = crate::tree::TreeSort::from_key(v.as_str().unwrap_or(""))
+                }
+                "minimap" => self.minimap_enabled = v.as_bool().unwrap_or(false),
+                "dock_mode" => self.dock_mode = v.as_bool().unwrap_or(false),
+                "snap_mode" => self.snap_mode = v.as_bool().unwrap_or(false),
+                "depth_mode" => self.depth_mode = v.as_bool().unwrap_or(false),
+                "time_mode" => self.time_mode = v.as_bool().unwrap_or(false),
+                "notify_digest" => self.notify_digest = v.as_bool().unwrap_or(false),
+                "notify_agent" => self.notify_agent = v.as_bool().unwrap_or(false),
+                "zoom_enabled" => self.zoom_enabled = v.as_bool().unwrap_or(false),
+                "autosave" => self.autosave = v.as_bool().unwrap_or(false),
+                "stick_windows" => self.stick_windows = v.as_bool().unwrap_or(false),
+                "agenda_open" => self.agenda_open = v.as_bool().unwrap_or(false),
+                "agenda_show_done" => self.agenda_show_done = v.as_bool().unwrap_or(false),
+                "kanban_open" => self.kanban_open = v.as_bool().unwrap_or(false),
+                "kanban_show_done" => self.kanban_show_done = v.as_bool().unwrap_or(false),
+                "tags_open" => self.tags_open = v.as_bool().unwrap_or(false),
+                "find_open" => self.find_open = v.as_bool().unwrap_or(false),
+                "backlinks_open" => self.backlinks_open = v.as_bool().unwrap_or(false),
+                "agenda_project" => self.agenda_project = v.as_u64(),
+                "kanban_project" => self.kanban_project = v.as_u64(),
+                // Same clamps the Settings panel applies, and `keep.max(1)` so a
+                // zero cannot prune away the snapshot just written.
+                "history_keep" => {
+                    self.history_keep = (v.as_u64().unwrap_or(1) as usize).clamp(1, 200)
+                }
+                "history_gap_mins" => self.history_gap_mins = v.as_u64().unwrap_or(0).min(1440),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn handle_api_instance(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
         match req {
+            api::ApiRequest::SettingsGet => Some(api::ApiResponse::ok(self.settings_json())),
+            api::ApiRequest::SettingsSet(patch) => Some(match self.apply_settings(patch) {
+                // A theme change repaints and a sort reorders the tree, so the
+                // caller gets the settings back as they now are rather than as
+                // they asked for them.
+                Ok(()) => api::ApiResponse::ok(self.settings_json()),
+                Err(e) => api::ApiResponse::err(400, &e),
+            }),
             api::ApiRequest::Instance => Some(api::ApiResponse::ok(serde_json::json!({
                 "app": "trellis",
                 "version": env!("CARGO_PKG_VERSION"),
@@ -6834,6 +6968,8 @@ impl TrellisApp {
                     for line in [
                         "GET    /api/health                        (no auth)",
                         "GET    /api/instance   → which document this port serves",
+                        "GET    /api/settings   → theme, canvas toggles, panels, notifications, retention",
+                        "POST   /api/settings   {theme?, tree_sort?, minimap?, notify_digest?, …}",
                         "GET    /api/tree",
                         "GET    /api/nodes",
                         "POST   /api/nodes               {parent?, title}",

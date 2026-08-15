@@ -316,7 +316,10 @@ from the main cluster, and click or drag on it to jump there without zooming out
   basket (`/cards/{cid}/move`), **expand/collapse** subtrees, query the tree by
   `#tags` / `key:: value` properties / due-date **agenda** (`/tasks`) / **Kanban**
   columns (`/kanban`) / wiki-link **graph**, register · insert · **update**
-  reusable card **templates**, trigger a **backup**, and export the document
+  reusable card **templates**, **read and change the app's own settings**
+  (`/settings` — theme, canvas toggles, panels, notifications, tree sort,
+  history retention; not the key, port, LAN flag or mirror policy, which a
+  caller must not be able to widen), trigger a **backup**, and export the document
   (incl. PDF/PNG) — so agents can collaborate on the same notes. **Live updates:**
   `GET /api/wait` long-polls so clients react the instant anything changes, and
   `GET /api/changes` says **what** changed — which card, who changed it, which

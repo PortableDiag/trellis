@@ -6,6 +6,31 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.109.0]
+
+### Added
+- **`GET` / `POST /api/settings`** — the app's own settings over the API, so an
+  agent can set a machine up (or put one back) without anybody clicking.
+  Twenty-three of them: theme, tree sort, the canvas toggles, both hypercube
+  axes, which panels are open and what they are scoped to, notifications, and
+  history retention.
+
+  **This closes a gap that had opened quietly.** The rule is that everything a
+  person can do, an agent can do — and settings had never been part of it. The
+  theme has been unreachable since it shipped, and this session added three more
+  (two notification toggles and the project sort) without noticing.
+
+  **What is deliberately *not* settable:** the API key, the port, the LAN flag
+  and the file-mirroring policy. A caller must not be able to widen its own
+  reach — an agent that could switch on LAN access, or point the mirror policy at
+  `/`, would be escalating with a credential given to it for notes. Those stay in
+  Tools → Settings, and the error says so by name.
+
+  A patch is validated in full before any of it is applied, an unknown name is a
+  400 listing what was expected, a known name with the wrong type is refused
+  rather than coerced, and an empty object is refused because it is not a change.
+  The response is every setting as it now stands, not an echo of what was sent.
+
 ## [0.108.0]
 
 ### Added

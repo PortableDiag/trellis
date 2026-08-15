@@ -153,6 +153,52 @@ GET /api/instance
 is its full path, or `null` when untitled. `nodes` is the document's node count.
 Unlike `/api/health` this needs the key, since it reveals a file path.
 
+### Settings
+
+The app's own settings — theme, canvas toggles, panels, notifications, retention
+— so an agent can set a machine up, or put one back the way it was, without
+anybody clicking. These are **instance** settings (per `--data-dir`), not
+document settings: they live beside the key and the port, and are never written
+into the `.ron`.
+
+```
+GET  /api/settings          → 200 {theme, tree_sort, minimap, dock_mode, snap_mode,
+                                   depth_mode, time_mode, notify_digest, notify_agent,
+                                   zoom_enabled, autosave, stick_windows, agenda_open,
+                                   agenda_show_done, agenda_project, kanban_open,
+                                   kanban_show_done, kanban_project, tags_open,
+                                   find_open, backlinks_open, history_keep,
+                                   history_gap_mins}
+POST /api/settings  {…}     → 200 the settings as they now are   | 400
+```
+
+| setting | type | what it is |
+|---|---|---|
+| `theme` | string | `Trellis`, `Light`, `TerminalGreen`, `StickyNotes`, `Futuristic`, `SynthWave`, `Blueprint`, `Silkscreen`, `Phosphor` |
+| `tree_sort` | string | `manual`, `name`, `name_desc`, `recent`, `tasks` — orders the **root** projects only |
+| `minimap`, `dock_mode`, `snap_mode`, `zoom_enabled` | bool | canvas behaviour |
+| `depth_mode`, `time_mode` | bool | the two hypercube axes |
+| `notify_digest`, `notify_agent` | bool | desktop notifications |
+| `autosave` | bool | background saves; with it off a change sits dirty in memory |
+| `stick_windows` | bool | detached Agenda/Kanban follow the main window |
+| `agenda_open`, `kanban_open`, `tags_open`, `find_open`, `backlinks_open` | bool | which panels are showing |
+| `agenda_show_done`, `kanban_show_done` | bool | include finished work |
+| `agenda_project`, `kanban_project` | node id or `null` | scope a view to one project; `null` = all |
+| `history_keep` | integer | snapshots kept (clamped 1–200) |
+| `history_gap_mins` | integer | minimum minutes between snapshots (clamped ≤ 1440) |
+
+**A patch is validated in full before any of it is applied**, so a bad third key
+cannot leave the first two set. An **unknown name is a 400 that lists what was
+expected**, and a known name with the wrong type is refused rather than coerced —
+the same rule as every other input since v0.86.0. An empty object is refused too:
+it is not a change.
+
+**Deliberately not settable here:** the **API key, port and LAN flag**, and the
+**file-mirroring policy**. A caller must not be able to widen its own reach — an
+agent that could turn on LAN access, or point the mirror policy at `/`, would be
+escalating with the credential you gave it for notes. Those stay in
+**Tools → Settings**.
+
 ### Read
 ```
 GET /api/tree
@@ -1404,6 +1450,26 @@ curl -s -X PATCH -H "X-API-Key: $KEY" \
 curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"emphasis":"none"}' $API/nodes/$NID/cards/$CID
 # An unknown value is refused rather than ignored:
 #   {"error":"invalid JSON body: unknown emphasis \"strobe\" (expected \"none\", \"glow\" or \"pulse\")"}
+
+# Read the app's settings, and change some. Instance settings (per --data-dir),
+# so work and personal each have their own.
+curl -s -H "X-API-Key: $KEY" $API/settings
+curl -s -X POST -H "X-API-Key: $KEY" \
+  -d '{"theme":"Blueprint","tree_sort":"name","notify_digest":true}' $API/settings
+# → 200 with every setting as it now stands, not just the ones you sent.
+#
+# `tree_sort` orders the ROOT projects only and is a view: the document keeps its
+# own order, so a project added later appears in place instead of at the bottom.
+curl -s -X POST -H "X-API-Key: $KEY" -d '{"tree_sort":"tasks"}' $API/settings
+#
+# Scope a panel to one project, or clear it with null:
+curl -s -X POST -H "X-API-Key: $KEY" -d "{\"kanban_project\":$NID}" $API/settings
+curl -s -X POST -H "X-API-Key: $KEY" -d '{"kanban_project":null}' $API/settings
+#
+# A typo is refused by name rather than ignored:
+#   {"error":"unknown setting \"thmee\". Settable: theme, tree_sort, …"}
+# So is the API key, port, LAN flag and mirror policy — a caller must not be able
+# to widen its own reach. Those stay in Tools → Settings.
 
 # Find something
 curl -s -H "X-API-Key: $KEY" "$API/search?q=agenda"
