@@ -6,6 +6,30 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.110.1]
+
+### Fixed
+- **A `trellis://` link clicked out of a sentence works.** Links are read out of
+  prose, not address bars, and a terminal hands over whatever its URL detector
+  decided the link was — including the full stop that ended the sentence, the
+  comma, the closing bracket, the em dash, or the `<…>` delimiters someone
+  wrapped it in. Those are now trimmed before parsing.
+
+  **Two different failures, neither of them visible.** A trailing `.` or `,` rode
+  into `?doc=`, so the receiving instance compared `Personal.ron.` against
+  `Personal.ron` and refused with a **409 nobody ever saw**. And `<trellis://…>`
+  did not match the scheme at all, so it fell through to the argument parser, was
+  taken for a **file name**, and opened a second instance on another document —
+  a window flashing up and vanishing while the link went nowhere.
+
+- **Anything that looks like one of our links is handled as a link**, never as a
+  file. A malformed link is now an error, not a new window.
+
+- **A failed link says so where it can be seen.** The desktop file launches the
+  handler with no terminal attached, so every `eprintln!` went to the void and a
+  refused link was indistinguishable from a working one. Failures now raise a
+  desktop notification naming the reason.
+
 ## [0.110.0]
 
 ### Added

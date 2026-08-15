@@ -91,8 +91,25 @@ fn main() -> eframe::Result<()> {
     // hands the URL to a *new* process; that process forwards it to whichever
     // instance is serving that port and exits. Nothing opens a second window on
     // a document that is already open.
-    if let Some(url) = std::env::args().nth(1).filter(|a| link_scheme(a).is_some()) {
-        std::process::exit(follow_link(&url));
+    if let Some(raw) = std::env::args().nth(1) {
+        let url = clean_link_arg(&raw);
+        // Anything that *looks* like one of our links is handled as a link and
+        // never falls through to the argument parser. A malformed link used to
+        // be taken for a file name, which opened a second instance on a document
+        // nobody asked for — a new window flashing up and vanishing, with the
+        // real target never reached.
+        if link_scheme(url).is_some() {
+            std::process::exit(follow_link(url));
+        }
+        if URL_SCHEMES.iter().any(|s| url.starts_with(&format!("{s}:"))) {
+            let msg = format!(
+                "not a link I understand: {raw}\n\
+                 expected {URL_SCHEME}://<port>/card/<id> or {URL_SCHEME}://<port>/node/<id>"
+            );
+            eprintln!("trellis: {msg}");
+            link_failed(&msg);
+            std::process::exit(1);
+        }
     }
 
     let args = match parse_args() {
@@ -169,6 +186,41 @@ fn link_scheme(url: &str) -> Option<&'static str> {
     URL_SCHEMES.iter().copied().find(|s| url.starts_with(&format!("{s}://")))
 }
 
+/// Strip what a link picks up from the prose around it.
+///
+/// **Links are read out of sentences, not out of address bars.** A card body, a
+/// chat message or a session report writes
+/// `… → trellis://7374/card/1609?doc=Personal.ron — the seven gates …`, and a
+/// terminal's URL detector hands over whatever it decided the link was: the
+/// trailing full stop, the comma, the closing bracket, the em dash, or the
+/// `<…>` RFC 3986 delimiters someone wrapped it in.
+///
+/// Every one of those used to break the link, and the two failures looked
+/// completely different:
+///
+/// - A trailing `.` or `,` rode into `?doc=`, so the receiving instance compared
+///   `Personal.ron.` against `Personal.ron` and refused with a **409 nobody
+///   sees** — the process has no terminal when the desktop file launches it.
+/// - `<trellis://…>` did not match the scheme at all, so it fell through to the
+///   argument parser, was taken for a **file name**, and opened a whole second
+///   instance. That is the "a new window flashes and vanishes" report.
+///
+/// Trimming here rather than at each parse step means every later stage sees a
+/// clean URL. A `>` is only stripped when the URL also opened with `<`, so a
+/// legitimate character is never eaten.
+fn clean_link_arg(raw: &str) -> &str {
+    let mut s = raw.trim();
+    if let Some(inner) = s.strip_prefix('<') {
+        s = inner.strip_suffix('>').unwrap_or(inner);
+    }
+    // Punctuation that ends a sentence, closes a bracket, or quotes the link.
+    // Not `/`, `=` or `-`: those occur inside real links.
+    s.trim_end_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'
+                                         | '"' | '\'' | '>' | '\u{2014}' | '\u{2013}')
+    })
+}
+
 /// Hand a link URL to the instance that owns it.
 ///
 /// Format (see API.md): `trellis://<port>/card/<id>` or `.../node/<id>`, with an
@@ -176,6 +228,18 @@ fn link_scheme(url: &str) -> Option<&'static str> {
 /// address because one instance serves one document — so a link names the port,
 /// not a file path, and `doc=` is a check rather than a lookup.
 ///
+/// Say that a link failed, somewhere the person who clicked it can see.
+///
+/// **`eprintln!` alone is a message to nobody here.** The desktop file launches
+/// this process with no terminal attached, so every diagnostic it prints goes
+/// straight to the void — which is why a link that answered `409` looked
+/// identical to one that worked, and identical to one that did nothing at all.
+/// A desktop notification is the one channel a launcher-spawned process
+/// reliably has.
+fn link_failed(msg: &str) {
+    let _ = crate::notify::send("Trellis link", msg);
+}
+
 /// Returns a process exit code: 0 opened it, 1 could not.
 fn follow_link(url: &str) -> i32 {
     let Some(scheme) = link_scheme(url) else {
@@ -191,17 +255,23 @@ fn follow_link(url: &str) -> i32 {
     let (port, kind, id) = match parts.as_slice() {
         [port, kind, id] => (*port, *kind, *id),
         _ => {
-            eprintln!("trellis: not a link I understand: {url}\n\
-                       expected {scheme}://<port>/card/<id> or {scheme}://<port>/node/<id>");
+            let m = format!("not a link I understand: {url}\nexpected \
+                             {scheme}://<port>/card/<id> or {scheme}://<port>/node/<id>");
+            eprintln!("trellis: {m}");
+            link_failed(&m);
             return 1;
         }
     };
     if !matches!(kind, "card" | "node") {
-        eprintln!("trellis: {kind} is not a link target — use card or node");
+        let m = format!("{kind} is not a link target — use card or node");
+        eprintln!("trellis: {m}");
+        link_failed(&m);
         return 1;
     }
     if port.parse::<u16>().is_err() || id.parse::<u64>().is_err() {
-        eprintln!("trellis: port and id must be numbers: {url}");
+        let m = format!("port and id must be numbers: {url}");
+        eprintln!("trellis: {m}");
+        link_failed(&m);
         return 1;
     }
     let q = query.map(|q| format!("?{q}")).unwrap_or_default();
@@ -213,10 +283,12 @@ fn follow_link(url: &str) -> i32 {
     let mut sock = match std::net::TcpStream::connect(&addr) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "trellis: nothing is serving port {port} ({e}).\n\
-                 Start the instance for that document first — the port is the document."
+            let m = format!(
+                "Nothing is serving port {port}.\nStart the instance for that document \
+                 first — the port is the document. ({e})"
             );
+            eprintln!("trellis: {m}");
+            link_failed(&m);
             return 1;
         }
     };
@@ -235,7 +307,9 @@ fn follow_link(url: &str) -> i32 {
         0
     } else {
         let body = resp.split("\r\n\r\n").nth(1).unwrap_or("").trim();
-        eprintln!("trellis: {} — {body}", if status.is_empty() { "no reply" } else { status });
+        let what = if status.is_empty() { "no reply" } else { status };
+        eprintln!("trellis: {what} — {body}");
+        link_failed(&format!("{what} — {body}"));
         1
     }
 }
@@ -369,6 +443,43 @@ mod tests {
         let a = args(&["-d", "sub/dir"]).unwrap();
         assert!(a.data_dir.as_ref().unwrap().is_absolute());
         assert!(a.data_dir.unwrap().ends_with("sub/dir"));
+    }
+
+    /// Links are clicked out of sentences, and a terminal hands over whatever
+    /// its URL detector decided the link was. Every form below was produced by
+    /// clicking a real link written in prose.
+    #[test]
+    fn a_link_survives_the_prose_around_it() {
+        let want = "trellis://7374/card/1609?doc=Personal.ron";
+        for raw in [
+            want,
+            "trellis://7374/card/1609?doc=Personal.ron.",   // end of sentence
+            "trellis://7374/card/1609?doc=Personal.ron,",   // list item
+            "trellis://7374/card/1609?doc=Personal.ron —",  // em dash after it
+            "trellis://7374/card/1609?doc=Personal.ron)",   // parenthetical
+            "<trellis://7374/card/1609?doc=Personal.ron>",  // RFC 3986 delimiters
+            "  trellis://7374/card/1609?doc=Personal.ron\n",
+        ] {
+            assert_eq!(clean_link_arg(raw), want, "cleaning {raw:?}");
+        }
+        // Every one of those must still be recognised as a link afterwards —
+        // the failure that mattered was `<…>` falling through to the argument
+        // parser, being taken for a file name, and opening a second instance.
+        for raw in ["<trellis://7374/card/1/>", "hypercube://7374/node/2."] {
+            assert!(link_scheme(clean_link_arg(raw)).is_some(), "{raw:?} should follow as a link");
+        }
+    }
+
+    /// The trimming must not eat characters that occur inside real links.
+    #[test]
+    fn cleaning_a_link_leaves_its_own_punctuation_alone() {
+        let u = "trellis://7374/card/9?doc=My-Notes_v2.ron";
+        assert_eq!(clean_link_arg(u), u);
+        // A `>` is only stripped when the link opened with `<`.
+        assert_eq!(clean_link_arg("trellis://7374/card/9"), "trellis://7374/card/9");
+        // Not a link of ours at all: left exactly as it came, so a file whose
+        // name happens to end in a full stop still opens.
+        assert_eq!(clean_link_arg("/home/me/notes.ron"), "/home/me/notes.ron");
     }
 
     #[test]
