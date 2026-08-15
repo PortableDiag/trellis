@@ -271,6 +271,12 @@ from the main cluster, and click or drag on it to jump there without zooming out
   expiry**, so a highlight fades on its own instead of accumulating until every
   card shouts. There is deliberately no flash: anything above about 3 Hz is a
   photosensitive-seizure risk, and a pulse never dims below 40%.
+- **Select several cards at once** — **Shift+drag a box** round them on the
+  canvas, then drag any one of them to move the whole set; **Esc** clears the
+  selection, and Ctrl+click still adds or removes one card at a time. A box takes
+  what it *touches* rather than only what it fully encloses, because a selection
+  box is drawn roughly and the card you clipped by three pixels is exactly the
+  one you meant. Plain drag still pans the canvas.
 - **Notifications** (Settings → Canvas → Notifications, both off by default) —
   a desktop notification when the document opens carrying what is **overdue or
   due today**, and one when an **agent changes something** while you are in

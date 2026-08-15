@@ -6,6 +6,29 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.107.0]
+
+### Added
+- **Shift+drag a box to select several cards**, then drag any one of them to move
+  the whole set; **Esc** clears it. Asked for in those words, and the last
+  unbuilt item on *Desired features*.
+
+  **Shift rather than a mode**, because a mode is a thing to remember to leave,
+  and plain drag has meant *pan* for the entire life of the canvas — so it still
+  does. **A box takes what it touches**, not only what it fully encloses: a
+  selection box is drawn roughly, and the card clipped by three pixels is exactly
+  the one you meant. A drag of a few pixels is treated as a click that wobbled,
+  so it cannot silently clear a selection you already had. Ctrl+click still adds
+  or removes one card at a time, and a marquee **replaces** the selection rather
+  than adding to it — it is a statement about what you want selected.
+
+  **What could not be verified by driving it, and why that is recorded rather
+  than glossed:** synthetic pointer input does not hold `primary_down` across
+  frames, so egui never sees a synthetic drag at all and the interaction cannot
+  be exercised from a script. The geometry — which cards a box takes, including
+  the grazing case and the empty-space case — is extracted into `cards_in` and
+  covered by a test; the drag gesture itself wants a human hand.
+
 ## [0.106.0]
 
 ### Added

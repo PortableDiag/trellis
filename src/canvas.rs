@@ -240,6 +240,8 @@ pub enum CanvasAction {
     OpenLightbox(CardId, usize),
     // Multi-select (runtime only; used to build a group).
     ToggleSelect(CardId),
+    /// Replace the selection with everything a marquee enclosed.
+    SelectCards(Vec<CardId>),
     ClearSelection,
     // Grouping.
     GroupSelected,
@@ -355,7 +357,52 @@ pub fn ui(
     // Alt+drag is the camera orbit, so it must not pan as well — otherwise the
     // two cancel out into a plain pan and depth looks like it does nothing.
     let orbiting = depth_mode && ui.input(|i| i.modifiers.alt);
-    if canvas_resp.dragged_by(egui::PointerButton::Primary) && !minimap_active && !orbiting {
+    // **Shift+drag is a selection box, not a pan.** Asked for directly: draw a
+    // rectangle round some cards, then drag them as one. Shift rather than a
+    // mode, because a mode is a thing to remember to leave — and plain drag has
+    // meant "pan" for the whole life of the canvas, so it keeps meaning that.
+    let marquee_id = ui.id().with("canvas_marquee");
+    let shift = ui.input(|i| i.modifiers.shift_only());
+    let mut marquee: Option<egui::Pos2> = ui.memory(|m| m.data.get_temp(marquee_id));
+    if canvas_resp.drag_started_by(egui::PointerButton::Primary) && shift && !minimap_active {
+        marquee = canvas_resp.interact_pointer_pos();
+        ui.memory_mut(|m| m.data.insert_temp(marquee_id, marquee.unwrap_or_default()));
+    }
+    let marquee_active = marquee.is_some()
+        && canvas_resp.dragged_by(egui::PointerButton::Primary)
+        && !minimap_active
+        && !orbiting;
+    if marquee_active {
+        // Drawn in screen space, tested in world space: the box is where the
+        // pointer is, and the cards are where the document says they are.
+        if let (Some(start), Some(now)) = (marquee, canvas_resp.interact_pointer_pos()) {
+            let box_screen = egui::Rect::from_two_pos(start, now);
+            let p = ui.painter_at(canvas_rect);
+            let accent = ui.visuals().selection.bg_fill;
+            p.rect_filled(box_screen, 2.0, accent.gamma_multiply(0.18));
+            p.rect_stroke(box_screen, 2.0, egui::Stroke::new(1.0, ui.visuals().selection.stroke.color));
+        }
+    }
+    if canvas_resp.drag_stopped_by(egui::PointerButton::Primary) {
+        if let (Some(start), Some(end)) = (marquee, ui.input(|i| i.pointer.latest_pos())) {
+            // The same mapping the cards are drawn through, built here because
+            // this runs before the draw pass defines it.
+            let map = TSTransform::from_translation(canvas_rect.min.to_vec2()) * *view;
+            let world = egui::Rect::from_two_pos(map.inverse() * start, map.inverse() * end);
+            // A drag of a few pixels is a click that wobbled, not a selection —
+            // and treating it as one would silently clear the selection you
+            // already had.
+            if world.width() * view.scaling > 4.0 || world.height() * view.scaling > 4.0 {
+                actions.push(CanvasAction::SelectCards(cards_in(node, world)));
+            }
+        }
+        ui.memory_mut(|m| m.data.remove::<egui::Pos2>(marquee_id));
+    }
+    if canvas_resp.dragged_by(egui::PointerButton::Primary)
+        && !minimap_active
+        && !orbiting
+        && !marquee_active
+    {
         view.translation += canvas_resp.drag_delta();
     }
 
@@ -1039,6 +1086,24 @@ pub const PULSE_PERIOD_S: f64 = 1.8;
 /// to read, and both are ways of losing a card that the user cannot easily undo.
 pub const Z_MIN: f32 = -1600.0;
 pub const Z_MAX: f32 = 1200.0;
+
+/// Which cards a selection box encloses.
+///
+/// **Touching counts.** A box drawn round a group is drawn roughly, and
+/// requiring full containment means the card you clipped by three pixels is the
+/// one that does not come with you — which reads as the feature being broken
+/// rather than as a rule. This is the same choice every canvas tool makes.
+///
+/// Extracted so it can be tested: the drag itself cannot be, because synthetic
+/// pointer input does not hold `primary_down` across frames and egui therefore
+/// never sees a drag at all.
+pub(crate) fn cards_in(node: &crate::model::Node, world: egui::Rect) -> Vec<CardId> {
+    node.cards
+        .iter()
+        .filter(|c| world.intersects(egui::Rect::from_min_size(c.pos, c.size)))
+        .map(|c| c.id)
+        .collect()
+}
 
 /// The world→screen transform for one card, given its depth.
 ///
@@ -4076,5 +4141,40 @@ mod tests {
         let mut kept = kept.unwrap();
         let _ = kept.kill();
         let _ = kept.wait();
+    }
+
+    /// A marquee takes what it touches, and leaves what it misses.
+    #[test]
+    fn a_selection_box_takes_what_it_touches() {
+        use crate::model::{CardKind, Document};
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Marquee".into());
+        let mut place = |x: f32, y: f32| {
+            let id = doc.add_card(n, egui::pos2(x, y), CardKind::Text).unwrap();
+            let c = doc.card_mut(n, id).unwrap();
+            c.size = egui::vec2(220.0, 120.0);
+            id
+        };
+        let tl = place(40.0, 40.0);
+        let tr = place(300.0, 40.0);
+        let bl = place(40.0, 200.0);
+        let br = place(300.0, 200.0);
+        let node = doc.nodes.get(&n).unwrap();
+
+        // The left column, boxed generously.
+        let left = super::cards_in(node, egui::Rect::from_min_max(
+            egui::pos2(20.0, 20.0), egui::pos2(280.0, 340.0)));
+        assert_eq!(left, vec![tl, bl], "the box is round the left column");
+
+        // Clipping a card by a few pixels still takes it: a box is drawn
+        // roughly, and demanding full containment makes it feel broken.
+        let grazed = super::cards_in(node, egui::Rect::from_min_max(
+            egui::pos2(20.0, 20.0), egui::pos2(305.0, 60.0)));
+        assert!(grazed.contains(&tr), "a grazed card comes along: {grazed:?}");
+        assert!(!grazed.contains(&br), "one nowhere near it does not");
+
+        // A box in empty space takes nothing rather than everything.
+        assert!(super::cards_in(node, egui::Rect::from_min_max(
+            egui::pos2(900.0, 900.0), egui::pos2(1000.0, 1000.0))).is_empty());
     }
 }

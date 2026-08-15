@@ -3726,7 +3726,9 @@ impl TrellisApp {
         Some(match a {
             // Pure view/clipboard/export, plus the template actions, which record
             // themselves where the library is actually touched.
-            CanvasAction::ResetView
+            // Selecting changes nothing in the document.
+            CanvasAction::SelectCards(_)
+            | CanvasAction::ResetView
             | CanvasAction::CopyCard(_)
             // Launching a plugin changes nothing by itself. Anything it does to
             // the document arrives over the API and is logged there, as `api`
@@ -4128,8 +4130,21 @@ impl TrellisApp {
                     self.doc.add_card(node, pos, kind);
                 }
                 CanvasAction::MoveCard(cid, delta) => {
-                    // Moves the card plus anything docked to it.
-                    self.doc.move_card_tree(node, cid, delta);
+                    // Dragging one card of a selection moves the whole
+                    // selection — which is the point of drawing a box round
+                    // them. Anything docked to each still travels with it.
+                    if self.card_sel.len() > 1
+                        && self.card_sel_node == Some(node)
+                        && self.card_sel.contains(&cid)
+                    {
+                        let ids: Vec<_> = self.card_sel.iter().copied().collect();
+                        for id in ids {
+                            self.doc.move_card_tree(node, id, delta);
+                        }
+                    } else {
+                        // Moves the card plus anything docked to it.
+                        self.doc.move_card_tree(node, cid, delta);
+                    }
                 }
                 CanvasAction::ResizeCard(cid, delta) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {
@@ -4404,6 +4419,18 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::ClearSelection => self.card_sel.clear(),
+                CanvasAction::SelectCards(ids) => {
+                    // Replace rather than add: a marquee is a statement about
+                    // what you want selected, not an increment. Shift is already
+                    // spent on drawing the box, and Ctrl+click still adds one.
+                    self.card_sel = ids.into_iter().collect();
+                    self.card_sel_node = Some(node);
+                    self.status = match self.card_sel.len() {
+                        0 => "Nothing in the box".to_string(),
+                        1 => "1 card selected".to_string(),
+                        n => format!("{n} cards selected — drag one to move them all"),
+                    };
+                }
                 CanvasAction::ToggleDockMode => self.dock_mode = !self.dock_mode,
                 CanvasAction::ToggleSnapMode => self.snap_mode = !self.snap_mode,
                 CanvasAction::ToggleDepthMode => self.depth_mode = !self.depth_mode,
@@ -8216,6 +8243,16 @@ impl eframe::App for TrellisApp {
         }
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::N)) {
             self.new_document();
+        }
+        // Escape clears a card selection — the way out of a marquee, asked for
+        // by name. Only when there is one to clear, and never while a text field
+        // has the keyboard, where Escape means "stop editing this".
+        if !self.card_sel.is_empty()
+            && !ctx.wants_keyboard_input()
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            self.card_sel.clear();
+            self.status = "Selection cleared".to_string();
         }
         // Undo/redo — but not while a text field is capturing the keyboard, so
         // egui's built-in in-field text undo keeps Ctrl+Z while you type in a card.
