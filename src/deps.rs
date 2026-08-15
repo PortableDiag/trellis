@@ -215,6 +215,24 @@ pub fn all() -> Vec<Dep> {
     ];
     if cfg!(target_os = "linux") {
         v.push(Dep {
+            id: "notify",
+            label: "notify-send",
+            bins: &["notify-send"],
+            enables: "Desktop notifications: what is due when the document opens, \
+                      and a nudge when an agent changes something while you are in \
+                      another window (Settings → Canvas → Notifications).",
+            url: "https://gitlab.gnome.org/GNOME/libnotify",
+            pkg: Pkg {
+                winget: "",
+                brew: "",
+                apt: "libnotify-bin",
+                dnf: "libnotify",
+                pacman: "libnotify",
+                zypper: "libnotify-tools",
+            },
+            builtin_here: false,
+        });
+        v.push(Dep {
             id: "clipboard",
             label: "xclip or xsel",
             bins: &["xclip", "xsel"],

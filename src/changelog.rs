@@ -250,6 +250,14 @@ impl ChangeLog {
 
     /// The oldest sequence still retained, so a client can see how far back it
     /// could catch up from before deciding to resync.
+    /// The newest `seq` recorded, or 0 when nothing has been.
+    ///
+    /// A reader that only wants "anything since I last looked" needs this to
+    /// mark its place without re-reading the entries it just handled.
+    pub fn newest(&self) -> Seq {
+        self.entries.back().map(|c| c.seq).unwrap_or(0)
+    }
+
     pub fn oldest(&self) -> Option<Seq> {
         self.entries.front().map(|c| c.seq)
     }

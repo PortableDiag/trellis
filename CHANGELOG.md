@@ -6,6 +6,33 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.106.0]
+
+### Added
+- **Desktop notifications**, in Settings → Canvas → Notifications and off by
+  default: what is **overdue or due today** when the document opens, and a nudge
+  when an **agent changes something** while you are in another window.
+
+  **Why this exists next to the Telegram plugin rather than instead of it.** The
+  distinction is the operator's and it is the right one: a desktop notification
+  is **dismissible**, a message is not. Swipe one away and it is gone; a Telegram
+  message sits in a list until it is dealt with. So the two answer different
+  questions — *this just happened, look now* versus *this is outstanding and will
+  still be outstanding later* — and neither replaces the other.
+
+  Three rules keep it worth leaving on. **Nothing while the window has focus**:
+  an agent's edit is already on the canvas, and announcing what you can see is
+  how a notifier teaches you to ignore it. **An empty digest is not sent** — a
+  notifier that reports "nothing is due" is one you learn to skip. **One
+  notification per batch**, because an agent writing a basket makes twenty change
+  entries and twenty popups is an attack.
+
+  Linux goes through `notify-send`, which joins the optional-tools list
+  (Tools → Requirements…) rather than becoming a hard dependency; macOS uses
+  `osascript` and Windows the built-in toast API. The honest limit is stated in
+  the Settings panel: **nothing fires while Trellis is closed**, because a
+  desktop app is not a service.
+
 ## [0.105.0]
 
 ### Added

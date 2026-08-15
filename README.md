@@ -271,6 +271,20 @@ from the main cluster, and click or drag on it to jump there without zooming out
   expiry**, so a highlight fades on its own instead of accumulating until every
   card shouts. There is deliberately no flash: anything above about 3 Hz is a
   photosensitive-seizure risk, and a pulse never dims below 40%.
+- **Notifications** (Settings → Canvas → Notifications, both off by default) —
+  a desktop notification when the document opens carrying what is **overdue or
+  due today**, and one when an **agent changes something** while you are in
+  another window. Two rules make them worth leaving on: nothing is sent while
+  this window has **focus** (an edit you can see does not need announcing), and
+  an empty digest is not sent at all (a notifier that says *nothing is due*
+  teaches you to ignore the next one). One notification per batch, not one per
+  card.
+
+  **They are the immediate half, not the durable half.** A notification is
+  dismissible and local — it says *this just happened, look now*. It cannot
+  reach you with Trellis closed, because a desktop app is not a service. For
+  something that waits in a list until it is dealt with, the **notify plugin**
+  sends the same digest to Telegram.
 - **Zoom** the whole UI (Ctrl+`+` / Ctrl+`-` / Ctrl+`0`)
 - **Agent API** — a key-gated HTTP API (localhost by default; opt-in **LAN
   access** in Settings for phones/other devices) with full parity to the app:
@@ -498,6 +512,7 @@ ask for.
 | `gpg` | Encrypted backups (AES-256) |
 | `rclone` | Cloud backup destinations (S3, Drive, Dropbox, B2…) |
 | `scp` | SFTP backup destinations — ships with macOS, Linux and Windows 10+ |
+| `notify-send` | Linux only: desktop notifications (macOS and Windows use the notifier built into the OS) |
 | `xclip` / `xsel` | Linux only: middle-click paste and the X11 primary selection |
 | `maim` / `scrot` / `spectacle` / … | Linux only: **Snip to card**. macOS and Windows use the region capture built into the OS |
 

@@ -102,6 +102,11 @@ const BACKLINKS_OPEN_KEY: &str = "backlinks_open";
 const DEPTH_MODE_KEY: &str = "depth_mode";
 const TIME_MODE_KEY: &str = "time_mode";
 const MINIMAP_KEY: &str = "minimap";
+/// Desktop notifications. Off by default: an app that starts popping up
+/// system-wide the first time you run it has taken a decision that was not its
+/// to take.
+const NOTIFY_DIGEST_KEY: &str = "notify_digest";
+const NOTIFY_AGENT_KEY: &str = "notify_agent";
 /// Journal root for daily notes. Absent = the feature is off, which is the
 /// default and the whole point: a dated node must never appear unasked.
 const DAILY_ROOT_KEY: &str = "daily_root";
@@ -1151,6 +1156,14 @@ pub struct TrellisApp {
     /// thread, which serves `/api/changes`. In memory only — see changelog.rs
     /// for why it deliberately isn't part of the document.
     changes: Arc<Mutex<crate::changelog::ChangeLog>>,
+    /// Notify on startup with what is due, and when an agent edits.
+    notify_digest: bool,
+    notify_agent: bool,
+    /// The change-log seq already reported, so one edit is announced once.
+    notified_seq: crate::changelog::Seq,
+    /// Set once the startup digest has been considered — it fires once per run,
+    /// not once per frame.
+    digest_done: bool,
     /// Tokens minted for approved plugins, shared with the API thread so it can
     /// authenticate them. Persisted in config, so approval survives a restart
     /// and revoking is real rather than cosmetic.
@@ -1345,6 +1358,18 @@ impl TrellisApp {
             .and_then(|s| s.get_string(MINIMAP_KEY))
             .map(|s| s != "false")
             .unwrap_or(true);
+        // Both default to OFF. Notifications are a decision about the whole
+        // desktop, not about this window, so they are opted into.
+        let notify_digest = cc
+            .storage
+            .and_then(|s| s.get_string(NOTIFY_DIGEST_KEY))
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let notify_agent = cc
+            .storage
+            .and_then(|s| s.get_string(NOTIFY_AGENT_KEY))
+            .map(|s| s == "true")
+            .unwrap_or(false);
         let theme = cc
             .storage
             .and_then(|s| s.get_string(THEME_KEY))
@@ -1560,6 +1585,10 @@ impl TrellisApp {
             theme,
             zoom_enabled,
             minimap_enabled,
+            notify_digest,
+            notify_agent,
+            notified_seq: 0,
+            digest_done: false,
             daily_root: cc
                 .storage
                 .and_then(|st| st.get_string(DAILY_ROOT_KEY))
@@ -2383,6 +2412,86 @@ impl TrellisApp {
             .filter(|(_, p)| p.manifest.triggers.contains(&t) && self.is_approved(&p.manifest.name))
             .map(|(i, p)| (i, p.manifest.title.clone()))
             .collect()
+    }
+
+    /// Desktop notifications: the startup digest, and agent edits as they land.
+    ///
+    /// **Only while the window is unfocused.** If you are looking at Trellis, an
+    /// agent's edit is already on the canvas — a popup would be telling you what
+    /// you can see, which is how a notifier teaches you to ignore it.
+    ///
+    /// **And only while Trellis is running.** A desktop app is not a service.
+    /// That is the honest limit of this channel and it is stated in Settings
+    /// rather than left to be discovered; a Telegram message is the answer when
+    /// something has to reach you with the app closed.
+    fn pump_notifications(&mut self, ctx: &egui::Context) {
+        if !self.notify_digest && !self.notify_agent {
+            return;
+        }
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+
+        // The digest, once per run. Deliberately at startup rather than on a
+        // timer: a desktop app can only tell you things while it is open, so the
+        // moment it opens is the one moment it is certain to be able to.
+        if self.notify_digest && !self.digest_done {
+            self.digest_done = true;
+            if let Some((summary, body)) =
+                crate::notify::digest(&self.doc, crate::api::today_days())
+            {
+                crate::notify::send(&summary, &body);
+            }
+        }
+
+        if !self.notify_agent || focused {
+            // Keep the cursor moving while focused, or every edit made while you
+            // were looking would be announced the moment you switched away.
+            if focused {
+                if let Ok(log) = self.changes.lock() {
+                    self.notified_seq = log.newest();
+                }
+            }
+            return;
+        }
+
+        let fresh: Vec<(String, String)> = match self.changes.lock() {
+            Ok(log) => {
+                let (entries, _) = log.since(self.notified_seq, 64);
+                self.notified_seq = log.newest();
+                entries
+                    .iter()
+                    // `api` and not `ui`: the point is work that arrived while
+                    // you were elsewhere. Your own edits are not news.
+                    .filter(|c| c.actor == crate::changelog::Actor::Api)
+                    .map(|c| {
+                        (
+                            format!("{:?} {:?}", c.entity, c.op),
+                            c.title.clone().unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            }
+            Err(_) => return,
+        };
+        if fresh.is_empty() {
+            return;
+        }
+        // One notification for the batch, not one per change: an agent writing a
+        // basket makes twenty entries, and twenty popups is an attack.
+        let summary = if fresh.len() == 1 {
+            "Trellis — an agent changed a card".to_string()
+        } else {
+            format!("Trellis — an agent made {} changes", fresh.len())
+        };
+        let body = crate::notify::elide(
+            &fresh
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(", "),
+            120,
+        );
+        crate::notify::send(&summary, &body);
     }
 
     fn pump_api(&mut self) {
@@ -6433,6 +6542,44 @@ impl TrellisApp {
                          your current view. Click or drag on it to jump the view. Spot cards that \
                          sit outside the main cluster without zooming out.",
                     );
+                ui.separator();
+                ui.label(egui::RichText::new("Notifications").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "Desktop notifications, from this instance, about this document. \
+                         They only fire while Trellis is running — a desktop app is not a \
+                         service — and never while this window has focus, because an edit \
+                         you can see does not need announcing. For something that reaches \
+                         you with Trellis closed, and that waits to be dealt with rather \
+                         than being swiped away, use the Telegram plugin.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.checkbox(&mut self.notify_digest, "On startup: what is overdue or due today")
+                    .on_hover_text(
+                        "Sent once when the document opens, and only when there is something \
+                         to say. A notifier that reports \"nothing due\" is one you learn to \
+                         ignore.",
+                    );
+                ui.checkbox(&mut self.notify_agent, "When an agent changes something")
+                    .on_hover_text(
+                        "Changes that arrive over the API while you are in another window. \
+                         One notification per batch, not one per card.",
+                    );
+                if !cfg!(target_os = "linux") || crate::deps::which("notify-send").is_some() {
+                    // Nothing to say: the tool is there.
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "notify-send is not installed, so nothing can be delivered — \
+                             Tools → Requirements… installs it.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
+                ui.separator();
                 ui.checkbox(&mut self.dock_mode, "Dock mode (drag a card onto another to stick it)")
                     .on_hover_text(
                         "When on, dropping a card on another docks them so they move together; \
@@ -7982,6 +8129,8 @@ impl eframe::App for TrellisApp {
         self.pump_sources(false);
         self.pump_snip();
 
+        self.pump_notifications(ctx);
+
         // Apply finished background saves.
         self.pump_save();
 
@@ -8417,6 +8566,8 @@ impl eframe::App for TrellisApp {
             self.url_scheme_registered.clone().unwrap_or_default(),
         );
         storage.set_string(MINIMAP_KEY, self.minimap_enabled.to_string());
+        storage.set_string(NOTIFY_DIGEST_KEY, self.notify_digest.to_string());
+        storage.set_string(NOTIFY_AGENT_KEY, self.notify_agent.to_string());
         // Absent rather than "0" when off: a stored root that points at nothing
         // would be indistinguishable from a deleted journal.
         storage.set_string(
