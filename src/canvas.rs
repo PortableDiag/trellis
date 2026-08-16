@@ -46,6 +46,13 @@ pub struct Env<'a> {
     /// Card to flash-highlight, and the `ui.input().time` at which the flash ends.
     pub highlight_card: Option<CardId>,
     pub highlight_until: f64,
+    /// One-shot request to recenter on a whole group — a `[[#g…]]` link or a
+    /// Ctrl+O group row. Centres on the members' bounding box, because a group
+    /// is the box, not any one card in it.
+    pub focus_group: Option<GroupId>,
+    /// Group container to flash-highlight, sharing `highlight_until` with the
+    /// card flash — only one reveal is ever in flight.
+    pub highlight_group: Option<GroupId>,
     /// Draw the bottom-right minimap (overview of the basket + a view reticle).
     pub minimap: bool,
     /// Theme-driven card look (Normal / Sticky / Futuristic).
@@ -460,6 +467,23 @@ pub fn ui(
             let world_center = c.pos + c.size * 0.5;
             view.translation = (canvas_rect.center() - canvas_rect.min)
                 - view.scaling * world_center.to_vec2();
+        }
+    }
+
+    // Same one-shot for a group: centre on the union of its members, so the
+    // whole box lands in view rather than whichever card happens to be first.
+    if let Some(gid) = env.focus_group {
+        let mut bounds: Option<egui::Rect> = None;
+        for c in node.cards.iter().filter(|c| c.group == Some(gid)) {
+            let wr = egui::Rect::from_min_size(c.pos, c.size);
+            bounds = Some(match bounds {
+                Some(b) => b.union(wr),
+                None => wr,
+            });
+        }
+        if let Some(b) = bounds {
+            view.translation = (canvas_rect.center() - canvas_rect.min)
+                - view.scaling * b.center().to_vec2();
         }
     }
 
@@ -897,6 +921,28 @@ pub fn ui(
                     ),
                 );
                 ui.ctx().request_repaint(); // keep animating the fade
+            }
+        }
+    }
+
+    // The same flash for a group container, drawn around the box rather than a
+    // card, so following `[[#g…]]` shows you the group you asked for and not
+    // just the basket it happens to live in.
+    if let Some(hid) = env.highlight_group {
+        let now = ui.input(|i| i.time);
+        if now < env.highlight_until {
+            if let Some(wb) = gbounds.get(&hid) {
+                let frac = ((env.highlight_until - now) / HIGHLIGHT_SECS).clamp(0.0, 1.0) as f32;
+                let alpha = (frac * 255.0) as u8;
+                ui.painter_at(canvas_rect).rect_stroke(
+                    to_screen.mul_rect(wb.expand(10.0)).expand(4.0 * zoom),
+                    6.0 * zoom,
+                    egui::Stroke::new(
+                        3.0,
+                        egui::Color32::from_rgba_unmultiplied(0xff, 0xd1, 0x66, alpha),
+                    ),
+                );
+                ui.ctx().request_repaint();
             }
         }
     }
@@ -2452,6 +2498,10 @@ fn card_menu(
     // Copy the card's id or its breadcrumb path so you can point an agent at
     // this exact card (`/api/nodes/{node}/cards/{id}`).
     ui.menu_button("Copy", |ui| {
+        if ui.button("Card link  [[#…]]").clicked() {
+            copy_both(ui, &format!("[[#{}]]", card.id));
+            ui.close_menu();
+        }
         if ui.button("Card id").clicked() {
             copy_both(ui, &card.id.to_string());
             ui.close_menu();
@@ -2537,7 +2587,8 @@ fn card_menu(
     }
 }
 
-/// Context menu for a group's header: rename, recolor, or ungroup.
+/// Context menu for a group's header: rename, recolor, copy its address, or
+/// ungroup.
 fn group_menu(ui: &mut egui::Ui, group: &CardGroup, actions: &mut Vec<CanvasAction>) {
     ui.horizontal(|ui| {
         ui.label("Name:");
@@ -2549,6 +2600,18 @@ fn group_menu(ui: &mut egui::Ui, group: &CardGroup, actions: &mut Vec<CanvasActi
     ui.menu_button("Color", |ui| {
         if let Some(col) = swatch_grid(ui) {
             actions.push(CanvasAction::SetGroupColor(group.id, col));
+            ui.close_menu();
+        }
+    });
+    // A group's id was previously visible nowhere, so the only way to point
+    // anyone at one was to name a card inside it.
+    ui.menu_button("Copy", |ui| {
+        if ui.button("Group link  [[#g…]]").clicked() {
+            copy_both(ui, &format!("[[#g{}]]", group.id));
+            ui.close_menu();
+        }
+        if ui.button("Group id").clicked() {
+            copy_both(ui, &group.id.to_string());
             ui.close_menu();
         }
     });

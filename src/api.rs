@@ -96,6 +96,17 @@ pub enum ApiRequest {
     CreateGroup { node: NodeId, cards: Vec<u64>, title: Option<String> },
     UpdateGroup { node: NodeId, group: GroupId, title: Option<String>, color: Option<[u8; 3]> },
     DeleteGroup { node: NodeId, group: GroupId },
+    /// One group from its id alone, without already knowing its basket — the
+    /// counterpart of [`LocateCard`]. Group ids come from one document-wide
+    /// counter, so an id is a complete address.
+    LocateGroup(GroupId),
+    /// Move a whole group — container and members — to another basket. Moving
+    /// the members one at a time cannot do this: group membership is
+    /// basket-local, so each card arrives ungrouped and the group's id, the
+    /// thing a `[[#g…]]` link points at, is lost.
+    MoveGroup { node: NodeId, group: GroupId, to: NodeId, pos: Option<[f32; 2]> },
+    /// Cards whose `[[#g…]]` links point at one group.
+    GroupBacklinks(GroupId),
     // Docking.
     DockCard { node: NodeId, card: u64, anchor: u64 },
     DetachCard { node: NodeId, card: u64 },
@@ -170,11 +181,38 @@ pub enum ApiRequest {
     /// window and answers ok/not-found, never document content, because a link
     /// has to be clickable from a terminal or a browser and anything that
     /// returned data would let a web page read notes by walking ids.
-    Open { node: bool, id: u64, doc: Option<String> },
+    Open { kind: OpenKind, id: u64, doc: Option<String> },
     /// `GET /api/cards/{cid}/link` — the canonical URL for a card, so an agent
     /// never builds one by hand. Hand-built identifiers are how the work journal
     /// grew three spellings of the same day.
     CardLink(u64),
+    /// `GET /api/groups/{gid}/link` — the canonical URL for a group, minted the
+    /// same way and for the same reason as [`CardLink`].
+    GroupLink(u64),
+}
+
+/// `POST /api/nodes/{id}/groups/{gid}/move` — the destination basket, and
+/// optionally where the group's top-left corner should land in it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveGroupInput {
+    /// The basket to move the group into.
+    node: NodeId,
+    /// Top-left corner in the destination. Every member moves by the same
+    /// delta, so the arrangement inside the group survives.
+    #[serde(default)]
+    pos: Option<[f32; 2]>,
+}
+
+/// What a `trellis://` link (and its `/open/…` HTTP twin) names.
+///
+/// A bool distinguished the first two; a third kind needs a name, and naming
+/// them makes the route table read as the link format does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenKind {
+    Node,
+    Card,
+    Group,
 }
 
 /// Which card a request asked to size to its content, if any.
@@ -237,6 +275,7 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::GetImage { node, .. }
         | ApiRequest::CreateGroup { node, .. }
         | ApiRequest::UpdateGroup { node, .. }
+        | ApiRequest::MoveGroup { node, .. }
         | ApiRequest::DeleteGroup { node, .. } => Some(*node),
         ApiRequest::CreateNode { parent, .. } => *parent,
         _ => None,
@@ -410,6 +449,12 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
             c
         }
         ApiRequest::DeleteGroup { node, group } => ch(E::Group, Op::Deleted, *group).in_node(*node),
+        // Reported against the basket it came *from*, with the destination as a
+        // field — the same shape as a cross-basket card move, so a client that
+        // knows to refresh both ends already handles this one.
+        ApiRequest::MoveGroup { node, group, to, .. } => {
+            ch(E::Group, Op::Moved, *group).in_node(*node).field(&format!("node={to}"))
+        }
 
         // Reads change nothing; app-intercepted routes log where they're handled.
         _ => return None,
@@ -474,6 +519,50 @@ impl MoveCardInput {
     /// The basket a card is being moved *to*, when this is a cross-basket move.
     pub fn target_node(&self) -> Option<NodeId> {
         self.node
+    }
+}
+
+impl MoveNodeInput {
+    /// Where this move would put the node, when it changes parent. `before`/
+    /// `after` adopt the sibling's parent, which only the tree can resolve.
+    pub fn destination(&self) -> Option<MoveDest> {
+        if let Some(p) = self.parent {
+            return Some(MoveDest::Parent(p));
+        }
+        if let Some(sib) = self.before.or(self.after) {
+            return Some(MoveDest::Sibling(sib));
+        }
+        None
+    }
+}
+
+/// Where a request is trying to put something, when that is somewhere other
+/// than where it already is.
+///
+/// A subtree-scoped token is checked against the node a request *names*
+/// ([`target_node`]), which for a move is where the thing is coming **from**.
+/// That alone lets a confined token move its own card or basket out into the
+/// rest of the document — a write outside the scope, reached by relocating
+/// something inside it. The destination is resolved separately because
+/// `before`/`after` name a sibling, and only the tree knows its parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveDest {
+    /// A basket a card or group is being moved into.
+    Basket(NodeId),
+    /// A node's new parent; `None` is the top level.
+    Parent(Option<NodeId>),
+    /// A node whose parent this move will adopt.
+    Sibling(NodeId),
+}
+
+/// The destination of a move request, if it has one. `None` means the request
+/// cannot relocate anything outside where it already is.
+pub fn move_destination(req: &ApiRequest) -> Option<MoveDest> {
+    match req {
+        ApiRequest::MoveCard { mv, .. } => mv.target_node().map(MoveDest::Basket),
+        ApiRequest::MoveGroup { to, .. } => Some(MoveDest::Basket(*to)),
+        ApiRequest::MoveNode { mv, .. } => mv.destination(),
+        _ => None,
     }
 }
 
@@ -1140,14 +1229,20 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         // Deliberately outside /api: this is a link target, not part of the
         // agent surface, and it is the one route that answers without a key.
         (Method::Get, ["api", "cards", cid, "link"]) => Ok(ApiRequest::CardLink(pid(cid)?)),
+        (Method::Get, ["api", "groups", gid, "link"]) => Ok(ApiRequest::GroupLink(pid(gid)?)),
         (Method::Get, ["open", "card", cid]) => Ok(ApiRequest::Open {
-            node: false,
+            kind: OpenKind::Card,
             id: pid(cid)?,
             doc: query_get(query, "doc"),
         }),
         (Method::Get, ["open", "node", id]) => Ok(ApiRequest::Open {
-            node: true,
+            kind: OpenKind::Node,
             id: pid(id)?,
+            doc: query_get(query, "doc"),
+        }),
+        (Method::Get, ["open", "group", gid]) => Ok(ApiRequest::Open {
+            kind: OpenKind::Group,
+            id: pid(gid)?,
             doc: query_get(query, "doc"),
         }),
         (Method::Get, ["api", "tree"]) => Ok(ApiRequest::Tree),
@@ -1181,6 +1276,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Get, ["api", "cards", cid, "backlinks"]) => Ok(ApiRequest::CardBacklinks(pid(cid)?)),
         (Method::Get, ["api", "cards", cid]) => Ok(ApiRequest::LocateCard(pid(cid)?)),
+        (Method::Get, ["api", "groups", gid, "backlinks"]) => {
+            Ok(ApiRequest::GroupBacklinks(pid(gid)?))
+        }
+        (Method::Get, ["api", "groups", gid]) => Ok(ApiRequest::LocateGroup(pid(gid)?)),
         // POST, not GET: it creates the node when it isn't there yet.
         (Method::Get, ["api", "daily"]) => Ok(ApiRequest::DailyConfig),
         (Method::Post, ["api", "daily", "root"]) => {
@@ -1316,6 +1415,15 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Patch, ["api", "nodes", nid, "groups", gid]) => {
             let i: UpdateGroupInput = parse(body)?;
             Ok(ApiRequest::UpdateGroup { node: pid(nid)?, group: pid(gid)?, title: i.title, color: i.color })
+        }
+        (Method::Post, ["api", "nodes", nid, "groups", gid, "move"]) => {
+            let i: MoveGroupInput = parse(body)?;
+            Ok(ApiRequest::MoveGroup {
+                node: pid(nid)?,
+                group: pid(gid)?,
+                to: i.node,
+                pos: i.pos,
+            })
         }
         (Method::Delete, ["api", "nodes", nid, "groups", gid]) => {
             Ok(ApiRequest::DeleteGroup { node: pid(nid)?, group: pid(gid)? })
@@ -2269,6 +2377,77 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 (false, ApiResponse::err(404, "card not found"))
             }
         }
+        // The basket rides along for the same reason it does on LocateCard:
+        // every route that edits a group is still /nodes/{node}/groups/{gid},
+        // so an id alone finds it but cannot change it.
+        ApiRequest::LocateGroup(group) => match doc.locate_group(group) {
+            Some(node) => {
+                let n = match doc.nodes.get(&node) {
+                    Some(n) => n,
+                    None => return (false, ApiResponse::err(404, "group not found")),
+                };
+                let g = match n.groups.iter().find(|g| g.id == group) {
+                    Some(g) => g,
+                    None => return (false, ApiResponse::err(404, "group not found")),
+                };
+                let cards: Vec<u64> =
+                    n.cards.iter().filter(|c| c.group == Some(group)).map(|c| c.id).collect();
+                (
+                    false,
+                    ApiResponse::ok(json!({
+                        "node": node,
+                        "node_title": n.title.clone(),
+                        "node_path": doc.node_path(node),
+                        "group": {
+                            "id": g.id,
+                            "title": g.title,
+                            "color": g.color,
+                            "cards": cards,
+                        },
+                    })),
+                )
+            }
+            None => (false, ApiResponse::err(404, "group not found")),
+        },
+        ApiRequest::GroupBacklinks(group) => match doc.locate_group(group) {
+            Some(node) => {
+                let hits: Vec<Value> = doc
+                    .backlinks_group(group)
+                    .into_iter()
+                    .map(|h| json!({
+                        "node": h.node,
+                        "card": h.card,
+                        "node_title": h.node_title,
+                        "node_path": doc.node_path(h.node),
+                        "snippet": h.snippet,
+                    }))
+                    .collect();
+                (false, ApiResponse::ok(json!({ "group": group, "node": node, "hits": hits })))
+            }
+            None => (false, ApiResponse::err(404, "group not found")),
+        },
+        ApiRequest::MoveGroup { node, group, to, pos } => {
+            if !doc.nodes.contains_key(&node) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            if !doc.nodes.contains_key(&to) {
+                return (false, ApiResponse::err(404, "destination node not found"));
+            }
+            if !group_exists(doc, node, group) {
+                return (false, ApiResponse::err(404, "group not found"));
+            }
+            if node == to {
+                return (false, ApiResponse::err(400, "group is already in that node"));
+            }
+            let at = pos.map(|p| egui::pos2(p[0], p[1]));
+            match doc.move_group_to_node(node, group, to, at) {
+                Some(moved) => (
+                    true,
+                    ApiResponse::ok(json!({ "group": group, "node": to, "moved": moved })),
+                ),
+                None => (false, ApiResponse::err(404, "group not found")),
+            }
+        }
         ApiRequest::ListGroups(node) => match doc.nodes.get(&node) {
             Some(n) => (false, ApiResponse::ok(json!({ "groups": groups_json(n) }))),
             None => (false, ApiResponse::err(404, "node not found")),
@@ -2775,6 +2954,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::TemplateDelete(_)
         | ApiRequest::Open { .. }
         | ApiRequest::CardLink(_)
+        | ApiRequest::GroupLink(_)
         | ApiRequest::DailyNote { .. }
         | ApiRequest::DailyConfig
         | ApiRequest::SetDailyRoot(_) => {
@@ -3667,6 +3847,31 @@ mod tests {
             route(&Method::Get, "/api/nodes/5/cards/9", "", "").unwrap(),
             ApiRequest::GetCard { node: 5, card: 9 }
         ));
+        // The group routes mirror the card ones exactly, and the more specific
+        // paths must not be shadowed by the bare-id lookup below them.
+        assert!(matches!(
+            route(&Method::Get, "/api/groups/9", "", "").unwrap(),
+            ApiRequest::LocateGroup(9)
+        ));
+        assert!(matches!(
+            route(&Method::Get, "/api/groups/9/backlinks", "", "").unwrap(),
+            ApiRequest::GroupBacklinks(9)
+        ));
+        assert!(matches!(
+            route(&Method::Get, "/api/groups/9/link", "", "").unwrap(),
+            ApiRequest::GroupLink(9)
+        ));
+        assert!(matches!(
+            route(&Method::Post, "/api/nodes/5/groups/9/move", "", "{\"node\":7}").unwrap(),
+            ApiRequest::MoveGroup { node: 5, group: 9, to: 7, pos: None }
+        ));
+        // Strict input, like every other route: a misspelt field is a 400 that
+        // names it, not a silent default.
+        assert!(route(&Method::Post, "/api/nodes/5/groups/9/move", "", "{\"nodes\":7}").is_err());
+        assert!(matches!(
+            route(&Method::Get, "/open/group/9", "", "").unwrap(),
+            ApiRequest::Open { kind: OpenKind::Group, id: 9, .. }
+        ));
         // The by-id lookup is its own top-level route: no node in the path,
         // because not knowing the node is the entire reason to call it.
         assert!(matches!(
@@ -4388,6 +4593,124 @@ mod tests {
         let (dirty, resp) = process(&mut doc, ApiRequest::Autosort(nid));
         assert!(dirty);
         assert_eq!(resp.status, 200);
+    }
+
+    /// The point of the whole feature: a group survives a basket change with
+    /// its id, so a `[[#g…]]` link written before the move still lands.
+    #[test]
+    fn a_group_moves_between_baskets_over_the_api() {
+        let mut doc = Document::empty();
+        let from = doc.add_node(None, "from".into());
+        let to = doc.add_node(None, "to".into());
+        let a = doc.add_card(from, egui::pos2(40.0, 60.0), CardKind::Text).unwrap();
+        let b = doc.add_card(from, egui::pos2(40.0, 200.0), CardKind::Text).unwrap();
+        let g = doc.group_cards(from, &[a, b], "design".into()).unwrap();
+
+        let (dirty, resp) = process(
+            &mut doc,
+            ApiRequest::MoveGroup { node: from, group: g, to, pos: Some([10.0, 10.0]) },
+        );
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        let got: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(got["moved"], 2);
+        assert_eq!(got["node"], to);
+        assert_eq!(doc.locate_group(g), Some(to));
+
+        // Reads by id alone now answer from the new basket.
+        let (_d, resp) = process(&mut doc, ApiRequest::LocateGroup(g));
+        assert_eq!(resp.status, 200);
+        let got: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(got["node"], to);
+        assert_eq!(got["group"]["title"], "design");
+        assert_eq!(got["group"]["cards"].as_array().unwrap().len(), 2);
+
+        // Every failure mode is named rather than silently doing nothing.
+        let (_d, resp) =
+            process(&mut doc, ApiRequest::MoveGroup { node: to, group: g, to, pos: None });
+        assert_eq!(resp.status, 400, "moving a group into its own basket");
+        let (_d, resp) =
+            process(&mut doc, ApiRequest::MoveGroup { node: to, group: g, to: 999, pos: None });
+        assert_eq!(resp.status, 404, "unknown destination");
+        let (_d, resp) =
+            process(&mut doc, ApiRequest::MoveGroup { node: to, group: 999, to: from, pos: None });
+        assert_eq!(resp.status, 404, "unknown group");
+        let (_d, resp) = process(&mut doc, ApiRequest::LocateGroup(999));
+        assert_eq!(resp.status, 404);
+    }
+
+    #[test]
+    fn group_backlinks_over_the_api() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let a = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let g = doc.group_cards(n, &[a, b], "pair".into()).unwrap();
+        let p = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, p).unwrap().body = format!("see [[#g{g}]]");
+
+        let (dirty, resp) = process(&mut doc, ApiRequest::GroupBacklinks(g));
+        assert!(!dirty, "a backlinks read must not dirty the document");
+        assert_eq!(resp.status, 200);
+        let got: Value = serde_json::from_str(&resp.body).unwrap();
+        let hits = got["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["card"], p);
+        let (_d, resp) = process(&mut doc, ApiRequest::GroupBacklinks(999));
+        assert_eq!(resp.status, 404);
+    }
+
+    /// A subtree-scoped token is checked against the node a request *names*,
+    /// which for a move is where the thing is coming **from**. Without a check
+    /// at the far end, a confined token could carry its own card, group or
+    /// basket out into the rest of the document.
+    #[test]
+    fn a_move_declares_its_destination_for_the_scope_check() {
+        // Cross-basket card move.
+        let mv: MoveCardInput = serde_json::from_str(r#"{"node":42}"#).unwrap();
+        assert_eq!(
+            move_destination(&ApiRequest::MoveCard { node: 1, card: 2, mv }),
+            Some(MoveDest::Basket(42))
+        );
+        // Reordering inside one basket relocates nothing.
+        let mv: MoveCardInput = serde_json::from_str(r#"{"to":"front"}"#).unwrap();
+        assert_eq!(move_destination(&ApiRequest::MoveCard { node: 1, card: 2, mv }), None);
+
+        assert_eq!(
+            move_destination(&ApiRequest::MoveGroup { node: 1, group: 2, to: 42, pos: None }),
+            Some(MoveDest::Basket(42))
+        );
+
+        // A node reparent, in all three forms it can be written.
+        let mv: MoveNodeInput = serde_json::from_str(r#"{"parent":42,"to":"bottom"}"#).unwrap();
+        assert_eq!(
+            move_destination(&ApiRequest::MoveNode { id: 1, mv }),
+            Some(MoveDest::Parent(Some(42)))
+        );
+        let mv: MoveNodeInput = serde_json::from_str(r#"{"parent":null,"to":"bottom"}"#).unwrap();
+        assert_eq!(
+            move_destination(&ApiRequest::MoveNode { id: 1, mv }),
+            Some(MoveDest::Parent(None)),
+            "the top level is a destination too, and it is outside every subtree"
+        );
+        let mv: MoveNodeInput = serde_json::from_str(r#"{"before":42}"#).unwrap();
+        assert_eq!(
+            move_destination(&ApiRequest::MoveNode { id: 1, mv }),
+            Some(MoveDest::Sibling(42)),
+            "before/after adopt the sibling's parent, which only the tree knows"
+        );
+        // A pure reorder among current siblings names no new home.
+        let mv: MoveNodeInput = serde_json::from_str(r#"{"index":3}"#).unwrap();
+        assert_eq!(move_destination(&ApiRequest::MoveNode { id: 1, mv }), None);
+
+        // Anything that cannot relocate is None, so the check waves it through.
+        assert_eq!(move_destination(&ApiRequest::LocateCard(1)), None);
+        // The group move still declares its source, so the near end is checked
+        // by the ordinary path.
+        assert_eq!(
+            target_node(&ApiRequest::MoveGroup { node: 7, group: 2, to: 42, pos: None }),
+            Some(7)
+        );
     }
 
     #[test]

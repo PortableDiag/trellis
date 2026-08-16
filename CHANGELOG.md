@@ -6,6 +6,59 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.111.0]
+
+### Added
+- **A group can be linked to, and moved.** `[[#g146]]` names a group the way
+  `[[#1391]]` names a card. Following one centres the canvas on the container
+  and flashes it.
+
+  **The gap was specific.** A group already had an id — from the same kind of
+  document-wide counter that gives cards theirs — and nothing could read it.
+  There was no link form, no `GET` that took one, no Ctrl+O row, and the id
+  appeared nowhere in the app. So the only way to point anyone at a group was to
+  name a card **inside** it, which says *somewhere near here* rather than naming
+  the thing. Reported exactly that way: *"I can link cards and such but I cant
+  link a group."*
+
+  The `g` is what keeps the two id spaces apart — card ids and group ids come
+  from different counters, so the same number can name both. Nothing written
+  before this changes meaning: `g146` never parsed as a card id.
+
+- **`POST /api/nodes/{id}/groups/{gid}/move {node, pos?}` — move a whole group to
+  another basket**, container, members, title, colour and **id** together.
+
+  **Moving the cards was not a workaround, it was a different operation.** Group
+  membership is basket-local, so `cards/{cid}/move {node}` drops it by design:
+  every card arrives ungrouped and the container has to be rebuilt by hand —
+  with a **new id**, which breaks every `[[#g…]]` link already written to it.
+  `pos` places the group's top-left corner and moves every member by the same
+  delta, so the arrangement inside survives.
+
+- **`GET /api/groups/{gid}`**, **`…/backlinks`** and **`…/link`** — find a group
+  from its id alone, see what points at it, and mint its address. `link` returns
+  the `[[#g146]]` form to paste into a card alongside the `trellis://` form for
+  leaving the app.
+
+- **`trellis://127.0.0.1:<port>/group/<gid>`**, and **Ctrl+O accepts `g146`**.
+
+- **Copy → *Group link*** on a group's header, and **Copy → *Card link*** on a
+  card. Both hand you the `[[#…]]` form. The app could only ever copy a bare
+  number, so the README's advice was to type the brackets yourself.
+
+### Fixed
+- **A scoped token's move was only checked at the end it started from.**
+  A subtree-confined token is checked against the node a request *names*, and for
+  a move that is where the thing is coming **from**. The destination went
+  unchecked, so a token confined to one basket could move its own card — or
+  reparent its own basket — **out into the rest of the document**. A write
+  outside the scope, reached by relocating something inside it.
+
+  Both ends are checked now, for cards, groups and nodes alike. `before`/`after`
+  are resolved through the sibling's parent, and the top level counts as outside
+  every subtree. Found while adding the group move, which would have inherited
+  the same hole.
+
 ## [0.110.2]
 
 ### Fixed

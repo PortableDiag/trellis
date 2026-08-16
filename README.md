@@ -119,8 +119,10 @@ from the main cluster, and click or drag on it to jump there without zooming out
 **Organizing cards**
 - **Group** — Ctrl/Cmd+click cards to multi-select, then "Group N cards" wraps
   them in a labeled container you drag as one; right-click the header to rename,
-  recolor, or ungroup. **Click a group's header to raise the whole group to the
-  front** — the header stays grabbable even when other cards pile on top of it.
+  recolor, copy its link, or ungroup. **Click a group's header to raise the whole
+  group to the front** — the header stays grabbable even when other cards pile on
+  top of it. A group can be **linked to** (`[[#g146]]`) and **moved to another
+  basket whole**, keeping its id so those links keep working.
 - **Dock** (toggle) — drag one card onto another to stick them so they move
   together; drag a docked card off to detach.
 - **Snap** (toggle) — a dragged card's edges snap to nearby cards' edges, with a
@@ -406,11 +408,13 @@ work *in flight for five days*, not work due on the last one — it reads as **t
 every day until it's done, instead of hiding under a future date until it's already
 late. The card never moves; the window does.
 
-**Link to a card, not just a basket.** `[[#1391]]` points at a card;
-`[[Some Basket]]` and `[[42]]` still point at baskets. In a journal every card
-written on one day shares a basket, so linking to the day says nothing about the
-thing — `[[#1391]]` says it. Right-click a card → Copy → Card id, or find one with
-Ctrl+O.
+**Link to a card or a group, not just a basket.** `[[#1391]]` points at a card,
+`[[#g146]]` at a group; `[[Some Basket]]` and `[[42]]` still point at baskets. In
+a journal every card written on one day shares a basket, so linking to the day
+says nothing about the thing — `[[#1391]]` says it. A group used to be
+addressable only by naming a card inside it, which is "somewhere near here"
+rather than the thing itself. Right-click a card or a group's header → **Copy**,
+or find either with Ctrl+O (`1391`, `g146`).
 
 **Reschedule from the Agenda.** Right-click any task row for *Today / Tomorrow /
 In 3 days / Next week / Next month / Clear date* — the dates are shown, so you

@@ -1777,6 +1777,18 @@ impl Document {
             .map(|(&id, _)| id)
     }
 
+    /// Which basket holds a group, from its id alone.
+    ///
+    /// The counterpart of [`locate_card`]. Group ids come from one document-wide
+    /// counter (`next_group_id`), exactly like card ids, so an id names one group
+    /// in the whole document and is a complete address on its own.
+    pub fn locate_group(&self, group: GroupId) -> Option<NodeId> {
+        self.nodes
+            .iter()
+            .find(|(_, n)| n.groups.iter().any(|g| g.id == group))
+            .map(|(&id, _)| id)
+    }
+
     /// Store OCR-extracted text on an image card. Returns false if not an image card.
     pub fn set_card_ocr(&mut self, node: NodeId, card: CardId, text: String) -> bool {
         match self.card_mut(node, card).map(|c| &mut c.kind) {
@@ -2293,6 +2305,81 @@ impl Document {
         let id = c.id;
         self.nodes.get_mut(&to)?.cards.push(c);
         Some(id)
+    }
+
+    /// Move a whole group — its container and every member card — to another
+    /// basket, keeping the group's id, title, colour and internal layout.
+    ///
+    /// This exists because [`move_card_to_node`] deliberately drops group
+    /// membership: a group is basket-local, so a card moved on its own cannot
+    /// stay in a group that did not come with it. Moving the members one at a
+    /// time therefore dissolves the group and leaves the caller to rebuild it,
+    /// which loses the id — and the id is what a `[[#g…]]` link points at.
+    ///
+    /// `pos` places the group's **top-left corner**, translating every member by
+    /// the same delta so the arrangement inside the group survives the move.
+    /// Docking is kept only between cards that travel together; a dock to a card
+    /// left behind is cut, because it would name a card in another basket.
+    ///
+    /// Returns how many cards moved, or `None` if the basket, the group or the
+    /// destination does not exist.
+    pub fn move_group_to_node(
+        &mut self,
+        from: NodeId,
+        group: GroupId,
+        to: NodeId,
+        pos: Option<egui::Pos2>,
+    ) -> Option<usize> {
+        if from == to || !self.nodes.contains_key(&to) {
+            return None;
+        }
+        let n = self.nodes.get(&from)?;
+        let gidx = n.groups.iter().position(|g| g.id == group)?;
+        let members: Vec<CardId> =
+            n.cards.iter().filter(|c| c.group == Some(group)).map(|c| c.id).collect();
+
+        // Translate so the group's top-left lands on `pos`, keeping the layout.
+        let delta = match pos {
+            Some(p) => {
+                let mut min = egui::pos2(f32::MAX, f32::MAX);
+                for c in n.cards.iter().filter(|c| c.group == Some(group)) {
+                    min.x = min.x.min(c.pos.x);
+                    min.y = min.y.min(c.pos.y);
+                }
+                if min.x == f32::MAX { egui::Vec2::ZERO } else { p - min }
+            }
+            None => egui::Vec2::ZERO,
+        };
+
+        let n = self.nodes.get_mut(&from)?;
+        let container = n.groups.remove(gidx);
+        let mut moved: Vec<Card> = Vec::with_capacity(members.len());
+        let mut i = 0;
+        while i < n.cards.len() {
+            if n.cards[i].group == Some(group) {
+                let mut c = n.cards.remove(i);
+                c.pos += delta;
+                moved.push(c);
+            } else {
+                i += 1;
+            }
+        }
+        // Cards staying behind cannot dock to one that left.
+        for other in n.cards.iter_mut() {
+            if other.docked_to.is_some_and(|d| members.contains(&d)) {
+                other.docked_to = None;
+            }
+        }
+        for c in moved.iter_mut() {
+            if c.docked_to.is_some_and(|d| !members.contains(&d)) {
+                c.docked_to = None;
+            }
+        }
+        let count = moved.len();
+        let dest = self.nodes.get_mut(&to)?;
+        dest.groups.push(container);
+        dest.cards.extend(moved);
+        Some(count)
     }
 
     /// Index of `card` in its basket's list, or `None` if the node/card is
@@ -3440,6 +3527,7 @@ impl Document {
         match self.resolve_link_target(target)? {
             LinkTarget::Node(id) => Some(id),
             LinkTarget::Card { node, .. } => Some(node),
+            LinkTarget::Group { node, .. } => Some(node),
         }
     }
 
@@ -3449,10 +3537,22 @@ impl Document {
     /// the docs and accepted by the Ctrl+O palette, so it reads the way it is
     /// already spoken. `[[42]]` and `[[Some Basket]]` stay node links, unchanged,
     /// because that is what every link written before this existed means.
+    ///
+    /// `[[#g146]]` is a **group**. It hangs off the same `#` because a group id
+    /// is the same kind of thing as a card id — an address that is not a basket —
+    /// and the `g` is what tells them apart. Nothing written before this can
+    /// collide: `g146` never parsed as a card id, so a link that means a group
+    /// today fell through to a title lookup and found nothing.
     pub fn resolve_link_target(&self, target: &str) -> Option<LinkTarget> {
         let t = target.trim();
-        if let Some(digits) = t.strip_prefix('#') {
-            let id: CardId = digits.trim().parse().ok()?;
+        if let Some(rest) = t.strip_prefix('#') {
+            let rest = rest.trim();
+            if let Some(digits) = rest.strip_prefix(['g', 'G']) {
+                let id: GroupId = digits.trim().parse().ok()?;
+                let node = self.locate_group(id)?;
+                return Some(LinkTarget::Group { node, group: id });
+            }
+            let id: CardId = rest.parse().ok()?;
             let node = self.locate_card(id)?;
             return Some(LinkTarget::Card { node, card: id });
         }
@@ -3485,6 +3585,33 @@ impl Document {
                 let points_here = extract_wikilinks(&hay).iter().any(|t| {
                     matches!(self.resolve_link_target(t),
                              Some(LinkTarget::Card { card: tc, .. }) if tc == card)
+                });
+                if points_here {
+                    hits.push(SearchHit {
+                        node: n.id,
+                        card: Some(c.id),
+                        node_title: n.title.clone(),
+                        snippet: snippet_around(&hay, 0, 0),
+                    });
+                }
+            }
+        }
+        hits
+    }
+
+    /// Cards anywhere whose `[[#g…]]` links point at one group.
+    ///
+    /// A member card is not skipped the way [`backlinks_card`] skips the card
+    /// itself: a card that names the group it belongs to is making a real
+    /// reference, not linking to itself.
+    pub fn backlinks_group(&self, group: GroupId) -> Vec<SearchHit> {
+        let mut hits = Vec::new();
+        for n in self.nodes.values() {
+            for c in &n.cards {
+                let hay = format!("{}\n{}", c.title, searchable_body(c));
+                let points_here = extract_wikilinks(&hay).iter().any(|t| {
+                    matches!(self.resolve_link_target(t),
+                             Some(LinkTarget::Group { group: tg, .. }) if tg == group)
                 });
                 if points_here {
                     hits.push(SearchHit {
@@ -4328,6 +4455,7 @@ pub struct KanbanCard {
 pub enum LinkTarget {
     Node(NodeId),
     Card { node: NodeId, card: CardId },
+    Group { node: NodeId, group: GroupId },
 }
 
 /// The calendar day a journal node stands for, plus the names to write.
@@ -6861,6 +6989,96 @@ mod tests {
         doc.raise_group(n, g);
         let order: Vec<CardId> = doc.nodes[&n].cards.iter().map(|c| c.id).collect();
         assert_eq!(order, vec![b, a, c]);
+    }
+
+    #[test]
+    fn a_group_link_resolves_and_does_not_collide_with_a_card_link() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Basket".into());
+        let a = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let g = doc.group_cards(n, &[a, b], "pair".into()).unwrap();
+        assert_eq!(doc.locate_group(g), Some(n));
+        assert_eq!(
+            doc.resolve_link_target(&format!("#g{g}")),
+            Some(LinkTarget::Group { node: n, group: g })
+        );
+        // Upper case is accepted the way `#` links already tolerate spacing.
+        assert_eq!(
+            doc.resolve_link_target(&format!("#G{g}")),
+            Some(LinkTarget::Group { node: n, group: g })
+        );
+        // The card form is untouched, and the two id spaces stay separate: a
+        // group id and a card id may be the same number and mean different
+        // things.
+        assert_eq!(
+            doc.resolve_link_target(&format!("#{a}")),
+            Some(LinkTarget::Card { node: n, card: a })
+        );
+        // An unknown group is no link at all, never a fall-through to a title.
+        assert_eq!(doc.resolve_link_target("#g9999"), None);
+        // `resolve_link` collapses a group to its basket, like a card link.
+        assert_eq!(doc.resolve_link(&format!("#g{g}")), Some(n));
+    }
+
+    #[test]
+    fn a_group_moves_to_another_basket_whole() {
+        let mut doc = Document::empty();
+        let from = doc.add_node(None, "from".into());
+        let to = doc.add_node(None, "to".into());
+        let a = doc.add_card(from, egui::pos2(100.0, 100.0), CardKind::Text).unwrap();
+        let b = doc.add_card(from, egui::pos2(140.0, 220.0), CardKind::Text).unwrap();
+        let loose = doc.add_card(from, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let g = doc.group_cards(from, &[a, b], "design".into()).unwrap();
+        // A card left behind that was docked to one that leaves must be cut, or
+        // it would name a card in another basket.
+        doc.card_mut(from, loose).unwrap().docked_to = Some(a);
+
+        let moved = doc.move_group_to_node(from, g, to, Some(egui::pos2(10.0, 10.0)));
+        assert_eq!(moved, Some(2));
+
+        // The id survives, which is the whole point: `[[#g…]]` still resolves.
+        assert_eq!(doc.locate_group(g), Some(to));
+        assert_eq!(
+            doc.resolve_link_target(&format!("#g{g}")),
+            Some(LinkTarget::Group { node: to, group: g })
+        );
+        // Title and colour came with it, and membership held.
+        let dest = &doc.nodes[&to];
+        assert_eq!(dest.groups.iter().find(|x| x.id == g).map(|x| x.title.as_str()), Some("design"));
+        assert_eq!(doc.card(to, a).unwrap().group, Some(g));
+        assert_eq!(doc.card(to, b).unwrap().group, Some(g));
+        // Relative layout preserved: `a` lands on the requested corner and `b`
+        // keeps its offset from it.
+        assert_eq!(doc.card(to, a).unwrap().pos, egui::pos2(10.0, 10.0));
+        assert_eq!(doc.card(to, b).unwrap().pos, egui::pos2(50.0, 130.0));
+        // Source is left clean.
+        assert!(doc.nodes[&from].groups.iter().all(|x| x.id != g));
+        assert!(doc.card(from, a).is_none());
+        assert_eq!(doc.card(from, loose).unwrap().docked_to, None);
+        // A second move to the same basket is refused rather than silently
+        // duplicating the container.
+        assert_eq!(doc.move_group_to_node(to, g, to, None), None);
+        assert_eq!(doc.move_group_to_node(to, 9999, from, None), None);
+    }
+
+    #[test]
+    fn group_backlinks_find_cards_that_name_it() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let other = doc.add_node(None, "other".into());
+        let a = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let g = doc.group_cards(n, &[a, b], "pair".into()).unwrap();
+        let pointer = doc.add_card(other, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(other, pointer).unwrap().body = format!("see [[#g{g}]] for the design");
+        // A card pointing at a *card* is not a group backlink.
+        let card_pointer = doc.add_card(other, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(other, card_pointer).unwrap().body = format!("see [[#{a}]]");
+
+        let hits = doc.backlinks_group(g);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].card, Some(pointer));
     }
 
     /// A card holding HTML showed nothing at all before this: CommonMark passes

@@ -1051,10 +1051,17 @@ pub struct TrellisApp {
     /// the reveal (and the window focus) happen on the next frame, where one
     /// exists. The highlight clock is frame time, not wall clock.
     pending_reveal: Option<(NodeId, CardId)>,
+    /// The same deferred reveal for a group link.
+    pending_reveal_group: Option<(NodeId, crate::model::GroupId)>,
     focus_window: bool,
     /// The card to flash-highlight on the canvas, and the `ctx` time the flash ends.
     highlight_card: Option<CardId>,
     highlight_until: f64,
+    /// Same pair for a whole group (`[[#g…]]`, a Ctrl+O group row, or a
+    /// `trellis://…/group/…` link). Shares `highlight_until`: only one reveal is
+    /// ever in flight, so a second clock would just be a way to disagree.
+    focus_group: Option<crate::model::GroupId>,
+    highlight_group: Option<crate::model::GroupId>,
     /// Claims panel: cards that assert state (`verify::`), worst first, so a
     /// workspace that has gone out of date says so instead of being believed.
     claims_open: bool,
@@ -1521,9 +1528,12 @@ impl TrellisApp {
             scroll_to: None,
             focus_card: None,
             pending_reveal: None,
+            pending_reveal_group: None,
             focus_window: false,
             highlight_card: None,
             highlight_until: 0.0,
+            focus_group: None,
+            highlight_group: None,
             claims_open: cc
                 .storage
                 .and_then(|s| s.get_string(CLAIMS_OPEN_KEY))
@@ -2566,9 +2576,22 @@ impl TrellisApp {
                                 .doc
                                 .locate_card(*cid)
                                 .is_some_and(|n| self.node_is_within(n, root)),
+                            // Same resolve-then-check for a group id: an id
+                            // alone names no basket until the tree says so.
+                            api::ApiRequest::LocateGroup(gid)
+                            | api::ApiRequest::GroupBacklinks(gid) => self
+                                .doc
+                                .locate_group(*gid)
+                                .is_some_and(|n| self.node_is_within(n, root)),
                             _ => api::is_scope_neutral(&cmd.req),
                         },
                     };
+                    // A move is checked at BOTH ends. `target_node` names where
+                    // the thing is coming *from*, so on its own it lets a
+                    // confined token carry its own card or basket out into the
+                    // rest of the document — a write outside the scope, made by
+                    // relocating something inside it.
+                    let allowed = allowed && self.move_dest_within(&cmd.req, root);
                     if !allowed {
                         let _ = cmd.resp.send(api::ApiResponse::err(
                             403,
@@ -3007,7 +3030,40 @@ impl TrellisApp {
                 "http": format!("http://127.0.0.1:{port}/open/card/{cid}"),
             })));
         }
-        let api::ApiRequest::Open { node, id, doc } = req else {
+        if let api::ApiRequest::GroupLink(gid) = req {
+            let gid = *gid as crate::model::GroupId;
+            let Some(node) = self.doc.locate_group(gid) else {
+                return Some(api::ApiResponse::err(404, "no group with that id"));
+            };
+            let doc = self
+                .doc_path
+                .as_ref()
+                .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
+                .unwrap_or_default();
+            let scheme = crate::URL_SCHEME;
+            let port = self.api_port;
+            let title = self
+                .doc
+                .nodes
+                .get(&node)
+                .and_then(|n| n.groups.iter().find(|g| g.id == gid))
+                .map(|g| g.title.clone())
+                .unwrap_or_default();
+            return Some(api::ApiResponse::ok(serde_json::json!({
+                "group": gid,
+                "title": title,
+                "node": node,
+                "node_path": self.doc.node_path(node),
+                "document": doc,
+                "link": format!("{scheme}://127.0.0.1:{port}/group/{gid}"),
+                "link_verified": format!("{scheme}://127.0.0.1:{port}/group/{gid}?doc={doc}"),
+                "http": format!("http://127.0.0.1:{port}/open/group/{gid}"),
+                // The in-document form, which is what you actually paste into a
+                // card. A `trellis://` link is for leaving the app.
+                "wikilink": format!("[[#g{gid}]]"),
+            })));
+        }
+        let api::ApiRequest::Open { kind, id, doc } = req else {
             return None;
         };
         // `doc` is optional — the port is the address (the operator's ruling) —
@@ -3027,20 +3083,31 @@ impl TrellisApp {
                 ));
             }
         }
-        let found = if *node {
-            let nid = *id as crate::model::NodeId;
-            self.doc.nodes.contains_key(&nid).then(|| {
-                self.jump_to_node(nid);
-                format!("node {nid}")
-            })
-        } else {
-            let cid = *id as crate::model::CardId;
-            self.doc.locate_card(cid).map(|n| {
-                // Same reveal the Agenda and a [[#id]] link use — land *on* the
-                // card, not merely in its basket — deferred to the next frame.
-                self.pending_reveal = Some((n, cid));
-                format!("card {cid}")
-            })
+        let found = match kind {
+            api::OpenKind::Node => {
+                let nid = *id as crate::model::NodeId;
+                self.doc.nodes.contains_key(&nid).then(|| {
+                    self.jump_to_node(nid);
+                    format!("node {nid}")
+                })
+            }
+            api::OpenKind::Card => {
+                let cid = *id as crate::model::CardId;
+                self.doc.locate_card(cid).map(|n| {
+                    // Same reveal the Agenda and a [[#id]] link use — land *on*
+                    // the card, not merely in its basket — deferred to the next
+                    // frame.
+                    self.pending_reveal = Some((n, cid));
+                    format!("card {cid}")
+                })
+            }
+            api::OpenKind::Group => {
+                let gid = *id as crate::model::GroupId;
+                self.doc.locate_group(gid).map(|n| {
+                    self.pending_reveal_group = Some((n, gid));
+                    format!("group {gid}")
+                })
+            }
         };
         Some(match found {
             Some(what) => {
@@ -7029,8 +7096,11 @@ impl TrellisApp {
                         "GET    /api/nodes/{id}/cards/{cid}        (one card, without the whole basket)",
                         "GET    /api/cards/{cid}                   (find a card from its id alone → {node, node_path, card})",
                         "GET    /api/cards/{cid}/link              (canonical trellis:// link for this card)",
-                        "GET    /open/card/{cid} · /open/node/{id} (no key — what a trellis:// link opens)",
+                        "GET    /open/card/{cid} · /open/node/{id} · /open/group/{gid}  (no key — what a trellis:// link opens)",
                         "GET    /api/cards/{cid}/backlinks         (cards whose [[#id]] links point at this card)",
+                        "GET    /api/groups/{gid}                  (find a group from its id alone → {node, node_path, group})",
+                        "GET    /api/groups/{gid}/link             (canonical trellis:// link + the [[#g…]] form)",
+                        "GET    /api/groups/{gid}/backlinks        (cards whose [[#g…]] links point at this group)",
                         "POST   /api/nodes/{id}/cards/{cid}/items/{item}/property {key, value}   (one checklist LINE)",
                         "DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due",
                         "POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done}   (tick a line)",
@@ -7053,6 +7123,7 @@ impl TrellisApp {
                         "POST   /api/nodes/{id}/cards/{cid}/sketch {op, …}          (add_stroke / undo / clear)",
                         "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}    (GET / DELETE …/images/{idx})",
                         "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",
+                        "POST   /api/nodes/{id}/groups/{gid}/move  {node, pos?}     (the whole group — container, members and id)",
                         "POST   /api/nodes/{id}/autosort",
                         "GET    /api/nodes/{id}/overlaps           (which cards cover each other)",
                         "POST   /api/nodes/{id}/overlaps           (push them clear, keeping x)",
@@ -7362,7 +7433,36 @@ impl TrellisApp {
                 .unwrap_or_else(|| "(untitled card)".to_string());
             // Just above a node id match, so that when a number is both, the
             // node — the coarser, more likely target — still leads.
-            matches.push(SwitcherHit { node, card: Some(card), id: card, label, path, score: i32::MIN + 1 });
+            matches.push(SwitcherHit { node, card: Some(card), group: None, id: card, label, path, score: i32::MIN + 1 });
+        }
+        // A group id is typed `g146`, so it can never collide with the node/card
+        // rows above — nothing else in the palette parses a leading letter.
+        if let Some(gid) = queried_group_id(&q) {
+            if let Some(node) = self.doc.locate_group(gid) {
+                let path = crate::tree::node_path(&self.doc, node);
+                let label = self
+                    .doc
+                    .nodes
+                    .get(&node)
+                    .and_then(|n| n.groups.iter().find(|g| g.id == gid))
+                    .map(|g| {
+                        if g.title.trim().is_empty() {
+                            "(untitled group)".to_string()
+                        } else {
+                            g.title.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| "(untitled group)".to_string());
+                matches.push(SwitcherHit {
+                    node,
+                    card: None,
+                    group: Some(gid),
+                    id: gid,
+                    label,
+                    path,
+                    score: i32::MIN + 1,
+                });
+            }
         }
         for (&id, n) in &self.doc.nodes {
             let path = crate::tree::node_path(&self.doc, id);
@@ -7378,7 +7478,7 @@ impl TrellisApp {
                     None => continue,
                 }
             };
-            matches.push(SwitcherHit { node: id, card: None, id, label: n.title.clone(), path, score });
+            matches.push(SwitcherHit { node: id, card: None, group: None, id, label: n.title.clone(), path, score });
         }
         matches.sort_by(|a, b| {
             a.score.cmp(&b.score).then(a.path.len().cmp(&b.path.len())).then(a.label.cmp(&b.label))
@@ -7409,10 +7509,10 @@ impl TrellisApp {
         if up {
             self.switcher_index = self.switcher_index.saturating_sub(1);
         }
-        let mut jump: Option<(NodeId, Option<CardId>)> = None;
+        let mut jump: Option<(NodeId, Option<CardId>, Option<crate::model::GroupId>)> = None;
         if enter {
             if let Some(m) = matches.get(self.switcher_index) {
-                jump = Some((m.node, m.card));
+                jump = Some((m.node, m.card, m.group));
             }
         }
 
@@ -7445,6 +7545,8 @@ impl TrellisApp {
                             ui.small(
                                 egui::RichText::new(if m.card.is_some() {
                                     format!("card #{}", m.id)
+                                } else if m.group.is_some() {
+                                    format!("group #g{}", m.id)
                                 } else {
                                     format!("node #{}", m.id)
                                 })
@@ -7453,7 +7555,7 @@ impl TrellisApp {
                             ui.small(egui::RichText::new(&m.path).weak());
                         });
                         if r.clicked() {
-                            jump = Some((m.node, m.card));
+                            jump = Some((m.node, m.card, m.group));
                         }
                         if sel {
                             r.scroll_to_me(Some(egui::Align::Center));
@@ -7468,9 +7570,12 @@ impl TrellisApp {
         // A card hit reveals the card itself — recenter and flash — rather than
         // just opening the basket and leaving you to find it. `reveal_hit` is the
         // same path the Agenda, Kanban, Find, Tags and Backlinks rows already use.
-        if let Some((node, card)) = jump {
+        if let Some((node, card, group)) = jump {
             self.switcher_open = false;
-            self.reveal_hit(ctx, node, card);
+            match group {
+                Some(g) => self.jump_to_group(ctx, node, g),
+                None => self.reveal_hit(ctx, node, card),
+            }
         }
     }
 
@@ -8428,8 +8533,16 @@ impl TrellisApp {
             Some(crate::model::LinkTarget::Card { node, card }) => {
                 self.jump_to_card(ctx, node, card)
             }
+            // A group link lands on the group box, for the same reason a card
+            // link lands on the card: the basket is not the thing that was named.
+            Some(crate::model::LinkTarget::Group { node, group }) => {
+                self.jump_to_group(ctx, node, group)
+            }
             None => {
-                self.status = if target.starts_with('#') {
+                let t = target.trim_start_matches('#');
+                self.status = if t.starts_with(['g', 'G']) && t[1..].parse::<u64>().is_ok() {
+                    format!("No group {target} in this document")
+                } else if target.starts_with('#') {
                     format!("No card {target} in this document")
                 } else {
                     format!("No node named \"{target}\" to link to")
@@ -8463,6 +8576,38 @@ impl TrellisApp {
         self.jump_to_node(node);
         self.focus_card = Some(card);
         self.highlight_card = Some(card);
+        self.highlight_until = ctx.input(|i| i.time) + canvas::HIGHLIGHT_SECS;
+    }
+
+    /// Whether a move request's *destination* is inside a scoped token's
+    /// subtree. Requests that cannot relocate anything answer `true`.
+    fn move_dest_within(&self, req: &api::ApiRequest, root: NodeId) -> bool {
+        match api::move_destination(req) {
+            None => true,
+            Some(api::MoveDest::Basket(n)) => self.node_is_within(n, root),
+            Some(api::MoveDest::Parent(Some(p))) => self.node_is_within(p, root),
+            // The top level is outside every subtree by definition.
+            Some(api::MoveDest::Parent(None)) => false,
+            Some(api::MoveDest::Sibling(s)) => self
+                .doc
+                .nodes
+                .get(&s)
+                .and_then(|n| n.parent)
+                .is_some_and(|p| self.node_is_within(p, root)),
+        }
+    }
+
+    /// Like [`jump_to_card`], but reveals a whole group: the canvas centres on
+    /// the members' bounding box and flashes the container.
+    fn jump_to_group(
+        &mut self,
+        ctx: &egui::Context,
+        node: NodeId,
+        group: crate::model::GroupId,
+    ) {
+        self.jump_to_node(node);
+        self.focus_group = Some(group);
+        self.highlight_group = Some(group);
         self.highlight_until = ctx.input(|i| i.time) + canvas::HIGHLIGHT_SECS;
     }
 
@@ -8741,6 +8886,8 @@ impl eframe::App for TrellisApp {
                         focus_card: self.focus_card,
                         highlight_card: self.highlight_card,
                         highlight_until: self.highlight_until,
+                        focus_group: self.focus_group,
+                        highlight_group: self.highlight_group,
                         minimap: self.minimap_enabled,
                         style: match self.theme {
                             Theme::StickyNotes => canvas::CardStyle::Sticky,
@@ -8806,6 +8953,7 @@ impl eframe::App for TrellisApp {
                     // The recenter is one-shot: the canvas consumed it this frame,
                     // so the user can pan freely afterward.
                     self.focus_card = None;
+                    self.focus_group = None;
                     // Never let a temporary export reframe overwrite the real view.
                     if framing_card.is_none() && basket_target.is_none() {
                         self.views.insert(sel, view);
@@ -8905,6 +9053,9 @@ impl eframe::App for TrellisApp {
         // and where the viewport can be asked for focus.
         if let Some((node, card)) = self.pending_reveal.take() {
             self.jump_to_card(ctx, node, card);
+        }
+        if let Some((node, group)) = self.pending_reveal_group.take() {
+            self.jump_to_group(ctx, node, group);
         }
         if std::mem::take(&mut self.focus_window) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -9453,12 +9604,14 @@ fn elide(text: &str, max: usize) -> String {
 
 /// One row in the Ctrl+O palette: a node, or a card inside one.
 struct SwitcherHit {
-    /// The basket to open. For a card hit this is the card's basket.
+    /// The basket to open. For a card or group hit this is its basket.
     node: NodeId,
     /// Set when this row is a card, so Enter reveals the card and not just its
     /// basket.
     card: Option<CardId>,
-    /// The id shown on the row — the node's, or the card's.
+    /// Set when this row is a group, so Enter reveals the container.
+    group: Option<crate::model::GroupId>,
+    /// The id shown on the row — the node's, the card's, or the group's.
     id: u64,
     label: String,
     path: String,
@@ -9485,6 +9638,20 @@ fn card_label(c: &crate::model::Card) -> String {
     } else {
         line.to_string()
     }
+}
+
+/// A typed group id: `g146` or `#g146`. Kept separate from
+/// [`queried_node_id`] because the `g` is the only thing distinguishing a group
+/// id from a card id — they come from different counters and would otherwise
+/// both match a bare number.
+fn queried_group_id(query: &str) -> Option<crate::model::GroupId> {
+    let t = query.trim();
+    let rest = t.strip_prefix('#').unwrap_or(t);
+    let digits = rest.strip_prefix(['g', 'G'])?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<crate::model::GroupId>().ok()
 }
 
 fn queried_node_id(query: &str) -> Option<NodeId> {

@@ -234,7 +234,7 @@ GET /api/cards/{cid}/link
         card**. Ask for it rather than assembling one: the port and the document
         name are the instance's, not something a client can know.
 
-GET /open/card/{cid}   ·   GET /open/node/{id}        [no key; not under /api]
+GET /open/card/{cid} · /open/node/{id} · /open/group/{gid}   [no key; not under /api]
   → 200 {"opened":"card 1391"}   | 404 (no such target)  | 409 (?doc= mismatch)
         what a `trellis://` link resolves to. Navigation only — it focuses the
         window and reveals the target, and deliberately returns no document
@@ -405,7 +405,25 @@ PATCH  /api/nodes/{id}/groups/{gid}      {title?, color?}
   → 200 {"id":<gid>}   | 404
 
 DELETE /api/nodes/{id}/groups/{gid}      → 200 {"ungrouped":<gid>}   | 404   (cards remain, container removed)
+
+GET    /api/groups/{gid}                 → 200 {node, node_title, node_path, group:{id,title,color,cards:[ids]}}  | 404
+
+POST   /api/nodes/{id}/groups/{gid}/move {node:<target>, pos?:[x,y]}
+  → 200 {"group":<gid>,"node":<target>,"moved":N}
+  | 400 (already in that basket)  | 404 (node / group / destination)
 ```
+
+**Moving a group needs this route — moving its cards does not work.** Group
+membership is basket-local, so `cards/{cid}/move {node}` deliberately drops it:
+each card arrives ungrouped and you are left rebuilding the container by hand,
+with a **new id**. The id is what `[[#g…]]` points at, so rebuilding breaks every
+link already written to that group. This route carries the container, the
+members, the title, the colour and the id together.
+
+`pos` places the group's **top-left corner** in the destination; every member
+moves by the same delta, so the arrangement inside the group survives. Omit it to
+keep the current coordinates. Docking is kept between cards that travel together
+and cut where it would name a card left behind.
 
 ### Docking
 Stick one card to another so they move together (`card` docks onto `anchor`).
@@ -541,6 +559,7 @@ clicks like any other.
 `[[Some Basket]]` and `[[42]]` link to a **basket**, as they always have.
 **`[[#1391]]` links to a card.** The `#` prefix is how card ids are written
 everywhere else (the docs, the Ctrl+O palette), so it reads the way it is spoken.
+**`[[#g146]]` links to a group.**
 
 Card links matter most in a journal-shaped document: every card written on one day
 shares a basket, so `[[Tuesday 8/11/2026]]` names the day, not the thing that
@@ -555,6 +574,30 @@ GET /api/cards/{cid}/backlinks
 A link written in a **table cell** counts for backlinks (it always has — cell text
 is scanned), though it is not clickable there; links render as clickable in text
 card bodies.
+
+#### Group links — `[[#g146]]`
+A group had an id and no way to address it: the only way to point anyone at one
+was to name a card **inside** it, which says "somewhere near here" rather than
+naming the thing. `[[#g146]]` names the group, and following it centres the canvas
+on the container and flashes it — the same reveal a card link does.
+
+The `g` is what separates the two id spaces. Card ids and group ids come from
+different counters, so the same number can name both; nothing written before this
+existed changes meaning, because `g146` never parsed as a card id.
+
+```
+GET /api/groups/{gid}/backlinks
+  → 200 {"group":146,"node":366,"hits":[{node,card,node_title,node_path,snippet}]}
+  | 404 (group not found)
+
+GET /api/groups/{gid}/link
+  → 200 {group, title, node, node_path, document, link, link_verified, http, wikilink}
+  | 404
+```
+
+`wikilink` is the `[[#g146]]` form — what you paste into a card. `link` is the
+`trellis://` form, for leaving the app. In the UI: right-click a group's header
+→ **Copy** → *Group link*, and **Ctrl+O** accepts `g146` or `#g146`.
 
 ### Backlinks
 `[[Node Title]]` (or `[[id]]`, or `[[Target|shown text]]`) written in a card is a
@@ -735,9 +778,14 @@ instance on that exact card.
 ```
 trellis://127.0.0.1:<port>/card/<cid>            trellis://127.0.0.1:7374/card/1391
 trellis://127.0.0.1:<port>/node/<id>             trellis://127.0.0.1:7373/node/63
+trellis://127.0.0.1:<port>/group/<gid>           trellis://127.0.0.1:7374/group/146
 trellis://127.0.0.1:<port>/card/<cid>?doc=<file> optional, verified on arrival
 http://127.0.0.1:<port>/open/card/<cid>          the same thing, no registration needed
 ```
+
+Inside a document, prefer the wiki-link forms — `[[#1391]]` for a card,
+`[[#g146]]` for a group. A `trellis://` link is for handing an address to
+something outside the app.
 
 **Why `127.0.0.1:` is in there.** Links used to be minted as
 `trellis://7374/card/1391`, which puts the port where a URL keeps its **host** —
@@ -760,6 +808,12 @@ curl -s -H "X-API-Key: $KEY" $API/cards/1391/link
 #    "link":"trellis://127.0.0.1:7374/card/1391",
 #    "link_verified":"trellis://127.0.0.1:7374/card/1391?doc=Personal.ron",
 #    "http":"http://127.0.0.1:7374/open/card/1391"}
+
+curl -s -H "X-API-Key: $KEY" $API/groups/146/link
+# → {"group":146,"title":"Design — how it was scoped","node":366,
+#    "node_path":"VolumePerApp","document":"Personal.ron",
+#    "wikilink":"[[#g146]]",
+#    "link":"trellis://127.0.0.1:7374/group/146", …}
 ```
 
 **The port is the address**, because one instance serves one document — which is

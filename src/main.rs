@@ -30,8 +30,9 @@ USAGE:
 ARGS:
     <FILE>    Document to open. If the path doesn't exist yet, Trellis starts a
               new document and saves it there.
-    <URL>     A link — trellis://127.0.0.1:<port>/card/<id> or .../node/<id>,
-              optional ?doc=<file> the receiving instance verifies. Hands the
+    <URL>     A link — trellis://127.0.0.1:<port>/card/<id>, .../node/<id> or
+              .../group/<id>, optional ?doc=<file> the receiving instance
+              verifies. Hands the
               link to whichever instance is serving that port and exits, so a
               link never opens a second window on an open document. hypercube://
               is accepted too. Ask an instance for a link with
@@ -104,7 +105,8 @@ fn main() -> eframe::Result<()> {
         if URL_SCHEMES.iter().any(|s| url.starts_with(&format!("{s}:"))) {
             let msg = format!(
                 "not a link I understand: {raw}\n\
-                 expected {URL_SCHEME}://127.0.0.1:<port>/card/<id> or .../node/<id>"
+                 expected {URL_SCHEME}://127.0.0.1:<port>/card/<id>, .../node/<id> \
+                 or .../group/<id>"
             );
             eprintln!("trellis: {msg}");
             link_failed(&msg);
@@ -223,7 +225,8 @@ fn clean_link_arg(raw: &str) -> &str {
 
 /// Hand a link URL to the instance that owns it.
 ///
-/// Format (see API.md): `trellis://127.0.0.1:<port>/card/<id>` or `.../node/<id>`, with an
+/// Format (see API.md): `trellis://127.0.0.1:<port>/card/<id>`, `.../node/<id>`
+/// or `.../group/<id>`, with an
 /// optional `?doc=<file>` the receiving instance verifies. The port is the
 /// address because one instance serves one document — so a link names the port,
 /// not a file path, and `doc=` is a check rather than a lookup.
@@ -299,14 +302,15 @@ fn follow_link(url: &str) -> i32 {
         [authority, kind, id] => (*authority, *kind, *id),
         _ => {
             let m = format!("not a link I understand: {url}\nexpected \
-                             {scheme}://127.0.0.1:<port>/card/<id> or .../node/<id>");
+                             {scheme}://127.0.0.1:<port>/card/<id>, .../node/<id> \
+                             or .../group/<id>");
             eprintln!("trellis: {m}");
             link_failed(&m);
             return 1;
         }
     };
-    if !matches!(kind, "card" | "node") {
-        let m = format!("{kind} is not a link target — use card or node");
+    if !matches!(kind, "card" | "node" | "group") {
+        let m = format!("{kind} is not a link target — use card, node or group");
         eprintln!("trellis: {m}");
         link_failed(&m);
         return 1;
