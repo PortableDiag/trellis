@@ -6,6 +6,35 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.113.1]
+
+### Fixed
+- **A desktop card window flashed and jumped**, badly enough to be unusable.
+  The builder was re-applying `with_position` every frame from the window's own
+  reported position, so the app commanded the window, the window manager moved
+  it, the app read the new position and commanded it again.
+
+  **This is the v0.99.1 bug, and the changelog entry that shipped it cited that
+  bug by name.** A delta chased against a lagging reading cannot converge.
+  Where a window is *created* is now fixed for the life of that window; where it
+  currently *is* is observed for persistence only and never fed back into a
+  builder.
+
+- **Right-click did nothing on a desktop card.** The card's context menu hangs
+  off its title-bar interaction, and the strip added to drag the window covered
+  exactly that and won the hit-test — silently removing the menu from a card the
+  moment it left the canvas. The strip now carries the menu itself.
+
+- **That menu offered *Send to desktop* on a card that was plainly already out.**
+  Suppressing the "on the desktop" placeholder had been done by passing an empty
+  set, which also told the menu nothing was out. The two questions are now
+  separate: `on_desktop` says *which cards are out* (what the menu needs) and
+  `as_window` says *where the drawing is happening* (what suppresses the
+  placeholder).
+
+All three were found by driving the running app and looking at it — none is
+visible in the source, and the first was reported from the operator's screen.
+
 ## [0.113.0]
 
 ### Added

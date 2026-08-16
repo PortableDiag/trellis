@@ -63,6 +63,15 @@ pub struct Env<'a> {
     /// Cards that are currently out on the desktop as their own OS windows.
     /// The canvas dims them in place so the basket still shows where they live.
     pub on_desktop: &'a HashSet<CardId>,
+    /// True while drawing a card *into its own desktop window*.
+    ///
+    /// Separate from [`on_desktop`] because the two answer different questions:
+    /// that set says **which cards are out** — which the right-click menu needs,
+    /// so it can offer *Recall* rather than *Send* — while this says **where the
+    /// drawing is happening**, which is what suppresses the "on the desktop"
+    /// placeholder. Conflating them made the window paint the placeholder over
+    /// itself.
+    pub as_window: bool,
 }
 
 /// How cards are painted, chosen by the active theme. `Normal` is the default
@@ -1237,16 +1246,41 @@ fn scale_fonts(ui: &mut egui::Ui, zoom: f32) {
 ///
 /// The transform maps the card's world position to the window origin at zoom 1,
 /// so the card exactly fills the viewport it was given.
+/// Returns true when a drag began on the title strip, which the caller turns
+/// into a `ViewportCommand::StartDrag` so the window manager performs the move.
 pub fn desktop_card_ui(
     ui: &mut egui::Ui,
     card: &Card,
     node_path: &str,
     env: &mut Env,
     actions: &mut Vec<CanvasAction>,
-) {
+) -> bool {
     let to_window = TSTransform::from_translation(-card.pos.to_vec2());
     let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, card.size);
     card_ui(ui, card, node_path, to_window, clip, env, false, None, actions);
+
+    // The title strip is registered AFTER the card so it wins the hit-test —
+    // dragging it must move the *window*, not the card's canvas position.
+    //
+    // **It has to carry the context menu too.** The card's own menu hangs off
+    // its title-bar interaction, so a strip that covers the title and does not
+    // re-offer the menu silently removes right-click from a desktop card. That
+    // is exactly what happened: the menu was gone in the window and nowhere else.
+    let strip = egui::Rect::from_min_size(
+        clip.min,
+        egui::vec2((clip.width() - 26.0).max(0.0), TITLE_H),
+    );
+    let r = ui.interact(
+        strip,
+        ui.id().with(("dcard-title", card.id)),
+        egui::Sense::click_and_drag(),
+    );
+    let on_desktop = env.on_desktop.contains(&card.id);
+    r.context_menu(|ui| {
+        card_menu(ui, card, node_path, env.templates, env.masters, env.card_plugins,
+                  on_desktop, actions)
+    });
+    r.drag_started()
 }
 
 fn card_ui(
@@ -1284,7 +1318,7 @@ fn card_ui(
     // **Pulse is a slow sine that never reaches zero** — 40% to 100% over 1.8s.
     // Anything faster than about 3 Hz is a photosensitive-seizure risk, and a
     // halo that blinks fully off reads as a fault rather than as attention.
-    let out = env.on_desktop.contains(&card.id);
+    let out = env.on_desktop.contains(&card.id) && !env.as_window;
     let live = card.live_emphasis(crate::changelog::now_secs() as i64);
     if live != crate::model::Emphasis::None {
         let base = card.emphasis_intensity.clamp(0.0, 1.0);
