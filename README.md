@@ -408,6 +408,10 @@ work *in flight for five days*, not work due on the last one — it reads as **t
 every day until it's done, instead of hiding under a future date until it's already
 late. The card never moves; the window does.
 
+**Archive finished work instead of deleting it.** Every project workspace has an
+`Archive` basket; a card moved there keeps its id, so links and backlinks to it
+still resolve. `POST /api/nodes/{id}/cards/move` moves a whole batch in one call.
+
 **Link to a card or a group, not just a basket.** `[[#1391]]` points at a card,
 `[[#g146]]` at a group; `[[Some Basket]]` and `[[42]]` still point at baskets. In
 a journal every card written on one day shares a basket, so linking to the day

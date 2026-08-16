@@ -6,6 +6,29 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.112.0]
+
+### Added
+- **`POST /api/nodes/{id}/cards/move {cards, node, pos?, gap?}` — move a batch of
+  cards to another basket in one call.** Archiving the Trellis workspace was **55
+  single-card calls**, one per card, which is what made the gap obvious: the
+  operation an agent actually performs is *"these cards, over there"*, and the API
+  only offered *"this card, over there"*, repeated.
+
+  **The whole list is validated before anything moves.** One bad id refuses the
+  batch rather than moving what it can — a partial move leaves the caller unable
+  to tell how far it got, which is the same reasoning behind batched table ops in
+  v0.82.0. `pos` places the first card and stacks the rest below it by height plus
+  `gap`, so an archive reads as a column instead of a pile; omit it to keep the
+  coordinates each card already had.
+
+- **`POST /api/nodes/{id}/cards/property {cards, key, value}`** — one `key:: value`
+  on many cards. Marking a batch `status:: done` was the same one-call-per-card
+  problem.
+
+Both are scope-checked at **both** ends for a confined token, like every other
+move since v0.111.0.
+
 ## [0.111.0]
 
 ### Added

@@ -7112,6 +7112,8 @@ impl TrellisApp {
                         "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
                         "DELETE /api/nodes/{id}/cards/{cid}",
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
+                        "POST   /api/nodes/{id}/cards/move        {cards:[ids], node, pos?, gap?}  (batch; whole list validated first)",
+                        "POST   /api/nodes/{id}/cards/property    {cards:[ids], key, value}        (one property, many cards)",
                         "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
                         "DELETE /api/nodes/{id}/cards/{cid}/property?key=due        (remove the line; not the same as value:\"\")",
                         "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE …/dock)",

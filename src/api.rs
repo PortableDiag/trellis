@@ -107,6 +107,12 @@ pub enum ApiRequest {
     MoveGroup { node: NodeId, group: GroupId, to: NodeId, pos: Option<[f32; 2]> },
     /// Cards whose `[[#g…]]` links point at one group.
     GroupBacklinks(GroupId),
+    /// Move several cards to another basket in one call. Archiving a finished
+    /// basket was 55 single-card calls before this existed.
+    MoveCards { node: NodeId, cards: Vec<u64>, to: NodeId, pos: Option<[f32; 2]>, gap: f32 },
+    /// Set one `key:: value` property on several cards at once — marking a batch
+    /// `status:: done` is the case that keeps coming up.
+    SetCardsProperty { node: NodeId, cards: Vec<u64>, key: String, value: String },
     // Docking.
     DockCard { node: NodeId, card: u64, anchor: u64 },
     DetachCard { node: NodeId, card: u64 },
@@ -189,6 +195,38 @@ pub enum ApiRequest {
     /// `GET /api/groups/{gid}/link` — the canonical URL for a group, minted the
     /// same way and for the same reason as [`CardLink`].
     GroupLink(u64),
+}
+
+/// `POST /api/nodes/{id}/cards/move` — move a list of cards to another basket.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveCardsInput {
+    /// The cards to move. Every one must exist in the source basket; an id that
+    /// does not is a 400 naming it, not a silent skip.
+    cards: Vec<u64>,
+    /// Destination basket.
+    node: NodeId,
+    /// Where the first card lands. Omit to keep every card's current
+    /// coordinates, which is what you want when the layout already means
+    /// something.
+    #[serde(default)]
+    pos: Option<[f32; 2]>,
+    /// Vertical gap between stacked cards when `pos` is given.
+    #[serde(default = "default_gap")]
+    gap: f32,
+}
+
+fn default_gap() -> f32 {
+    20.0
+}
+
+/// `POST /api/nodes/{id}/cards/property` — one property, many cards.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CardsPropertyInput {
+    cards: Vec<u64>,
+    key: String,
+    value: String,
 }
 
 /// `POST /api/nodes/{id}/groups/{gid}/move` — the destination basket, and
@@ -276,6 +314,8 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::CreateGroup { node, .. }
         | ApiRequest::UpdateGroup { node, .. }
         | ApiRequest::MoveGroup { node, .. }
+        | ApiRequest::MoveCards { node, .. }
+        | ApiRequest::SetCardsProperty { node, .. }
         | ApiRequest::DeleteGroup { node, .. } => Some(*node),
         ApiRequest::CreateNode { parent, .. } => *parent,
         _ => None,
@@ -452,6 +492,17 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
         // Reported against the basket it came *from*, with the destination as a
         // field — the same shape as a cross-basket card move, so a client that
         // knows to refresh both ends already handles this one.
+        ApiRequest::MoveCards { node, cards, to, .. } => {
+            let mut c = ch(E::Card, Op::Moved, cards.first().copied().unwrap_or(0)).in_node(*node);
+            c = c.field(&format!("node={to}"));
+            c.field(&format!("batch={}", cards.len()))
+        }
+        ApiRequest::SetCardsProperty { node, cards, key, value } => {
+            ch(E::Card, Op::Updated, cards.first().copied().unwrap_or(0))
+                .in_node(*node)
+                .field(&format!("{}={}", key.to_lowercase(), value))
+                .field(&format!("batch={}", cards.len()))
+        }
         ApiRequest::MoveGroup { node, group, to, .. } => {
             ch(E::Group, Op::Moved, *group).in_node(*node).field(&format!("node={to}"))
         }
@@ -561,6 +612,7 @@ pub fn move_destination(req: &ApiRequest) -> Option<MoveDest> {
     match req {
         ApiRequest::MoveCard { mv, .. } => mv.target_node().map(MoveDest::Basket),
         ApiRequest::MoveGroup { to, .. } => Some(MoveDest::Basket(*to)),
+        ApiRequest::MoveCards { to, .. } => Some(MoveDest::Basket(*to)),
         ApiRequest::MoveNode { mv, .. } => mv.destination(),
         _ => None,
     }
@@ -1294,6 +1346,19 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "nodes", id, "cards"]) => {
             let input: AddCardInput = parse(body)?;
             Ok(ApiRequest::AddCard { node: pid(id)?, input })
+        }
+        // Literal arms first: "move" and "property" sit where a card id would.
+        (Method::Post, ["api", "nodes", nid, "cards", "move"]) => {
+            let i: MoveCardsInput = parse(body)?;
+            Ok(ApiRequest::MoveCards {
+                node: pid(nid)?, cards: i.cards, to: i.node, pos: i.pos, gap: i.gap,
+            })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", "property"]) => {
+            let i: CardsPropertyInput = parse(body)?;
+            Ok(ApiRequest::SetCardsProperty {
+                node: pid(nid)?, cards: i.cards, key: i.key, value: i.value,
+            })
         }
         (Method::Patch, ["api", "nodes", nid, "cards", cid]) => {
             let patch: UpdateCardInput = parse(body)?;
@@ -2447,6 +2512,78 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 ),
                 None => (false, ApiResponse::err(404, "group not found")),
             }
+        }
+        ApiRequest::MoveCards { node, cards, to, pos, gap } => {
+            if !doc.nodes.contains_key(&node) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            if !doc.nodes.contains_key(&to) {
+                return (false, ApiResponse::err(404, "destination node not found"));
+            }
+            if node == to {
+                return (false, ApiResponse::err(400, "those cards are already in that node"));
+            }
+            if cards.is_empty() {
+                return (false, ApiResponse::err(400, "cards must name at least one card"));
+            }
+            // Validate the whole list BEFORE moving any of it. A partial move
+            // leaves the caller with no way to know how far it got — the same
+            // reason table ops validate a batch up front.
+            for cid in &cards {
+                if doc.card(node, *cid).is_none() {
+                    return (
+                        false,
+                        ApiResponse::err(404, &format!("card {cid} is not in node {node}")),
+                    );
+                }
+            }
+            let mut moved = Vec::with_capacity(cards.len());
+            let mut cursor = pos.map(|p| egui::pos2(p[0], p[1]));
+            for cid in &cards {
+                // Height is read before the move, while the card is still here.
+                let h = doc.card(node, *cid).map(|c| c.size.y).unwrap_or(0.0);
+                if doc.move_card_to_node(node, *cid, to, cursor).is_some() {
+                    moved.push(*cid);
+                    if let Some(c) = cursor.as_mut() {
+                        c.y += h + gap;
+                    }
+                }
+            }
+            (
+                true,
+                ApiResponse::ok(json!({ "moved": moved.len(), "node": to, "cards": moved })),
+            )
+        }
+        ApiRequest::SetCardsProperty { node, cards, key, value } => {
+            if !doc.nodes.contains_key(&node) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            if cards.is_empty() {
+                return (false, ApiResponse::err(400, "cards must name at least one card"));
+            }
+            for cid in &cards {
+                if doc.card(node, *cid).is_none() {
+                    return (
+                        false,
+                        ApiResponse::err(404, &format!("card {cid} is not in node {node}")),
+                    );
+                }
+            }
+            let mut done = Vec::with_capacity(cards.len());
+            for cid in &cards {
+                if doc.set_card_property(node, *cid, &key, &value) {
+                    done.push(*cid);
+                }
+            }
+            (
+                true,
+                ApiResponse::ok(json!({
+                    "updated": done.len(),
+                    "cards": done,
+                    "key": key.to_lowercase(),
+                    "value": value,
+                })),
+            )
         }
         ApiRequest::ListGroups(node) => match doc.nodes.get(&node) {
             Some(n) => (false, ApiResponse::ok(json!({ "groups": groups_json(n) }))),
@@ -3849,6 +3986,20 @@ mod tests {
         ));
         // The group routes mirror the card ones exactly, and the more specific
         // paths must not be shadowed by the bare-id lookup below them.
+        // The literal arms must not be shadowed by the {cid} arm at the same length.
+        assert!(matches!(
+            route(&Method::Post, "/api/nodes/5/cards/move", "",
+                  "{\"cards\":[1,2],\"node\":7}").unwrap(),
+            ApiRequest::MoveCards { node: 5, to: 7, .. }
+        ));
+        assert!(matches!(
+            route(&Method::Post, "/api/nodes/5/cards/property", "",
+                  "{\"cards\":[1],\"key\":\"status\",\"value\":\"done\"}").unwrap(),
+            ApiRequest::SetCardsProperty { node: 5, .. }
+        ));
+        // Still strict, like everything else since v0.86.0.
+        assert!(route(&Method::Post, "/api/nodes/5/cards/move", "",
+                      "{\"cards\":[1],\"nodes\":7}").is_err());
         assert!(matches!(
             route(&Method::Get, "/api/groups/9", "", "").unwrap(),
             ApiRequest::LocateGroup(9)
@@ -4597,6 +4748,80 @@ mod tests {
 
     /// The point of the whole feature: a group survives a basket change with
     /// its id, so a `[[#g…]]` link written before the move still lands.
+    /// The operation that motivated this: archiving a finished basket was 55
+    /// single-card calls, one per card.
+    #[test]
+    fn cards_move_in_a_batch_and_the_whole_list_is_validated_first() {
+        let mut doc = Document::empty();
+        let from = doc.add_node(None, "from".into());
+        let to = doc.add_node(None, "to".into());
+        let a = doc.add_card(from, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(from, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let c = doc.add_card(from, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(from, a).unwrap().size = egui::vec2(300.0, 100.0);
+        doc.card_mut(from, b).unwrap().size = egui::vec2(300.0, 50.0);
+
+        // One bad id refuses the WHOLE batch — a partial move leaves the caller
+        // unable to tell how far it got.
+        let (dirty, resp) = process(&mut doc, ApiRequest::MoveCards {
+            node: from, cards: vec![a, 9999], to, pos: None, gap: 20.0,
+        });
+        assert!(!dirty, "a refused batch must not move anything");
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("9999"), "the error names the offending id");
+        assert_eq!(doc.locate_card(a), Some(from), "nothing moved");
+
+        // pos stacks the cards down by height + gap, so an archive is readable.
+        let (dirty, resp) = process(&mut doc, ApiRequest::MoveCards {
+            node: from, cards: vec![a, b, c], to, pos: Some([40.0, 40.0]), gap: 20.0,
+        });
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        let got: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(got["moved"], 3);
+        assert_eq!(doc.card(to, a).unwrap().pos, egui::pos2(40.0, 40.0));
+        assert_eq!(doc.card(to, b).unwrap().pos, egui::pos2(40.0, 160.0));
+        assert_eq!(doc.card(to, c).unwrap().pos, egui::pos2(40.0, 230.0));
+        // Ids survive, so links written to an archived card still resolve.
+        assert_eq!(doc.locate_card(a), Some(to));
+        assert!(doc.nodes[&from].cards.is_empty());
+
+        // Refusals that name the reason.
+        let (_d, resp) = process(&mut doc, ApiRequest::MoveCards {
+            node: to, cards: vec![a], to, pos: None, gap: 20.0 });
+        assert_eq!(resp.status, 400, "same basket");
+        let (_d, resp) = process(&mut doc, ApiRequest::MoveCards {
+            node: to, cards: vec![], to: from, pos: None, gap: 20.0 });
+        assert_eq!(resp.status, 400, "empty list");
+        let (_d, resp) = process(&mut doc, ApiRequest::MoveCards {
+            node: to, cards: vec![a], to: 999, pos: None, gap: 20.0 });
+        assert_eq!(resp.status, 404, "unknown destination");
+    }
+
+    #[test]
+    fn one_property_can_be_set_on_many_cards() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let a = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        let (_d, resp) = process(&mut doc, ApiRequest::SetCardsProperty {
+            node: n, cards: vec![a, 9999], key: "status".into(), value: "done".into() });
+        assert_eq!(resp.status, 404, "validated up front, like the batch move");
+
+        let (dirty, resp) = process(&mut doc, ApiRequest::SetCardsProperty {
+            node: n, cards: vec![a, b], key: "status".into(), value: "done".into() });
+        assert!(dirty);
+        let got: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(got["updated"], 2);
+        assert_eq!(got["key"], "status");
+        for cid in [a, b] {
+            let props = doc.card(n, cid).unwrap().properties();
+            assert!(props.iter().any(|(k, v)| k == "status" && v == "done"),
+                    "card {cid} carries status:: done");
+        }
+    }
+
     #[test]
     fn a_group_moves_between_baskets_over_the_api() {
         let mut doc = Document::empty();

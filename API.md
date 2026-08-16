@@ -381,6 +381,24 @@ POST /api/nodes/{id}/cards/{cid}/move  {to:"front"|"back"}     front = on top / 
 Move a card to a **different** basket with `node` (and optionally `pos`), which
 takes precedence over the ordering fields above:
 ```
+POST /api/nodes/{id}/cards/move  {cards:[ids], node:<target>, pos?:[x,y], gap?:20}
+  → 200 {"moved":N,"node":<target>,"cards":[ids]}
+  | 400 (empty list / already in that basket)  | 404 (node, destination, or a card
+        that is not in the source basket — named)
+
+  **The whole list is validated before anything moves.** One bad id refuses the
+  batch, because a partial move leaves you unable to tell how far it got — the
+  same rule table ops follow. `pos` places the first card and stacks the rest
+  below it by each card's height plus `gap`; omit it to keep every card's current
+  coordinates, which is what you want when the layout already means something.
+  Ids survive, so `[[#id]]` links and backlinks to a moved card still resolve.
+
+POST /api/nodes/{id}/cards/property  {cards:[ids], key, value}
+  → 200 {"updated":N,"cards":[ids],"key":"status","value":"done"}
+  | 400 (empty list)  | 404 (node, or a card not in it — named)
+
+  One `key:: value` on many cards. Validated up front, same as the batch move.
+
 POST /api/nodes/{id}/cards/{cid}/move  {node:<target id>, pos?:[x,y]}
     → 200 {"card":<cid>, "node":<target>, "moved":true}
     | 400 (already in that node) | 404 (card or target node not found)
