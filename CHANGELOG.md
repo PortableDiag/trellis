@@ -6,6 +6,44 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.113.0]
+
+### Added
+- **Desktop mode - a card can leave the canvas and become its own OS window**
+  (Linux/X11). Right-click a card, *Send to desktop*, or
+  `POST /api/cards/{cid}/desktop`. It is the same card: edit it in the window and
+  the basket has the change, because both draw through the one `card_ui`.
+
+  **One real window per card, not a transparent overlay.** The overlay is the
+  cheap route and it is the wrong one: a single window sits entirely above or
+  entirely below every other application, so a card could never be behind a
+  browser and in front of a terminal - which is the whole premise. Only genuine
+  top-level windows take part in the window manager's stacking.
+
+  **Not always-on-top**, for the same reason. A card that can never go behind
+  anything is a HUD, not part of the desktop.
+
+  **Placement is app config, not document state.** A screen coordinate belongs to
+  one machine; a document opened on another box, or read by the Android app, must
+  not carry window geometry. Same rule that keeps templates and the backup
+  schedule out of the `.ron`.
+
+  Dragging hands the move to the **window manager** (`StartDrag`) rather than
+  chasing the pointer delta - a delta measured inside a window that is itself
+  moving cannot converge, which is exactly how a stuck panel walked off the
+  screen in v0.99.1.
+
+  A card that is out is drawn faintly in its basket, labelled *on the desktop*, so
+  the layout does not develop a hole where a card used to be.
+
+  **Measured before it was built**, on this machine, as a throwaway binary: a
+  transparent undecorated viewport composites under `kwin_x11` with the glow
+  backend; `StartDrag` moves an undecorated window; and 50 such windows held a
+  steady 59.9 FPS - so the design needed neither a cap nor an opaque fallback.
+
+  **Linux/X11 only.** Wayland has no protocol for an application to position its
+  own windows at all; macOS and Windows need their own pass and answer **501**.
+
 ## [0.112.0]
 
 ### Added

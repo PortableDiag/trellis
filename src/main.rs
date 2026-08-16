@@ -155,6 +155,12 @@ fn main() -> eframe::Result<()> {
             .with_title(app::window_title(args.doc.as_deref()))
             .with_inner_size([1200.0, 780.0])
             .with_min_inner_size([720.0, 460.0])
+            // Transparency is a PROCESS-WIDE decision: eframe picks one GL config
+            // from the root viewport's flag and every child viewport shares it.
+            // Desktop-mode card windows need alpha, so the main window has to ask
+            // for it too — it stays opaque in practice because its panels paint
+            // their own fills over the cleared surface.
+            .with_transparent(true)
             .with_icon(load_icon()),
         persistence_path,
         ..Default::default()

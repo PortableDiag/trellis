@@ -443,6 +443,36 @@ moves by the same delta, so the arrangement inside the group survives. Omit it t
 keep the current coordinates. Docking is kept between cards that travel together
 and cut where it would name a card left behind.
 
+### Desktop mode (Linux/X11)
+Send a card out of the canvas to become its own borderless OS window, sitting
+among your other applications instead of inside Trellis.
+```
+GET    /api/desktop        -> 200 {"supported":true,"cards":[{"card":1815,"pos":[760,430]}]}
+
+POST   /api/cards/{cid}/desktop  {pos?:[x,y]}
+  -> 200 {"card":1815,"desktop":true,"pos":[760,430]}
+  | 404 (no card with that id)  | 501 (not Linux)
+
+DELETE /api/cards/{cid}/desktop  -> 200 {"card":1815,"desktop":false,"was_on_desktop":true}
+```
+`pos` is **screen** pixels; omit it and the window opens near where the card sits
+on the canvas. The window is undecorated, transparent-cornered, keeps no taskbar
+entry, and is dragged by its own title strip.
+
+**One real window per card, not one overlay.** An overlay is a single window and
+therefore sits entirely above or entirely below every other application - a card
+could never be behind a browser and in front of a terminal, which is the point.
+Windows are **not** always-on-top for the same reason: a card that can never go
+behind anything is a HUD, not part of the desktop.
+
+**Placement is app config, not document state** - `card id -> [x, y]` per
+instance, the same rule that keeps templates and the backup schedule out of the
+`.ron`. A screen coordinate belongs to one machine; a document opened elsewhere,
+or read by the Android app, must not carry it.
+
+**Linux/X11 only.** Wayland has no protocol for an application to position its own
+windows; macOS and Windows need their own pass and return **501** for now.
+
 ### Docking
 Stick one card to another so they move together (`card` docks onto `anchor`).
 ```

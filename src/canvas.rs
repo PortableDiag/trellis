@@ -60,6 +60,9 @@ pub struct Env<'a> {
     /// Draw a soft accent-colored glow behind each card (the radiant neon
     /// themes: Futuristic, SynthWave).
     pub glow: bool,
+    /// Cards that are currently out on the desktop as their own OS windows.
+    /// The canvas dims them in place so the basket still shows where they live.
+    pub on_desktop: &'a HashSet<CardId>,
 }
 
 /// How cards are painted, chosen by the active theme. `Normal` is the default
@@ -161,6 +164,10 @@ pub enum CanvasAction {
     SetEmphasis(CardId, crate::model::Emphasis),
     ToggleDepthMode,
     ToggleTimeMode,
+    /// Send a card out of the canvas and onto the desktop as its own borderless
+    /// OS window, or bring it back.
+    SendToDesktop(CardId),
+    RecallFromDesktop(CardId),
     /// A `[[wiki-link]]` clicked inside a table cell. Carries the raw target;
     /// the app resolves it exactly as it resolves one clicked in a text card.
     FollowLink(String),
@@ -268,7 +275,7 @@ pub enum CanvasAction {
     ToggleSnapMode,
 }
 
-const TITLE_H: f32 = 24.0;
+pub(crate) const TITLE_H: f32 = 24.0;
 /// How close (world units) a dragged edge must be to snap to another card's edge.
 const SNAP_DIST: f32 = 8.0;
 
@@ -1221,6 +1228,27 @@ fn scale_fonts(ui: &mut egui::Ui, zoom: f32) {
     ui.set_style(style);
 }
 
+/// Draw one card filling its own OS window (Desktop mode).
+///
+/// Deliberately routed through the same [`card_ui`] the canvas uses, for the
+/// reason the Agenda renders one `agenda_body` into either a panel or a window:
+/// two renderers for one thing drift, and then a card looks different depending
+/// on where you happen to be looking at it.
+///
+/// The transform maps the card's world position to the window origin at zoom 1,
+/// so the card exactly fills the viewport it was given.
+pub fn desktop_card_ui(
+    ui: &mut egui::Ui,
+    card: &Card,
+    node_path: &str,
+    env: &mut Env,
+    actions: &mut Vec<CanvasAction>,
+) {
+    let to_window = TSTransform::from_translation(-card.pos.to_vec2());
+    let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, card.size);
+    card_ui(ui, card, node_path, to_window, clip, env, false, None, actions);
+}
+
 fn card_ui(
     ui: &mut egui::Ui,
     card: &Card,
@@ -1256,6 +1284,7 @@ fn card_ui(
     // **Pulse is a slow sine that never reaches zero** — 40% to 100% over 1.8s.
     // Anything faster than about 3 Hz is a photosensitive-seizure risk, and a
     // halo that blinks fully off reads as a fault rather than as attention.
+    let out = env.on_desktop.contains(&card.id);
     let live = card.live_emphasis(crate::changelog::now_secs() as i64);
     if live != crate::model::Emphasis::None {
         let base = card.emphasis_intensity.clamp(0.0, 1.0);
@@ -1507,7 +1536,8 @@ fn card_ui(
         actions.push(CanvasAction::SetEditing(card.id, !card.editing));
     }
     handle.context_menu(|ui| {
-        card_menu(ui, card, node_path, env.templates, env.masters, env.card_plugins, actions)
+        card_menu(ui, card, node_path, env.templates, env.masters, env.card_plugins,
+                  env.on_desktop.contains(&card.id), actions)
     });
 
     // Title label. A title is painted as one galley with no Markdown involved,
@@ -1698,6 +1728,26 @@ fn card_ui(
     }
     if grip_resp.dragged() {
         actions.push(CanvasAction::ResizeCard(card.id, grip_resp.drag_delta() / zoom));
+    }
+
+    // A card that is out on the desktop still lives in this basket — it is just
+    // being *shown* somewhere else. Say so in place rather than leaving a gap
+    // where a card used to be, which reads as "something is missing".
+    if out {
+        let p = ui.painter_at(clip);
+        p.rect_filled(rect, r, ui.visuals().panel_fill.gamma_multiply(0.55));
+        p.rect_stroke(
+            rect,
+            r,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(0x94, 0xa3, 0xb8)),
+        );
+        p.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "on the desktop",
+            egui::FontId::proportional(12.0 * zoom),
+            egui::Color32::from_rgb(0x94, 0xa3, 0xb8),
+        );
     }
 }
 
@@ -2325,6 +2375,7 @@ fn card_menu(
     templates: &[String],
     masters: &HashMap<CardId, (usize, String, bool)>,
     card_plugins: &[(usize, String)],
+    on_desktop: bool,
     actions: &mut Vec<CanvasAction>,
 ) {
     if supports_edit(&card.kind) && card.source.is_none() {
@@ -2493,6 +2544,19 @@ fn card_menu(
                     }
                 });
             }
+        }
+    }
+    // Desktop mode: the card leaves the canvas and becomes a real OS window,
+    // interleaving with other applications instead of living inside Trellis.
+    if cfg!(target_os = "linux") {
+        if on_desktop {
+            if ui.button("Recall from desktop").clicked() {
+                actions.push(CanvasAction::RecallFromDesktop(card.id));
+                ui.close_menu();
+            }
+        } else if ui.button("Send to desktop").clicked() {
+            actions.push(CanvasAction::SendToDesktop(card.id));
+            ui.close_menu();
         }
     }
     // Copy the card's id or its breadcrumb path so you can point an agent at

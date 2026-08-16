@@ -64,6 +64,13 @@ const API_KEY_KEY: &str = "api_key";
 const API_PORT_KEY: &str = "api_port";
 const API_LAN_KEY: &str = "api_lan";
 const TEMPLATES_KEY: &str = "card_templates";
+/// Desktop-mode window placements, `card id -> [x, y]` in screen pixels.
+///
+/// **App config, not the document.** A desktop position is screen geometry for
+/// one machine; a document opened on another box, or read by the Android app,
+/// must not carry it. Same rule that puts templates and the backup schedule
+/// here rather than in the `.ron`.
+const DESKTOP_CARDS_KEY: &str = "desktop_cards";
 const GRANTS_KEY: &str = "plugin_grants";
 const MIRROR_MODE_KEY: &str = "mirror_policy";
 const MIRROR_DIRS_KEY: &str = "mirror_dirs";
@@ -1062,6 +1069,9 @@ pub struct TrellisApp {
     /// ever in flight, so a second clock would just be a way to disagree.
     focus_group: Option<crate::model::GroupId>,
     highlight_group: Option<crate::model::GroupId>,
+    /// Cards currently living on the desktop as their own OS windows, and where
+    /// each window sits. Linux/X11 only — see `desktop_windows`.
+    desktop_cards: std::collections::HashMap<CardId, [f32; 2]>,
     /// Claims panel: cards that assert state (`verify::`), worst first, so a
     /// workspace that has gone out of date says so instead of being believed.
     claims_open: bool,
@@ -1534,6 +1544,11 @@ impl TrellisApp {
             highlight_until: 0.0,
             focus_group: None,
             highlight_group: None,
+            desktop_cards: cc
+                .storage
+                .and_then(|s| s.get_string(DESKTOP_CARDS_KEY))
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
             claims_open: cc
                 .storage
                 .and_then(|s| s.get_string(CLAIMS_OPEN_KEY))
@@ -3030,6 +3045,47 @@ impl TrellisApp {
                 "http": format!("http://127.0.0.1:{port}/open/card/{cid}"),
             })));
         }
+        // Desktop-mode placement is app config, so it is answered here rather
+        // than in `process`, the same as templates and the backup schedule.
+        if let api::ApiRequest::ListCardDesktop = req {
+            let cards: Vec<serde_json::Value> = self
+                .desktop_cards
+                .iter()
+                .map(|(cid, p)| serde_json::json!({ "card": cid, "pos": p }))
+                .collect();
+            return Some(api::ApiResponse::ok(serde_json::json!({
+                "supported": cfg!(target_os = "linux"),
+                "cards": cards,
+            })));
+        }
+        if let api::ApiRequest::SetCardDesktop { card, pos, on } = req {
+            let cid = *card as crate::model::CardId;
+            if !cfg!(target_os = "linux") {
+                return Some(api::ApiResponse::err(
+                    501,
+                    "desktop mode needs a window manager that lets an application                      position its own windows — Linux/X11 only for now",
+                ));
+            }
+            if self.doc.locate_card(cid).is_none() {
+                return Some(api::ApiResponse::err(404, "no card with that id"));
+            }
+            if *on {
+                let p = pos.unwrap_or_else(|| {
+                    self.card_rects
+                        .get(&cid)
+                        .map(|r| [r.min.x + 60.0, r.min.y + 60.0])
+                        .unwrap_or([200.0, 200.0])
+                });
+                self.desktop_cards.insert(cid, p);
+                return Some(api::ApiResponse::ok(serde_json::json!({
+                    "card": cid, "desktop": true, "pos": p,
+                })));
+            }
+            let was = self.desktop_cards.remove(&cid).is_some();
+            return Some(api::ApiResponse::ok(serde_json::json!({
+                "card": cid, "desktop": false, "was_on_desktop": was,
+            })));
+        }
         if let api::ApiRequest::GroupLink(gid) = req {
             let gid = *gid as crate::model::GroupId;
             let Some(node) = self.doc.locate_group(gid) else {
@@ -3959,6 +4015,12 @@ impl TrellisApp {
         let group = |op, id: crate::model::GroupId| Change::new(Ui, Entity::Group, op, id).in_node(node);
         let upd = |id: &CardId, f: &str| card(Op::Updated, *id).titled(title(id)).field(f);
         Some(match a {
+            CanvasAction::SendToDesktop(c) => {
+                card(Op::Updated, *c).titled(title(c)).field("desktop")
+            }
+            CanvasAction::RecallFromDesktop(c) => {
+                card(Op::Updated, *c).titled(title(c)).field("desktop.recall")
+            }
             // Pure view/clipboard/export, plus the template actions, which record
             // themselves where the library is actually touched.
             // Selecting changes nothing in the document.
@@ -4394,6 +4456,23 @@ impl TrellisApp {
         }
         for a in actions {
             match a {
+                // Placement is app config, so this touches no document state and
+                // must not mark the document dirty.
+                CanvasAction::SendToDesktop(cid) => {
+                    // Open near where the card sits on screen rather than at a
+                    // fixed corner, so it lands roughly where you were looking.
+                    let pos = self
+                        .card_rects
+                        .get(&cid)
+                        .map(|r| [r.min.x + 60.0, r.min.y + 60.0])
+                        .unwrap_or([200.0, 200.0]);
+                    self.desktop_cards.insert(cid, pos);
+                    self.status = format!("Card #{cid} sent to the desktop");
+                }
+                CanvasAction::RecallFromDesktop(cid) => {
+                    self.desktop_cards.remove(&cid);
+                    self.status = format!("Card #{cid} recalled from the desktop");
+                }
                 CanvasAction::AddCard(kind, pos) => {
                     self.doc.add_card(node, pos, kind);
                 }
@@ -7114,6 +7193,8 @@ impl TrellisApp {
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
                         "POST   /api/nodes/{id}/cards/move        {cards:[ids], node, pos?, gap?}  (batch; whole list validated first)",
                         "POST   /api/nodes/{id}/cards/property    {cards:[ids], key, value}        (one property, many cards)",
+                        "GET    /api/desktop                      (cards out on the desktop as their own windows; Linux/X11)",
+                        "POST   /api/cards/{cid}/desktop {pos?}   (send a card to the desktop; DELETE recalls it)",
                         "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
                         "DELETE /api/nodes/{id}/cards/{cid}/property?key=due        (remove the line; not the same as value:\"\")",
                         "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE …/dock)",
@@ -8581,6 +8662,174 @@ impl TrellisApp {
         self.highlight_until = ctx.input(|i| i.time) + canvas::HIGHLIGHT_SECS;
     }
 
+    /// Desktop mode: draw every card that has been sent out as its own
+    /// borderless OS window, so it interleaves with other applications in the
+    /// window manager's z-order.
+    ///
+    /// **One real window per card, not one transparent overlay.** An overlay is
+    /// a single window and therefore sits entirely above or entirely below every
+    /// other application — a card could never be behind a browser and in front of
+    /// a terminal, which is the whole point. Only genuine top-level windows take
+    /// part in the WM's stacking.
+    ///
+    /// **Not always-on-top.** A card that can never go behind anything is a HUD,
+    /// not part of the desktop.
+    ///
+    /// Linux/X11 only: an application may position its own windows there. Wayland
+    /// has no protocol for it at all, and macOS/Windows need their own pass.
+    #[cfg(target_os = "linux")]
+    fn desktop_windows(&mut self, ctx: &egui::Context) {
+        if self.desktop_cards.is_empty() {
+            return;
+        }
+        // Resolve each card once, up front: a card can be deleted or moved while
+        // its window is open, and a stale id must close the window rather than
+        // panic or draw nothing forever.
+        let open: Vec<(CardId, [f32; 2], NodeId)> = self
+            .desktop_cards
+            .iter()
+            .filter_map(|(&cid, &pos)| self.doc.locate_card(cid).map(|n| (cid, pos, n)))
+            .collect();
+        let gone: Vec<CardId> = self
+            .desktop_cards
+            .keys()
+            .copied()
+            .filter(|c| self.doc.locate_card(*c).is_none())
+            .collect();
+        for c in gone {
+            self.desktop_cards.remove(&c);
+        }
+
+        let mut recall: Vec<CardId> = Vec::new();
+        let mut moved: Vec<(CardId, [f32; 2])> = Vec::new();
+        let mut actions: Vec<canvas::CanvasAction> = Vec::new();
+        for (cid, pos, node) in open {
+            let Some(card) = self.doc.card(node, cid).cloned() else { continue };
+            let node_path = crate::tree::node_path(&self.doc, node);
+            let size = card.size;
+            let vid = egui::ViewportId::from_hash_of(("desktop-card", cid));
+            let builder = egui::ViewportBuilder::default()
+                .with_title(format!("Trellis card #{cid}"))
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_taskbar(false)
+                .with_position(pos)
+                .with_inner_size([size.x, size.y]);
+
+            let template_names: Vec<String> =
+                self.templates.iter().map(|t| t.card.title.clone()).collect();
+            let card_plugins = self.plugins_for(crate::plugins::Trigger::CardMenu);
+            let masters = self.master_states(node);
+            // **Empty on purpose.** The `on_desktop` set makes the *canvas* draw a
+            // "this card is elsewhere" placeholder over a card that has been sent
+            // out. Inside the card's own window it must not apply, or the window
+            // paints the placeholder over itself and shows everything except the
+            // card you asked for. Found by screenshotting it, not by reading it.
+            let none_out: std::collections::HashSet<CardId> = Default::default();
+            let theme = self.theme;
+            let inline_epoch = self.inline_epoch;
+            let minimap = self.minimap_enabled;
+            let md = &mut self.md_cache;
+            let tex = &mut self.tex_cache;
+            let rects = &mut self.card_rects;
+            let sent = &mut self.inline_sent;
+
+            ctx.show_viewport_immediate(vid, builder, |vctx, _| {
+                let mut env = Env {
+                    md, tex, card_rects: rects,
+                    templates: &template_names,
+                    masters: &masters,
+                    card_plugins: &card_plugins,
+                    inline_sent: sent,
+                    inline_epoch,
+                    focus_card: None,
+                    highlight_card: None,
+                    highlight_until: 0.0,
+                    focus_group: None,
+                    highlight_group: None,
+                    minimap,
+                    style: match theme {
+                        Theme::StickyNotes => canvas::CardStyle::Sticky,
+                        Theme::Futuristic => canvas::CardStyle::Futuristic,
+                        Theme::Blueprint => canvas::CardStyle::Blueprint,
+                        Theme::Silkscreen => canvas::CardStyle::Silkscreen,
+                        Theme::Phosphor => canvas::CardStyle::Phosphor,
+                        _ => canvas::CardStyle::Normal,
+                    },
+                    glow: matches!(theme, Theme::Futuristic | Theme::SynthWave | Theme::Phosphor),
+                    on_desktop: &none_out,
+                };
+                // Transparent frame: the window is the card, so its rounded
+                // corners must show the desktop rather than a grey rectangle.
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
+                    .show(vctx, |ui| {
+                        canvas::desktop_card_ui(ui, &card, &node_path, &mut env, &mut actions);
+
+                        // Registered AFTER the card so it wins the title strip —
+                        // egui hit-testing gives the later interaction priority,
+                        // which is the same ordering the group header relies on.
+                        //
+                        // `StartDrag` hands the whole move to the window manager.
+                        // Chasing the pointer delta ourselves is the bug that made
+                        // a stuck panel walk off the screen in v0.99.1: a delta
+                        // measured inside a window that is itself moving cannot
+                        // converge.
+                        let strip = egui::Rect::from_min_size(
+                            ui.max_rect().min,
+                            egui::vec2(ui.max_rect().width() - 26.0, canvas::TITLE_H),
+                        );
+                        if ui
+                            .interact(strip, ui.id().with(("dcard-drag", cid)), egui::Sense::drag())
+                            .drag_started()
+                        {
+                            vctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+                        // Recall button, top-right, where a close box belongs.
+                        let bx = egui::Rect::from_min_size(
+                            egui::pos2(ui.max_rect().max.x - 24.0, ui.max_rect().min.y + 2.0),
+                            egui::vec2(20.0, 20.0),
+                        );
+                        if ui
+                            .put(bx, egui::Button::new("⤓").small().frame(false))
+                            .on_hover_text("Recall to its basket")
+                            .clicked()
+                        {
+                            recall.push(cid);
+                        }
+                    });
+
+                // Remember where the window manager actually put it, so the
+                // placement survives a restart. Read from the viewport rather
+                // than assumed, because the WM is free to constrain it.
+                if let Some(r) = vctx.input(|i| i.viewport().outer_rect) {
+                    if (r.min.x - pos[0]).abs() > 0.5 || (r.min.y - pos[1]).abs() > 0.5 {
+                        moved.push((cid, [r.min.x, r.min.y]));
+                    }
+                }
+                // Closing the OS window recalls the card, rather than leaving an
+                // invisible entry that the menu then refuses to reopen.
+                if vctx.input(|i| i.viewport().close_requested()) {
+                    recall.push(cid);
+                }
+            });
+        }
+        for (cid, p) in moved {
+            self.desktop_cards.insert(cid, p);
+        }
+        for cid in recall {
+            self.desktop_cards.remove(&cid);
+        }
+        if !actions.is_empty() {
+            // Card edits made in a desktop window go through the same path as
+            // edits made on the canvas — one code path, so they cannot drift.
+            let sel = self.selected;
+            if let Some(node) = sel {
+                self.apply_canvas(ctx, node, actions, false);
+            }
+        }
+    }
+
     /// Whether a move request's *destination* is inside a scoped token's
     /// subtree. Requests that cannot relocate anything answer `true`.
     fn move_dest_within(&self, req: &api::ApiRequest, root: NodeId) -> bool {
@@ -8625,6 +8874,13 @@ impl TrellisApp {
 }
 
 impl eframe::App for TrellisApp {
+    /// Clear to fully transparent so a Desktop-mode card window shows the desktop
+    /// through its rounded corners. The main window is unaffected in appearance:
+    /// its side, top and central panels paint opaque fills over this.
+    fn clear_color(&self, _v: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Capture the window handles so file/message dialogs can be parented
         // to the app window instead of opening behind it.
@@ -8876,6 +9132,8 @@ impl eframe::App for TrellisApp {
                         self.templates.iter().map(|t| t.card.title.clone()).collect();
                     let card_plugins = self.plugins_for(crate::plugins::Trigger::CardMenu);
                     let masters = self.master_states(sel);
+                    let desktop_ids: std::collections::HashSet<CardId> =
+                        self.desktop_cards.keys().copied().collect();
                     let mut env = Env {
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
@@ -8890,6 +9148,7 @@ impl eframe::App for TrellisApp {
                         highlight_until: self.highlight_until,
                         focus_group: self.focus_group,
                         highlight_group: self.highlight_group,
+                        on_desktop: &desktop_ids,
                         minimap: self.minimap_enabled,
                         style: match self.theme {
                             Theme::StickyNotes => canvas::CardStyle::Sticky,
@@ -9050,6 +9309,11 @@ impl eframe::App for TrellisApp {
             }
         }
 
+        // Desktop-mode windows, drawn after the canvas so a card sent out this
+        // frame already has a screen rect to open near.
+        #[cfg(target_os = "linux")]
+        self.desktop_windows(ctx);
+
         // A `trellis://` link that arrived on the API thread: reveal it here,
         // where there is a frame (the highlight fade is measured in frame time)
         // and where the viewport can be asked for focus.
@@ -9084,6 +9348,11 @@ impl eframe::App for TrellisApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Desktop-mode placements: app config, so they live here rather than in
+        // the document — screen geometry belongs to this machine.
+        if let Ok(j) = serde_json::to_string(&self.desktop_cards) {
+            storage.set_string(DESKTOP_CARDS_KEY, j);
+        }
         // Remember which file to reopen next launch (untitled docs live in the
         // autosave slot and need no key).
         if let Some(p) = &self.doc_path {

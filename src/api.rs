@@ -195,6 +195,19 @@ pub enum ApiRequest {
     /// `GET /api/groups/{gid}/link` — the canonical URL for a group, minted the
     /// same way and for the same reason as [`CardLink`].
     GroupLink(u64),
+    /// Send a card to the desktop as its own OS window, or recall it. Placement
+    /// is app config, so this is answered in the app loop, not here.
+    SetCardDesktop { card: u64, pos: Option<[f32; 2]>, on: bool },
+    /// Which cards are currently out on the desktop.
+    ListCardDesktop,
+}
+
+/// `POST /api/cards/{cid}/desktop` — optional screen position for the window.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CardDesktopInput {
+    #[serde(default)]
+    pos: Option<[f32; 2]>,
 }
 
 /// `POST /api/nodes/{id}/cards/move` — move a list of cards to another basket.
@@ -1282,6 +1295,15 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         // agent surface, and it is the one route that answers without a key.
         (Method::Get, ["api", "cards", cid, "link"]) => Ok(ApiRequest::CardLink(pid(cid)?)),
         (Method::Get, ["api", "groups", gid, "link"]) => Ok(ApiRequest::GroupLink(pid(gid)?)),
+        (Method::Get, ["api", "desktop"]) => Ok(ApiRequest::ListCardDesktop),
+        (Method::Post, ["api", "cards", cid, "desktop"]) => {
+            let i: CardDesktopInput =
+                if body.trim().is_empty() { CardDesktopInput { pos: None } } else { parse(body)? };
+            Ok(ApiRequest::SetCardDesktop { card: pid(cid)?, pos: i.pos, on: true })
+        }
+        (Method::Delete, ["api", "cards", cid, "desktop"]) => {
+            Ok(ApiRequest::SetCardDesktop { card: pid(cid)?, pos: None, on: false })
+        }
         (Method::Get, ["open", "card", cid]) => Ok(ApiRequest::Open {
             kind: OpenKind::Card,
             id: pid(cid)?,
@@ -3092,6 +3114,8 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::Open { .. }
         | ApiRequest::CardLink(_)
         | ApiRequest::GroupLink(_)
+        | ApiRequest::SetCardDesktop { .. }
+        | ApiRequest::ListCardDesktop
         | ApiRequest::DailyNote { .. }
         | ApiRequest::DailyConfig
         | ApiRequest::SetDailyRoot(_) => {
@@ -4750,6 +4774,39 @@ mod tests {
     /// its id, so a `[[#g…]]` link written before the move still lands.
     /// The operation that motivated this: archiving a finished basket was 55
     /// single-card calls, one per card.
+    #[test]
+    fn desktop_routes_parse_and_are_answered_by_the_app_loop() {
+        assert!(matches!(
+            route(&Method::Post, "/api/cards/9/desktop", "", "{\"pos\":[10,20]}").unwrap(),
+            ApiRequest::SetCardDesktop { card: 9, on: true, pos: Some([10.0, 20.0]) }
+        ));
+        // An empty body is allowed: "put it somewhere sensible".
+        assert!(matches!(
+            route(&Method::Post, "/api/cards/9/desktop", "", "").unwrap(),
+            ApiRequest::SetCardDesktop { card: 9, on: true, pos: None }
+        ));
+        assert!(matches!(
+            route(&Method::Delete, "/api/cards/9/desktop", "", "").unwrap(),
+            ApiRequest::SetCardDesktop { card: 9, on: false, .. }
+        ));
+        assert!(matches!(
+            route(&Method::Get, "/api/desktop", "", "").unwrap(),
+            ApiRequest::ListCardDesktop
+        ));
+        assert!(route(&Method::Post, "/api/cards/9/desktop", "", "{\"posn\":[1,2]}").is_err());
+        // Placement is app config, so `process` must refuse to answer these —
+        // they are handled where the window state lives.
+        let mut doc = Document::empty();
+        for req in [
+            ApiRequest::SetCardDesktop { card: 9, pos: None, on: true },
+            ApiRequest::ListCardDesktop,
+        ] {
+            let (dirty, resp) = process(&mut doc, req);
+            assert!(!dirty);
+            assert_eq!(resp.status, 500, "must fall through to the app loop");
+        }
+    }
+
     #[test]
     fn cards_move_in_a_batch_and_the_whole_list_is_validated_first() {
         let mut doc = Document::empty();

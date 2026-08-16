@@ -408,6 +408,13 @@ work *in flight for five days*, not work due on the last one — it reads as **t
 every day until it's done, instead of hiding under a future date until it's already
 late. The card never moves; the window does.
 
+**Send a card to the desktop** (Linux/X11) - right-click a card, *Send to desktop*,
+and it leaves the canvas to become its own borderless window among your other
+applications. It is the same card: edit it there and the basket has the change.
+Its place in the basket is marked *on the desktop* so nothing looks missing, and
+*Recall* brings it home. Not always-on-top, on purpose - a card that can never go
+behind anything is a HUD, not part of the desktop.
+
 **Archive finished work instead of deleting it.** Every project workspace has an
 `Archive` basket; a card moved there keeps its id, so links and backlinks to it
 still resolve. `POST /api/nodes/{id}/cards/move` moves a whole batch in one call.
