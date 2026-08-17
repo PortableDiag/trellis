@@ -113,6 +113,10 @@ pub enum ApiRequest {
     /// Set one `key:: value` property on several cards at once — marking a batch
     /// `status:: done` is the case that keeps coming up.
     SetCardsProperty { node: NodeId, cards: Vec<u64>, key: String, value: String },
+    /// Create several cards in one call. Same endpoint as the single create,
+    /// which accepts an object or an array — the shape table ops took in
+    /// v0.82.0, for the same reason: building anything real is many small calls.
+    AddCards { node: NodeId, inputs: Vec<AddCardInput> },
     // Docking.
     DockCard { node: NodeId, card: u64, anchor: u64 },
     DetachCard { node: NodeId, card: u64 },
@@ -288,6 +292,18 @@ pub fn fit_request(req: &ApiRequest) -> Option<(NodeId, Option<u64>)> {
     }
 }
 
+/// Which cards of a **batch** create asked to be fitted, by their index in the
+/// batch. The app loop pairs these with the ids the response hands back, because
+/// a created card has no id until it exists.
+pub fn fit_batch(req: &ApiRequest) -> Vec<usize> {
+    match req {
+        ApiRequest::AddCards { inputs, .. } => {
+            inputs.iter().enumerate().filter(|(_, i)| i.fit).map(|(n, _)| n).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 
 /// The node a request acts on, for enforcing a subtree-scoped plugin token.
 ///
@@ -333,6 +349,7 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::MoveGroup { node, .. }
         | ApiRequest::MoveCards { node, .. }
         | ApiRequest::SetCardsProperty { node, .. }
+        | ApiRequest::AddCards { node, .. }
         | ApiRequest::DeleteGroup { node, .. } => Some(*node),
         ApiRequest::CreateNode { parent, .. } => *parent,
         _ => None,
@@ -350,14 +367,28 @@ pub fn is_scope_neutral(req: &ApiRequest) -> bool {
 /// Split out so the app loop can check it against the mirror policy before the
 /// request is applied — `process` cannot, since the setting lives in the app.
 pub fn source_request(req: &ApiRequest) -> Option<String> {
-    let s = match req {
-        ApiRequest::AddCard { input, .. } => input.source.clone(),
-        ApiRequest::UpdateCard { patch, .. } => patch.source.clone(),
-        _ => None,
-    }?;
+    source_requests(req).into_iter().next()
+}
+
+/// Every file a request asks a card to mirror.
+///
+/// **Plural on purpose.** A batch create carries one `source` per card, and
+/// checking only the first would let the second reach any file the policy
+/// forbids — the mirror check is the one place an API request can touch the
+/// filesystem, so it has to see all of them.
+pub fn source_requests(req: &ApiRequest) -> Vec<String> {
+    let raw: Vec<Option<String>> = match req {
+        ApiRequest::AddCard { input, .. } => vec![input.source.clone()],
+        ApiRequest::UpdateCard { patch, .. } => vec![patch.source.clone()],
+        ApiRequest::AddCards { inputs, .. } => inputs.iter().map(|i| i.source.clone()).collect(),
+        _ => Vec::new(),
+    };
     // Detaching (`""`) reaches no file, so it is always allowed.
-    let s = s.trim().to_string();
-    (!s.is_empty()).then_some(s)
+    raw.into_iter()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Describe what a request is about to change, for the change log.
@@ -509,6 +540,9 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
         // Reported against the basket it came *from*, with the destination as a
         // field — the same shape as a cross-basket card move, so a client that
         // knows to refresh both ends already handles this one.
+        ApiRequest::AddCards { node, inputs } => ch(E::Card, Op::Created, 0)
+            .in_node(*node)
+            .field(&format!("batch={}", inputs.len())),
         ApiRequest::MoveCards { node, cards, to, .. } => {
             let mut c = ch(E::Card, Op::Moved, cards.first().copied().unwrap_or(0)).in_node(*node);
             c = c.field(&format!("node={to}"));
@@ -1376,6 +1410,13 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::DailyNote { date: i.date })
         }
         (Method::Post, ["api", "nodes", id, "cards"]) => {
+            // An array creates a batch; an object creates one. Deciding on the
+            // first non-space byte keeps the single-card path byte-identical to
+            // what it has always been.
+            if body.trim_start().starts_with('[') {
+                let inputs: Vec<AddCardInput> = parse(body)?;
+                return Ok(ApiRequest::AddCards { node: pid(id)?, inputs });
+            }
             let input: AddCardInput = parse(body)?;
             Ok(ApiRequest::AddCard { node: pid(id)?, input })
         }
@@ -2132,104 +2173,29 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let changed = doc.set_all_expanded(expanded);
             (changed > 0, ApiResponse::ok(json!({ "expanded": expanded, "changed": changed })))
         }
-        ApiRequest::AddCard { node, input } => {
+        ApiRequest::AddCard { node, input } => match add_one(doc, node, input) {
+            Ok(cid) => (true, ApiResponse::created(json!({ "id": cid }))),
+            Err(e) => (false, e),
+        },
+        // Same creation path as the single card, called once per input — the
+        // two cannot drift because there is only one of them. Validated up
+        // front like the batch move: an unknown node refuses the whole batch
+        // rather than half-creating it.
+        ApiRequest::AddCards { node, inputs } => {
             if !doc.nodes.contains_key(&node) {
                 return (false, ApiResponse::err(404, "node not found"));
             }
-            let kind = match input.kind.as_str() {
-                "code" => CardKind::Code { lang: input.lang.clone().unwrap_or_else(|| "text".into()) },
-                "checklist" => CardKind::Checklist {
-                    items: input
-                        .items
-                        .clone()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|i| ChecklistItem { id: 0, done: i.done, text: i.text })
-                        .collect(),
-                },
-                "table" => {
-                    let mut t = match input.rows.clone() {
-                        Some(rows) if !rows.is_empty() => crate::model::TableData::from_values(rows),
-                        _ => crate::model::TableData::empty(3, 3),
-                    };
-                    if let Some(h) = input.header {
-                        t.header = h;
-                    }
-                    CardKind::Table { table: t }
-                }
-                "image" => CardKind::Image {
-                    data: Vec::new(),
-                    name: input.title.clone(),
-                    extra: Vec::new(),
-                    ocr: String::new(),
-                },
-                "sketch" => CardKind::Sketch { strokes: Vec::new() },
-                _ => CardKind::Text,
-            };
-            let pos = input
-                .pos
-                .map(|[x, y]| egui::pos2(x, y))
-                .unwrap_or_else(|| egui::pos2(40.0, 40.0));
-            let fit = input.fit;
-            let img_name = input.title.clone();
-            match doc.add_card(node, pos, kind) {
-                Some(cid) => {
-                    if let Some(c) = doc.card_mut(node, cid) {
-                        c.title = input.title;
-                        c.body = input.body;
-                        c.editing = false;
-                        // The body is filled in by the app's refresh pass; the
-                        // request only names the file.
-                        c.source = input.source.filter(|s| !s.trim().is_empty());
-                        if let Some(col) = input.color {
-                            c.color = col;
-                        }
-                        if let Some([w, h]) = input.size {
-                            c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
-                        }
-                        if let Some(z) = input.z {
-                            c.z = z.clamp(crate::canvas::Z_MIN, crate::canvas::Z_MAX);
-                        }
-                        apply_emphasis(
-                            c,
-                            input.emphasis.as_deref(),
-                            input.emphasis_intensity,
-                            input.emphasis_minutes,
-                        );
-                        if let Some(fs) = input.font_scale {
-                            c.font_scale = fs.clamp(0.25, 4.0);
-                        }
-                    }
-                    // Optional initial image bytes for an image card.
-                    if let Some(b64) = input.image_base64 {
-                        if let Ok(bytes) =
-                            base64::engine::general_purpose::STANDARD.decode(b64.trim())
-                        {
-                            doc.add_image(node, cid, bytes, img_name);
-                        }
-                    }
-                    // Optional inline images embedded in a text card's body.
-                    if let Some(list) = input.inline_images {
-                        for (i, b64) in list.iter().enumerate() {
-                            if let Ok(bytes) =
-                                base64::engine::general_purpose::STANDARD.decode(b64.trim())
-                            {
-                                doc.add_inline_image(node, cid, bytes, format!("inline-{i}"));
-                            }
-                        }
-                    }
-                    // Fit to content last, once body/items/images are all set.
-                    if fit {
-                        if let Some(c) = doc.card_mut(node, cid) {
-                            if let Some(sz) = c.fit_size() {
-                                c.size = sz;
-                            }
-                        }
-                    }
-                    (true, ApiResponse::created(json!({ "id": cid })))
-                }
-                None => (false, ApiResponse::err(404, "node not found")),
+            if inputs.is_empty() {
+                return (false, ApiResponse::err(400, "the array must contain at least one card"));
             }
+            let mut ids = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                match add_one(doc, node, input) {
+                    Ok(cid) => ids.push(cid),
+                    Err(e) => return (!ids.is_empty(), e),
+                }
+            }
+            (true, ApiResponse::created(json!({ "created": ids.len(), "ids": ids })))
         }
         ApiRequest::UpdateCard { node, card, patch } => match doc.card_mut(node, card) {
             Some(c) => {
@@ -3133,6 +3099,111 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             (false, ApiResponse::err(500, "request not handled by the app loop"))
         }
     }
+}
+
+/// Create one card from an [`AddCardInput`].
+///
+/// Extracted so the single create and the batch create are the *same* code:
+/// two copies of this would drift, and the drift would show up as a card that
+/// behaves differently depending on how it was made.
+fn add_one(doc: &mut Document, node: NodeId, input: AddCardInput) -> Result<u64, ApiResponse> {
+    if !doc.nodes.contains_key(&node) {
+                return Err(ApiResponse::err(404, "node not found"));
+            }
+            let kind = match input.kind.as_str() {
+                "code" => CardKind::Code { lang: input.lang.clone().unwrap_or_else(|| "text".into()) },
+                "checklist" => CardKind::Checklist {
+                    items: input
+                        .items
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|i| ChecklistItem { id: 0, done: i.done, text: i.text })
+                        .collect(),
+                },
+                "table" => {
+                    let mut t = match input.rows.clone() {
+                        Some(rows) if !rows.is_empty() => crate::model::TableData::from_values(rows),
+                        _ => crate::model::TableData::empty(3, 3),
+                    };
+                    if let Some(h) = input.header {
+                        t.header = h;
+                    }
+                    CardKind::Table { table: t }
+                }
+                "image" => CardKind::Image {
+                    data: Vec::new(),
+                    name: input.title.clone(),
+                    extra: Vec::new(),
+                    ocr: String::new(),
+                },
+                "sketch" => CardKind::Sketch { strokes: Vec::new() },
+                _ => CardKind::Text,
+            };
+            let pos = input
+                .pos
+                .map(|[x, y]| egui::pos2(x, y))
+                .unwrap_or_else(|| egui::pos2(40.0, 40.0));
+            let fit = input.fit;
+            let img_name = input.title.clone();
+            match doc.add_card(node, pos, kind) {
+                Some(cid) => {
+                    if let Some(c) = doc.card_mut(node, cid) {
+                        c.title = input.title;
+                        c.body = input.body;
+                        c.editing = false;
+                        // The body is filled in by the app's refresh pass; the
+                        // request only names the file.
+                        c.source = input.source.filter(|s| !s.trim().is_empty());
+                        if let Some(col) = input.color {
+                            c.color = col;
+                        }
+                        if let Some([w, h]) = input.size {
+                            c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
+                        }
+                        if let Some(z) = input.z {
+                            c.z = z.clamp(crate::canvas::Z_MIN, crate::canvas::Z_MAX);
+                        }
+                        apply_emphasis(
+                            c,
+                            input.emphasis.as_deref(),
+                            input.emphasis_intensity,
+                            input.emphasis_minutes,
+                        );
+                        if let Some(fs) = input.font_scale {
+                            c.font_scale = fs.clamp(0.25, 4.0);
+                        }
+                    }
+                    // Optional initial image bytes for an image card.
+                    if let Some(b64) = input.image_base64 {
+                        if let Ok(bytes) =
+                            base64::engine::general_purpose::STANDARD.decode(b64.trim())
+                        {
+                            doc.add_image(node, cid, bytes, img_name);
+                        }
+                    }
+                    // Optional inline images embedded in a text card's body.
+                    if let Some(list) = input.inline_images {
+                        for (i, b64) in list.iter().enumerate() {
+                            if let Ok(bytes) =
+                                base64::engine::general_purpose::STANDARD.decode(b64.trim())
+                            {
+                                doc.add_inline_image(node, cid, bytes, format!("inline-{i}"));
+                            }
+                        }
+                    }
+                    // Fit to content last, once body/items/images are all set.
+                    if fit {
+                        if let Some(c) = doc.card_mut(node, cid) {
+                            if let Some(sz) = c.fit_size() {
+                                c.size = sz;
+                            }
+                        }
+                    }
+                    Ok(cid)
+                }
+                None => Err(ApiResponse::err(404, "node not found")),
+            }
 }
 
 fn tree_nodes(doc: &Document, ids: &[NodeId]) -> Vec<Value> {
@@ -4816,6 +4887,65 @@ mod tests {
             assert!(!dirty);
             assert_eq!(resp.status, 500, "must fall through to the app loop");
         }
+    }
+
+    #[test]
+    fn cards_can_be_created_in_a_batch_on_the_same_endpoint() {
+        // An array batches; an object stays the single create it always was.
+        assert!(matches!(
+            route(&Method::Post, "/api/nodes/5/cards", "", r#"[{"title":"a"},{"title":"b"}]"#).unwrap(),
+            ApiRequest::AddCards { node: 5, .. }
+        ));
+        assert!(matches!(
+            route(&Method::Post, "/api/nodes/5/cards", "", r#"{"title":"a"}"#).unwrap(),
+            ApiRequest::AddCard { node: 5, .. }
+        ));
+        // Still strict inside every element of the array.
+        assert!(route(&Method::Post, "/api/nodes/5/cards", "", r#"[{"titel":"a"}]"#).is_err());
+
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let req = route(&Method::Post, &format!("/api/nodes/{n}/cards"), "",
+            r#"[{"title":"one","pos":[10,10]},{"kind":"checklist","title":"two",
+                 "items":[{"text":"x","done":false}]},{"title":"three","fit":true}]"#).unwrap();
+        // fit_batch names WHICH entries asked to be fitted, by index.
+        assert_eq!(fit_batch(&req), vec![2]);
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(dirty);
+        assert_eq!(resp.status, 201);
+        let got: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(got["created"], 3);
+        let ids: Vec<u64> = got["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(doc.card(n, ids[0]).unwrap().title, "one");
+        assert_eq!(doc.card(n, ids[0]).unwrap().pos, egui::pos2(10.0, 10.0));
+        assert!(matches!(doc.card(n, ids[1]).unwrap().kind, CardKind::Checklist { .. }));
+
+        // An unknown node refuses the whole batch rather than half-creating it.
+        let (_d, resp) = process(&mut doc, ApiRequest::AddCards { node: 999, inputs: vec![] });
+        assert_eq!(resp.status, 404);
+        let req = route(&Method::Post, &format!("/api/nodes/{n}/cards"), "", "[]").unwrap();
+        let (_d, resp) = process(&mut doc, req);
+        assert_eq!(resp.status, 400, "an empty array is a mistake, not a no-op");
+    }
+
+    /// A batch carries one `source` per card, and the mirror policy is the one
+    /// place an API request can reach the filesystem — so it has to see all of
+    /// them, not just the first.
+    #[test]
+    fn every_source_in_a_batch_is_offered_to_the_mirror_check() {
+        let req = route(&Method::Post, "/api/nodes/5/cards", "",
+            r#"[{"title":"a","source":"/tmp/one.md"},
+                {"title":"b"},
+                {"title":"c","source":"/tmp/two.md"},
+                {"title":"d","source":"   "}]"#).unwrap();
+        assert_eq!(source_requests(&req), vec!["/tmp/one.md", "/tmp/two.md"]);
+        // The single-card path is unchanged.
+        let one = route(&Method::Post, "/api/nodes/5/cards", "",
+            r#"{"title":"a","source":"/tmp/one.md"}"#).unwrap();
+        assert_eq!(source_request(&one).as_deref(), Some("/tmp/one.md"));
+        // And a scoped token is checked against the basket it names.
+        assert_eq!(target_node(&ApiRequest::AddCards { node: 7, inputs: vec![] }), Some(7));
     }
 
     #[test]

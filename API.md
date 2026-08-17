@@ -267,6 +267,17 @@ POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
 POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, color?, font_scale?, fit?, image_base64?, inline_images?, source?}
+  → 201 {"id":<cid>}
+
+POST /api/nodes/{id}/cards [ {…}, {…} ]      the SAME endpoint, given an array
+  → 201 {"created":N,"ids":[cids]}   | 400 (empty array)  | 404 (node)
+
+  An array creates a batch, an object creates one — the shape table ops took in
+  v0.82.0, and for the same reason: building anything real is many small calls.
+  Every element is validated to the same strictness, `fit` is honoured per card
+  (re-measured with the real fonts, as for a single create), checklist item ids
+  are backfilled, and **every `source` in the batch** is checked against the
+  mirror policy rather than only the first.
   → 201 {"id":<new>}   | 404 if node doesn't exist
 ```
 `kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
@@ -1574,6 +1585,20 @@ curl -s -H "X-API-Key: $KEY" \
   -d '{"cards":[1246,1730],"key":"status","value":"done"}' \
   $API/nodes/$NID/cards/property
 ```
+
+### Building a basket in one call
+
+```sh
+curl -s -H "X-API-Key: $KEY" -d '[
+  {"title":"Findings","body":"…","pos":[40,40],"fit":true},
+  {"kind":"checklist","title":"Follow-ups","items":[{"text":"rotate the key","done":false}]},
+  {"kind":"table","title":"Versions","rows":[["ver","date"],["0.114.2","2026-08-16"]],"header":true}
+]' $API/nodes/$NID/cards
+# -> {"created":3,"ids":[1840,1841,1842]}
+```
+
+The ids come back **in the order you sent them**, so a follow-up call can address
+each card without a second lookup.
 
 ### Pointing someone at a group
 

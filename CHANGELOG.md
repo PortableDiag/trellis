@@ -6,6 +6,35 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.115.0]
+
+### Added
+- **`POST /api/nodes/{id}/cards` accepts an array** and creates the whole batch,
+  returning `{"created":N,"ids":[…]}` with the ids **in the order you sent them**.
+  The same endpoint still takes a single object; an array is what switches it.
+
+  This was deferred once as "looks like the batch move but isn't", and that was
+  right — creating a card is not a pure document operation. `fit` is re-measured
+  with the real fonts **in the app loop**, checklist items are given their ids
+  after the fact, and `source` is checked against the mirror policy before the
+  request applies. All three had to become plural, and the mirror check
+  especially: it is the one place an API request can reach the filesystem, so a
+  batch that only had its **first** `source` checked would let the second reach
+  anything the policy forbids.
+
+  The creation path itself was **extracted, not copied** — one `add_one`, called
+  by both routes, because two copies would drift and the drift would show up as a
+  card that behaves differently depending on how it was made.
+
+### Fixed
+- **Resizing a desktop-mode window now resizes the card.** The window resized
+  fine, but the size was never written back, so recalling the card or restarting
+  reverted it — which reads as the resize having been ignored. A desktop window
+  *is* the card, so it now updates `card.size`, guarded by a one-pixel epsilon:
+  writing back a value that differs by a fraction would change the builder, which
+  would command the window, which is the flashing loop from v0.114.1 again with
+  size instead of position.
+
 ## [0.114.2]
 
 ### Fixed

@@ -2660,16 +2660,26 @@ impl TrellisApp {
             // item is never visible to anything without an identity.
             let needs_item_ids = matches!(
                 cmd.req,
-                api::ApiRequest::AddCard { .. } | api::ApiRequest::UpdateCard { .. }
+                api::ApiRequest::AddCard { .. }
+                    | api::ApiRequest::UpdateCard { .. }
+                    | api::ApiRequest::AddCards { .. }
             );
             let fit_target = api::fit_request(&cmd.req);
+            // Which entries of a BATCH create asked to be fitted. Paired with the
+            // ids below, because a created card has no id until it exists — the
+            // same reason the single-card path reads its id from the response.
+            let fit_batch = api::fit_batch(&cmd.req);
+            let fit_batch_node = match &cmd.req {
+                api::ApiRequest::AddCards { node, .. } => Some(*node),
+                _ => None,
+            };
             // Same reason as `fit_request`: the request is consumed below, and
             // reading the document *now* catches the pre-change state — a
             // deleted card's title can't be looked up after it's gone.
             // `source` is the one field an API request can use to reach outside
             // the document, so it is checked here rather than in `process`,
             // which has no access to the setting.
-            if let Some(path) = api::source_request(&cmd.req) {
+            for path in api::source_requests(&cmd.req) {
                 // A token confined to a basket may not mirror a file at all,
                 // whatever the global policy allows.
                 //
@@ -2708,6 +2718,23 @@ impl TrellisApp {
                 });
                 if let Some(card) = card {
                     self.refit_card_precise(node, card);
+                }
+            }
+            if let Some(node) = fit_batch_node {
+                if !fit_batch.is_empty() {
+                    let ids: Vec<u64> = serde_json::from_str::<serde_json::Value>(&resp.body)
+                        .ok()
+                        .and_then(|v| {
+                            v["ids"].as_array().map(|a| {
+                                a.iter().filter_map(|x| x.as_u64()).collect::<Vec<_>>()
+                            })
+                        })
+                        .unwrap_or_default();
+                    for i in fit_batch {
+                        if let Some(&cid) = ids.get(i) {
+                            self.refit_card_precise(node, cid);
+                        }
+                    }
                 }
             }
             if changed {
@@ -7322,6 +7349,7 @@ Linux/X11 only: elsewhere an                          application may not place 
                         "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
                         "DELETE /api/nodes/{id}/cards/{cid}",
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
+                        "POST   /api/nodes/{id}/cards    [ {…}, {…} ]      (an ARRAY creates a batch; ids come back in order)",
                         "POST   /api/nodes/{id}/cards/move        {cards:[ids], node, pos?, gap?}  (batch; whole list validated first)",
                         "POST   /api/nodes/{id}/cards/property    {cards:[ids], key, value}        (one property, many cards)",
                         "POST   /api/nodes/{id}/desktop           (DESKTOP MODE — the whole basket becomes windows; DELETE brings it back)",
@@ -8919,6 +8947,7 @@ Linux/X11 only: elsewhere an                          application may not place 
 
         let mut recall: Vec<CardId> = Vec::new();
         let mut moved: Vec<(CardId, [f32; 2])> = Vec::new();
+        let mut resized: Vec<(CardId, egui::Vec2)> = Vec::new();
         let mut actions: Vec<canvas::CanvasAction> = Vec::new();
         for (cid, pos, node) in open {
             let Some(card) = self.doc.card(node, cid).cloned() else { continue };
@@ -9010,6 +9039,20 @@ Linux/X11 only: elsewhere an                          application may not place 
                 if let Some(r) = vctx.input(|i| i.viewport().outer_rect) {
                     moved.push((cid, [r.min.x, r.min.y]));
                 }
+                // A desktop window IS the card, so resizing the window resizes
+                // the card — otherwise the new size is lost the moment it is
+                // recalled, which reads as the resize having been ignored.
+                //
+                // The epsilon matters: writing back a value that differs by a
+                // fraction of a pixel would change `card.size`, which changes the
+                // builder, which commands the window — the flashing loop again,
+                // just with size instead of position.
+                if let Some(r) = vctx.input(|i| i.viewport().inner_rect) {
+                    let now = r.size();
+                    if (now.x - size.x).abs() > 1.0 || (now.y - size.y).abs() > 1.0 {
+                        resized.push((cid, now));
+                    }
+                }
                 // Closing the OS window recalls the card, rather than leaving an
                 // invisible entry that the menu then refuses to reopen.
                 if vctx.input(|i| i.viewport().close_requested()) {
@@ -9019,6 +9062,23 @@ Linux/X11 only: elsewhere an                          application may not place 
         }
         for (cid, p) in moved {
             self.desktop_live.insert(cid, p);
+        }
+        for (cid, sz) in resized {
+            if let Some(node) = self.doc.locate_card(cid) {
+                if let Some(c) = self.doc.card_mut(node, cid) {
+                    c.size = sz;
+                }
+                self.note(
+                    crate::changelog::Change::new(
+                        crate::changelog::Actor::Ui,
+                        crate::changelog::Entity::Card,
+                        crate::changelog::Op::Updated,
+                        cid,
+                    )
+                    .in_node(node)
+                    .field("size"),
+                );
+            }
         }
         for cid in recall {
             self.desktop_cards.remove(&cid);
