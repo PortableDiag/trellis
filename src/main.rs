@@ -61,11 +61,13 @@ ENVIRONMENT:
                               searched for (Noto Color Emoji on Linux, Apple
                               Color Emoji on macOS). Settings -> Canvas names
                               the file in use, or says none was found.
-    TRELLIS_RESTART_DELAY_MS  Milliseconds to wait before starting. Set by
-                              File -> Restart so the new process does not race
-                              the old one for the API port; a failed bind is not
-                              fatal, which would leave an instance running with
-                              no API at all.
+    TRELLIS_RESTART_WAIT_SECS How long to wait for the API port to be free
+                              before starting. Set by File -> Restart so the new
+                              process does not race the old one for the port; a
+                              failed bind is not fatal, which would leave an
+                              instance running with no API at all. It waits for
+                              the port itself, not a fixed delay, because a slow
+                              exit save can hold it for tens of seconds.
 ";
 
 /// Startup overrides parsed from the command line. Deliberately tiny — enough to

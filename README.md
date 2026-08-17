@@ -525,8 +525,9 @@ it hands the link to whichever instance is serving that port and exits, so
 following a link never opens a second window on a document you already have open.
 That is what the registered `trellis://` handler runs. Two environment variables
 are read: `TRELLIS_EMOJI_FONT` (a colour-emoji font to use instead of the ones
-searched for) and `TRELLIS_RESTART_DELAY_MS` (set by **File → Restart**, so the
-new process doesn't race the old one for the API port).
+searched for) and `TRELLIS_RESTART_WAIT_SECS` (set by **File → Restart**: the new
+process waits for the API port to actually be free rather than for a fixed delay,
+because a slow exit save can hold it for tens of seconds).
 
 ### Separate documents, side by side
 

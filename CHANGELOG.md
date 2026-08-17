@@ -6,6 +6,22 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.114.2]
+
+### Fixed
+- **`--help` and the README documented an environment variable that no longer
+  exists.** `TRELLIS_RESTART_DELAY_MS` was replaced by `TRELLIS_RESTART_WAIT_SECS`
+  in v0.114.1 — the restart now waits for the API port to be free rather than for
+  a guessed number of milliseconds — and both doc surfaces still named the old
+  one. A documented variable that does nothing is the same defect as a runbook
+  that says `assembleDebug`.
+
+### Changed
+- **API.md gained worked examples** for the endpoints added this cycle: archiving
+  a basket with the batch move, addressing and moving a group, and putting a
+  basket on the desktop. The reference told you the shape; the examples give a
+  copy-paste pattern, which is what an agent actually starts from.
+
 ## [0.114.1]
 
 ### Fixed

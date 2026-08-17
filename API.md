@@ -1541,6 +1541,84 @@ most likely to surface a bug you already had.
 
 ## Examples
 
+### Archiving finished work — a batch move
+
+Finished cards belong in the project's `Archive` basket, not deleted: a moved card
+**keeps its id**, so every `[[#id]]` link and backlink to it still resolves.
+
+Moving them one at a time is what `POST …/cards/move` exists to avoid — clearing a
+basket of 55 cards was 55 calls before it.
+
+```sh
+# Every card in the basket that is status:: done.
+DONE=$(curl -s -H "X-API-Key: $KEY" "$API/nodes/$NID/cards" \
+  | python3 -c 'import json,sys,re
+cards=json.load(sys.stdin)["cards"]
+print(json.dumps([c["id"] for c in cards
+                  if re.search(r"^status::\s*done", c.get("body") or "", re.M)]))')
+
+# One call. pos stacks them down a column so the archive reads as a list;
+# omit it to keep the coordinates each card already had.
+curl -s -H "X-API-Key: $KEY" \
+  -d "{\"cards\":$DONE,\"node\":$ARCHIVE,\"pos\":[40,40],\"gap\":20}" \
+  $API/nodes/$NID/cards/move
+# -> {"moved":48,"node":378,"cards":[...]}
+```
+
+**The whole list is validated before anything moves** — one bad id refuses the
+batch rather than moving what it can, because a partial move leaves you unable to
+tell how far it got. Marking a batch done is the same shape:
+
+```sh
+curl -s -H "X-API-Key: $KEY" \
+  -d '{"cards":[1246,1730],"key":"status","value":"done"}' \
+  $API/nodes/$NID/cards/property
+```
+
+### Pointing someone at a group
+
+A group has an id like a card does, and until v0.111.0 nothing could read it — the
+only way to name one was to name a card inside it, which says *somewhere near here*
+rather than naming the thing.
+
+```sh
+# Find a group from its id alone, and mint its address.
+curl -s -H "X-API-Key: $KEY" $API/groups/146
+# -> {"node":366,"node_path":"VolumePerApp","group":{"id":146,"title":…,"cards":[…]}}
+
+curl -s -H "X-API-Key: $KEY" $API/groups/146/link
+# -> {"wikilink":"[[#g146]]", "link":"trellis://127.0.0.1:7374/group/146", …}
+
+# Move the whole group to another basket — container, members, title, colour AND
+# id together. Moving its cards individually cannot do this: membership is
+# basket-local, so each card arrives ungrouped and the rebuilt group gets a NEW
+# id, breaking every [[#g…]] already written to it.
+curl -s -H "X-API-Key: $KEY" -d '{"node":328}' $API/nodes/366/groups/146/move
+```
+
+Paste `[[#g146]]` into a card to link it. `GET /api/groups/146/backlinks` says what
+points at it.
+
+### Putting a basket on the desktop (Linux/X11)
+
+Desktop mode is a **mode**: one call takes the whole basket out as real OS windows,
+among the user's other applications, keeping the arrangement it has on the canvas.
+
+```sh
+curl -s -H "X-API-Key: $KEY" -d '' $API/nodes/$NID/desktop
+# -> {"node":63,"desktop":true,"cards":[1536,1246,278]}
+
+curl -s -H "X-API-Key: $KEY" $API/desktop      # what is out, and where
+curl -s -X DELETE -H "X-API-Key: $KEY" $API/nodes/$NID/desktop   # all back
+
+# One card on its own, if that is what you want:
+curl -s -H "X-API-Key: $KEY" -d '{"pos":[760,430]}' $API/cards/1815/desktop
+```
+
+Only one basket is out at a time — turning a second on recalls the first. Placement
+is **app config, per instance**: a screen coordinate belongs to one machine, so it
+never travels with the document. Non-Linux returns **501**.
+
 ### Working under an agent token
 
 If the user issued you a token (*Settings → Agent API → Agent tokens*) rather
