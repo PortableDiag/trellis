@@ -6,6 +6,39 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.119.0]
+
+### Added
+- **A list of card ids is an address, whatever baskets they are in.**
+
+  ```
+  GET    /api/cards?ids=1391,1392,1393
+  POST   /api/cards/property   {cards:[ids], key, value}
+  DELETE /api/cards/property   {cards:[ids], key}
+  ```
+
+  Every whole-document query — `/api/tasks`, `/api/claims`, `/api/query`,
+  `/api/search`, `/api/properties`, `/api/tags` — hands back ids from **different
+  baskets**, and that is deliberate: an agenda that only covered one basket would be
+  useless. But the batch routes validate against one basket, correctly, so *"mark
+  these five done"* meant grouping the list by basket first, at one lookup per card,
+  to satisfy an argument the caller never had. Reading them was one call each.
+
+  This was left as a documented limitation when the card-addressed writes shipped in
+  v0.117.0. It is the last place where the API asked a caller to know something it
+  had never been told.
+
+  **A missing id is fatal to the write and merely reported by the read.** The `GET`
+  returns `missing`, so you know exactly what you got; a partial *write* is the case
+  where you cannot tell how far it got, which is why one bad id refuses the whole
+  thing — the rule the rest of the batch surface follows.
+
+  **Whole-document, so a token confined to a basket is refused**, exactly as it is
+  for `/api/tasks`, `/api/search`, `/api/kanban` and `/api/query`: a route that names
+  no basket cannot be checked against one. A confined token still has
+  `/api/nodes/{id}/cards/…` for its own basket. Stated as a cost rather than glossed,
+  and pinned by a test.
+
 ## [0.118.0]
 
 ### Added

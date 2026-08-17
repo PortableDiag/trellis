@@ -127,6 +127,25 @@ pub enum ApiRequest {
     AddItem { node: NodeId, card: u64, input: AddItemInput },
     /// Remove one checklist line, addressed by its id rather than its position.
     DeleteItem { node: NodeId, card: u64, item: u64 },
+    /// Read several cards by id, wherever they live.
+    ///
+    /// Every whole-document query hands back a list of card ids in *different*
+    /// baskets, and reading them was one call each.
+    GetCards { cards: Vec<u64> },
+    /// Set or clear one `key:: value` on cards **anywhere in the document**.
+    ///
+    /// The basket-addressed batch validates its list against one basket, which is
+    /// right — but the lists agents actually hold come from `/api/tasks`,
+    /// `/api/claims`, `/api/query` and `/api/search`, and those span baskets. So
+    /// "mark these five done" meant grouping the ids by basket first, at one lookup
+    /// per card, to satisfy an argument the caller never cared about.
+    ///
+    /// Whole-document, therefore **refused for a token confined to a basket** —
+    /// the same rule `/api/tasks`, `/api/search`, `/api/kanban` and `/api/query`
+    /// already follow, and the same reason: a route that names no basket cannot be
+    /// checked against one. A confined token still has the basket-addressed batch
+    /// for its own basket. Stated rather than glossed, because it is a real cost.
+    CardsProperty { cards: Vec<u64>, key: String, value: Option<String> },
     /// A **card-addressed write**: the same operation as its node-addressed twin,
     /// with the basket left for the app loop to resolve.
     ///
@@ -270,6 +289,17 @@ pub enum ApiRequest {
 struct CardDesktopInput {
     #[serde(default)]
     pos: Option<[f32; 2]>,
+}
+
+/// `POST`/`DELETE /api/cards/property` — one property, cards anywhere.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CardsAnywhereInput {
+    cards: Vec<u64>,
+    key: String,
+    /// Required on `POST`, ignored on `DELETE`.
+    #[serde(default)]
+    value: Option<String>,
 }
 
 /// `POST …/cards/{cid}/append` — add text to a card's body.
@@ -758,6 +788,14 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
             .titled(card_title(node, card))
             .field(&format!("item={item}"))
             .field(&format!("-{}", key.to_lowercase())),
+        ApiRequest::CardsProperty { cards, key, value } => {
+            let mut c = ch(E::Card, Op::Updated, cards.first().copied().unwrap_or(0));
+            c = match value {
+                Some(v) => c.field(&format!("{}={}", key.to_lowercase(), v)),
+                None => c.field(&format!("-{}", key.to_lowercase())),
+            };
+            c.field(&format!("batch={}", cards.len()))
+        }
         ApiRequest::AppendCard { node, card, .. } => ch(E::Card, Op::Updated, *card)
             .in_node(*node)
             .titled(card_title(node, card))
@@ -1626,6 +1664,32 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Get, ["api", "cards", cid, "backlinks"]) => Ok(ApiRequest::CardBacklinks(pid(cid)?)),
         (Method::Get, ["api", "cards", cid]) => Ok(ApiRequest::LocateCard(pid(cid)?)),
+        // Whole-document card routes. Literal arms first: `property` sits exactly
+        // where a card id would.
+        (Method::Post, ["api", "cards", "property"]) => {
+            let i: CardsAnywhereInput = parse(body)?;
+            if i.value.is_none() {
+                return Err((400, "setting a property needs \"value\"".into()));
+            }
+            Ok(ApiRequest::CardsProperty { cards: i.cards, key: i.key, value: i.value })
+        }
+        (Method::Delete, ["api", "cards", "property"]) => {
+            let i: CardsAnywhereInput = parse(body)?;
+            Ok(ApiRequest::CardsProperty { cards: i.cards, key: i.key, value: None })
+        }
+        (Method::Get, ["api", "cards"]) => {
+            let ids = query_get(query, "ids").unwrap_or_default();
+            let mut cards = Vec::new();
+            for part in ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                cards.push(
+                    part.parse::<u64>().map_err(|_| (400, format!("bad card id: {part}")))?,
+                );
+            }
+            if cards.is_empty() {
+                return Err((400, "which cards? /api/cards?ids=1391,1392".into()));
+            }
+            Ok(ApiRequest::GetCards { cards })
+        }
         // Card-addressed writes. Every one is the same operation as its
         // /api/nodes/{id}/cards/{cid}/… twin — the app loop resolves the basket
         // and hands the request on, so there is one implementation, not two.
@@ -2893,6 +2957,85 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 true,
                 ApiResponse::ok(json!({ "moved": moved.len(), "node": to, "cards": moved })),
             )
+        }
+        ApiRequest::GetCards { cards } => {
+            // A read, so a missing id is *reported*, not fatal. The batch writes
+            // refuse the whole list on one bad id because a partial write leaves
+            // the caller unable to tell how far it got; a partial read tells you
+            // exactly that, in `missing`.
+            let mut out = Vec::new();
+            let mut missing = Vec::new();
+            for cid in &cards {
+                match doc.locate_card(*cid).and_then(|n| doc.card(n, *cid).map(|c| (n, c))) {
+                    Some((node, c)) => out.push(json!({
+                        "node": node,
+                        "node_path": doc.node_path(node),
+                        "card": card_json(c),
+                    })),
+                    None => missing.push(*cid),
+                }
+            }
+            (
+                false,
+                ApiResponse::ok(json!({ "count": out.len(), "cards": out, "missing": missing })),
+            )
+        }
+        ApiRequest::CardsProperty { cards, key, value } => {
+            if cards.is_empty() {
+                return (false, ApiResponse::err(400, "cards must name at least one card"));
+            }
+            // Resolve every id before touching any of them — the batch rule, and
+            // here it also means the caller learns which id was wrong rather than
+            // discovering that some subset of a list they no longer trust got done.
+            let mut located = Vec::with_capacity(cards.len());
+            for cid in &cards {
+                match doc.locate_card(*cid) {
+                    Some(node) => located.push((node, *cid)),
+                    None => {
+                        return (
+                            false,
+                            ApiResponse::err(
+                                404,
+                                &format!("no card {cid} in this document"),
+                            ),
+                        )
+                    }
+                }
+            }
+            let mut done = Vec::new();
+            match &value {
+                Some(v) => {
+                    for (node, cid) in located {
+                        if doc.set_card_property(node, cid, &key, v) {
+                            done.push(cid);
+                        }
+                    }
+                    (
+                        !done.is_empty(),
+                        ApiResponse::ok(json!({
+                            "updated": done.len(),
+                            "cards": done,
+                            "key": key.to_lowercase(),
+                            "value": v,
+                        })),
+                    )
+                }
+                None => {
+                    for (node, cid) in located {
+                        if doc.clear_card_property(node, cid, &key) {
+                            done.push(cid);
+                        }
+                    }
+                    (
+                        !done.is_empty(),
+                        ApiResponse::ok(json!({
+                            "cleared": done.len(),
+                            "cards": done,
+                            "key": key.to_lowercase(),
+                        })),
+                    )
+                }
+            }
         }
         ApiRequest::AppendCard { node, card, input } => {
             let Some(c) = doc.card(node, card) else {
@@ -6511,6 +6654,111 @@ mod tests {
         )
         .unwrap();
         assert!(c.fields.iter().any(|f| f == "-due"), "{:?}", c.fields);
+    }
+
+
+    // --- a LIST of card ids is an address too ---------------------------------
+
+    /// The lists agents hold come from whole-document queries, so they span
+    /// baskets. Reading them was a call each; setting a property on them meant
+    /// grouping by basket first, at a lookup per card.
+    #[test]
+    fn cards_anywhere_can_be_read_and_marked_in_one_call() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "A".into());
+        let b = doc.add_node(None, "B".into());
+        let c1 = doc.add_card(a, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let c2 = doc.add_card(b, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        // Read across baskets; a missing id is reported, not fatal — a partial
+        // READ tells you exactly what it got, unlike a partial write.
+        let req = route(&Method::Get, "/api/cards", &format!("ids={c1},{c2},4242"), "").unwrap();
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(!dirty);
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["count"], 2);
+        assert_eq!(v["missing"], json!([4242]));
+        let paths: Vec<&str> =
+            v["cards"].as_array().unwrap().iter().map(|c| c["node_path"].as_str().unwrap()).collect();
+        assert_eq!(paths, vec!["A", "B"], "each card comes back with where it lives");
+
+        // Mark both done in one call, though they are in different baskets.
+        let req = route(
+            &Method::Post,
+            "/api/cards/property",
+            "",
+            &format!(r#"{{"cards":[{c1},{c2}],"key":"status","value":"done"}}"#),
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(dirty);
+        assert_eq!(serde_json::from_str::<Value>(&resp.body).unwrap()["updated"], 2);
+        assert_eq!(doc.card_property(a, c1, "status").as_deref(), Some("done"));
+        assert_eq!(doc.card_property(b, c2, "status").as_deref(), Some("done"));
+
+        // And take a property back off them the same way.
+        let req = route(
+            &Method::Delete,
+            "/api/cards/property",
+            "",
+            &format!(r#"{{"cards":[{c1},{c2}],"key":"status"}}"#),
+        )
+        .unwrap();
+        let (_d, resp) = process(&mut doc, req);
+        assert_eq!(serde_json::from_str::<Value>(&resp.body).unwrap()["cleared"], 2);
+        assert!(doc.card_property(a, c1, "status").is_none());
+
+        // One unresolvable id refuses the whole write, naming it.
+        let (dirty, resp) = process(
+            &mut doc,
+            ApiRequest::CardsProperty {
+                cards: vec![c1, 4242],
+                key: "status".into(),
+                value: Some("done".into()),
+            },
+        );
+        assert!(!dirty);
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("4242"), "{}", resp.body);
+        assert!(doc.card_property(a, c1, "status").is_none(), "nothing was applied");
+    }
+
+    /// Whole-document routes name no basket, so a confined token is refused —
+    /// the same rule /api/tasks, /api/search, /api/kanban and /api/query follow.
+    /// A stated cost, not an oversight: the basket-addressed batch still works.
+    #[test]
+    fn whole_document_card_routes_are_refused_for_a_confined_token() {
+        for req in [
+            ApiRequest::GetCards { cards: vec![1, 2] },
+            ApiRequest::CardsProperty {
+                cards: vec![1, 2],
+                key: "status".into(),
+                value: Some("done".into()),
+            },
+        ] {
+            assert_eq!(target_node(&req), None);
+            assert!(!is_scope_neutral(&req));
+        }
+    }
+
+    /// `property` sits where a card id would, and `ids=` is required rather than
+    /// defaulting to "every card in the document".
+    #[test]
+    fn the_whole_document_card_routes_parse_unambiguously() {
+        assert!(matches!(
+            route(&Method::Post, "/api/cards/property", "", r#"{"cards":[1],"key":"s","value":"d"}"#)
+                .unwrap(),
+            ApiRequest::CardsProperty { .. }
+        ));
+        // A set with no value would silently write an empty property.
+        assert!(route(&Method::Post, "/api/cards/property", "", r#"{"cards":[1],"key":"s"}"#).is_err());
+        // A bare id still resolves as a single card, not as this route.
+        assert!(matches!(
+            route(&Method::Get, "/api/cards/7", "", "").unwrap(),
+            ApiRequest::LocateCard(7)
+        ));
+        assert!(route(&Method::Get, "/api/cards", "", "").is_err(), "ids= is required");
+        assert!(route(&Method::Get, "/api/cards", "ids=1,oops", "").is_err());
     }
 
 }

@@ -252,6 +252,36 @@ GET /api/cards/{cid}
         Node ids and card ids are separate spaces: the same number can name one
         of each, and this route always answers about the card.
 
+A **list** of ids is an address too (v0.119.0), and unlike the batch routes it does
+not care which baskets they are in:
+
+```
+GET  /api/cards?ids=1391,1392,1393
+  → 200 {"count":N,"cards":[{node, node_path, card:{…}}], "missing":[ids]}
+  | 400 (no ids=, or one that is not a number)
+POST   /api/cards/property   {cards:[ids], key, value}
+DELETE /api/cards/property   {cards:[ids], key}
+  → 200 {"updated"|"cleared":N, "cards":[ids], "key":"status", "value":"done"}
+  | 400 (empty list, or a POST with no value)  | 404 (an id in no basket — named)
+```
+
+Every whole-document query — `/api/tasks`, `/api/claims`, `/api/query`,
+`/api/search`, `/api/properties`, `/api/tags` — hands back ids from **different
+baskets**, which is exactly the list you then want to act on. The basket-addressed
+batch validates against one basket, correctly, so *"mark these five done"* meant
+grouping the ids by basket first at one lookup per card, to satisfy an argument the
+caller never cared about.
+
+**A missing id is fatal to the write and merely reported by the read.** `missing` on
+the `GET` tells you precisely what you got; a partial write is the case where you
+cannot tell how far it got, which is why one bad id refuses the whole thing.
+
+**These are whole-document routes, so a token confined to a basket is refused** —
+the same rule `/api/tasks`, `/api/search`, `/api/kanban` and `/api/query` already
+follow, for the same reason: a route that names no basket cannot be checked against
+one. A confined token still has `/api/nodes/{id}/cards/…` for its own basket. That
+is a real cost, stated rather than glossed.
+
 Since v0.117.0 the **writes take a bare card id too**, so an id is a complete
 address for doing something and not only for looking it up:
 
@@ -1764,6 +1794,24 @@ curl -s -H "X-API-Key: $KEY" -d "{\"node\":$ARCHIVE}" $API/cards/1391/move
 
 No `GET /api/cards/1391` first to learn the basket, and nothing in the reply
 mentions a node number the person you are working with never used.
+
+### Closing out a list of tasks the agenda handed you
+
+```sh
+# The agenda spans baskets, which is the point of it.
+IDS=$(curl -s -H "X-API-Key: $KEY" "$API/tasks" \
+  | python3 -c 'import json,sys; print(",".join(str(t["card"]) for t in json.load(sys.stdin)["tasks"]))')
+
+# Read them all at once, wherever they live.
+curl -s -H "X-API-Key: $KEY" "$API/cards?ids=$IDS"
+
+# Mark them done and take their dates off, so they LEAVE the agenda rather than
+# sitting there under a due:: nobody can read. Two calls, any number of baskets.
+curl -s -H "X-API-Key: $KEY" \
+  -d "{\"cards\":[$IDS],\"key\":\"status\",\"value\":\"done\"}" $API/cards/property
+curl -s -X DELETE -H "X-API-Key: $KEY" \
+  -d "{\"cards\":[$IDS],\"key\":\"due\"}" $API/cards/property
+```
 
 ### Adding to a shared card without overwriting it
 
