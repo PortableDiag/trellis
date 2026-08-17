@@ -6,6 +6,56 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.115.1]
+
+### Changed
+- **The build is warning-free again**, and the two warnings it was carrying were
+  each hiding something worth knowing.
+
+  `Plugin.enabled` was **constructed `false` and never read by anything**, while
+  its own doc comment said *"a plugin is inert until approved"* — as if that field
+  were the gate. The real gate is the `Grant` list, checked through `is_approved`
+  on the manual, node-menu, card-menu, schedule and on-change paths. Nothing was
+  unguarded, which is exactly why this was worth removing rather than wiring up: a
+  duplicate that *looks* like the permission check is something a future reader
+  trusts instead of going to find the one that runs. The reasoning moved onto the
+  struct, pointing at where approval actually lives.
+
+  `TreeSort::label()` was dead because the sort menu iterates `TreeSort::ALL`,
+  which already pairs each variant with its label. `key()`/`from_key()` are still
+  used, for settings persistence.
+
+- **`import_journal` no longer emits 20 unfixable warnings.** It `#[path]`-includes
+  `model.rs` to get `Document` and `CardKind` and uses a fraction of it, so every
+  unused item in the model was reported as dead code *in that binary* — warnings
+  that could not be fixed and never meant anything. `#![allow(dead_code)]` is now
+  set on that binary alone; the app compiles the same file with warnings on and
+  answers for it. A build that always warns teaches you to skim the output, and
+  `unconditional_recursion` has shipped a crash here twice.
+
+- **`api::source_request` (singular) is gone.** v0.115.0 moved the app loop's
+  mirror-policy check to the plural `source_requests`, and the singular was left
+  behind with a doc comment still claiming to be the thing the app loop calls —
+  kept alive only by its own tests. Those assertions now go through
+  `source_requests`, so the coverage is unchanged and the comment is true again.
+
+- **Three items in `model.rs` are annotated instead of deleted**, because they are
+  not actually dead: `Document::empty()` is what `import_journal` builds onto, and
+  `card_properties`/`card_property` are how the test suite pins *"a checklist
+  card's properties come from its title and items, never its body"*. `model.rs` is
+  compiled into two binaries, so an item live in one is reported dead in the other.
+
+- **Two warnings came from our own vendored `egui_commonmark`.** Vendoring dropped
+  the `macros` feature and the `egui_commonmark_macros` dependency but left two
+  `#[cfg(feature = "macros")]` re-exports behind, pointing at a crate that is not
+  in this copy — blocks that could never be enabled, warning on every build. Trellis
+  renders through `CommonMarkViewer`, never the compile-time macro.
+
+  No behaviour change on any surface: 320 tests green (236 app + 84
+  `import_journal`), no endpoint, document-format or UI difference, and
+  `cargo build --release` and `cargo test --release` now both emit **zero
+  warnings** — from any crate, so the next real one will be visible.
+
 ## [0.115.0]
 
 ### Added

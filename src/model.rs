@@ -1607,6 +1607,10 @@ impl Default for Document {
 impl Document {
     /// An empty document with no nodes. Unlike [`Document::default`], which seeds
     /// a welcome node, this is the blank slate importers build onto.
+    ///
+    /// `allow(dead_code)` because this file is compiled into two binaries: the
+    /// `import_journal` importer builds onto this, the app never does.
+    #[allow(dead_code)]
     pub fn empty() -> Self {
         Document {
             nodes: HashMap::new(),
@@ -3282,6 +3286,14 @@ impl Document {
     }
 
     /// The `key:: value` properties on one card (parsed from its title + body).
+    ///
+    /// `allow(dead_code)`: the app reads properties through the task, agenda and
+    /// query surfaces rather than one card at a time, so these two accessors
+    /// exist for the test suite — which is where the *"a checklist card's
+    /// properties come from its title and items, never its body"* rule is
+    /// pinned. Asserting on `extract_properties` by hand instead would duplicate
+    /// the logic under test.
+    #[allow(dead_code)]
     pub fn card_properties(&self, node: NodeId, card: CardId) -> Vec<(String, String)> {
         match self.card(node, card) {
             Some(c) => {
@@ -3293,6 +3305,7 @@ impl Document {
     }
 
     /// Value of property `key` on a card (last one wins), or `None`.
+    #[allow(dead_code)]
     pub fn card_property(&self, node: NodeId, card: CardId, key: &str) -> Option<String> {
         let key = key.to_lowercase();
         self.card_properties(node, card)

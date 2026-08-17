@@ -109,10 +109,6 @@ impl TreeSort {
             _ => TreeSort::Manual,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        Self::ALL.iter().find(|(t, _)| *t == self).map(|(_, l)| *l).unwrap_or("Manual")
-    }
 }
 
 /// The roots in display order.

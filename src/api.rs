@@ -362,20 +362,18 @@ pub fn is_scope_neutral(req: &ApiRequest) -> bool {
     matches!(req, ApiRequest::Health | ApiRequest::Instance | ApiRequest::Tree | ApiRequest::ListNodes)
 }
 
-/// The file a request is asking a card to mirror, if any.
-///
-/// Split out so the app loop can check it against the mirror policy before the
-/// request is applied — `process` cannot, since the setting lives in the app.
-pub fn source_request(req: &ApiRequest) -> Option<String> {
-    source_requests(req).into_iter().next()
-}
-
 /// Every file a request asks a card to mirror.
+///
+/// Split out so the app loop can check them against the mirror policy before the
+/// request is applied — `process` cannot, since the setting lives in the app.
 ///
 /// **Plural on purpose.** A batch create carries one `source` per card, and
 /// checking only the first would let the second reach any file the policy
 /// forbids — the mirror check is the one place an API request can touch the
-/// filesystem, so it has to see all of them.
+/// filesystem, so it has to see all of them. A singular `source_request` sat
+/// beside this until v0.115.1, left behind when the app loop moved to the batch
+/// form: nothing but its own tests called it, and its doc comment still claimed
+/// to be what the app loop used.
 pub fn source_requests(req: &ApiRequest) -> Vec<String> {
     let raw: Vec<Option<String>> = match req {
         ApiRequest::AddCard { input, .. } => vec![input.source.clone()],
@@ -3793,9 +3791,9 @@ mod tests {
         let mk = |json: &str| -> ApiRequest {
             ApiRequest::UpdateCard { node: 1, card: 1, patch: serde_json::from_str(json).unwrap() }
         };
-        assert_eq!(source_request(&mk(r#"{"source":"/srv/a.md"}"#)), Some("/srv/a.md".into()));
-        assert_eq!(source_request(&mk(r#"{"source":""}"#)), None, "detach reaches no file");
-        assert_eq!(source_request(&mk(r#"{"body":"x"}"#)), None);
+        assert_eq!(source_requests(&mk(r#"{"source":"/srv/a.md"}"#)), vec!["/srv/a.md"]);
+        assert!(source_requests(&mk(r#"{"source":""}"#)).is_empty(), "detach reaches no file");
+        assert!(source_requests(&mk(r#"{"body":"x"}"#)).is_empty());
     }
 
 
@@ -4943,7 +4941,7 @@ mod tests {
         // The single-card path is unchanged.
         let one = route(&Method::Post, "/api/nodes/5/cards", "",
             r#"{"title":"a","source":"/tmp/one.md"}"#).unwrap();
-        assert_eq!(source_request(&one).as_deref(), Some("/tmp/one.md"));
+        assert_eq!(source_requests(&one), vec!["/tmp/one.md"]);
         // And a scoped token is checked against the basket it names.
         assert_eq!(target_node(&ApiRequest::AddCards { node: 7, inputs: vec![] }), Some(7));
     }

@@ -16,6 +16,15 @@
 //!
 //! Usage: import_journal [INPUT=Notes.txt] [OUTPUT=Notes.ron]
 
+// `model.rs` is included wholesale to get `Document` and `CardKind`, and this
+// importer uses a fraction of it — so every unused item in the model was
+// reported here as dead code: 20 warnings that could never be fixed and could
+// never mean anything. A permanently-warning build teaches you to skim past the
+// output, which is how `unconditional_recursion` shipped a crash twice. Silence
+// the noise *at this binary only*, so a real warning here is visible again; the
+// app binary compiles the same file with warnings on, and answers for it.
+#![allow(dead_code)]
+
 #[path = "../model.rs"]
 mod model;
 

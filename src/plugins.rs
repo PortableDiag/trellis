@@ -190,14 +190,19 @@ fn default_triggers() -> Vec<Trigger> {
     vec![Trigger::Manual]
 }
 
-/// An installed plugin: its manifest, where it lives, and whether it's approved.
+/// An installed plugin: its manifest and where it lives.
+///
+/// **Approval is not recorded here.** A plugin is inert until approved —
+/// installing one must not be the same act as granting it access — and the
+/// authority for that is the [`Grant`] list, read through `is_approved`. This
+/// struct used to carry an `enabled` flag as well, always constructed `false`
+/// and never read by anything: a field that looked like the gate while the real
+/// gate lived elsewhere, which is the kind of duplicate a future reader trusts
+/// instead of checking.
 #[derive(Clone, Debug)]
 pub struct Plugin {
     pub manifest: Manifest,
     pub dir: PathBuf,
-    /// A plugin is inert until approved — installing one must not be the same
-    /// act as granting it access.
-    pub enabled: bool,
 }
 
 impl Plugin {
@@ -262,7 +267,7 @@ pub fn scan(dir: &Path) -> (Vec<Plugin>, Vec<String>) {
             serde_json::from_str::<Manifest>(&s).map_err(|e| e.to_string())
         }) {
             Ok(manifest) => {
-                found.push(Plugin { manifest, dir: p, enabled: false });
+                found.push(Plugin { manifest, dir: p });
             }
             Err(err) => errors.push(format!("{}: {err}", mf.display())),
         }
@@ -638,7 +643,7 @@ mod tests {
         let plug = |cmd: &str| {
             let mut m: Manifest = serde_json::from_str(&manifest_json("")).unwrap();
             m.command = cmd.to_string();
-            Plugin { manifest: m, dir: PathBuf::from("/plugins/dry"), enabled: true }
+            Plugin { manifest: m, dir: PathBuf::from("/plugins/dry") }
         };
         assert_eq!(plug("./run.py").program(), PathBuf::from("/plugins/dry/./run.py"));
         assert_eq!(plug("bin/tool").program(), PathBuf::from("/plugins/dry/bin/tool"));
@@ -679,7 +684,7 @@ mod tests {
         let mut m: Manifest = serde_json::from_str(&manifest_json("")).unwrap();
         m.command = "./run.sh".into();
         m.title = "Shell".into();
-        Plugin { manifest: m, dir: dir.to_path_buf(), enabled: true }
+        Plugin { manifest: m, dir: dir.to_path_buf() }
     }
 
     /// Output must arrive while the plugin is still running, not at exit — the

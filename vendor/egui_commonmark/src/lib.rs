@@ -76,13 +76,13 @@ mod parsers;
 pub use egui_commonmark_backend::alerts::{Alert, AlertBundle};
 pub use egui_commonmark_backend::misc::CommonMarkCache;
 
-#[cfg(feature = "macros")]
-pub use egui_commonmark_macros::*;
-
-#[cfg(feature = "macros")]
-// Do not rely on this directly!
-#[doc(hidden)]
-pub use egui_commonmark_backend;
+// The upstream `macros` re-exports (`egui_commonmark_macros::*` and a hidden
+// `egui_commonmark_backend`) were removed when this crate was vendored: the
+// `macros` feature and the `egui_commonmark_macros` dependency are not in this
+// copy's Cargo.toml, so those `#[cfg(feature = "macros")]` blocks could never be
+// enabled and only produced two `unexpected cfg condition value` warnings on
+// every build. Trellis renders markdown through `CommonMarkViewer`, never the
+// compile-time macro.
 
 use egui_commonmark_backend::*;
 
