@@ -7431,6 +7431,7 @@ impl TrellisApp {
                         for line in [
                             "GET    /api/health                        (no auth)",
                             "GET    /api/instance   → which document this port serves",
+                        "GET    /api/docs[?section=examples]   → THIS build's API.md, compiled in (any scope; ~100KB whole)",
                             "GET    /api/settings   → theme, canvas toggles, panels, notifications, retention",
                             "POST   /api/settings   {theme?, tree_sort?, minimap?, notify_digest?, …}",
                             "GET    /api/tree",

@@ -127,6 +127,16 @@ pub enum ApiRequest {
     AddItem { node: NodeId, card: u64, input: AddItemInput },
     /// Remove one checklist line, addressed by its id rather than its position.
     DeleteItem { node: NodeId, card: u64, item: u64 },
+    /// This binary's own API reference — the `API.md` compiled into it.
+    ///
+    /// Not a second copy of the docs: `include_str!` embeds the very file the
+    /// repo carries, so there is nothing to drift. What it adds is *which* docs —
+    /// the ones for the build that is answering you. Every prompt and runbook
+    /// says "read /media/veracrypt1/Rust/trellis/API.md", which needs this
+    /// machine's filesystem and describes whatever is checked out there, not
+    /// whatever is installed. An agent on the LAN has neither. Twice in one day
+    /// a route was documented that the *serving* instance did not have.
+    Docs { section: Option<String> },
     /// Read several cards by id, wherever they live.
     ///
     /// Every whole-document query hands back a list of card ids in *different*
@@ -573,7 +583,17 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
 /// Whether a request is harmless for a subtree-scoped token even though it names
 /// no node: the instance-level reads a plugin needs to orient itself.
 pub fn is_scope_neutral(req: &ApiRequest) -> bool {
-    matches!(req, ApiRequest::Health | ApiRequest::Instance | ApiRequest::Tree | ApiRequest::ListNodes)
+    matches!(
+        req,
+        ApiRequest::Health
+            | ApiRequest::Instance
+            | ApiRequest::Tree
+            | ApiRequest::ListNodes
+            // The API reference is static text compiled into the binary — no
+            // document content at all. A token confined to one basket still has
+            // to be able to read how the API works.
+            | ApiRequest::Docs { .. }
+    )
 }
 
 /// Every file a request asks a card to mirror.
@@ -1676,6 +1696,9 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Delete, ["api", "cards", "property"]) => {
             let i: CardsAnywhereInput = parse(body)?;
             Ok(ApiRequest::CardsProperty { cards: i.cards, key: i.key, value: None })
+        }
+        (Method::Get, ["api", "docs"]) => {
+            Ok(ApiRequest::Docs { section: query_get(query, "section") })
         }
         (Method::Get, ["api", "cards"]) => {
             let ids = query_get(query, "ids").unwrap_or_default();
@@ -3545,6 +3568,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 (false, ApiResponse::err(404, "node not found or has no cards"))
             }
         }
+        ApiRequest::Docs { section } => docs_response(section),
         ApiRequest::Export(format) => export_response(doc, &format),
         ApiRequest::Search(q) => {
             let hits: Vec<Value> = doc
@@ -3949,6 +3973,76 @@ fn group_exists(doc: &Document, node: NodeId, group: GroupId) -> bool {
 
 /// Export the whole document in `format`. Text formats return `content`; binary
 /// formats (pdf/png/gif) return standard base64 in `base64`.
+/// This build's API reference, compiled in from the repo's own `API.md`.
+///
+/// `include_str!` rather than a summary written by hand: a summary is a second
+/// copy, and a second copy drifts. This cannot — it *is* the file, and it is the
+/// file as of the commit this binary was built from.
+const API_DOC: &str = include_str!("../API.md");
+
+/// The `## ` headings of [`API_DOC`], in order.
+fn doc_sections() -> Vec<&'static str> {
+    API_DOC
+        .lines()
+        .filter_map(|l| l.strip_prefix("## "))
+        .map(str::trim)
+        .collect()
+}
+
+/// One `## ` section of the reference, heading included, or `None`.
+///
+/// Matched case-insensitively on a substring so `?section=example` finds
+/// *Examples* — an agent should not have to guess the exact wording to avoid
+/// pulling the whole 100 KB reference into its context.
+fn doc_section(want: &str) -> Option<String> {
+    let want = want.trim().to_lowercase();
+    let lines: Vec<&str> = API_DOC.lines().collect();
+    let mut start = None;
+    for (i, l) in lines.iter().enumerate() {
+        if let Some(h) = l.strip_prefix("## ") {
+            if start.is_some() {
+                return Some(lines[start.unwrap()..i].join("\n"));
+            }
+            if h.trim().to_lowercase().contains(&want) {
+                start = Some(i);
+            }
+        }
+    }
+    start.map(|s| lines[s..].join("\n"))
+}
+
+fn docs_response(section: Option<String>) -> (bool, ApiResponse) {
+    let sections = doc_sections();
+    let content = match &section {
+        None => API_DOC.to_string(),
+        Some(want) => match doc_section(want) {
+            Some(text) => text,
+            None => {
+                return (
+                    false,
+                    ApiResponse::err(
+                        404,
+                        &format!(
+                            "no section matching {want:?}. Sections: {}",
+                            sections.join(" · ")
+                        ),
+                    ),
+                )
+            }
+        },
+    };
+    (
+        false,
+        ApiResponse::ok(json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "format": "markdown",
+            "section": section,
+            "sections": sections,
+            "content": content,
+        })),
+    )
+}
+
 fn export_response(doc: &Document, format: &str) -> (bool, ApiResponse) {
     let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
     let resp = match format {
@@ -6759,6 +6853,104 @@ mod tests {
         ));
         assert!(route(&Method::Get, "/api/cards", "", "").is_err(), "ids= is required");
         assert!(route(&Method::Get, "/api/cards", "ids=1,oops", "").is_err());
+    }
+
+
+    // --- the reference this binary actually implements -----------------------
+
+    /// The docs endpoint serves the compiled-in `API.md`, whole or by section.
+    #[test]
+    fn the_docs_endpoint_serves_this_builds_reference() {
+        let (dirty, resp) = process(&mut Document::empty(), ApiRequest::Docs { section: None });
+        assert!(!dirty, "reading docs changes nothing");
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"), "the docs name the build serving them");
+        let content = v["content"].as_str().unwrap();
+        assert!(content.starts_with("# Trellis Agent API"));
+        let sections: Vec<&str> = v["sections"].as_array().unwrap()
+            .iter().map(|s| s.as_str().unwrap()).collect();
+        assert!(sections.contains(&"Endpoints") && sections.contains(&"Examples"), "{sections:?}");
+
+        // A section, matched loosely so an agent need not guess the wording.
+        let (_d, resp) = process(
+            &mut Document::empty(),
+            ApiRequest::Docs { section: Some("example".into()) },
+        );
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        let part = v["content"].as_str().unwrap();
+        assert!(part.starts_with("## Examples"), "{}", &part[..40.min(part.len())]);
+        assert!(part.len() < content.len(), "a section is less than the whole");
+
+        // An unknown section names the ones that exist rather than 404'ing blank.
+        let (_d, resp) = process(
+            &mut Document::empty(),
+            ApiRequest::Docs { section: Some("nonsense".into()) },
+        );
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("Endpoints"), "{}", resp.body);
+
+        // Static text, no document content: a confined token may read it.
+        assert!(is_scope_neutral(&ApiRequest::Docs { section: None }));
+    }
+
+    /// **Every route in the table appears in `API.md`.**
+    ///
+    /// This was a step in the release runbook — regex the route matcher, compare
+    /// against the reference, expect zero missing — run by hand and therefore run
+    /// only when someone remembered. It is a test now, because "the four doc
+    /// surfaces move together" is a rule the compiler can hold for at least one of
+    /// them: a new endpoint that never reaches the reference fails here, at the
+    /// commit that added it, rather than in a session three weeks later that
+    /// cannot find out how the thing works.
+    #[test]
+    fn every_route_is_documented_in_the_reference() {
+        const SRC: &str = include_str!("api.rs");
+        let mut missing = Vec::new();
+        let mut checked = 0;
+        for line in SRC.lines() {
+            let t = line.trim_start();
+            let Some(rest) = t.strip_prefix("(Method::") else { continue };
+            let Some((method, rest)) = rest.split_once(',') else { continue };
+            let Some(start) = rest.find('[') else { continue };
+            let Some(end) = rest.find(']') else { continue };
+            let segs: Vec<String> = rest[start + 1..end]
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if segs.is_empty() {
+                continue;
+            }
+            checked += 1;
+            let method = method.trim().to_uppercase();
+            // Literal path segments only: an id is spelled {id}/{cid}/… in the
+            // docs and `id`/`cid`/… in the matcher, so compare what is fixed.
+            let literals: Vec<&String> = segs
+                .iter()
+                .filter(|s| !matches!(s.as_str(), "id" | "cid" | "nid" | "gid" | "iid" | "idx"))
+                .collect();
+            let documented = API_DOC.lines().any(|l| {
+                let Some(after) = l.to_uppercase().find(&method) else { return false };
+                let mut cursor = after;
+                for lit in &literals {
+                    match l[cursor..].find(lit.as_str()) {
+                        Some(at) => cursor += at + lit.len(),
+                        None => return false,
+                    }
+                }
+                true
+            });
+            if !documented {
+                missing.push(format!("{method} /{}", segs.join("/")));
+            }
+        }
+        assert!(checked > 90, "the route matcher was not parsed properly ({checked} routes)");
+        assert!(
+            missing.is_empty(),
+            "{} route(s) missing from API.md — the reference moves with the route:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
     }
 
 }

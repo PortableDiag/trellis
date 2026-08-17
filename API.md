@@ -321,6 +321,32 @@ DELETE /api/cards/{cid}/items/{item}/property?key=due
   validated against one basket, and a list of ids gathered from a whole-document
   query can span several.
 
+GET /api/docs[?section=<name>]
+  → 200 {"version":"0.120.0","format":"markdown","section":null,
+         "sections":["Enabling it","Authentication",…],"content":"# Trellis Agent API…"}
+  | 404 (no section matching that name — the error lists the ones there are)
+        **This document, served by the instance that implements it.** It is
+        `include_str!`-ed at build time, so it is not a copy that can drift: it is
+        this file, as of the commit the running binary was built from.
+
+        Two things that makes possible. An agent that is not on this machine — the
+        phone, a LAN agent, anything holding a token — can read the reference at
+        all; every prompt and runbook otherwise says "read
+        /media/veracrypt1/Rust/trellis/API.md", which needs the filesystem and
+        describes whatever is *checked out* there rather than whatever is
+        *installed*. And it answers the question that costs real time: not "what
+        does the API do" but "what does the API **this port is serving** do".
+        `GET /api/instance` gives you the version; this gives you its manual.
+
+        `section` matches a `##` heading case-insensitively, on a substring, so
+        `?section=example` finds *Examples*. Use it: the whole reference is ~100 KB,
+        and an agent rarely needs more than one part of it. `sections` comes back
+        either way, so one call orients you and the next is narrow.
+
+        Allowed at **any** scope, including a token confined to a basket: it is
+        static text with no document content in it, and an agent that cannot read
+        how the API works is not confined, just broken.
+
 GET /api/search?q=<text>
   → 200 {"hits":[ {node,card,node_title,snippet} ]}                   (case-insensitive)
 ```

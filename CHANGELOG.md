@@ -6,6 +6,43 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.120.0]
+
+### Added
+- **`GET /api/docs[?section=<name>]` — the reference, served by the instance that
+  implements it.**
+
+  Not a second copy of the docs: `API.md` is `include_str!`-ed at build time, so
+  what comes back *is* the file, as of the commit the running binary was built
+  from. There is nothing to keep in sync, which is the only reason this is worth
+  having rather than a summary someone has to remember to update.
+
+  Two things it fixes. **An agent that is not on this machine can read the
+  reference at all** — every prompt and runbook says *"read
+  /media/veracrypt1/Rust/trellis/API.md"*, which needs this filesystem, and the
+  phone, a LAN agent and anything else holding a token have neither. And it answers
+  the question that actually costs time: not *what does the API do* but **what does
+  the API this port is serving do**. Twice in one day a route was documented that
+  the serving instance did not have — the mirror of *a build is not an install*.
+  `GET /api/instance` gives the version; this gives that version's manual.
+
+  `?section=` matches a `##` heading case-insensitively on a substring, so
+  `?section=example` finds *Examples*; the whole reference is ~100 KB and an agent
+  rarely needs more than one part. `sections` is returned either way, so one call
+  orients and the next is narrow. Allowed at **any** scope, including a
+  basket-confined token: it is static text with no document content, and an agent
+  that cannot read how the API works is not confined, just broken.
+
+### Changed
+- **Route-to-reference parity is a test now, not a runbook step.** The release
+  runbook said: regex the route matcher, normalise the placeholders, compare
+  against `API.md`, expect zero missing. Which meant it ran when someone
+  remembered. `every_route_is_documented_in_the_reference` parses the route table
+  out of `api.rs` at compile time and fails naming any route absent from the
+  embedded reference, so an endpoint that never reached the docs breaks the build
+  that added it rather than a session three weeks later that cannot find out how
+  the thing works. It caught `GET /api/docs` itself on the first run.
+
 ## [0.119.1]
 
 ### Fixed

@@ -425,6 +425,13 @@ behind anything is a HUD, not part of the desktop.
 `Archive` basket; a card moved there keeps its id, so links and backlinks to it
 still resolve. `POST /api/nodes/{id}/cards/move` moves a whole batch in one call.
 
+**The API documents itself, for the build that answers.** `GET /api/docs` returns
+this instance's own `API.md` — compiled into the binary, so it is not a copy that
+can drift — and `?section=examples` returns one part of it. An agent on the phone or
+elsewhere on the LAN can read the reference without this machine's filesystem, and
+what it reads describes the version actually serving it rather than whatever happens
+to be checked out.
+
 **A list of ids is an address too.** `GET /api/cards?ids=…` reads a set of cards
 wherever they live, and `POST`/`DELETE /api/cards/property` sets or clears one
 `key:: value` across all of them — which is the shape every whole-document query
