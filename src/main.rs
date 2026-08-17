@@ -78,15 +78,66 @@ struct Args {
     data_dir: Option<PathBuf>,
 }
 
+/// The API port this process will try to bind, read straight from `argv` before
+/// the full parse — the wait has to happen first, and it needs the number.
+fn port_from_args() -> u16 {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-p" | "--port" => {
+                if let Some(v) = args.get(i + 1).and_then(|v| v.parse().ok()) {
+                    return v;
+                }
+            }
+            a => {
+                if let Some(v) = a.strip_prefix("--port=").and_then(|v| v.parse().ok()) {
+                    return v;
+                }
+            }
+        }
+        i += 1;
+    }
+    crate::app::DEFAULT_API_PORT
+}
+
+/// Block until nothing is listening on `port`, or `limit` elapses.
+///
+/// Probed by connecting, not by binding: a successful bind here would have to be
+/// dropped again before the app binds for real, which is its own race.
+fn wait_for_port(port: u16, limit: std::time::Duration) {
+    let start = std::time::Instant::now();
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    while start.elapsed() < limit {
+        let busy = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200))
+            .is_ok();
+        if !busy {
+            // A moment for the old process to finish tearing down after it
+            // stopped answering.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    eprintln!(
+        "trellis: port {port} still in use after {}s — starting anyway; the agent API          will be unavailable in this window",
+        limit.as_secs()
+    );
+}
+
 fn main() -> eframe::Result<()> {
     // A restart spawns this process while the old one is still holding the API
     // port. Binding it is not fatal — Trellis starts *without* an API, which
     // looks perfectly healthy and answers nothing — so wait for the old process
     // to go rather than racing it. Set only by File → Restart.
-    if let Ok(ms) = std::env::var("TRELLIS_RESTART_DELAY_MS") {
-        if let Ok(ms) = ms.parse::<u64>() {
-            std::thread::sleep(std::time::Duration::from_millis(ms.min(10_000)));
-        }
+    //
+    // **Wait for the port, not for a duration.** This used to be a flat 1.5s
+    // sleep, and a slow exit save beat it: the old instance held the port for
+    // 20 seconds and the new window came up with no API at all. A fixed guess
+    // cannot be right for every document size and every disk.
+    if let Ok(secs) = std::env::var("TRELLIS_RESTART_WAIT_SECS") {
+        let secs: u64 = secs.parse().unwrap_or(90).min(300);
+        wait_for_port(port_from_args(), std::time::Duration::from_secs(secs));
     }
     // A `trellis://` link. The scheme handler is this same binary, so the OS
     // hands the URL to a *new* process; that process forwards it to whichever

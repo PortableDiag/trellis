@@ -74,7 +74,7 @@ const DESKTOP_CARDS_KEY: &str = "desktop_cards";
 const GRANTS_KEY: &str = "plugin_grants";
 const MIRROR_MODE_KEY: &str = "mirror_policy";
 const MIRROR_DIRS_KEY: &str = "mirror_dirs";
-const DEFAULT_API_PORT: u16 = 7373;
+pub(crate) const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
 const SNAP_MODE_KEY: &str = "snap_mode";
@@ -1818,10 +1818,14 @@ impl TrellisApp {
     /// and answers nothing. That failure already has a status-bar warning
     /// because two instances on one port produced it once.
     fn restart(&mut self) {
-        // Save first: the child opens the file this process is about to leave.
-        if self.dirty {
-            self.save();
-        }
+        // **Synchronously.** `save()` spawns a background thread, so the child
+        // used to be launched while the save was still running — it then opened
+        // the file as it stood *before* this process finished writing, and any
+        // edit in the new window would write that stale copy back over the good
+        // one. Observed: the child started 19 seconds before the parent's final
+        // write landed.
+        let path = self.target_path();
+        self.write_to(path, false);
         let exe = match exe_for_restart() {
             Some(e) => e,
             None => {
@@ -1830,9 +1834,14 @@ impl TrellisApp {
             }
         };
         let args: Vec<String> = std::env::args().skip(1).collect();
+        // A deadline, not a guess. The old value was a flat 1.5s sleep, which is
+        // fine until the exit save is slow — on a large document over a slow
+        // volume it took **20 seconds**, so the child bound the port, lost, and
+        // came up silently API-less. The child now waits for the port to be free
+        // and only gives up at this deadline.
         match std::process::Command::new(exe)
             .args(&args)
-            .env("TRELLIS_RESTART_DELAY_MS", "1500")
+            .env("TRELLIS_RESTART_WAIT_SECS", "90")
             .spawn()
         {
             Ok(_) => self.status = "Restarting…".into(),
@@ -10231,12 +10240,30 @@ fn history_snapshots(doc_path: &std::path::Path) -> Vec<(PathBuf, String)> {
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "gz"))
+            // A `.part` is an unfinished write and is excluded by the extension
+            // check above. This drops anything that is not a readable gzip at
+            // all — a snapshot that cannot be decompressed must never be offered
+            // for restore, because the moment you need one is the worst possible
+            // moment to discover it is empty.
+            .filter(|p| is_readable_gzip(p))
             .filter_map(|p| p.file_name().map(|n| (p.clone(), n.to_string_lossy().into_owned())))
             .collect(),
         Err(_) => return Vec::new(),
     };
     v.sort_by(|a, b| b.1.cmp(&a.1)); // timestamped names sort chronologically
     v
+}
+
+/// Whether a snapshot file is a gzip that actually decompresses.
+///
+/// Cheap: it reads the header and pulls a few bytes through the decoder rather
+/// than inflating the whole document, so listing history stays fast.
+fn is_readable_gzip(p: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(f) = std::fs::File::open(p) else { return false };
+    let mut d = flate2::read::GzDecoder::new(std::io::BufReader::new(f));
+    let mut buf = [0u8; 64];
+    matches!(d.read(&mut buf), Ok(n) if n > 0)
 }
 
 /// After a successful save, drop a timestamped snapshot into the history dir
@@ -10257,7 +10284,17 @@ fn write_history_snapshot(doc_path: &std::path::Path, keep: usize, min_gap_secs:
         return;
     }
     let stamp = crate::backup::stamp(std::time::SystemTime::now());
-    let _ = std::fs::write(dir.join(format!("{stamp}.ron.gz")), &bytes);
+    // Temp-then-rename, like the document save itself. Writing straight to the
+    // final name leaves a TRUNCATED `.gz` behind if the write does not finish —
+    // and it looks like a perfectly good snapshot, with a valid timestamped
+    // name, until the day you try to restore it. Observed: a 55 KB entry beside
+    // 12.8 MB ones, written while the process was leaving.
+    let tmp = dir.join(format!("{stamp}.ron.gz.part"));
+    let final_path = dir.join(format!("{stamp}.ron.gz"));
+    if std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &final_path)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
     // Prune oldest beyond the cap. `max(1)` so a bad setting can never delete
     // every snapshot including the one just written.
     let snaps = history_snapshots(doc_path);

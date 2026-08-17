@@ -6,6 +6,35 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.114.1]
+
+### Fixed
+- **File → Restart left the new window with no API, and reading a stale
+  document.** Both because it did not wait for the old process to finish.
+
+  `restart()` called the ordinary save, which runs on a **background thread**, and
+  then immediately launched the child. So the child opened the file as it stood
+  *before* this process finished writing — measured at **19 seconds** before —
+  and any edit made in the new window would have written that older copy back
+  over the good one. The save is synchronous now: the child is not launched until
+  the document on disk is final.
+
+  The child then waited a flat **1.5 seconds** for the port. On a large document
+  over a slow volume the old instance held it for **20 seconds**, so the new
+  window bound nothing and came up silently API-less — no agents, no plugins, no
+  clipper, and nothing obviously wrong to look at. It now **waits for the port to
+  actually be free** rather than for a guessed duration, up to a deadline, and
+  says so on stderr if it gives up.
+
+- **A history snapshot could be written truncated, and then offered for restore.**
+  Snapshots were written straight to their final name, so an interrupted write
+  left a short `.gz` with a perfectly good timestamped filename. Observed: a
+  **55 KB** entry sitting beside 12.8 MB ones. Snapshots are now written to a
+  `.part` file and renamed into place, the way the document itself has always
+  been saved, and the history list **skips any snapshot that does not
+  decompress** — the moment you need a restore is the worst possible moment to
+  find out the file is empty.
+
 ## [0.114.0]
 
 ### Added
