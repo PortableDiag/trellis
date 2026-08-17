@@ -177,6 +177,8 @@ pub enum CanvasAction {
     /// OS window, or bring it back.
     SendToDesktop(CardId),
     RecallFromDesktop(CardId),
+    /// Take the whole basket out onto the desktop, or bring it all back.
+    ToggleDesktopMode,
     /// A `[[wiki-link]]` clicked inside a table cell. Carries the raw target;
     /// the app resolves it exactly as it resolves one clicked in a text card.
     FollowLink(String),
@@ -301,6 +303,8 @@ pub fn ui(
     can_paste: bool,
     dock_mode: bool,
     snap_mode: bool,
+    // Whether this basket is currently out on the desktop as real windows.
+    desktop_mode: bool,
     depth_mode: bool,
     // `eye`: camera offset from straight-on, in screen pixels — the orbit.
     // Alt+drag moves it; Reset view returns it to zero.
@@ -1042,6 +1046,21 @@ pub fn ui(
                     .clicked()
                 {
                     actions.push(CanvasAction::ToggleSnapMode);
+                }
+                // Desktop mode is a MODE, like VMware's Unity: one switch takes
+                // the whole basket out onto the desktop, and takes it back. A
+                // per-card action exists too, but promoting cards one at a time
+                // is not what "the cards of a workspace are on the screen" means.
+                if cfg!(target_os = "linux") {
+                    if ui
+                        .selectable_label(desktop_mode, "Desktop")
+                        .on_hover_text(
+                            "Desktop mode: every card in this basket becomes its own                              window on your desktop, among your other applications,                              keeping the arrangement you gave it here.\n\nClick again                              to bring them all back. A single card can also be sent                              out on its own from its right-click menu.",
+                        )
+                        .clicked()
+                    {
+                        actions.push(CanvasAction::ToggleDesktopMode);
+                    }
                 }
                 // The two axes that turn a basket from a plane into a hypercube,
                 // grouped and named as such. The group's own state is **derived**

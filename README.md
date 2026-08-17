@@ -408,7 +408,13 @@ work *in flight for five days*, not work due on the last one — it reads as **t
 every day until it's done, instead of hiding under a future date until it's already
 late. The card never moves; the window does.
 
-**Send a card to the desktop** (Linux/X11) - right-click a card, *Send to desktop*,
+**Desktop mode** (Linux/X11) - the **Desktop** toggle on the canvas, beside Dock
+and Snap, takes **every card in the open basket** out onto your desktop as real
+windows, keeping the arrangement you gave them. Move the Trellis window away and
+the cards are simply there, among your other applications. Click it again to
+bring them all back. It is the same idea as VMware's Unity mode.
+
+**Or send one card on its own** - right-click a card's title bar, *Send to desktop*,
 and it leaves the canvas to become its own borderless window among your other
 applications. It is the same card: edit it there and the basket has the change.
 Its place in the basket is marked *on the desktop* so nothing looks missing, and

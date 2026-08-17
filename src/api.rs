@@ -200,6 +200,9 @@ pub enum ApiRequest {
     SetCardDesktop { card: u64, pos: Option<[f32; 2]>, on: bool },
     /// Which cards are currently out on the desktop.
     ListCardDesktop,
+    /// Desktop **mode**: take a whole basket out onto the desktop at once, or
+    /// bring it back. The per-card route is the exception; this is the feature.
+    SetNodeDesktop { node: NodeId, on: bool },
 }
 
 /// `POST /api/cards/{cid}/desktop` — optional screen position for the window.
@@ -326,6 +329,7 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::GetImage { node, .. }
         | ApiRequest::CreateGroup { node, .. }
         | ApiRequest::UpdateGroup { node, .. }
+        | ApiRequest::SetNodeDesktop { node, .. }
         | ApiRequest::MoveGroup { node, .. }
         | ApiRequest::MoveCards { node, .. }
         | ApiRequest::SetCardsProperty { node, .. }
@@ -1296,6 +1300,12 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "cards", cid, "link"]) => Ok(ApiRequest::CardLink(pid(cid)?)),
         (Method::Get, ["api", "groups", gid, "link"]) => Ok(ApiRequest::GroupLink(pid(gid)?)),
         (Method::Get, ["api", "desktop"]) => Ok(ApiRequest::ListCardDesktop),
+        (Method::Post, ["api", "nodes", id, "desktop"]) => {
+            Ok(ApiRequest::SetNodeDesktop { node: pid(id)?, on: true })
+        }
+        (Method::Delete, ["api", "nodes", id, "desktop"]) => {
+            Ok(ApiRequest::SetNodeDesktop { node: pid(id)?, on: false })
+        }
         (Method::Post, ["api", "cards", cid, "desktop"]) => {
             let i: CardDesktopInput =
                 if body.trim().is_empty() { CardDesktopInput { pos: None } } else { parse(body)? };
@@ -3115,6 +3125,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::CardLink(_)
         | ApiRequest::GroupLink(_)
         | ApiRequest::SetCardDesktop { .. }
+        | ApiRequest::SetNodeDesktop { .. }
         | ApiRequest::ListCardDesktop
         | ApiRequest::DailyNote { .. }
         | ApiRequest::DailyConfig
@@ -4805,6 +4816,29 @@ mod tests {
             assert!(!dirty);
             assert_eq!(resp.status, 500, "must fall through to the app loop");
         }
+    }
+
+    #[test]
+    fn desktop_mode_routes_take_a_whole_basket() {
+        assert!(matches!(
+            route(&Method::Post, "/api/nodes/63/desktop", "", "").unwrap(),
+            ApiRequest::SetNodeDesktop { node: 63, on: true }
+        ));
+        assert!(matches!(
+            route(&Method::Delete, "/api/nodes/63/desktop", "", "").unwrap(),
+            ApiRequest::SetNodeDesktop { node: 63, on: false }
+        ));
+        // Placement is app config, so `process` must not answer these.
+        let mut doc = Document::empty();
+        let (dirty, resp) =
+            process(&mut doc, ApiRequest::SetNodeDesktop { node: 63, on: true });
+        assert!(!dirty);
+        assert_eq!(resp.status, 500, "answered in the app loop, where the windows live");
+        // A subtree-scoped token is checked against the basket it names.
+        assert_eq!(
+            target_node(&ApiRequest::SetNodeDesktop { node: 63, on: true }),
+            Some(63)
+        );
     }
 
     #[test]

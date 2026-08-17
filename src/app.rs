@@ -1083,6 +1083,15 @@ pub struct TrellisApp {
     /// Last observed position of each open desktop window. Read-only feedback:
     /// it is persisted, and never fed back into a `ViewportBuilder`.
     desktop_live: std::collections::HashMap<CardId, [f32; 2]>,
+    /// The most recent frame's context, so an API request answered in the pump
+    /// loop can reach the window's own position — Desktop mode places card
+    /// windows relative to it. Cheap to hold: `egui::Context` is an `Arc`.
+    last_ctx: Option<egui::Context>,
+    /// The basket currently *in* Desktop mode — the whole thing out on the
+    /// desktop at once, the way VMware's Unity puts a guest's windows on the
+    /// host. `None` means no basket is out as a whole (individual cards sent
+    /// from their own menu are still tracked in `desktop_cards`).
+    desktop_mode: Option<NodeId>,
     /// Claims panel: cards that assert state (`verify::`), worst first, so a
     /// workspace that has gone out of date says so instead of being believed.
     claims_open: bool,
@@ -1561,6 +1570,8 @@ impl TrellisApp {
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default(),
             desktop_live: Default::default(),
+            desktop_mode: None,
+            last_ctx: None,
             claims_open: cc
                 .storage
                 .and_then(|s| s.get_string(CLAIMS_OPEN_KEY))
@@ -3070,6 +3081,52 @@ impl TrellisApp {
                 "cards": cards,
             })));
         }
+        if let api::ApiRequest::SetNodeDesktop { node, on } = req {
+            if !cfg!(target_os = "linux") {
+                return Some(api::ApiResponse::err(
+                    501,
+                    "desktop mode needs a window manager that lets an application \
+                     position its own windows — Linux/X11 only for now",
+                ));
+            }
+            if !self.doc.nodes.contains_key(node) {
+                return Some(api::ApiResponse::err(404, "node not found"));
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let n = *node;
+                if *on {
+                    if let Some(prev) = self.desktop_mode {
+                        if prev != n {
+                            self.recall_basket_from_desktop(prev);
+                        }
+                    }
+                    let ctx = self.last_ctx.clone();
+                    match ctx {
+                        Some(c) => self.send_basket_to_desktop(&c, n),
+                        // No frame has run yet, so there are no screen rects to
+                        // place windows by. Refusing beats opening every card in
+                        // one corner of the display.
+                        None => {
+                            return Some(api::ApiResponse::err(
+                                503,
+                                "the window has not drawn yet — try again in a moment",
+                            ))
+                        }
+                    }
+                } else {
+                    self.recall_basket_from_desktop(n);
+                }
+                let out: Vec<u64> = self.desktop_cards.keys().copied().collect();
+                return Some(api::ApiResponse::ok(serde_json::json!({
+                    "node": n,
+                    "desktop": *on,
+                    "cards": out,
+                })));
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Some(api::ApiResponse::err(501, "Linux/X11 only"));
+        }
         if let api::ApiRequest::SetCardDesktop { card, pos, on } = req {
             let cid = *card as crate::model::CardId;
             if !cfg!(target_os = "linux") {
@@ -4027,6 +4084,9 @@ impl TrellisApp {
         let group = |op, id: crate::model::GroupId| Change::new(Ui, Entity::Group, op, id).in_node(node);
         let upd = |id: &CardId, f: &str| card(Op::Updated, *id).titled(title(id)).field(f);
         Some(match a {
+            CanvasAction::ToggleDesktopMode => {
+                Change::new(Ui, Entity::Node, Op::Updated, node).field("desktop_mode")
+            }
             CanvasAction::SendToDesktop(c) => {
                 card(Op::Updated, *c).titled(title(c)).field("desktop")
             }
@@ -4468,6 +4528,28 @@ impl TrellisApp {
         }
         for a in actions {
             match a {
+                // Desktop MODE: the whole basket at once, which is what "the
+                // cards of a workspace are on the screen" means — a per-card
+                // action is the exception, not the feature.
+                #[cfg(not(target_os = "linux"))]
+                CanvasAction::ToggleDesktopMode => {
+                    self.status =
+                        "Desktop mode needs a window manager that lets an application place                          its own windows — Linux/X11 only for now".into();
+                }
+                #[cfg(target_os = "linux")]
+                CanvasAction::ToggleDesktopMode => {
+                    if self.desktop_mode == Some(node) {
+                        self.recall_basket_from_desktop(node);
+                    } else {
+                        // Only one basket is out at a time: two baskets of
+                        // windows on one desktop is a pile with no way to tell
+                        // which document you are looking at.
+                        if let Some(prev) = self.desktop_mode {
+                            self.recall_basket_from_desktop(prev);
+                        }
+                        self.send_basket_to_desktop(ctx, node);
+                    }
+                }
                 // Placement is app config, so this touches no document state and
                 // must not mark the document dirty.
                 CanvasAction::SendToDesktop(cid) => {
@@ -7030,6 +7112,34 @@ impl TrellisApp {
                     );
                 ui.checkbox(&mut self.snap_mode, "Snap mode (align card edges while dragging)")
                     .on_hover_text("When on, a dragged card's edges snap to nearby cards' edges.");
+                if cfg!(target_os = "linux") {
+                    let sel = self.selected;
+                    let on = sel.is_some() && self.desktop_mode == sel;
+                    let mut want = on;
+                    let r = ui.checkbox(
+                        &mut want,
+                        "Desktop mode (this basket's cards become windows on your desktop)",
+                    );
+                    r.on_hover_text(
+                        "Every card in the open basket becomes its own borderless window,                          keeping the arrangement it has here — move the Trellis window away                          and the cards stay on your desktop among your other applications.                          Turn it off to bring them all back.
+
+Linux/X11 only: elsewhere an                          application may not place its own windows.",
+                    );
+                    if want != on {
+                        if let Some(n) = sel {
+                            #[cfg(target_os = "linux")]
+                            if want {
+                                if let Some(prev) = self.desktop_mode {
+                                    self.recall_basket_from_desktop(prev);
+                                }
+                                let c = ctx.clone();
+                                self.send_basket_to_desktop(&c, n);
+                            } else {
+                                self.recall_basket_from_desktop(n);
+                            }
+                        }
+                    }
+                }
                 ui.label(
                     egui::RichText::new(
                         "Hypercube — a basket is x and y; these two add z and time.",
@@ -7205,6 +7315,7 @@ impl TrellisApp {
                         "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
                         "POST   /api/nodes/{id}/cards/move        {cards:[ids], node, pos?, gap?}  (batch; whole list validated first)",
                         "POST   /api/nodes/{id}/cards/property    {cards:[ids], key, value}        (one property, many cards)",
+                        "POST   /api/nodes/{id}/desktop           (DESKTOP MODE — the whole basket becomes windows; DELETE brings it back)",
                         "GET    /api/desktop                      (cards out on the desktop as their own windows; Linux/X11)",
                         "POST   /api/cards/{cid}/desktop {pos?}   (send a card to the desktop; DELETE recalls it)",
                         "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
@@ -8674,6 +8785,91 @@ impl TrellisApp {
         self.highlight_until = ctx.input(|i| i.time) + canvas::HIGHLIGHT_SECS;
     }
 
+    /// Take a whole basket onto the desktop — Desktop mode proper.
+    ///
+    /// **The arrangement is preserved.** Each card's window opens exactly where
+    /// the card appears on screen right now, so the layout you built in the
+    /// basket is the layout you get on the desktop; move or minimise the Trellis
+    /// window and the cards are simply there. That is what makes it Unity rather
+    /// than "a pile of windows".
+    ///
+    /// Cards are read from `card_rects`, which the canvas fills each frame with
+    /// the on-screen rectangle it actually drew — so zoom, pan and depth are all
+    /// already accounted for, rather than recomputed here and allowed to drift.
+    #[cfg(target_os = "linux")]
+    fn send_basket_to_desktop(&mut self, ctx: &egui::Context, node: NodeId) {
+        // egui reports positions inside the window; a window manager wants them
+        // on the screen. Without the window's own origin every card would open
+        // in the top-left corner of the display.
+        let cards: Vec<(CardId, egui::Pos2, egui::Vec2)> = match self.doc.nodes.get(&node) {
+            Some(n) => n.cards.iter().map(|c| (c.id, c.pos, c.size)).collect(),
+            None => return,
+        };
+        if cards.is_empty() {
+            self.status = "Nothing in this basket to send to the desktop".into();
+            return;
+        }
+
+        // The basket's own bounding box, in world coordinates. Positions come
+        // from the DOCUMENT, not from the drawn screen rects: a card scrolled
+        // out of the viewport has a screen rect off the display, and placing a
+        // window there just makes the window manager clamp it to the edge —
+        // measured, and it flattened the arrangement into a row along the
+        // bottom of the screen.
+        let mut min = egui::pos2(f32::MAX, f32::MAX);
+        let mut max = egui::pos2(f32::MIN, f32::MIN);
+        let mut biggest = egui::vec2(0.0, 0.0);
+        for (_, pos, size) in &cards {
+            min.x = min.x.min(pos.x);
+            min.y = min.y.min(pos.y);
+            max.x = max.x.max(pos.x + size.x);
+            max.y = max.y.max(pos.y + size.y);
+            biggest = biggest.max(*size);
+        }
+
+        // Fit that box to the screen, so the whole basket is reachable. Windows
+        // keep their real size — scaling a card's *window* would shrink its text
+        // — so only the spacing between them is compressed.
+        let screen = ctx
+            .input(|i| i.viewport().monitor_size)
+            .unwrap_or(egui::vec2(1920.0, 1080.0));
+        const MARGIN: f32 = 40.0;
+        let room = (screen - egui::vec2(MARGIN * 2.0, MARGIN * 2.0) - biggest).max(egui::vec2(1.0, 1.0));
+        let span = (max - min).max(egui::vec2(1.0, 1.0));
+        let scale = (room.x / span.x).min(room.y / span.y).min(1.0).max(0.05);
+
+        let mut sent = 0usize;
+        for (cid, pos, size) in &cards {
+            let x = MARGIN + (pos.x - min.x) * scale;
+            let y = MARGIN + (pos.y - min.y) * scale;
+            // Clamp so no window is placed where the WM would have to move it —
+            // a moved window is one whose position we did not choose.
+            let x = x.clamp(0.0, (screen.x - size.x).max(0.0));
+            let y = y.clamp(0.0, (screen.y - size.y).max(0.0));
+            self.desktop_cards.insert(*cid, [x, y]);
+            sent += 1;
+        }
+        self.desktop_mode = Some(node);
+        self.status = format!("{sent} card(s) on the desktop — click Desktop again to bring them back");
+    }
+
+    /// Bring a whole basket back off the desktop.
+    #[cfg(target_os = "linux")]
+    fn recall_basket_from_desktop(&mut self, node: NodeId) {
+        let ids: Vec<CardId> = match self.doc.nodes.get(&node) {
+            Some(n) => n.cards.iter().map(|c| c.id).collect(),
+            None => Vec::new(),
+        };
+        for cid in ids {
+            self.desktop_cards.remove(&cid);
+            self.desktop_live.remove(&cid);
+        }
+        if self.desktop_mode == Some(node) {
+            self.desktop_mode = None;
+        }
+        self.status = "Cards recalled from the desktop".into();
+    }
+
     /// Desktop mode: draw every card that has been sent out as its own
     /// borderless OS window, so it interleaves with other applications in the
     /// window manager's z-order.
@@ -8881,6 +9077,7 @@ impl eframe::App for TrellisApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.last_ctx = Some(ctx.clone());
         // Capture the window handles so file/message dialogs can be parented
         // to the app window instead of opening behind it.
         if let (Ok(w), Ok(d)) = (frame.window_handle(), frame.display_handle()) {
@@ -9204,6 +9401,7 @@ impl eframe::App for TrellisApp {
                         can_paste,
                         self.dock_mode,
                         self.snap_mode,
+                        self.desktop_mode == Some(sel),
                         self.depth_mode,
                         &mut eye,
                         self.time_mode,

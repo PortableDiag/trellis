@@ -447,6 +447,21 @@ and cut where it would name a card left behind.
 Send a card out of the canvas to become its own borderless OS window, sitting
 among your other applications instead of inside Trellis.
 ```
+POST   /api/nodes/{id}/desktop      -> 200 {"node":63,"desktop":true,"cards":[ids]}
+  | 404 (node)  | 501 (not Linux)  | 503 (no frame drawn yet, so no screen to place on)
+DELETE /api/nodes/{id}/desktop      -> 200 {"node":63,"desktop":false,"cards":[]}
+
+  **This is the feature.** One call takes the whole basket out onto the desktop,
+  the way VMware's Unity puts a guest's windows on the host — the per-card route
+  below is the exception, not the main event. Only one basket is out at a time:
+  two baskets of windows on one desktop is a pile with no way to tell which
+  document you are looking at, so turning a second one on recalls the first.
+
+  **The arrangement survives.** The basket's bounding box is fitted to the screen
+  and every card is placed by the same scale, so the layout you built is the
+  layout you get. Windows keep their real size — scaling a card's window would
+  shrink its text — so only the spacing between them compresses.
+
 GET    /api/desktop        -> 200 {"supported":true,"cards":[{"card":1815,"pos":[760,430]}]}
 
 POST   /api/cards/{cid}/desktop  {pos?:[x,y]}

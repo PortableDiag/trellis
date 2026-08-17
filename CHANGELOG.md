@@ -6,6 +6,38 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.114.0]
+
+### Added
+- **Desktop mode is a mode.** The **Desktop** toggle on the canvas, beside Dock
+  and Snap, takes **every card in the open basket** onto your desktop as real
+  windows at once, and takes them all back. Also in **View**, and over the API as
+  `POST`/`DELETE /api/nodes/{id}/desktop`.
+
+  **This is what v0.113.0 should have been.** That release shipped only the
+  per-card action and called the feature done, when the request was *"the cards
+  of a selected workspace are seen on the screen"* — the workspace, not one card
+  at a time. VMware's Unity, which the request named, is a switch you flip; it
+  does not ask you to promote each window by hand. Splitting that into phases and
+  shipping the half that was not the feature was the wrong call.
+
+  **The arrangement survives the trip.** The basket's bounding box is fitted to
+  the screen and every card placed by the same scale, so the layout you built is
+  the layout you get. Windows keep their real size — scaling a window would
+  shrink its text — so only the spacing compresses.
+
+  **Positions come from the document, not from the drawn screen rects.** The
+  first version used the on-screen rectangles, which put every card that was
+  scrolled out of view past the edge of the display; the window manager then
+  clamped them, flattening the arrangement into a row along the bottom of the
+  screen. Measured: horizontal spacing was exact and vertical was crushed to
+  0.725 of it, with three windows sharing one bottom edge. Now a single uniform
+  scale, verified at 0.595 on both axes with nothing clamped.
+
+  Only one basket is out at a time — two baskets of windows on one desktop is a
+  pile with no way to tell which document you are looking at — so turning a
+  second one on recalls the first.
+
 ## [0.113.1]
 
 ### Fixed
