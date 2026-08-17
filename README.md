@@ -425,6 +425,15 @@ behind anything is a HUD, not part of the desktop.
 `Archive` basket; a card moved there keeps its id, so links and backlinks to it
 still resolve. `POST /api/nodes/{id}/cards/move` moves a whole batch in one call.
 
+**Two people (or a person and an agent) can write to the same card.**
+`POST /api/cards/{cid}/append` adds a line to a card's body on the server, so a
+message board or a running log does not need read-modify-write — which is where
+whatever the other one typed in between gets lost. Checklists get the same
+treatment a line at a time: `POST /api/cards/{cid}/items` and
+`DELETE …/items/{item}` add and remove one line, leaving every other line's id
+alone, because rewriting the whole list carries ids across by position and a dated
+line *is* a task.
+
 **A card id is a complete address — for changing it, not just finding it.**
 Every query surface hands out card ids (search, the agenda, claims, backlinks, the
 change log) and `[[#1391]]` *is* one, so `PATCH /api/cards/{cid}`,

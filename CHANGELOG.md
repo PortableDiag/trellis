@@ -6,6 +6,55 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.118.0]
+
+### Added
+- **`POST /api/cards/{cid}/append {text, at?, separator?}`** — add to a card's body
+  without sending the body back.
+
+  A card two people write to is where read-modify-write goes wrong: `GET` the body,
+  add a line, `PATCH` it back, and whatever the other one typed in between is gone.
+  A **message board, a running log, a handoff card** is exactly that card, and it
+  is exactly where a human and an agent both write. Append happens on the server,
+  in one call, and does not need an 18 KB body shipped in both directions to add a
+  line to it.
+
+  `separator` defaults to a **blank line** — the Markdown paragraph break that
+  naive concatenation gets wrong by running two paragraphs together — and an empty
+  body takes the text with no separator at all. `at: "start"` for newest-first
+  boards.
+
+  **Refused where `body` is not what the card shows**, naming the route that does
+  work: a checklist's lines and a table's cells are its content, and text appended
+  to *their* body is stored, displayed nowhere, and not read as a property either,
+  because a checklist card's properties come from its title and items alone. A 200
+  that changed nothing anyone can see is the worst answer available. Mirrored cards
+  answer 409, as they do for `PATCH`.
+
+- **`POST …/cards/{cid}/items {text, done?, at?}` and `DELETE …/items/{item}`** —
+  add or remove **one** checklist line, and get the new line's id back.
+
+  The alternative was rewriting the whole `items` array, which carries the existing
+  ids across **by position**. If a line was reordered or removed between the read
+  and the write — by the person you are working with, in the app — every id after it
+  changes hands. Since v0.90.0 an item id is what `…/items/{item}/done` and
+  `…/items/{item}/property` address, and a dated line **is a task**, so a
+  positional rewrite quietly reassigns which task is which. One line in, one line
+  out, and every other line's id stays where it was. The wholesale rewrite is still
+  right for *replacing* a list.
+
+  Both are reachable by bare card id as well, through the same v0.117.0 rewrite.
+
+### Fixed
+- **The change log now describes item-level edits.** `…/items/{item}/done`,
+  `…/items/{item}/property` and its `DELETE` were absent from `change_of`, so they
+  fell through to *"the document changed somehow"* — which is precisely what the
+  change log was built to stop being the only available answer. Ticking a line and
+  moving a line's date are among the most common writes in the API, and a client
+  watching `/api/changes` for an agent's edits could see that something had happened
+  and nothing more. Found by reading the log while driving the new routes, not by
+  reading the code.
+
 ## [0.117.0]
 
 ### Added

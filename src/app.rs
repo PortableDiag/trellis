@@ -7384,6 +7384,8 @@ Linux/X11 only: elsewhere an                          application may not place 
                         "POST   /api/cards/{cid}/property {key,value}  ·  DELETE …/property?key=due",
                         "POST   /api/cards/{cid}/move {node,pos?} | {before|after|index|to}",
                         "POST   /api/cards/{cid}/items/{item}/done {done}  ·  …/items/{item}/property (POST/DELETE)",
+                        "POST   /api/cards/{cid}/append {text, at?, separator?}        (add to a shared card without sending the body back)",
+                        "POST   /api/cards/{cid}/items  {text, done?, at?}  ·  DELETE …/items/{item}   (one line; ids of the rest stay put)",
                         "         same operations as the /nodes/{id}/cards/{cid}/… twins — no need to look the basket up first",
                         "GET    /api/groups/{gid}                  (find a group from its id alone → {node, node_path, group})",
                         "GET    /api/groups/{gid}/link             (canonical trellis:// link + the [[#g…]] form)",

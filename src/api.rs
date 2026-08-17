@@ -107,6 +107,26 @@ pub enum ApiRequest {
     MoveGroup { node: NodeId, group: GroupId, to: NodeId, pos: Option<[f32; 2]> },
     /// Cards whose `[[#g…]]` links point at one group.
     GroupBacklinks(GroupId),
+    /// Add text to the **end** (or start) of a card's body without sending the
+    /// body back.
+    ///
+    /// Two reasons this is not just `PATCH` with the whole body. It is **atomic**:
+    /// a read-modify-write from an agent silently discards whatever the person
+    /// typed into that card in between, and a shared card — a message board, a
+    /// running log, a handoff — is exactly where both of them write. And it does
+    /// not require shipping an 18 KB body over the wire to add a line to it.
+    AppendCard { node: NodeId, card: u64, input: AppendInput },
+    /// Add one checklist line, and get its id back.
+    ///
+    /// The alternative was a wholesale `items` rewrite, which carries the existing
+    /// ids across **by position** — so if a line was reordered or deleted between
+    /// the read and the write, every id after it silently changes hands. Since an
+    /// item id is what `…/items/{item}/done` and `…/items/{item}/property` address,
+    /// and since a checklist line with its own `due::` **is a task**, that quietly
+    /// reassigns which task is which.
+    AddItem { node: NodeId, card: u64, input: AddItemInput },
+    /// Remove one checklist line, addressed by its id rather than its position.
+    DeleteItem { node: NodeId, card: u64, item: u64 },
     /// A **card-addressed write**: the same operation as its node-addressed twin,
     /// with the basket left for the app loop to resolve.
     ///
@@ -252,6 +272,36 @@ struct CardDesktopInput {
     pos: Option<[f32; 2]>,
 }
 
+/// `POST …/cards/{cid}/append` — add text to a card's body.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppendInput {
+    /// The text to add. Empty is a 400: an append that adds nothing is a mistake
+    /// on the caller's side, and answering 200 hides it.
+    text: String,
+    /// `"end"` (default) or `"start"`.
+    #[serde(default)]
+    at: Option<String>,
+    /// What goes between the old text and the new. Defaults to a blank line,
+    /// which is a Markdown paragraph break — the thing you almost always mean,
+    /// and the thing a naive `body + text` gets wrong by running two paragraphs
+    /// together. `""` joins with nothing.
+    #[serde(default)]
+    separator: Option<String>,
+}
+
+/// `POST …/cards/{cid}/items` — add one checklist line.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddItemInput {
+    text: String,
+    #[serde(default)]
+    done: bool,
+    /// 0-based position. Omit (or send past the end) to append.
+    #[serde(default)]
+    at: Option<usize>,
+}
+
 /// `{key, value}` — the body of every "set one property" route, card or item.
 ///
 /// One definition rather than the two identical inline copies this had: they are
@@ -277,6 +327,9 @@ pub enum CardOp {
     ItemDone { item: u64, done: bool },
     SetItemProperty { item: u64, key: String, value: String },
     ClearItemProperty { item: u64, key: String },
+    Append(AppendInput),
+    AddItem(AddItemInput),
+    DeleteItem { item: u64 },
 }
 
 /// Turn a card-addressed request into the node-addressed one it stands for.
@@ -301,6 +354,9 @@ pub fn resolve_by_card(node: NodeId, card: u64, op: CardOp) -> ApiRequest {
         CardOp::ClearItemProperty { item, key } => {
             ApiRequest::ClearItemProperty { node, card, item, key }
         }
+        CardOp::Append(input) => ApiRequest::AppendCard { node, card, input },
+        CardOp::AddItem(input) => ApiRequest::AddItem { node, card, input },
+        CardOp::DeleteItem { item } => ApiRequest::DeleteItem { node, card, item },
     }
 }
 
@@ -475,6 +531,9 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::UpdateCards { node, .. }
         | ApiRequest::DeleteCards { node, .. }
         | ApiRequest::ClearCardsProperty { node, .. }
+        | ApiRequest::AppendCard { node, .. }
+        | ApiRequest::AddItem { node, .. }
+        | ApiRequest::DeleteItem { node, .. }
         | ApiRequest::DeleteGroup { node, .. } => Some(*node),
         ApiRequest::CreateNode { parent, .. } => *parent,
         _ => None,
@@ -677,6 +736,40 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
                 .field(&format!("{}={}", key.to_lowercase(), value))
                 .field(&format!("batch={}", cards.len()))
         }
+        // Item-level edits. Undescribed until v0.118.0, which meant the most
+        // common write in the whole API — ticking a line, moving a line's date —
+        // reached `/api/changes` as "the document changed somehow". The change log
+        // exists precisely to say *what* moved; a client watching it for an
+        // agent's edits could see that something had and nothing more.
+        ApiRequest::SetItemDone { node, card, item, done } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field(&format!("item={item}"))
+            .field(&format!("done={done}")),
+        ApiRequest::SetItemProperty { node, card, item, key, value } => {
+            ch(E::Card, Op::Updated, *card)
+                .in_node(*node)
+                .titled(card_title(node, card))
+                .field(&format!("item={item}"))
+                .field(&format!("{}={}", key.to_lowercase(), value))
+        }
+        ApiRequest::ClearItemProperty { node, card, item, key } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field(&format!("item={item}"))
+            .field(&format!("-{}", key.to_lowercase())),
+        ApiRequest::AppendCard { node, card, .. } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field("body.append"),
+        ApiRequest::AddItem { node, card, .. } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field("items.add"),
+        ApiRequest::DeleteItem { node, card, item } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field(&format!("items.remove={item}")),
         ApiRequest::UpdateCards { node, cards, .. } => {
             ch(E::Card, Op::Updated, cards.first().copied().unwrap_or(0))
                 .in_node(*node)
@@ -1557,6 +1650,15 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             }
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::ClearProperty { key } })
         }
+        (Method::Post, ["api", "cards", cid, "append"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Append(parse(body)?) })
+        }
+        (Method::Post, ["api", "cards", cid, "items"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::AddItem(parse(body)?) })
+        }
+        (Method::Delete, ["api", "cards", cid, "items", iid]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::DeleteItem { item: pid(iid)? } })
+        }
         (Method::Post, ["api", "cards", cid, "move"]) => {
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Move(parse(body)?) })
         }
@@ -1682,6 +1784,15 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "nodes", nid, "cards", cid, "property"]) => {
             let i: PropertyInput = parse(body)?;
             Ok(ApiRequest::SetCardProperty { node: pid(nid)?, card: pid(cid)?, key: i.key, value: i.value })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "append"]) => {
+            Ok(ApiRequest::AppendCard { node: pid(nid)?, card: pid(cid)?, input: parse(body)? })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "items"]) => {
+            Ok(ApiRequest::AddItem { node: pid(nid)?, card: pid(cid)?, input: parse(body)? })
+        }
+        (Method::Delete, ["api", "nodes", nid, "cards", cid, "items", iid]) => {
+            Ok(ApiRequest::DeleteItem { node: pid(nid)?, card: pid(cid)?, item: pid(iid)? })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "dock"]) => {
             let i: DockInput = parse(body)?;
@@ -2781,6 +2892,117 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             (
                 true,
                 ApiResponse::ok(json!({ "moved": moved.len(), "node": to, "cards": moved })),
+            )
+        }
+        ApiRequest::AppendCard { node, card, input } => {
+            let Some(c) = doc.card(node, card) else {
+                return (false, ApiResponse::err(404, "card not found"));
+            };
+            if input.text.is_empty() {
+                return (false, ApiResponse::err(400, "nothing to append"));
+            }
+            // A mirrored body belongs to the file, exactly as it does for PATCH.
+            if c.source.is_some() {
+                return (
+                    false,
+                    ApiResponse::err(
+                        409,
+                        "this card mirrors a file — its body is read-only. \
+                         Send \"source\": \"\" to detach it first.",
+                    ),
+                );
+            }
+            // Refused where the body is not what the card shows. A checklist's
+            // lines and a table's cells are the content; text appended to their
+            // `body` is stored, never displayed, and — the trap that matters —
+            // never read as a property either, because a checklist card's
+            // properties come from its title and items alone. A silent no-op that
+            // answers 200 is worse than a 400 naming the route that works.
+            let wrong_kind = match &c.kind {
+                CardKind::Checklist { .. } => {
+                    Some("a checklist card's lines are its content — POST …/cards/{cid}/items")
+                }
+                CardKind::Table { .. } => {
+                    Some("a table card's cells are its content — POST …/cards/{cid}/table")
+                }
+                CardKind::Image { .. } | CardKind::Sketch { .. } => {
+                    Some("this kind of card has no body to append to")
+                }
+                CardKind::Text | CardKind::Code { .. } => None,
+            };
+            if let Some(why) = wrong_kind {
+                return (false, ApiResponse::err(400, why));
+            }
+            let at_start = matches!(input.at.as_deref(), Some("start"));
+            if let Some(a) = input.at.as_deref() {
+                if a != "start" && a != "end" {
+                    return (false, ApiResponse::err(400, "at: \"end\" (default) or \"start\""));
+                }
+            }
+            // A blank line by default: a Markdown paragraph break, which is what
+            // `body + text` gets wrong by running two paragraphs together.
+            let sep = input.separator.as_deref().unwrap_or("\n\n");
+            let c = doc.card_mut(node, card).expect("checked above");
+            let added = input.text.chars().count();
+            if c.body.is_empty() {
+                c.body = input.text;
+            } else if at_start {
+                c.body = format!("{}{}{}", input.text, sep, c.body);
+            } else {
+                c.body = format!("{}{}{}", c.body, sep, input.text);
+            }
+            let len = c.body.chars().count();
+            (
+                true,
+                ApiResponse::ok(json!({
+                    "card": card,
+                    "at": if at_start { "start" } else { "end" },
+                    "added": added,
+                    "body_len": len,
+                })),
+            )
+        }
+        ApiRequest::AddItem { node, card, input } => {
+            match doc.card(node, card).map(|c| matches!(c.kind, CardKind::Checklist { .. })) {
+                None => return (false, ApiResponse::err(404, "card not found")),
+                Some(false) => return (false, ApiResponse::err(400, "not a checklist card")),
+                Some(true) => {}
+            }
+            // Minted here, where the counter lives, so the line has an identity
+            // from the moment it exists — an item with id 0 is addressable by
+            // nothing, and `…/items/{item}/done` is how a line gets ticked.
+            let id = doc.mint_item_id();
+            let c = doc.card_mut(node, card).expect("checked above");
+            let CardKind::Checklist { items } = &mut c.kind else {
+                unreachable!("checked above")
+            };
+            let index = input.at.unwrap_or(items.len()).min(items.len());
+            items.insert(index, ChecklistItem { id, done: input.done, text: input.text });
+            let count = items.len();
+            (
+                true,
+                ApiResponse::created(json!({
+                    "card": card, "item": id, "index": index, "count": count,
+                })),
+            )
+        }
+        ApiRequest::DeleteItem { node, card, item } => {
+            let Some(c) = doc.card_mut(node, card) else {
+                return (false, ApiResponse::err(404, "card not found"));
+            };
+            let CardKind::Checklist { items } = &mut c.kind else {
+                return (false, ApiResponse::err(400, "not a checklist card"));
+            };
+            let Some(pos) = items.iter().position(|i| i.id == item) else {
+                return (false, ApiResponse::err(404, "no such checklist item on that card"));
+            };
+            items.remove(pos);
+            let count = items.len();
+            (
+                true,
+                ApiResponse::ok(json!({
+                    "card": card, "item": item, "deleted": true, "count": count,
+                })),
             )
         }
         ApiRequest::UpdateCards { node, cards, patch } => {
@@ -6043,6 +6265,252 @@ mod tests {
             process(&mut doc, ApiRequest::ByCard { card: 9, op: CardOp::Delete });
         assert!(!dirty);
         assert_eq!(resp.status, 500, "must be resolved by the app loop, never here");
+    }
+
+
+    // --- writing to a shared card without sending it back --------------------
+
+    /// Append adds to what is there, with a Markdown paragraph break by default —
+    /// and joins nothing onto an empty body.
+    #[test]
+    fn append_adds_to_the_body_it_finds() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        let req = route(&Method::Post, &format!("/api/cards/{cid}/append"), "", r#"{"text":"first"}"#)
+            .unwrap();
+        // The card-addressed form is a rewrite; resolve it as the app loop would.
+        let req = match req {
+            ApiRequest::ByCard { card, op } => resolve_by_card(nid, card, op),
+            _ => panic!("expected a card-addressed request"),
+        };
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        assert_eq!(doc.card(nid, cid).unwrap().body, "first", "no separator onto an empty body");
+
+        let input: AppendInput = serde_json::from_str(r#"{"text":"second"}"#).unwrap();
+        let (_d, resp) = process(&mut doc, ApiRequest::AppendCard { node: nid, card: cid, input });
+        assert_eq!(resp.status, 200);
+        assert_eq!(
+            doc.card(nid, cid).unwrap().body,
+            "first\n\nsecond",
+            "a blank line, so two paragraphs do not run together"
+        );
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["added"], 6);
+        assert_eq!(v["at"], "end");
+
+        // At the start, and with a separator of your own.
+        let input: AppendInput =
+            serde_json::from_str(r#"{"text":"newest","at":"start","separator":"\n---\n"}"#).unwrap();
+        let (_d, _r) = process(&mut doc, ApiRequest::AppendCard { node: nid, card: cid, input });
+        assert_eq!(doc.card(nid, cid).unwrap().body, "newest\n---\nfirst\n\nsecond");
+
+        // An append that adds nothing is a caller mistake, not a 200.
+        let input: AppendInput = serde_json::from_str(r#"{"text":""}"#).unwrap();
+        assert_eq!(
+            process(&mut doc, ApiRequest::AppendCard { node: nid, card: cid, input }).1.status,
+            400
+        );
+        // And `at` only takes the two words it documents.
+        let input: AppendInput = serde_json::from_str(r#"{"text":"x","at":"top"}"#).unwrap();
+        assert_eq!(
+            process(&mut doc, ApiRequest::AppendCard { node: nid, card: cid, input }).1.status,
+            400
+        );
+    }
+
+    /// Refused where `body` is not what the card shows. Appending to a checklist's
+    /// body would be stored, never displayed, and never read as a property either
+    /// — a 200 that changed nothing anyone can see is the worst answer available.
+    #[test]
+    fn append_refuses_the_kinds_whose_body_is_not_their_content() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let kinds = [
+            (CardKind::Checklist { items: vec![] }, "items"),
+            (CardKind::Table { table: crate::model::TableData::empty(2, 2) }, "table"),
+            (CardKind::Sketch { strokes: vec![] }, "no body"),
+        ];
+        for (kind, expect) in kinds {
+            let cid = doc.add_card(nid, egui::pos2(0.0, 0.0), kind).unwrap();
+            let input: AppendInput = serde_json::from_str(r#"{"text":"x"}"#).unwrap();
+            let (dirty, resp) =
+                process(&mut doc, ApiRequest::AppendCard { node: nid, card: cid, input });
+            assert!(!dirty);
+            assert_eq!(resp.status, 400);
+            assert!(
+                resp.body.contains(expect),
+                "the 400 should point at the route that works: {}",
+                resp.body
+            );
+        }
+        // A mirrored body belongs to the file, here as much as on PATCH.
+        let cid = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(nid, cid).unwrap().source = Some("/tmp/x.md".into());
+        let input: AppendInput = serde_json::from_str(r#"{"text":"x"}"#).unwrap();
+        assert_eq!(
+            process(&mut doc, ApiRequest::AppendCard { node: nid, card: cid, input }).1.status,
+            409
+        );
+    }
+
+    /// **The reason this exists.** Adding a line used to mean rewriting the whole
+    /// `items` array, which carries ids across by position — so a line removed in
+    /// between hands every later id to a different line, and an item id is what
+    /// `…/done` and `…/property` address. Add and remove one at a time, and every
+    /// survivor keeps its identity.
+    #[test]
+    fn adding_and_removing_one_line_leaves_every_other_id_alone() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc
+            .add_card(nid, egui::pos2(0.0, 0.0), CardKind::Checklist {
+                items: vec![ChecklistItem::new("a"), ChecklistItem::new("b")],
+            })
+            .unwrap();
+        doc.ensure_item_ids();
+        let ids = |doc: &Document| -> Vec<u64> {
+            match &doc.card(nid, cid).unwrap().kind {
+                CardKind::Checklist { items } => items.iter().map(|i| i.id).collect(),
+                _ => unreachable!(),
+            }
+        };
+        let before = ids(&doc);
+        assert!(before.iter().all(|&i| i != 0), "loaded items have ids");
+
+        // Append, and get the new line's id back — that is what makes it
+        // addressable without a second read.
+        let input: AddItemInput = serde_json::from_str(r#"{"text":"c due:: 2026-09-01"}"#).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::AddItem { node: nid, card: cid, input });
+        assert!(dirty);
+        assert_eq!(resp.status, 201);
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        let new_id = v["item"].as_u64().unwrap();
+        assert!(new_id != 0 && !before.contains(&new_id), "a fresh, minted id");
+        assert_eq!(v["index"], 2);
+        assert_eq!(v["count"], 3);
+
+        // Insert in the middle by position.
+        let input: AddItemInput = serde_json::from_str(r#"{"text":"a.5","at":1,"done":true}"#).unwrap();
+        let (_d, resp) = process(&mut doc, ApiRequest::AddItem { node: nid, card: cid, input });
+        let mid_id = serde_json::from_str::<Value>(&resp.body).unwrap()["item"].as_u64().unwrap();
+        assert_eq!(ids(&doc), vec![before[0], mid_id, before[1], new_id]);
+
+        // Remove the one in the middle, by id. Nobody else's id moves.
+        let (dirty, resp) =
+            process(&mut doc, ApiRequest::DeleteItem { node: nid, card: cid, item: mid_id });
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        assert_eq!(ids(&doc), vec![before[0], before[1], new_id]);
+        assert_eq!(serde_json::from_str::<Value>(&resp.body).unwrap()["count"], 3);
+
+        // An id that is not on the card is a 404, not a silent no-op.
+        assert_eq!(
+            process(&mut doc, ApiRequest::DeleteItem { node: nid, card: cid, item: 9999 })
+                .1
+                .status,
+            404
+        );
+        // And neither op pretends a text card has lines.
+        let text = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let input: AddItemInput = serde_json::from_str(r#"{"text":"x"}"#).unwrap();
+        assert_eq!(
+            process(&mut doc, ApiRequest::AddItem { node: nid, card: text, input }).1.status,
+            400
+        );
+        assert_eq!(
+            process(&mut doc, ApiRequest::DeleteItem { node: nid, card: text, item: 1 }).1.status,
+            400
+        );
+    }
+
+    /// The three new operations are reachable by bare card id as well, and land on
+    /// the same twins.
+    #[test]
+    fn append_and_item_ops_are_card_addressed_too() {
+        for (m, path, body) in [
+            (Method::Post, "/api/cards/9/append", r#"{"text":"x"}"#),
+            (Method::Post, "/api/cards/9/items", r#"{"text":"x"}"#),
+            (Method::Delete, "/api/cards/9/items/4", ""),
+        ] {
+            match route(&m, path, "", body) {
+                Ok(ApiRequest::ByCard { card: 9, .. }) => {}
+                Ok(_) => panic!("{path} is not card-addressed"),
+                Err(e) => panic!("{path}: {e:?}"),
+            }
+        }
+        let input: AppendInput = serde_json::from_str(r#"{"text":"x"}"#).unwrap();
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::Append(input)),
+            ApiRequest::AppendCard { node: 3, card: 9, .. }
+        ));
+        let input: AddItemInput = serde_json::from_str(r#"{"text":"x"}"#).unwrap();
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::AddItem(input)),
+            ApiRequest::AddItem { node: 3, card: 9, .. }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::DeleteItem { item: 4 }),
+            ApiRequest::DeleteItem { node: 3, card: 9, item: 4 }
+        ));
+        // …and each names its basket, so a confined token is checked against it.
+        let input: AppendInput = serde_json::from_str(r#"{"text":"x"}"#).unwrap();
+        assert_eq!(
+            target_node(&ApiRequest::AppendCard { node: 7, card: 1, input }),
+            Some(7)
+        );
+        assert_eq!(target_node(&ApiRequest::DeleteItem { node: 7, card: 1, item: 1 }), Some(7));
+    }
+
+
+    /// Ticking a line and moving a line's date are the most common writes there
+    /// are, and until v0.118.0 the change log described neither — a client
+    /// watching `/api/changes` for an agent's edits saw "the document changed".
+    #[test]
+    fn item_level_edits_say_what_they_changed() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc
+            .add_card(nid, egui::pos2(0.0, 0.0), CardKind::Checklist {
+                items: vec![ChecklistItem::new("a")],
+            })
+            .unwrap();
+        doc.ensure_item_ids();
+        let iid = match &doc.card(nid, cid).unwrap().kind {
+            CardKind::Checklist { items } => items[0].id,
+            _ => unreachable!(),
+        };
+        let c = change_of(
+            &ApiRequest::SetItemDone { node: nid, card: cid, item: iid, done: true },
+            &doc,
+        )
+        .expect("a tick is a describable change");
+        assert_eq!(c.id, cid, "reported against the card, which is what clients watch");
+        assert!(c.fields.iter().any(|f| f == &format!("item={iid}")), "{:?}", c.fields);
+        assert!(c.fields.iter().any(|f| f == "done=true"), "{:?}", c.fields);
+
+        let c = change_of(
+            &ApiRequest::SetItemProperty {
+                node: nid,
+                card: cid,
+                item: iid,
+                key: "DUE".into(),
+                value: "2026-09-01".into(),
+            },
+            &doc,
+        )
+        .unwrap();
+        assert!(c.fields.iter().any(|f| f == "due=2026-09-01"), "{:?}", c.fields);
+
+        let c = change_of(
+            &ApiRequest::ClearItemProperty { node: nid, card: cid, item: iid, key: "due".into() },
+            &doc,
+        )
+        .unwrap();
+        assert!(c.fields.iter().any(|f| f == "-due"), "{:?}", c.fields);
     }
 
 }

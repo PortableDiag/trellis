@@ -1087,6 +1087,30 @@ DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due
 POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done}
 ```
 
+**Add and remove a line one at a time** (v0.118.0) rather than rewriting the array:
+
+```sh
+POST   /api/nodes/{id}/cards/{cid}/items          {text, done?, at?:<index>}
+  → 201 {"card":<cid>, "item":<new id>, "index":<n>, "count":<N>}
+  | 400 (not a checklist card)   | 404 (card)
+DELETE /api/nodes/{id}/cards/{cid}/items/{item}
+  → 200 {"card":<cid>, "item":<item>, "deleted":true, "count":<N>}
+  | 400 (not a checklist card)   | 404 (card, or no such item on it)
+```
+
+Both take a bare card id too: `POST /api/cards/{cid}/items`,
+`DELETE /api/cards/{cid}/items/{item}`.
+
+**Why not just `PATCH` the `items` array?** Because that carries the existing ids
+across **by position**. If a line was reordered or removed between your read and
+your write — by the person you are working with, in the app — every id after it
+changes hands, and an id is what `…/done` and `…/property` address. A dated line
+*is* a task, so that quietly reassigns which task is which. Adding or removing one
+line touches one line, and the new item's id comes back so you can address it
+without reading the card again. `at` inserts at a 0-based position; omit it to
+append. The wholesale rewrite is still there and still right for *replacing* a
+list wholesale.
+
 Reading a card back gives you the ids to use:
 
 ```sh
@@ -1740,6 +1764,42 @@ curl -s -H "X-API-Key: $KEY" -d "{\"node\":$ARCHIVE}" $API/cards/1391/move
 
 No `GET /api/cards/1391` first to learn the basket, and nothing in the reply
 mentions a node number the person you are working with never used.
+
+### Adding to a shared card without overwriting it
+
+A card two of you write to — a message board, a running log, a handoff — is where
+read-modify-write goes wrong: `GET` the body, add your line, `PATCH` it back, and
+whatever the other one typed in between is gone. Append does it in one call, on the
+server:
+
+```sh
+POST /api/nodes/{id}/cards/{cid}/append  {text, at?:"end"|"start", separator?}
+POST /api/cards/{cid}/append             (same, by card id alone)
+  → 200 {"card":<cid>, "at":"end", "added":<chars>, "body_len":<chars>}
+  | 400 (empty text, a bad `at`, or a kind whose body is not its content)
+  | 409 (the card mirrors a file — its body is read-only)
+```
+
+```sh
+curl -s -H "X-API-Key: $KEY" \
+  -d '{"text":"**2026-08-17 (agent)** — shipped v0.118.0."}' \
+  $API/cards/275/append
+
+# Newest-first boards: put it at the top, with a rule between entries.
+curl -s -H "X-API-Key: $KEY" \
+  -d '{"text":"**newest**","at":"start","separator":"\n\n---\n\n"}' \
+  $API/cards/275/append
+```
+
+`separator` defaults to a **blank line** — a Markdown paragraph break, which is
+what naive string concatenation gets wrong by running two paragraphs together. An
+empty body takes the text with no separator at all. Send `""` to join with nothing.
+
+**Refused where `body` is not what the card shows**, naming the route that works: a
+checklist's lines and a table's cells are its content, and text appended to *their*
+body is stored, displayed nowhere, and — the trap — not read as a property either,
+because a checklist card's properties come from its title and items alone. A 200
+that changed nothing anyone can see is the worst available answer.
 
 ### Building a basket in one call
 
