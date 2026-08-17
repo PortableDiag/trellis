@@ -107,6 +107,24 @@ pub enum ApiRequest {
     MoveGroup { node: NodeId, group: GroupId, to: NodeId, pos: Option<[f32; 2]> },
     /// Cards whose `[[#g…]]` links point at one group.
     GroupBacklinks(GroupId),
+    /// A **card-addressed write**: the same operation as its node-addressed twin,
+    /// with the basket left for the app loop to resolve.
+    ///
+    /// A card id has been a complete address since v0.87.0 — every query surface
+    /// hands them out (`/api/search`, `/api/tasks`, `/api/claims`, backlinks,
+    /// `/api/changes`) and a `[[#1391]]` link *is* one — but only reads could take
+    /// one. Every write needed the basket too, so an agent given an id had to
+    /// spend a `GET /api/cards/{cid}` learning the node before it could act, and
+    /// then quote a number the human never mentioned.
+    ///
+    /// **This is deliberately a rewrite, not a second implementation.** The app
+    /// loop resolves the id, turns this into the ordinary node-addressed request
+    /// and drops it back into the same pipeline — so the scope check, the mirror
+    /// check, the change log and `process` are the ones that already exist and
+    /// were already audited. Adding a parallel set of write paths that each had to
+    /// remember to check a token's scope is exactly how the v0.111.0 escape
+    /// happened, one end of a move at a time.
+    ByCard { card: u64, op: CardOp },
     /// Move several cards to another basket in one call. Archiving a finished
     /// basket was 55 single-card calls before this existed.
     MoveCards { node: NodeId, cards: Vec<u64>, to: NodeId, pos: Option<[f32; 2]>, gap: f32 },
@@ -232,6 +250,58 @@ pub enum ApiRequest {
 struct CardDesktopInput {
     #[serde(default)]
     pos: Option<[f32; 2]>,
+}
+
+/// `{key, value}` — the body of every "set one property" route, card or item.
+///
+/// One definition rather than the two identical inline copies this had: they are
+/// the same request shape, and a third caller (the card-addressed routes) is
+/// exactly when a copy starts to drift.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PropertyInput {
+    key: String,
+    value: String,
+}
+
+/// What a card-addressed request wants done, once the basket is known.
+///
+/// One variant per node-addressed twin, and [`resolve_by_card`] is the only place
+/// the pairing is written down.
+pub enum CardOp {
+    Patch(UpdateCardInput),
+    Delete,
+    SetProperty { key: String, value: String },
+    ClearProperty { key: String },
+    Move(MoveCardInput),
+    ItemDone { item: u64, done: bool },
+    SetItemProperty { item: u64, key: String, value: String },
+    ClearItemProperty { item: u64, key: String },
+}
+
+/// Turn a card-addressed request into the node-addressed one it stands for.
+///
+/// Called by the app loop, which is where a card id can be resolved to a basket.
+/// Keeping the mapping here — a pure function over ids, testable without a
+/// document — is what makes "the two routes do the same thing" checkable instead
+/// of a claim.
+pub fn resolve_by_card(node: NodeId, card: u64, op: CardOp) -> ApiRequest {
+    match op {
+        CardOp::Patch(patch) => ApiRequest::UpdateCard { node, card, patch },
+        CardOp::Delete => ApiRequest::DeleteCard { node, card },
+        CardOp::SetProperty { key, value } => {
+            ApiRequest::SetCardProperty { node, card, key, value }
+        }
+        CardOp::ClearProperty { key } => ApiRequest::ClearCardProperty { node, card, key },
+        CardOp::Move(mv) => ApiRequest::MoveCard { node, card, mv },
+        CardOp::ItemDone { item, done } => ApiRequest::SetItemDone { node, card, item, done },
+        CardOp::SetItemProperty { item, key, value } => {
+            ApiRequest::SetItemProperty { node, card, item, key, value }
+        }
+        CardOp::ClearItemProperty { item, key } => {
+            ApiRequest::ClearItemProperty { node, card, item, key }
+        }
+    }
 }
 
 /// `POST /api/nodes/{id}/cards/move` — move a list of cards to another basket.
@@ -1463,6 +1533,57 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Get, ["api", "cards", cid, "backlinks"]) => Ok(ApiRequest::CardBacklinks(pid(cid)?)),
         (Method::Get, ["api", "cards", cid]) => Ok(ApiRequest::LocateCard(pid(cid)?)),
+        // Card-addressed writes. Every one is the same operation as its
+        // /api/nodes/{id}/cards/{cid}/… twin — the app loop resolves the basket
+        // and hands the request on, so there is one implementation, not two.
+        (Method::Patch, ["api", "cards", cid]) => Ok(ApiRequest::ByCard {
+            card: pid(cid)?,
+            op: CardOp::Patch(parse(body)?),
+        }),
+        (Method::Delete, ["api", "cards", cid]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Delete })
+        }
+        (Method::Post, ["api", "cards", cid, "property"]) => {
+            let i: PropertyInput = parse(body)?;
+            Ok(ApiRequest::ByCard {
+                card: pid(cid)?,
+                op: CardOp::SetProperty { key: i.key, value: i.value },
+            })
+        }
+        (Method::Delete, ["api", "cards", cid, "property"]) => {
+            let key = query_get(query, "key").unwrap_or_default();
+            if key.trim().is_empty() {
+                return Err((400, "property to clear: /property?key=due".into()));
+            }
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::ClearProperty { key } })
+        }
+        (Method::Post, ["api", "cards", cid, "move"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Move(parse(body)?) })
+        }
+        (Method::Post, ["api", "cards", cid, "items", iid, "done"]) => {
+            let i: DoneInput = parse(body)?;
+            Ok(ApiRequest::ByCard {
+                card: pid(cid)?,
+                op: CardOp::ItemDone { item: pid(iid)?, done: i.done },
+            })
+        }
+        (Method::Post, ["api", "cards", cid, "items", iid, "property"]) => {
+            let i: PropertyInput = parse(body)?;
+            Ok(ApiRequest::ByCard {
+                card: pid(cid)?,
+                op: CardOp::SetItemProperty { item: pid(iid)?, key: i.key, value: i.value },
+            })
+        }
+        (Method::Delete, ["api", "cards", cid, "items", iid, "property"]) => {
+            let key = query_get(query, "key").unwrap_or_default();
+            if key.trim().is_empty() {
+                return Err((400, "property to clear: /property?key=due".into()));
+            }
+            Ok(ApiRequest::ByCard {
+                card: pid(cid)?,
+                op: CardOp::ClearItemProperty { item: pid(iid)?, key },
+            })
+        }
         (Method::Get, ["api", "groups", gid, "backlinks"]) => {
             Ok(ApiRequest::GroupBacklinks(pid(gid)?))
         }
@@ -1531,13 +1652,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::MoveCard { node: pid(nid)?, card: pid(cid)?, mv })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "items", iid, "property"]) => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct PropInput {
-                key: String,
-                value: String,
-            }
-            let i: PropInput = parse(body)?;
+            let i: PropertyInput = parse(body)?;
             Ok(ApiRequest::SetItemProperty {
                 node: pid(nid)?, card: pid(cid)?, item: pid(iid)?, key: i.key, value: i.value,
             })
@@ -1565,13 +1680,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::ClearCardProperty { node: pid(nid)?, card: pid(cid)?, key })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "property"]) => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct PropInput {
-                key: String,
-                value: String,
-            }
-            let i: PropInput = parse(body)?;
+            let i: PropertyInput = parse(body)?;
             Ok(ApiRequest::SetCardProperty { node: pid(nid)?, card: pid(cid)?, key: i.key, value: i.value })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "dock"]) => {
@@ -3307,6 +3416,14 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::DailyConfig
         | ApiRequest::SetDailyRoot(_) => {
             (false, ApiResponse::err(500, "request not handled by the app loop"))
+        }
+        // A card-addressed request is rewritten into its node-addressed twin by
+        // the app loop, which is where an id can be resolved to a basket. Reaching
+        // `process` means that did not happen, and applying it here — with no way
+        // to check the token's scope against the basket it lands in — is exactly
+        // the hole this shape exists to avoid.
+        ApiRequest::ByCard { .. } => {
+            (false, ApiResponse::err(500, "card-addressed request reached process unresolved"))
         }
     }
 }
@@ -5814,4 +5931,118 @@ mod tests {
             "the title used to be renamed before the body was refused"
         );
     }
+
+    // --- a card id is a complete address for writes too ----------------------
+
+    /// Each card-addressed route parses to the operation it stands for.
+    #[test]
+    fn card_addressed_writes_parse() {
+        let cases: Vec<(Method, &str, &str, &str)> = vec![
+            (Method::Patch, "/api/cards/9", "", r#"{"color":"red"}"#),
+            (Method::Delete, "/api/cards/9", "", ""),
+            (Method::Post, "/api/cards/9/property", "", r#"{"key":"status","value":"done"}"#),
+            (Method::Delete, "/api/cards/9/property", "key=due", ""),
+            (Method::Post, "/api/cards/9/move", "", r#"{"node":3}"#),
+            (Method::Post, "/api/cards/9/items/4/done", "", r#"{"done":true}"#),
+            (Method::Post, "/api/cards/9/items/4/property", "", r#"{"key":"due","value":"2026-09-01"}"#),
+            (Method::Delete, "/api/cards/9/items/4/property", "key=due", ""),
+        ];
+        for (m, path, q, body) in cases {
+            match route(&m, path, q, body) {
+                Ok(ApiRequest::ByCard { card: 9, .. }) => {}
+                Ok(_) => panic!("{path} did not parse as a card-addressed write"),
+                Err(e) => panic!("{path} failed to parse: {e:?}"),
+            }
+        }
+        // Clearing still needs to say WHICH property, as it does on the node form.
+        assert!(route(&Method::Delete, "/api/cards/9/property", "", "").is_err());
+        // And the reads that already took a bare id are untouched.
+        assert!(matches!(
+            route(&Method::Get, "/api/cards/9", "", "").unwrap(),
+            ApiRequest::LocateCard(9)
+        ));
+        assert!(matches!(
+            route(&Method::Get, "/api/cards/9/link", "", "").unwrap(),
+            ApiRequest::CardLink(9)
+        ));
+    }
+
+    /// The card-addressed form is a **rewrite**, so it must land on exactly the
+    /// request the node-addressed route produces — that is what makes "one
+    /// implementation, not two" true rather than claimed.
+    #[test]
+    fn resolving_a_card_op_lands_on_its_node_addressed_twin() {
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"color":"red"}"#).unwrap();
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::Patch(patch)),
+            ApiRequest::UpdateCard { node: 3, card: 9, .. }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::Delete),
+            ApiRequest::DeleteCard { node: 3, card: 9 }
+        ));
+        let set = resolve_by_card(3, 9, CardOp::SetProperty {
+            key: "status".into(),
+            value: "done".into(),
+        });
+        match &set {
+            ApiRequest::SetCardProperty { node: 3, card: 9, key, value } => {
+                assert_eq!((key.as_str(), value.as_str()), ("status", "done"));
+            }
+            _ => panic!("wrong twin"),
+        }
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::ClearProperty { key: "due".into() }),
+            ApiRequest::ClearCardProperty { node: 3, card: 9, .. }
+        ));
+        let mv: MoveCardInput = serde_json::from_str(r#"{"node":5}"#).unwrap();
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::Move(mv)),
+            ApiRequest::MoveCard { node: 3, card: 9, .. }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::ItemDone { item: 4, done: true }),
+            ApiRequest::SetItemDone { node: 3, card: 9, item: 4, done: true }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::SetItemProperty {
+                item: 4,
+                key: "due".into(),
+                value: "x".into()
+            }),
+            ApiRequest::SetItemProperty { node: 3, card: 9, item: 4, .. }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::ClearItemProperty { item: 4, key: "due".into() }),
+            ApiRequest::ClearItemProperty { node: 3, card: 9, item: 4, .. }
+        ));
+    }
+
+    /// **The security property, pinned from both ends.**
+    ///
+    /// Before the rewrite a card-addressed write names no basket, so `target_node`
+    /// is `None` — which the scope check reads as *refuse*. After the rewrite it
+    /// names the basket the card actually lives in, so a confined token is checked
+    /// against that. Fail either half and a token confined to one basket could
+    /// edit any card in the document by id.
+    #[test]
+    fn a_card_addressed_write_is_never_scope_neutral() {
+        let req = ApiRequest::ByCard { card: 9, op: CardOp::Delete };
+        assert_eq!(target_node(&req), None, "unresolved: no basket, so refused");
+        assert!(!is_scope_neutral(&req), "and never waved through as an orientation read");
+        // Resolved, it is checked against the basket it landed in.
+        assert_eq!(target_node(&resolve_by_card(42, 9, CardOp::Delete)), Some(42));
+    }
+
+    /// And if the rewrite is ever skipped, `process` refuses rather than applying
+    /// a write whose scope nobody checked.
+    #[test]
+    fn an_unresolved_card_write_is_refused_by_process() {
+        let mut doc = Document::empty();
+        let (dirty, resp) =
+            process(&mut doc, ApiRequest::ByCard { card: 9, op: CardOp::Delete });
+        assert!(!dirty);
+        assert_eq!(resp.status, 500, "must be resolved by the app loop, never here");
+    }
+
 }

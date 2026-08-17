@@ -6,6 +6,58 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.117.0]
+
+### Added
+- **A card id is a complete address for *writing* to a card, not only for finding
+  one.** Eight routes take a bare `{cid}`:
+
+  ```
+  PATCH  /api/cards/{cid}                          DELETE /api/cards/{cid}
+  POST   /api/cards/{cid}/property                 DELETE /api/cards/{cid}/property?key=
+  POST   /api/cards/{cid}/move
+  POST   /api/cards/{cid}/items/{item}/done
+  POST   /api/cards/{cid}/items/{item}/property    DELETE …/items/{item}/property?key=
+  ```
+
+  Card ids have been document-unique since the beginning and readable by id since
+  v0.87.0 — but every *write* was `/nodes/{id}/cards/{cid}/…`, and a card id is
+  what you are always handed: by `/api/search`, `/api/tasks`, `/api/claims`,
+  `/api/query`, `/api/properties`, `/api/tags`, backlinks, `/api/changes`, and by
+  the `[[#1391]]` links people paste into cards and messages. So the cheapest
+  possible edit cost **two round trips** — one to learn the basket — and an agent
+  answering "mark 1391 done" ended up quoting a node number the person it was
+  working with had never mentioned.
+
+  **These are the same operations, not new ones.** The app loop resolves the id to
+  its basket, rewrites the request into its ordinary node-addressed twin, and drops
+  it back into the same pipeline — so the scope check, the mirror-policy check, the
+  change log and the code that applies the edit are the ones that already existed
+  and were already audited. One `resolve_by_card`, a pure function over ids, is the
+  only place the pairing is written down, and a test asserts each op lands on the
+  right twin. A parallel set of write paths that each had to remember to check a
+  token's scope is precisely how a confined token could carry its own card out of
+  its basket until v0.111.0, one unchecked end at a time.
+
+  Verified against a running instance with a token confined to one basket: its own
+  card by id **200**, a card in another basket **403**, moving its own card *out*
+  by id **403** (the v0.111.0 escape, through the new door), reordering inside its
+  own basket **200**, and the private card unchanged throughout.
+
+  **A confined token gets 403 for any id it cannot reach, existing or not.**
+  Answering 404 for "no such card" and 403 for "someone else's card" would turn
+  this into a way to probe the rest of the document one id at a time — the same
+  reasoning that already governs `GET /api/cards/{cid}`. With the instance key a
+  missing id is an ordinary 404.
+
+  The batch routes stay basket-addressed: a batch is validated against one basket,
+  and a list of ids gathered from a whole-document query can span several.
+
+### Changed
+- **One `PropertyInput`** instead of two identical inline `{key, value}` structs.
+  They were the same request shape, and the card-addressed routes would have been
+  a third copy.
+
 ## [0.116.0]
 
 ### Added

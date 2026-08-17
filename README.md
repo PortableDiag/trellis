@@ -425,6 +425,15 @@ behind anything is a HUD, not part of the desktop.
 `Archive` basket; a card moved there keeps its id, so links and backlinks to it
 still resolve. `POST /api/nodes/{id}/cards/move` moves a whole batch in one call.
 
+**A card id is a complete address — for changing it, not just finding it.**
+Every query surface hands out card ids (search, the agenda, claims, backlinks, the
+change log) and `[[#1391]]` *is* one, so `PATCH /api/cards/{cid}`,
+`POST /api/cards/{cid}/property`, `…/move`, `…/items/{item}/done` and
+`DELETE /api/cards/{cid}` all take the bare id. No looking the basket up first,
+and nobody has to quote a node number that never came up. They are the same
+operations as their `/nodes/{id}/cards/{cid}/…` twins — the app resolves the id
+and runs the existing path, including the scope check on a confined token.
+
 **Anything you can do to a card, you can do to a list of them.** Create
 (`POST …/cards` with an array), move, set a property, take a property back off
 (`DELETE …/cards/property`), restyle (`PATCH …/cards`) and delete

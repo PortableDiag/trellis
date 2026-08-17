@@ -2578,7 +2578,43 @@ impl TrellisApp {
                 cmds.push(cmd);
             }
         }
-        for cmd in cmds {
+        for mut cmd in cmds {
+            // A card-addressed write (`PATCH /api/cards/{cid}`, …) names no
+            // basket. Resolve it into the ordinary node-addressed request FIRST,
+            // before the scope check below, so the rest of this loop — the token
+            // check, the mirror check, the change log, `process` — is the one that
+            // already exists. A second set of write paths that each had to
+            // remember to check a scope is how the v0.111.0 escape happened.
+            if let api::ApiRequest::ByCard { card, .. } = &cmd.req {
+                let card = *card;
+                match self.doc.locate_card(card) {
+                    Some(node) => {
+                        let api::ApiRequest::ByCard { op, .. } =
+                            std::mem::replace(&mut cmd.req, api::ApiRequest::Health)
+                        else {
+                            unreachable!("matched ByCard immediately above")
+                        };
+                        cmd.req = api::resolve_by_card(node, card, op);
+                    }
+                    None => {
+                        // A confined token gets the same answer for "no such card"
+                        // as for "a card you cannot see": telling the two apart
+                        // turns this route into a way to probe the rest of the
+                        // document one id at a time. Same reasoning as the 403 the
+                        // scope check gives instead of a 404.
+                        let confined = cmd.scope.as_ref().and_then(|s| s.subtree).is_some();
+                        let _ = cmd.resp.send(if confined {
+                            api::ApiResponse::err(
+                                403,
+                                "outside the basket this token was given access to",
+                            )
+                        } else {
+                            api::ApiResponse::err(404, "no card with that id in this document")
+                        });
+                        continue;
+                    }
+                }
+            }
             // Backup endpoints need app state (config + doc file), so answer them
             // here instead of in api::process (which only sees the Document).
             if let Some(resp) = self.handle_api_backup(&cmd.req) {
@@ -7344,6 +7380,11 @@ Linux/X11 only: elsewhere an                          application may not place 
                         "GET    /api/cards/{cid}/link              (canonical trellis:// link for this card)",
                         "GET    /open/card/{cid} · /open/node/{id} · /open/group/{gid}  (no key — what a trellis:// link opens)",
                         "GET    /api/cards/{cid}/backlinks         (cards whose [[#id]] links point at this card)",
+                        "PATCH  /api/cards/{cid}   ·  DELETE /api/cards/{cid}          (a card id is a complete address for WRITES too)",
+                        "POST   /api/cards/{cid}/property {key,value}  ·  DELETE …/property?key=due",
+                        "POST   /api/cards/{cid}/move {node,pos?} | {before|after|index|to}",
+                        "POST   /api/cards/{cid}/items/{item}/done {done}  ·  …/items/{item}/property (POST/DELETE)",
+                        "         same operations as the /nodes/{id}/cards/{cid}/… twins — no need to look the basket up first",
                         "GET    /api/groups/{gid}                  (find a group from its id alone → {node, node_path, group})",
                         "GET    /api/groups/{gid}/link             (canonical trellis:// link + the [[#g…]] form)",
                         "GET    /api/groups/{gid}/backlinks        (cards whose [[#g…]] links point at this group)",

@@ -246,10 +246,50 @@ GET /api/cards/{cid}
         Card ids are unique per document, so an id is a complete address — but
         every other card route is /nodes/{id}/cards/{cid}, so an id quoted in a
         note or read out of an earlier response could only be resolved by
-        walking every basket. The owning node comes back with it, because every
-        route that *edits* a card still needs the node.
+        walking every basket. The owning node comes back with it, so a client
+        that wants the basket for its own reasons (a breadcrumb, a link) has it
+        without a second call.
         Node ids and card ids are separate spaces: the same number can name one
         of each, and this route always answers about the card.
+
+Since v0.117.0 the **writes take a bare card id too**, so an id is a complete
+address for doing something and not only for looking it up:
+
+PATCH  /api/cards/{cid}                    {…}      same body as the node form
+DELETE /api/cards/{cid}
+POST   /api/cards/{cid}/property           {key, value}
+DELETE /api/cards/{cid}/property?key=due
+POST   /api/cards/{cid}/move               {node, pos?} or {before|after|index|to}
+POST   /api/cards/{cid}/items/{item}/done  {done}
+POST   /api/cards/{cid}/items/{item}/property   {key, value}
+DELETE /api/cards/{cid}/items/{item}/property?key=due
+  → exactly what the /nodes/{id}/cards/{cid}/… twin returns
+  | 404 (no card with that id in this document)
+  | 403 (a token confined to a basket, for **any** id it cannot reach)
+
+  Every card id you are ever handed comes without a basket: `/api/search`,
+  `/api/tasks`, `/api/claims`, `/api/query`, `/api/properties`, `/api/tags`,
+  backlinks, `/api/changes` and the `[[#1391]]` links people paste all name the
+  card. Before this, acting on one meant a `GET /api/cards/{cid}` first to learn
+  the node — so the cheapest possible edit cost two round trips, and an agent
+  ended up quoting a node number the human never mentioned.
+
+  **These are the same operations, not new ones.** The app loop resolves the id to
+  its basket and hands the ordinary node-addressed request on, so the scope check,
+  the mirror-policy check, the change log and the code that applies the edit are
+  the ones that were already there. That is deliberate: a parallel set of write
+  paths, each having to remember to check a token's scope, is how a confined token
+  could carry its own card out of its basket until v0.111.0 — one unchecked end at
+  a time.
+
+  **A confined token gets 403 for an id it cannot reach, whether or not that id
+  exists.** Distinguishing "no such card" from "a card in someone else's basket"
+  would make this route a way to probe the rest of the document one id at a time.
+  With the instance key a missing id is an ordinary 404.
+
+  The batch routes stay basket-addressed (`/nodes/{id}/cards/…`): a batch is
+  validated against one basket, and a list of ids gathered from a whole-document
+  query can span several.
 
 GET /api/search?q=<text>
   → 200 {"hits":[ {node,card,node_title,snippet} ]}                   (case-insensitive)
@@ -1679,6 +1719,27 @@ one batch operation you cannot walk back should not be reachable by leaving an
 argument out. Scratch cards an agent made for itself are what this is for —
 anything with reasoning worth keeping goes to `Archive` with the batch move above,
 where it keeps its id.
+
+### Acting on a card somebody named
+
+The human pastes `[[#1391]]`, or you read an id out of the agenda. That is the
+whole address:
+
+```sh
+# Mark it done and take its date off, so it leaves the agenda instead of
+# sitting there forever under a due:: nobody can read.
+curl -s -H "X-API-Key: $KEY" -d '{"key":"status","value":"done"}' $API/cards/1391/property
+curl -s -X DELETE -H "X-API-Key: $KEY" "$API/cards/1391/property?key=due"
+
+# Tick one line of a working list — the line is the task, not the card.
+curl -s -H "X-API-Key: $KEY" -d '{"done":true}' $API/cards/1391/items/60/done
+
+# Send it to the archive. It keeps its id, so [[#1391]] still resolves.
+curl -s -H "X-API-Key: $KEY" -d "{\"node\":$ARCHIVE}" $API/cards/1391/move
+```
+
+No `GET /api/cards/1391` first to learn the basket, and nothing in the reply
+mentions a node number the person you are working with never used.
 
 ### Building a basket in one call
 
