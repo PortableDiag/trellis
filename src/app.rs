@@ -2669,6 +2669,10 @@ impl TrellisApp {
             // ids below, because a created card has no id until it exists — the
             // same reason the single-card path reads its id from the response.
             let fit_batch = api::fit_batch(&cmd.req);
+            // A batch EDIT names its cards, so the ids need no pairing — but the
+            // re-measure still has to happen here, or `fit` would mean something
+            // slightly different depending on whether you sent one card or ten.
+            let fit_updates = api::fit_updates(&cmd.req);
             let fit_batch_node = match &cmd.req {
                 api::ApiRequest::AddCards { node, .. } => Some(*node),
                 _ => None,
@@ -2718,6 +2722,11 @@ impl TrellisApp {
                 });
                 if let Some(card) = card {
                     self.refit_card_precise(node, card);
+                }
+            }
+            if let Some((node, cards)) = fit_updates {
+                for cid in cards {
+                    self.refit_card_precise(node, cid);
                 }
             }
             if let Some(node) = fit_batch_node {
@@ -7352,6 +7361,10 @@ Linux/X11 only: elsewhere an                          application may not place 
                         "POST   /api/nodes/{id}/cards    [ {…}, {…} ]      (an ARRAY creates a batch; ids come back in order)",
                         "POST   /api/nodes/{id}/cards/move        {cards:[ids], node, pos?, gap?}  (batch; whole list validated first)",
                         "POST   /api/nodes/{id}/cards/property    {cards:[ids], key, value}        (one property, many cards)",
+                        "DELETE /api/nodes/{id}/cards/property    {cards:[ids], key}               (take it back off them; key in the BODY here)",
+                        "PATCH  /api/nodes/{id}/cards             {cards:[ids], color?, size?, fit?, font_scale?, z?, emphasis?…}",
+                        "         presentation only — title/body/items/rows/kind/lang/header/source are refused BY NAME (one card at a time)",
+                        "DELETE /api/nodes/{id}/cards             {cards:[ids]}                    (validated in full first; no 'all' form)",
                         "POST   /api/nodes/{id}/desktop           (DESKTOP MODE — the whole basket becomes windows; DELETE brings it back)",
                         "GET    /api/desktop                      (cards out on the desktop as their own windows; Linux/X11)",
                         "POST   /api/cards/{cid}/desktop {pos?}   (send a card to the desktop; DELETE recalls it)",

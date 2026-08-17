@@ -117,6 +117,23 @@ pub enum ApiRequest {
     /// which accepts an object or an array — the shape table ops took in
     /// v0.82.0, for the same reason: building anything real is many small calls.
     AddCards { node: NodeId, inputs: Vec<AddCardInput> },
+    /// Edit the **presentation** of several cards at once: colour, size, depth,
+    /// font scale, emphasis, `fit`.
+    ///
+    /// Deliberately not content. A batch that could set `body` or `items` would
+    /// write the same text over every card it names, and one typo'd id list is
+    /// then an unrecoverable overwrite of work — while the thing it would be
+    /// *used* for, N cards saying the same thing, is the copied-card failure this
+    /// codebase fights everywhere else. Content is one card at a time; the batch
+    /// is for "make these look the same". A content field here is a 400 naming it
+    /// and pointing at the single-card route.
+    UpdateCards { node: NodeId, cards: Vec<u64>, patch: UpdateCardInput },
+    /// Delete several cards in one call, having checked the whole list first.
+    DeleteCards { node: NodeId, cards: Vec<u64> },
+    /// Remove one `key:: value` line from several cards at once — the missing
+    /// half of [`SetCardsProperty`]. Clearing `due::` off a finished batch was
+    /// one call per card while setting it was one call for all of them.
+    ClearCardsProperty { node: NodeId, cards: Vec<u64>, key: String },
     // Docking.
     DockCard { node: NodeId, card: u64, anchor: u64 },
     DetachCard { node: NodeId, card: u64 },
@@ -240,6 +257,29 @@ fn default_gap() -> f32 {
     20.0
 }
 
+/// `DELETE /api/nodes/{id}/cards` — delete a list of cards.
+///
+/// The list is explicit and there is no "everything in this basket" form: the one
+/// batch operation that cannot be walked back should not be reachable by omitting
+/// an argument.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteCardsInput {
+    cards: Vec<u64>,
+}
+
+/// `DELETE /api/nodes/{id}/cards/property` — remove one property from many cards.
+///
+/// `key` rides in the body rather than the query string, unlike the single-card
+/// form: the card list has to be a body anyway, and splitting one request across
+/// both is how you end up deleting the wrong property from the right cards.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearCardsPropertyInput {
+    cards: Vec<u64>,
+    key: String,
+}
+
 /// `POST /api/nodes/{id}/cards/property` — one property, many cards.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -288,6 +328,18 @@ pub fn fit_request(req: &ApiRequest) -> Option<(NodeId, Option<u64>)> {
     match req {
         ApiRequest::AddCard { node, input } if input.fit => Some((*node, None)),
         ApiRequest::UpdateCard { node, card, patch } if patch.fit => Some((*node, Some(*card))),
+        _ => None,
+    }
+}
+
+/// The cards a **batch edit** asked to be fitted. Unlike a batch create, the ids
+/// are in the request — the caller named them — so there is nothing to pair with
+/// the response.
+pub fn fit_updates(req: &ApiRequest) -> Option<(NodeId, Vec<u64>)> {
+    match req {
+        ApiRequest::UpdateCards { node, cards, patch } if patch.fit => {
+            Some((*node, cards.clone()))
+        }
         _ => None,
     }
 }
@@ -350,6 +402,9 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::MoveCards { node, .. }
         | ApiRequest::SetCardsProperty { node, .. }
         | ApiRequest::AddCards { node, .. }
+        | ApiRequest::UpdateCards { node, .. }
+        | ApiRequest::DeleteCards { node, .. }
+        | ApiRequest::ClearCardsProperty { node, .. }
         | ApiRequest::DeleteGroup { node, .. } => Some(*node),
         ApiRequest::CreateNode { parent, .. } => *parent,
         _ => None,
@@ -550,6 +605,22 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
             ch(E::Card, Op::Updated, cards.first().copied().unwrap_or(0))
                 .in_node(*node)
                 .field(&format!("{}={}", key.to_lowercase(), value))
+                .field(&format!("batch={}", cards.len()))
+        }
+        ApiRequest::UpdateCards { node, cards, .. } => {
+            ch(E::Card, Op::Updated, cards.first().copied().unwrap_or(0))
+                .in_node(*node)
+                .field(&format!("batch={}", cards.len()))
+        }
+        ApiRequest::DeleteCards { node, cards } => {
+            ch(E::Card, Op::Deleted, cards.first().copied().unwrap_or(0))
+                .in_node(*node)
+                .field(&format!("batch={}", cards.len()))
+        }
+        ApiRequest::ClearCardsProperty { node, cards, key } => {
+            ch(E::Card, Op::Updated, cards.first().copied().unwrap_or(0))
+                .in_node(*node)
+                .field(&format!("-{}", key.to_lowercase()))
                 .field(&format!("batch={}", cards.len()))
         }
         ApiRequest::MoveGroup { node, group, to, .. } => {
@@ -1431,6 +1502,23 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
                 node: pid(nid)?, cards: i.cards, key: i.key, value: i.value,
             })
         }
+        (Method::Delete, ["api", "nodes", nid, "cards", "property"]) => {
+            let i: ClearCardsPropertyInput = parse(body)?;
+            Ok(ApiRequest::ClearCardsProperty {
+                node: pid(nid)?, cards: i.cards, key: i.key,
+            })
+        }
+        // The batch edit and batch delete are the 4-segment collection, so they
+        // cannot collide with a card id — but they do share a path with the
+        // create, which is why the method is what separates them.
+        (Method::Patch, ["api", "nodes", id, "cards"]) => {
+            let (cards, patch) = batch_patch(body)?;
+            Ok(ApiRequest::UpdateCards { node: pid(id)?, cards, patch })
+        }
+        (Method::Delete, ["api", "nodes", id, "cards"]) => {
+            let i: DeleteCardsInput = parse(body)?;
+            Ok(ApiRequest::DeleteCards { node: pid(id)?, cards: i.cards })
+        }
         (Method::Patch, ["api", "nodes", nid, "cards", cid]) => {
             let patch: UpdateCardInput = parse(body)?;
             Ok(ApiRequest::UpdateCard { node: pid(nid)?, card: pid(cid)?, patch })
@@ -1798,6 +1886,57 @@ pub fn stale_claim_count(doc: &crate::model::Document) -> usize {
         .iter()
         .filter(|c| matches!(claim_bucket(c.verify_days, today), "expired" | "unparsed"))
         .count()
+}
+
+/// Content fields: legal on a single card, refused in a batch.
+///
+/// Each of these *is* the card — writing one across a list means every card in
+/// the list ends up saying the same thing. See [`ApiRequest::UpdateCards`].
+const BATCH_FORBIDDEN: [&str; 9] =
+    ["title", "body", "items", "rows", "kind", "lang", "header", "source", "inline_images"];
+
+/// Split `cards` off a batch-PATCH body and validate the rest as an ordinary
+/// card patch.
+///
+/// The remainder is deserialized into [`UpdateCardInput`] — the very struct the
+/// single-card `PATCH` uses — so a misspelt field is still the 400 naming it that
+/// v0.86.0 promised, and there is no second list of legal fields to drift from
+/// the first. What this function adds is the *refusal*: a content field reaching
+/// a whole list of cards is rejected by name, with the route that does accept it.
+fn batch_patch(body: &str) -> Result<(Vec<u64>, UpdateCardInput), (u16, String)> {
+    let mut map: serde_json::Map<String, Value> = parse(body)?;
+    let Some(cards) = map.remove("cards") else {
+        return Err((400, "batch edit needs \"cards\": [ids]".into()));
+    };
+    let cards: Vec<u64> = serde_json::from_value(cards)
+        .map_err(|e| (400, format!("invalid \"cards\" list: {e}")))?;
+    for f in BATCH_FORBIDDEN {
+        if map.contains_key(f) {
+            return Err((
+                400,
+                format!(
+                    "\"{f}\" is content, not presentation, so it is refused for a list of \
+                     cards — it would write the same {f} over every one of them. Use PATCH \
+                     /api/nodes/{{id}}/cards/{{cid}} for that, one card at a time. A batch \
+                     may set: color, size, fit, font_scale, z, emphasis, emphasis_intensity, \
+                     emphasis_minutes."
+                ),
+            ));
+        }
+    }
+    // The "expected one of …" list serde produces here is `UpdateCardInput`'s
+    // whole field set, which includes the content fields this route refuses — so
+    // say so, rather than listing `body` as expected and then rejecting it.
+    let patch: UpdateCardInput = serde_json::from_value(Value::Object(map)).map_err(|e| {
+        (
+            400,
+            format!(
+                "invalid JSON body: {e} (of those, {} are single-card only)",
+                BATCH_FORBIDDEN.join(", ")
+            ),
+        )
+    })?;
+    Ok((cards, patch))
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, (u16, String)> {
@@ -2197,23 +2336,29 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         }
         ApiRequest::UpdateCard { node, card, patch } => match doc.card_mut(node, card) {
             Some(c) => {
+                // A mirrored body belongs to the file. Silently accepting an edit
+                // that the next refresh overwrites would look like data loss, so
+                // it's refused rather than ignored.
+                //
+                // Checked here, before **anything** is applied: this test used to
+                // sit after `title`, so a refused request had already renamed the
+                // card. A 409 that changed something is worse than either
+                // outcome, because the caller has no way to know what stuck.
+                if patch.body.is_some() && c.source.is_some() {
+                    return (
+                        false,
+                        ApiResponse::err(
+                            409,
+                            "this card mirrors a file — its body is read-only. \
+                             Send \"source\": \"\" to detach it first.",
+                        ),
+                    );
+                }
+                apply_presentation(c, &patch);
                 if let Some(t) = patch.title {
                     c.title = t;
                 }
                 if let Some(b) = patch.body {
-                    // A mirrored body belongs to the file. Silently accepting an
-                    // edit that the next refresh overwrites would look like data
-                    // loss, so it's refused rather than ignored.
-                    if c.source.is_some() {
-                        return (
-                            false,
-                            ApiResponse::err(
-                                409,
-                                "this card mirrors a file — its body is read-only. \
-                                 Send \"source\": \"\" to detach it first.",
-                            ),
-                        );
-                    }
                     c.body = b;
                 }
                 if let Some(s) = patch.source {
@@ -2228,12 +2373,6 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         // Force the next poll to read it.
                         c.source_mtime = None;
                     }
-                }
-                if let Some(col) = patch.color {
-                    c.color = col;
-                }
-                if let Some(fs) = patch.font_scale {
-                    c.font_scale = fs.clamp(0.25, 4.0);
                 }
                 // Convert to another kind first, so kind-specific fields below
                 // (lang/items/rows/header) land in the new kind. Existing
@@ -2273,21 +2412,6 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some([x, y]) = patch.pos {
                     c.pos = egui::pos2(x, y);
-                }
-                if let Some(z) = patch.z {
-                    // Clamped to the same range the canvas gesture uses: beyond
-                    // it a card is through the camera or too small to read, and
-                    // both are ways of losing a card the user cannot easily undo.
-                    c.z = z.clamp(crate::canvas::Z_MIN, crate::canvas::Z_MAX);
-                }
-                apply_emphasis(
-                    c,
-                    patch.emphasis.as_deref(),
-                    patch.emphasis_intensity,
-                    patch.emphasis_minutes,
-                );
-                if let Some([w, h]) = patch.size {
-                    c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
                 }
                 if let Some(rows) = patch.rows {
                     if let CardKind::Table { table } = &mut c.kind {
@@ -2548,6 +2672,94 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             (
                 true,
                 ApiResponse::ok(json!({ "moved": moved.len(), "node": to, "cards": moved })),
+            )
+        }
+        ApiRequest::UpdateCards { node, cards, patch } => {
+            if !doc.nodes.contains_key(&node) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            if cards.is_empty() {
+                return (false, ApiResponse::err(400, "cards must name at least one card"));
+            }
+            for cid in &cards {
+                if doc.card(node, *cid).is_none() {
+                    return (
+                        false,
+                        ApiResponse::err(404, &format!("card {cid} is not in node {node}")),
+                    );
+                }
+            }
+            let mut done = Vec::with_capacity(cards.len());
+            for cid in &cards {
+                if let Some(c) = doc.card_mut(node, *cid) {
+                    apply_presentation(c, &patch);
+                    // An estimate, like every other `fit` on this thread; the app
+                    // loop re-measures each of these with the real fonts.
+                    if patch.fit {
+                        if let Some(sz) = c.fit_size() {
+                            c.size = sz;
+                        }
+                    }
+                    done.push(*cid);
+                }
+            }
+            (true, ApiResponse::ok(json!({ "updated": done.len(), "cards": done })))
+        }
+        ApiRequest::DeleteCards { node, cards } => {
+            if !doc.nodes.contains_key(&node) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            if cards.is_empty() {
+                return (false, ApiResponse::err(400, "cards must name at least one card"));
+            }
+            // Validated in full before a single card is removed. This matters
+            // more here than anywhere else in the batch surface: a half-finished
+            // delete cannot be undone by re-sending the request.
+            for cid in &cards {
+                if doc.card(node, *cid).is_none() {
+                    return (
+                        false,
+                        ApiResponse::err(404, &format!("card {cid} is not in node {node}")),
+                    );
+                }
+            }
+            for cid in &cards {
+                doc.remove_card(node, *cid);
+            }
+            (true, ApiResponse::ok(json!({ "deleted": cards.len(), "cards": cards })))
+        }
+        ApiRequest::ClearCardsProperty { node, cards, key } => {
+            if !doc.nodes.contains_key(&node) {
+                return (false, ApiResponse::err(404, "node not found"));
+            }
+            if cards.is_empty() {
+                return (false, ApiResponse::err(400, "cards must name at least one card"));
+            }
+            for cid in &cards {
+                if doc.card(node, *cid).is_none() {
+                    return (
+                        false,
+                        ApiResponse::err(404, &format!("card {cid} is not in node {node}")),
+                    );
+                }
+            }
+            // A card that never carried the property is not an error — asking for
+            // `due::` to be gone from a list and getting that is the point. The
+            // count says how many lines were actually removed and `cards` names
+            // which, so "8 of 20 had one" is legible rather than hidden.
+            let mut cleared = Vec::new();
+            for cid in &cards {
+                if doc.clear_card_property(node, *cid, &key) {
+                    cleared.push(*cid);
+                }
+            }
+            (
+                !cleared.is_empty(),
+                ApiResponse::ok(json!({
+                    "cleared": cleared.len(),
+                    "cards": cleared,
+                    "key": key.to_lowercase(),
+                })),
             )
         }
         ApiRequest::SetCardsProperty { node, cards, key, value } => {
@@ -3402,6 +3614,34 @@ pub(crate) fn card_json(c: &Card) -> Value {
 /// the three names. Intensity is clamped rather than rejected: a caller asking
 /// for 3.0 wants "as loud as possible", and there is no reading of that which
 /// should fail the whole request.
+/// The fields a **batch** edit may set, applied to one card.
+///
+/// Called by both the single-card `PATCH` and the batch, so every clamp and
+/// default is written once. Two copies of "size has an 80×60 floor" is how the
+/// two paths end up disagreeing — which already happened once with `fit`, where
+/// the menu measured the real galley and the API only estimated.
+///
+/// `fit` is **not** here: it has to run after content fields the batch cannot
+/// set, and the app loop re-measures it with real fonts afterwards.
+fn apply_presentation(c: &mut crate::model::Card, p: &UpdateCardInput) {
+    if let Some(col) = p.color {
+        c.color = col;
+    }
+    if let Some(fs) = p.font_scale {
+        c.font_scale = fs.clamp(0.25, 4.0);
+    }
+    if let Some(z) = p.z {
+        // Clamped to the same range the canvas gesture uses: beyond it a card is
+        // through the camera or too small to read, and both are ways of losing a
+        // card the user cannot easily undo.
+        c.z = z.clamp(crate::canvas::Z_MIN, crate::canvas::Z_MAX);
+    }
+    apply_emphasis(c, p.emphasis.as_deref(), p.emphasis_intensity, p.emphasis_minutes);
+    if let Some([w, h]) = p.size {
+        c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
+    }
+}
+
 fn apply_emphasis(
     c: &mut crate::model::Card,
     emphasis: Option<&str>,
@@ -5328,6 +5568,250 @@ mod tests {
         assert!(
             route(&Method::Post, "/api/settings", "", "{}").is_err(),
             "an empty patch changes nothing and should say so"
+        );
+    }
+
+    // --- the batch surface: edit, delete, clear a property --------------------
+
+    /// Three cards, one call, and every one of them takes the change.
+    #[test]
+    fn a_batch_edit_reaches_every_card_it_names() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let ids: Vec<u64> = (0..3)
+            .map(|i| {
+                doc.add_card(nid, egui::pos2(0.0, i as f32 * 100.0), CardKind::Text).unwrap()
+            })
+            .collect();
+        let req = route(
+            &Method::Patch,
+            &format!("/api/nodes/{nid}/cards"),
+            "",
+            &format!(r#"{{"cards":{ids:?},"color":"red","size":[300,200],"font_scale":1.5}}"#),
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["updated"], 3);
+        for c in &doc.nodes[&nid].cards {
+            assert_eq!(c.color, [0xef, 0x44, 0x44], "the colour name resolved");
+            assert_eq!(c.size, egui::vec2(300.0, 200.0));
+            assert_eq!(c.font_scale, 1.5);
+        }
+    }
+
+    /// A batch sets presentation, never content. Refused **by name**, with the
+    /// route that does accept it — a list of cards all saying the same thing is
+    /// the copied-card failure, and one typo'd id list would be unrecoverable.
+    #[test]
+    fn a_batch_edit_refuses_content_fields_by_name() {
+        for field in ["title", "body", "items", "rows", "kind", "lang", "source"] {
+            let body = format!(r#"{{"cards":[1,2],"{field}":"x"}}"#);
+            let err = match route(&Method::Patch, "/api/nodes/5/cards", "", &body) {
+                Err(e) => e,
+                Ok(_) => panic!("{field} should be refused for a list of cards"),
+            };
+            assert_eq!(err.0, 400);
+            assert!(err.1.contains(field), "the 400 has to name the field: {}", err.1);
+            assert!(
+                err.1.contains("cards/{cid}"),
+                "and say where it IS accepted: {}",
+                err.1
+            );
+        }
+        // A misspelt presentation field is still the v0.86.0 400 naming it,
+        // because the remainder is parsed by the single-card struct itself.
+        // (`unwrap_err` will not compile here: ApiRequest has no Debug.)
+        let err = match route(&Method::Patch, "/api/nodes/5/cards", "", r#"{"cards":[1],"colr":"red"}"#) {
+            Err(e) => e,
+            Ok(_) => panic!("a misspelt field must not be accepted"),
+        };
+        assert_eq!(err.0, 400);
+        assert!(err.1.contains("colr"), "{}", err.1);
+        // And `cards` is not optional: a patch with no list would be a silent
+        // no-op that reads as success.
+        assert!(route(&Method::Patch, "/api/nodes/5/cards", "", r#"{"color":"red"}"#).is_err());
+    }
+
+    /// One bad id refuses the whole batch, and nothing is half-applied — the same
+    /// rule the batch move and table ops follow.
+    #[test]
+    fn one_bad_id_refuses_the_whole_batch() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let a = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let before = doc.nodes[&nid].cards[0].color;
+
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"color":"red"}"#).unwrap();
+        let (dirty, resp) = process(
+            &mut doc,
+            ApiRequest::UpdateCards { node: nid, cards: vec![a, 9999], patch },
+        );
+        assert!(!dirty);
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("9999"), "the 404 names the id: {}", resp.body);
+        assert_eq!(doc.nodes[&nid].cards[0].color, before, "nothing was applied");
+
+        // Same for the delete, where a partial run cannot be walked back at all.
+        let (dirty, resp) =
+            process(&mut doc, ApiRequest::DeleteCards { node: nid, cards: vec![a, 9999] });
+        assert!(!dirty);
+        assert_eq!(resp.status, 404);
+        assert_eq!(doc.nodes[&nid].cards.len(), 1, "the good card is still here");
+    }
+
+    /// Deleting a list is one call, and the cards are actually gone.
+    #[test]
+    fn a_batch_delete_removes_exactly_the_list() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let ids: Vec<u64> = (0..4)
+            .map(|i| {
+                doc.add_card(nid, egui::pos2(0.0, i as f32 * 100.0), CardKind::Text).unwrap()
+            })
+            .collect();
+        let req = route(
+            &Method::Delete,
+            &format!("/api/nodes/{nid}/cards"),
+            "",
+            &format!(r#"{{"cards":[{},{}]}}"#, ids[1], ids[2]),
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["deleted"], 2);
+        let left: Vec<u64> = doc.nodes[&nid].cards.iter().map(|c| c.id).collect();
+        assert_eq!(left, vec![ids[0], ids[3]]);
+        // An empty list is a mistake, not a no-op.
+        assert_eq!(
+            process(&mut doc, ApiRequest::DeleteCards { node: nid, cards: vec![] }).1.status,
+            400
+        );
+    }
+
+    /// Setting a property on a list had no counterpart: clearing one was a call
+    /// per card. And a card that never carried it is not an error — the count
+    /// says how many lines actually went.
+    #[test]
+    fn clearing_a_property_off_a_list_is_one_call() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let ids: Vec<u64> = (0..3)
+            .map(|i| {
+                doc.add_card(nid, egui::pos2(0.0, i as f32 * 100.0), CardKind::Text).unwrap()
+            })
+            .collect();
+        // Two of the three get a due date.
+        let (_d, _r) = process(
+            &mut doc,
+            ApiRequest::SetCardsProperty {
+                node: nid,
+                cards: vec![ids[0], ids[1]],
+                key: "due".into(),
+                value: "2026-08-20".into(),
+            },
+        );
+        let req = route(
+            &Method::Delete,
+            &format!("/api/nodes/{nid}/cards/property"),
+            "",
+            &format!(r#"{{"cards":{ids:?},"key":"DUE"}}"#),
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(dirty);
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["cleared"], 2, "only the two that had one");
+        assert_eq!(v["key"], "due", "the key is reported lowercased, as it is stored");
+        for c in &doc.nodes[&nid].cards {
+            assert!(doc.card_property(nid, c.id, "due").is_none());
+        }
+    }
+
+    /// `property` sits exactly where a card id would on the DELETE path. The
+    /// literal arm has to win, or clearing a property from a list would try to
+    /// parse "property" as an id.
+    #[test]
+    fn the_batch_property_path_is_not_shadowed_by_a_card_id() {
+        assert!(matches!(
+            route(
+                &Method::Delete,
+                "/api/nodes/5/cards/property",
+                "",
+                r#"{"cards":[1],"key":"due"}"#
+            )
+            .unwrap(),
+            ApiRequest::ClearCardsProperty { node: 5, .. }
+        ));
+        // And the single-card DELETE still resolves an id on the same shape.
+        assert!(matches!(
+            route(&Method::Delete, "/api/nodes/5/cards/7", "", "").unwrap(),
+            ApiRequest::DeleteCard { node: 5, card: 7 }
+        ));
+    }
+
+    /// Every batch route names its basket, so a confined token is checked against
+    /// it. A batch that reported `None` here would be refused outright — safe,
+    /// but it would also mean an agent could not use the batch surface in its own
+    /// basket, which is where it is most useful.
+    #[test]
+    fn the_batch_routes_name_their_basket_for_the_scope_check() {
+        let patch: UpdateCardInput = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            target_node(&ApiRequest::UpdateCards { node: 7, cards: vec![1], patch }),
+            Some(7)
+        );
+        assert_eq!(target_node(&ApiRequest::DeleteCards { node: 7, cards: vec![1] }), Some(7));
+        assert_eq!(
+            target_node(&ApiRequest::ClearCardsProperty {
+                node: 7,
+                cards: vec![1],
+                key: "due".into()
+            }),
+            Some(7)
+        );
+    }
+
+    /// `fit` on a batch has to reach the app loop's precise re-measure, or the
+    /// same flag would mean two different sizes depending on how many cards you
+    /// sent.
+    #[test]
+    fn fit_on_a_batch_edit_is_offered_to_the_precise_refit() {
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"fit":true}"#).unwrap();
+        assert_eq!(
+            fit_updates(&ApiRequest::UpdateCards { node: 3, cards: vec![8, 9], patch }),
+            Some((3, vec![8, 9]))
+        );
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"color":"red"}"#).unwrap();
+        assert_eq!(
+            fit_updates(&ApiRequest::UpdateCards { node: 3, cards: vec![8], patch }),
+            None
+        );
+    }
+
+    /// A 409 that had already changed something was worse than either outcome:
+    /// the caller could not tell what stuck. The mirror check now runs before any
+    /// field is applied.
+    #[test]
+    fn a_refused_edit_to_a_mirrored_card_changes_nothing() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(nid, cid).unwrap().source = Some("/tmp/whatever.md".into());
+        doc.card_mut(nid, cid).unwrap().title = "before".into();
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"title":"after","body":"mine now"}"#).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        assert!(!dirty);
+        assert_eq!(resp.status, 409);
+        assert_eq!(
+            doc.card(nid, cid).unwrap().title,
+            "before",
+            "the title used to be renamed before the body was refused"
         );
     }
 }

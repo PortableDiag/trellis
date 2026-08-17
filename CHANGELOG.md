@@ -6,6 +6,58 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.116.0]
+
+### Added
+- **The batch surface is finished.** Creating, moving and setting one property on
+  a list of cards already existed; editing them, deleting them and taking a
+  property back *off* them did not — so the half of a workflow that tidies up was
+  still one call per card while the half that made the mess was one call for all
+  of them.
+
+  - **`DELETE /api/nodes/{id}/cards/property {cards, key}`** — the missing
+    counterpart to the batch set. `cleared` counts the cards that actually carried
+    the property and `cards` names them, so *"8 of the 20 had a due date"* is
+    legible rather than hidden; a card that never had it is not an error. This one
+    matters because setting `due::` to `""` is **not** the same as removing it —
+    the empty line stays, unreadable, and the card sits under *No date* forever
+    instead of leaving the agenda.
+  - **`PATCH /api/nodes/{id}/cards {cards, …}`** — restyle a set: `color`, `size`,
+    `fit`, `font_scale`, `z`, `emphasis` and its two companions.
+  - **`DELETE /api/nodes/{id}/cards {cards}`** — delete a list, validated in full
+    before a single card goes.
+
+  All three follow the rule the batch move set: **the whole list is checked before
+  anything changes**, so one bad id refuses the batch and names itself. For the
+  delete that is not a nicety — a half-finished delete cannot be undone by
+  re-sending the request. There is deliberately no *"everything in this basket"*
+  form: the one batch operation you cannot walk back should not be reachable by
+  leaving an argument out.
+
+  **The batch edit is presentation only, and refuses content by name.** `title`,
+  `body`, `items`, `rows`, `kind`, `lang`, `header`, `source` and `inline_images`
+  come back as a 400 that names the field and points at the single-card route.
+  Each of those *is* the card: writing one across a list means every card in the
+  list ends up saying the same thing — the copied-card failure the task model
+  exists to prevent — and one typo'd id list would be an unrecoverable overwrite
+  of somebody's work. Content is one card at a time; the batch is for *make these
+  look the same*. There is no `pos` for the same reason in reverse: it would stack
+  every card on one point, and the batch **move** already has `pos` + `gap` for
+  laying out a column.
+
+  The fields it does accept are applied by **the same code the single-card `PATCH`
+  runs** — one extracted `apply_presentation`, not a second copy — so the 80×60
+  size floor, the depth clamp and the emphasis expiry cannot drift apart. `fit` is
+  re-measured with the real fonts per card in the app loop, exactly as it is for
+  one card; the compiler caught that being missing, because `fit_updates` sat
+  unused until it was wired in.
+
+### Fixed
+- **A refused edit no longer half-applies.** `PATCH` on a card that mirrors a file
+  answers 409 for a `body` — but that check sat *after* `title` was written, so a
+  request that was refused had already renamed the card, and the caller had no way
+  to know what stuck. The mirror check now runs before any field is applied.
+
 ## [0.115.1]
 
 ### Changed

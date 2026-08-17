@@ -425,6 +425,15 @@ behind anything is a HUD, not part of the desktop.
 `Archive` basket; a card moved there keeps its id, so links and backlinks to it
 still resolve. `POST /api/nodes/{id}/cards/move` moves a whole batch in one call.
 
+**Anything you can do to a card, you can do to a list of them.** Create
+(`POST …/cards` with an array), move, set a property, take a property back off
+(`DELETE …/cards/property`), restyle (`PATCH …/cards`) and delete
+(`DELETE …/cards`) all take `{"cards":[ids]}` — and every one validates the whole
+list before it changes anything, so one bad id refuses the batch instead of
+leaving you guessing how far it got. The batch edit is **presentation only**:
+`body`, `title` and the other content fields are refused by name, because writing
+one across a list means every card ends up saying the same thing.
+
 **Link to a card or a group, not just a basket.** `[[#1391]]` points at a card,
 `[[#g146]]` at a group; `[[Some Basket]]` and `[[42]]` still point at baskets. In
 a journal every card written on one day shares a basket, so linking to the day

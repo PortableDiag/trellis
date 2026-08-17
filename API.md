@@ -410,6 +410,50 @@ POST /api/nodes/{id}/cards/property  {cards:[ids], key, value}
 
   One `key:: value` on many cards. Validated up front, same as the batch move.
 
+DELETE /api/nodes/{id}/cards/property  {cards:[ids], key}
+  → 200 {"cleared":N,"cards":[ids],"key":"due"}
+  | 400 (empty list)  | 404 (node, or a card not in it — named)
+
+  The other half: **remove** a `key:: value` line from many cards. `cleared`
+  counts the cards that actually carried it and `cards` names them, so "8 of the
+  20 had a due date" is legible rather than hidden. A card that never had the
+  property is not an error — asking for it to be gone and getting that is the
+  point. `key` goes in the body, not the query string as it does on the
+  single-card form: the card list has to be a body anyway, and splitting one
+  request across both is how you delete the wrong property from the right cards.
+
+PATCH /api/nodes/{id}/cards  {cards:[ids], color?, size?, fit?, font_scale?, z?,
+                              emphasis?, emphasis_intensity?, emphasis_minutes?}
+  → 200 {"updated":N,"cards":[ids]}
+  | 400 (empty/missing list, a content field, an unknown field)
+  | 404 (node, or a card not in it — named)
+
+  **Presentation only, and that is deliberate.** `title`, `body`, `items`, `rows`,
+  `kind`, `lang`, `header`, `source` and `inline_images` are refused **by name**,
+  with the single-card route in the message. Each of those *is* the card: writing
+  one across a list means every card in the list ends up saying the same thing —
+  which is the copied-card failure the task model exists to prevent — and one
+  typo'd id list would be an unrecoverable overwrite of somebody's work. Content
+  is one card at a time; the batch is for *make these look the same*.
+
+  Everything else behaves exactly as the single-card `PATCH` does, because it is
+  the same code applying it: the same 80×60 size floor, the same `z` clamp, the
+  same emphasis expiry. `fit` is re-measured with the real fonts, per card.
+
+  There is no `pos`: it would stack every card in the list on one point, hiding
+  all but the last. Use the batch **move**, whose `pos` + `gap` stacks a column.
+
+DELETE /api/nodes/{id}/cards  {cards:[ids]}
+  → 200 {"deleted":N,"cards":[ids]}
+  | 400 (empty list)  | 404 (node, or a card not in it — named)
+
+  Validated in full before a single card is removed, which matters more here than
+  anywhere else on the batch surface: a half-finished delete cannot be undone by
+  re-sending the request. There is no "everything in this basket" form on
+  purpose — the one batch operation you cannot walk back should not be reachable
+  by *omitting* an argument. To clear a basket, list its ids; to keep the work,
+  move them to the project's `Archive` instead (a moved card keeps its id).
+
 POST /api/nodes/{id}/cards/{cid}/move  {node:<target id>, pos?:[x,y]}
     → 200 {"card":<cid>, "node":<target>, "moved":true}
     | 400 (already in that node) | 404 (card or target node not found)
@@ -1585,6 +1629,56 @@ curl -s -H "X-API-Key: $KEY" \
   -d '{"cards":[1246,1730],"key":"status","value":"done"}' \
   $API/nodes/$NID/cards/property
 ```
+
+…and so is taking a property back off them. A finished task should **leave** the
+agenda, and a `due::` set to `""` does not do that — it leaves an unreadable line
+behind and the card sits under *No date* forever:
+
+```sh
+curl -s -X DELETE -H "X-API-Key: $KEY" \
+  -d '{"cards":[1246,1730],"key":"due"}' \
+  $API/nodes/$NID/cards/property
+# -> {"cleared":2,"cards":[1246,1730],"key":"due"}
+```
+
+### Making a set of cards look like a set
+
+One call, and the same code that applies a single-card `PATCH` — so the size floor,
+the depth clamp and the emphasis expiry are identical:
+
+```sh
+# Grey out an archived batch, and drop any emphasis they were carrying.
+curl -s -X PATCH -H "X-API-Key: $KEY" \
+  -d '{"cards":[1836,1837],"color":"#64748b","emphasis":"none"}' \
+  $API/nodes/$ARCHIVE/cards
+
+# Size a set to its content. `fit` is re-measured with the real fonts, per card.
+curl -s -X PATCH -H "X-API-Key: $KEY" \
+  -d '{"cards":[1840,1841,1842],"fit":true}' \
+  $API/nodes/$NID/cards
+# -> {"updated":3,"cards":[1840,1841,1842]}
+```
+
+**Content is refused here, by name.** `body`, `title`, `items`, `rows`, `kind`,
+`lang`, `header`, `source` and `inline_images` are single-card fields: writing one
+across a list means every card ends up saying the same thing, and a typo in the id
+list would overwrite work irrecoverably. The 400 names the field and points at
+`PATCH /api/nodes/{id}/cards/{cid}`.
+
+### Deleting a batch — and why you probably want the move instead
+
+```sh
+curl -s -X DELETE -H "X-API-Key: $KEY" \
+  -d '{"cards":[1901,1902,1903]}' $API/nodes/$NID/cards
+# -> {"deleted":3,"cards":[1901,1902,1903]}
+```
+
+Validated in full first, because a half-finished delete cannot be undone by
+re-sending it. There is deliberately **no** "everything in this basket" form: the
+one batch operation you cannot walk back should not be reachable by leaving an
+argument out. Scratch cards an agent made for itself are what this is for —
+anything with reasoning worth keeping goes to `Archive` with the batch move above,
+where it keeps its id.
 
 ### Building a basket in one call
 
