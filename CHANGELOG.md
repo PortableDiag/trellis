@@ -6,6 +6,36 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.119.1]
+
+### Fixed
+- **The Settings window can be read to the bottom.** It had no scroll area, is
+  anchored to the centre and is not resizable, so it simply grew to whatever its
+  content needed — and expanding **Endpoints** (100+ lines, and longer after every
+  release that adds a route) pushed *both* ends of the window off the display with
+  no way to reach either. The body now scrolls, capped to the viewport.
+
+  Reported from use, and confirmed by driving it: open Settings, expand Endpoints,
+  scroll to *"Full reference: API.md in the source repo."* A settings window you
+  cannot read the bottom of is the same defect as a doc surface nobody updated —
+  and the list that broke it is one this project keeps telling itself to keep
+  current.
+
+- **Two more windows with the same defect**: **Requirements** and **Backup** both
+  hold lists that grow (external tools; backup destinations) and neither scrolled.
+  Both now use the same capped scroll area.
+
+- **A tooltip contained 26 literal spaces mid-sentence.** The Desktop-mode hover
+  text was written as a plain multi-line string, so the *source indentation* became
+  part of the text. Rust only strips that when the line ends with `\`. Found by a
+  check that had to run before re-indenting the window body — the re-indent was
+  safe precisely because every other literal in that window is backslash-continued.
+
+### Added
+- **Four more worked examples in Settings → Examples**, matching the reference:
+  acting on a card by its id alone, appending to a shared card, doing a whole list
+  of cards across baskets, and archiving a basket's finished cards in one call.
+
 ## [0.119.0]
 
 ### Added

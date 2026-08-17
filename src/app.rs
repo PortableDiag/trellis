@@ -965,6 +965,18 @@ pub fn project_color(doc: &Document, root: NodeId) -> egui::Color32 {
     }
 }
 
+/// The tallest a window's scrolling body may be.
+///
+/// The screen, less room for the title bar, the frame and a margin at each end.
+/// A window whose content simply grows is fine until the content is a list that
+/// grows too: the Settings window is anchored to the centre and not resizable, so
+/// an expanded `Endpoints` section ran off both ends of the display with no way to
+/// reach either. Capping the body and letting it scroll is what makes a long
+/// section safe to add to.
+fn window_body_max_height(ctx: &egui::Context) -> f32 {
+    (ctx.screen_rect().height() - 120.0).max(200.0)
+}
+
 /// The open document's file name, or `untitled` — what identifies an instance to
 /// a human (window title) and to an agent (`GET /api/instance`).
 pub fn doc_display_name(path: Option<&std::path::Path>) -> String {
@@ -6520,123 +6532,131 @@ impl TrellisApp {
             .default_width(560.0)
             .vscroll(true)
             .show(ctx, |ui| {
-                ui.label(
-                    "Trellis runs without any of these. Each one switches on a \
-                     single extra feature — a missing tool disables that feature \
-                     and nothing else.",
-                );
-                match mgr {
-                    crate::deps::Manager::None => {
-                        ui.label(
-                            egui::RichText::new(
-                                "No package manager found, so these link to their download pages.",
-                            )
-                            .weak(),
-                        );
-                    }
-                    m => {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Package manager: {}",
-                                match m {
-                                    crate::deps::Manager::Winget => "winget",
-                                    crate::deps::Manager::Brew => "Homebrew",
-                                    crate::deps::Manager::Apt => "apt",
-                                    crate::deps::Manager::Dnf => "dnf",
-                                    crate::deps::Manager::Pacman => "pacman",
-                                    crate::deps::Manager::Zypper => "zypper",
-                                    crate::deps::Manager::None => "",
-                                }
-                            ))
-                            .weak(),
-                        );
-                    }
-                }
-                ui.separator();
-
-                let mut note: Option<String> = None;
-                for (label, enables, url, present, builtin, install) in &self.req_scan {
-                    ui.horizontal(|ui| {
-                        // Colour *and* a word: a tick alone is unreadable to
-                        // anyone who can't separate the two greens.
-                        if *present {
-                            ui.colored_label(egui::Color32::from_rgb(80, 190, 110), "✔ Installed");
-                        } else {
-                            ui.colored_label(egui::Color32::from_rgb(230, 160, 60), "✘ Missing");
-                        }
-                        ui.strong(label);
-                    });
-                    ui.indent(label, |ui| {
-                        ui.label(egui::RichText::new(enables).weak());
-                        if !*present && *builtin {
-                            // Worth saying out loud: this one normally ships
-                            // with the OS, so its absence means it was removed
-                            // or switched off rather than never installed —
-                            // which points at a different fix.
+                // Scrolls and is capped to the screen: this window holds a
+                // list that grows, and a window that simply grows with it runs
+                // off the display.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .max_height(window_body_max_height(ctx))
+                    .show(ui, |ui| {
+                    ui.label(
+                        "Trellis runs without any of these. Each one switches on a \
+                         single extra feature — a missing tool disables that feature \
+                         and nothing else.",
+                    );
+                    match mgr {
+                        crate::deps::Manager::None => {
                             ui.label(
                                 egui::RichText::new(
-                                    "Normally comes with the system — it may be an optional \
-                                     component that isn't switched on.",
+                                    "No package manager found, so these link to their download pages.",
                                 )
-                                .weak()
-                                .italics(),
+                                .weak(),
                             );
                         }
-                        if !*present {
-                            ui.horizontal_wrapped(|ui| match install {
-                                crate::deps::Install::Run { label, bin, args } => {
-                                    if ui.button(label).clicked() {
-                                        note = Some(match crate::deps::run_install(bin, args) {
-                                            Ok(()) => format!(
-                                                "Installing in a new window. Re-check when it \
-                                                 finishes."
-                                            ),
-                                            Err(e) => e,
-                                        });
+                        m => {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Package manager: {}",
+                                    match m {
+                                        crate::deps::Manager::Winget => "winget",
+                                        crate::deps::Manager::Brew => "Homebrew",
+                                        crate::deps::Manager::Apt => "apt",
+                                        crate::deps::Manager::Dnf => "dnf",
+                                        crate::deps::Manager::Pacman => "pacman",
+                                        crate::deps::Manager::Zypper => "zypper",
+                                        crate::deps::Manager::None => "",
                                     }
-                                    if ui.button("Download page").clicked() {
-                                        let _ = crate::deps::open_url(url);
+                                ))
+                                .weak(),
+                            );
+                        }
+                    }
+                    ui.separator();
+
+                    let mut note: Option<String> = None;
+                    for (label, enables, url, present, builtin, install) in &self.req_scan {
+                        ui.horizontal(|ui| {
+                            // Colour *and* a word: a tick alone is unreadable to
+                            // anyone who can't separate the two greens.
+                            if *present {
+                                ui.colored_label(egui::Color32::from_rgb(80, 190, 110), "✔ Installed");
+                            } else {
+                                ui.colored_label(egui::Color32::from_rgb(230, 160, 60), "✘ Missing");
+                            }
+                            ui.strong(label);
+                        });
+                        ui.indent(label, |ui| {
+                            ui.label(egui::RichText::new(enables).weak());
+                            if !*present && *builtin {
+                                // Worth saying out loud: this one normally ships
+                                // with the OS, so its absence means it was removed
+                                // or switched off rather than never installed —
+                                // which points at a different fix.
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Normally comes with the system — it may be an optional \
+                                         component that isn't switched on.",
+                                    )
+                                    .weak()
+                                    .italics(),
+                                );
+                            }
+                            if !*present {
+                                ui.horizontal_wrapped(|ui| match install {
+                                    crate::deps::Install::Run { label, bin, args } => {
+                                        if ui.button(label).clicked() {
+                                            note = Some(match crate::deps::run_install(bin, args) {
+                                                Ok(()) => format!(
+                                                    "Installing in a new window. Re-check when it \
+                                                     finishes."
+                                                ),
+                                                Err(e) => e,
+                                            });
+                                        }
+                                        if ui.button("Download page").clicked() {
+                                            let _ = crate::deps::open_url(url);
+                                        }
                                     }
-                                }
-                                crate::deps::Install::Copy { label, cmd } => {
-                                    ui.label(format!("{label}:"));
-                                    ui.code(cmd);
-                                    if ui.button("Copy").clicked() {
-                                        ui.output_mut(|o| o.copied_text = cmd.clone());
-                                        note = Some("Command copied to the clipboard".into());
+                                    crate::deps::Install::Copy { label, cmd } => {
+                                        ui.label(format!("{label}:"));
+                                        ui.code(cmd);
+                                        if ui.button("Copy").clicked() {
+                                            ui.output_mut(|o| o.copied_text = cmd.clone());
+                                            note = Some("Command copied to the clipboard".into());
+                                        }
+                                        if ui.button("Download page").clicked() {
+                                            let _ = crate::deps::open_url(url);
+                                        }
                                     }
-                                    if ui.button("Download page").clicked() {
-                                        let _ = crate::deps::open_url(url);
+                                    crate::deps::Install::Link => {
+                                        if ui.button("Download page").clicked() {
+                                            let _ = crate::deps::open_url(url);
+                                        }
                                     }
-                                }
-                                crate::deps::Install::Link => {
-                                    if ui.button("Download page").clicked() {
-                                        let _ = crate::deps::open_url(url);
-                                    }
-                                }
-                            });
+                                });
+                            }
+                        });
+                        ui.add_space(6.0);
+                    }
+
+                    if let Some(n) = note {
+                        self.req_note = n;
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Re-check")
+                            .on_hover_text("Probe PATH again — use this after installing something")
+                            .clicked()
+                        {
+                            rescan = true;
+                            self.req_note.clear();
+                        }
+                        if !self.req_note.is_empty() {
+                            ui.label(egui::RichText::new(&self.req_note).weak());
                         }
                     });
-                    ui.add_space(6.0);
-                }
-
-                if let Some(n) = note {
-                    self.req_note = n;
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("Re-check")
-                        .on_hover_text("Probe PATH again — use this after installing something")
-                        .clicked()
-                    {
-                        rescan = true;
-                        self.req_note.clear();
-                    }
-                    if !self.req_note.is_empty() {
-                        ui.label(egui::RichText::new(&self.req_note).weak());
-                    }
-                });
+                    });
             });
         if rescan {
             self.scan_requirements();
@@ -6870,592 +6890,643 @@ impl TrellisApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.heading("Agent API");
-                // Links are how an agent hands you a place, so this belongs
-                // beside the key and the endpoint list rather than in Canvas.
-                ui.horizontal(|ui| {
-                    let scheme = crate::URL_SCHEME;
-                    match &self.url_scheme_registered {
-                        Some(p) if !p.is_empty() => {
-                            ui.weak(format!("{scheme}:// links open this build"))
-                                .on_hover_text(format!("Registered for {p}"));
-                        }
-                        _ => {
-                            ui.weak(format!("{scheme}:// links are not registered on this desktop"));
-                        }
-                    }
-                    if ui
-                        .button("Register now")
-                        .on_hover_text(
-                            "Done automatically on a new install and whenever the binary moves. \
-                             Use this if a link stopped opening — or after installing Trellis \
-                             somewhere new. The http://127.0.0.1:<port>/open/… form needs no \
-                             registration and works anywhere.",
-                        )
-                        .clicked()
-                    {
-                        match register_url_scheme() {
-                            Ok(path) => {
-                                self.url_scheme_registered =
-                                    std::env::current_exe().ok().map(|p| p.display().to_string());
-                                self.status = format!("Registered {scheme}:// — {path}");
-                            }
-                            Err(e) => self.status = format!("Could not register: {e}"),
-                        }
-                    }
-                });
-                ui.add_space(4.0);
-                ui.label(
-                    "An HTTP API for agents (and the Trellis mobile app) to add, query, \
-                     edit and remove nodes and cards. Localhost-only by default; enable \
-                     LAN access below to reach it from other devices on your network.",
-                );
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new(&self.api_status).weak());
-                ui.add_space(6.0);
-
-                egui::Grid::new("api_settings").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-                    ui.label("API key");
+                // The body scrolls, and is capped to the screen. Without this the
+                // window grew to whatever its content needed — and since it is
+                // anchored to the centre and not resizable, expanding `Endpoints`
+                // pushed both ends of the list off-screen with no way to reach
+                // them. A settings window you cannot read the bottom of is the
+                // same defect as a doc surface nobody updated.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .max_height(window_body_max_height(ctx))
+                    .show(ui, |ui| {
+                    ui.heading("Agent API");
+                    // Links are how an agent hands you a place, so this belongs
+                    // beside the key and the endpoint list rather than in Canvas.
                     ui.horizontal(|ui| {
+                        let scheme = crate::URL_SCHEME;
+                        match &self.url_scheme_registered {
+                            Some(p) if !p.is_empty() => {
+                                ui.weak(format!("{scheme}:// links open this build"))
+                                    .on_hover_text(format!("Registered for {p}"));
+                            }
+                            _ => {
+                                ui.weak(format!("{scheme}:// links are not registered on this desktop"));
+                            }
+                        }
                         if ui
-                            .add(
-                                egui::TextEdit::singleline(&mut self.api_key)
-                                    .desired_width(240.0)
-                                    .hint_text("empty = API disabled"),
+                            .button("Register now")
+                            .on_hover_text(
+                                "Done automatically on a new install and whenever the binary moves. \
+                                 Use this if a link stopped opening — or after installing Trellis \
+                                 somewhere new. The http://127.0.0.1:<port>/open/… form needs no \
+                                 registration and works anywhere.",
                             )
-                            .changed()
+                            .clicked()
                         {
-                            self.sync_api_key();
-                        }
-                        if ui.button("Generate").clicked() {
-                            self.api_key = generate_key();
-                            self.sync_api_key();
-                        }
-                        if ui.button("Copy").clicked() {
-                            ui.ctx().copy_text(self.api_key.clone());
+                            match register_url_scheme() {
+                                Ok(path) => {
+                                    self.url_scheme_registered =
+                                        std::env::current_exe().ok().map(|p| p.display().to_string());
+                                    self.status = format!("Registered {scheme}:// — {path}");
+                                }
+                                Err(e) => self.status = format!("Could not register: {e}"),
+                            }
                         }
                     });
-                    ui.end_row();
+                    ui.add_space(4.0);
+                    ui.label(
+                        "An HTTP API for agents (and the Trellis mobile app) to add, query, \
+                         edit and remove nodes and cards. Localhost-only by default; enable \
+                         LAN access below to reach it from other devices on your network.",
+                    );
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(&self.api_status).weak());
+                    ui.add_space(6.0);
 
-                    ui.label("Agent tokens");
-                    ui.vertical(|ui| {
-                        self.agent_tokens_ui(ui, &doc_title);
-                    });
-                    ui.end_row();
-
-                    ui.label("Files agents may mirror");
-                    ui.vertical(|ui| {
-                        use crate::model::MirrorPolicy as MP;
-                        let mut p = self.mirror_policy;
+                    egui::Grid::new("api_settings").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+                        ui.label("API key");
                         ui.horizontal(|ui| {
-                            ui.selectable_value(&mut p, MP::SafeDefault, "Anywhere but credentials");
-                            ui.selectable_value(&mut p, MP::OnlyDirs, "Only these folders");
-                            ui.selectable_value(&mut p, MP::Anywhere, "Anywhere");
-                        });
-                        if p != self.mirror_policy {
-                            self.mirror_policy = p;
-                        }
-                        if self.mirror_policy == MP::OnlyDirs {
-                            let mut text = self.mirror_dirs.join("\n");
                             if ui
                                 .add(
-                                    egui::TextEdit::multiline(&mut text)
-                                        .desired_rows(3)
-                                        .desired_width(320.0)
-                                        .hint_text("/home/you/projects\n/srv/docs"),
+                                    egui::TextEdit::singleline(&mut self.api_key)
+                                        .desired_width(240.0)
+                                        .hint_text("empty = API disabled"),
                                 )
                                 .changed()
                             {
-                                self.mirror_dirs = text
-                                    .lines()
-                                    .map(|l| l.trim().to_string())
-                                    .filter(|l| !l.is_empty())
-                                    .collect();
+                                self.sync_api_key();
                             }
-                        }
-                        ui.label(
-                            egui::RichText::new(
-                                "Only limits the API. Your own File → Mirror a file… is never \
-                                 restricted. Without a limit, anything holding the API key can \
-                                 point a card at a file and read it back.",
-                            )
-                            .weak()
-                            .small(),
-                        );
-                    });
-                    ui.end_row();
+                            if ui.button("Generate").clicked() {
+                                self.api_key = generate_key();
+                                self.sync_api_key();
+                            }
+                            if ui.button("Copy").clicked() {
+                                ui.ctx().copy_text(self.api_key.clone());
+                            }
+                        });
+                        ui.end_row();
 
-                    ui.label("Port");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut self.api_port).range(1024..=65535));
-                        ui.weak("(restart to apply — or launch with --port)")
-                            .on_hover_text(
-                                "One instance serves one document, so the port is how an agent \
-                                 addresses this document. Launch with --port to pin it, and \
-                                 --data-dir to give an instance its own key/port/settings so \
-                                 several can run at once. GET /api/instance reports which \
-                                 document a port is serving.",
+                        ui.label("Agent tokens");
+                        ui.vertical(|ui| {
+                            self.agent_tokens_ui(ui, &doc_title);
+                        });
+                        ui.end_row();
+
+                        ui.label("Files agents may mirror");
+                        ui.vertical(|ui| {
+                            use crate::model::MirrorPolicy as MP;
+                            let mut p = self.mirror_policy;
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut p, MP::SafeDefault, "Anywhere but credentials");
+                                ui.selectable_value(&mut p, MP::OnlyDirs, "Only these folders");
+                                ui.selectable_value(&mut p, MP::Anywhere, "Anywhere");
+                            });
+                            if p != self.mirror_policy {
+                                self.mirror_policy = p;
+                            }
+                            if self.mirror_policy == MP::OnlyDirs {
+                                let mut text = self.mirror_dirs.join("\n");
+                                if ui
+                                    .add(
+                                        egui::TextEdit::multiline(&mut text)
+                                            .desired_rows(3)
+                                            .desired_width(320.0)
+                                            .hint_text("/home/you/projects\n/srv/docs"),
+                                    )
+                                    .changed()
+                                {
+                                    self.mirror_dirs = text
+                                        .lines()
+                                        .map(|l| l.trim().to_string())
+                                        .filter(|l| !l.is_empty())
+                                        .collect();
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "Only limits the API. Your own File → Mirror a file… is never \
+                                     restricted. Without a limit, anything holding the API key can \
+                                     point a card at a file and read it back.",
+                                )
+                                .weak()
+                                .small(),
                             );
+                        });
+                        ui.end_row();
+
+                        ui.label("Port");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut self.api_port).range(1024..=65535));
+                            ui.weak("(restart to apply — or launch with --port)")
+                                .on_hover_text(
+                                    "One instance serves one document, so the port is how an agent \
+                                     addresses this document. Launch with --port to pin it, and \
+                                     --data-dir to give an instance its own key/port/settings so \
+                                     several can run at once. GET /api/instance reports which \
+                                     document a port is serving.",
+                                );
+                        });
+                        ui.end_row();
+
+                        ui.label("LAN access");
+                        if ui
+                            .checkbox(&mut self.api_lan, "Allow other devices on my network")
+                            .on_hover_text(
+                                "Binds the API to all network interfaces (0.0.0.0) so the \
+                                 mobile app and other devices can reach it. Still requires \
+                                 the API key. Only enable on trusted networks — never expose \
+                                 to the internet without a TLS proxy. Takes effect immediately.",
+                            )
+                            .changed()
+                        {
+                            self.restart_api(ctx);
+                        }
+                        ui.end_row();
                     });
-                    ui.end_row();
 
-                    ui.label("LAN access");
-                    if ui
-                        .checkbox(&mut self.api_lan, "Allow other devices on my network")
+                    ui.add_space(10.0);
+                    ui.heading("Document");
+                    ui.checkbox(&mut self.autosave, "Autosave changes")
                         .on_hover_text(
-                            "Binds the API to all network interfaces (0.0.0.0) so the \
-                             mobile app and other devices can reach it. Still requires \
-                             the API key. Only enable on trusted networks — never expose \
-                             to the internet without a TLS proxy. Takes effect immediately.",
-                        )
-                        .changed()
-                    {
-                        self.restart_api(ctx);
-                    }
-                    ui.end_row();
-                });
-
-                ui.add_space(10.0);
-                ui.heading("Document");
-                ui.checkbox(&mut self.autosave, "Autosave changes")
-                    .on_hover_text(
-                        "Save changes to disk automatically a couple of seconds after \
-                         you stop editing (like Google Docs). Written atomically. When \
-                         off, save manually with Ctrl+S; changes are still saved on exit.",
-                    );
-
-                ui.add_space(10.0);
-                ui.heading("Version history");
-                ui.small(
-                    egui::RichText::new(
-                        "Each snapshot is a complete copy of the document, so these settings \
-                         trade disk space and save time against how far back you can go. On a \
-                         large document (lots of images) keep fewer, spaced further apart.",
-                    )
-                    .weak(),
-                );
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut self.history_keep)
-                            .range(HISTORY_KEEP_RANGE)
-                            .speed(0.25),
-                    );
-                    ui.label("snapshots kept");
-                });
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut self.history_gap_mins)
-                            .range(HISTORY_GAP_MINS_RANGE)
-                            .speed(0.5),
-                    );
-                    ui.label("minutes between snapshots")
-                        .on_hover_text(
-                            "A burst of edits saves repeatedly; without a gap that would churn \
-                             through the whole history in a minute.",
+                            "Save changes to disk automatically a couple of seconds after \
+                             you stop editing (like Google Docs). Written atomically. When \
+                             off, save manually with Ctrl+S; changes are still saved on exit.",
                         );
-                });
-                // Concrete numbers beat abstract settings: show what this costs
-                // for THIS document, using the size it actually is on disk.
-                if let Some(sz) = self
-                    .doc_path
-                    .as_ref()
-                    .and_then(|p| std::fs::metadata(p).ok())
-                    .map(|m| m.len())
-                {
+
+                    ui.add_space(10.0);
+                    ui.heading("Version history");
                     ui.small(
-                        egui::RichText::new(format!(
-                            "This document is {:.1} MB, so history can reach about {:.1} MB.",
-                            sz as f64 / 1e6,
-                            (sz as f64 / 1e6) * self.history_keep as f64
-                        ))
+                        egui::RichText::new(
+                            "Each snapshot is a complete copy of the document, so these settings \
+                             trade disk space and save time against how far back you can go. On a \
+                             large document (lots of images) keep fewer, spaced further apart.",
+                        )
                         .weak(),
                     );
-                }
-                ui.small(
-                    egui::RichText::new(
-                        "No snapshot is taken when you close the app — the document is saved \
-                         either way, and skipping it keeps closing quick on a big document.",
-                    )
-                    .weak(),
-                );
-
-                ui.add_space(10.0);
-                ui.heading("Daily notes");
-                ui.small(
-                    egui::RichText::new(
-                        "Off unless you choose a journal root. Trellis then keeps \
-                         <root> → <month> → <day> under it, and Ctrl+T opens today's node, \
-                         creating it only if it isn't there. Nothing dated is ever created \
-                         any other way. This setting belongs to this instance, so one \
-                         document can keep a journal while another never grows one.",
-                    )
-                    .weak(),
-                );
-                let current = self
-                    .daily_root
-                    .and_then(|id| self.doc.nodes.get(&id).map(|n| (id, n.title.clone())));
-                ui.horizontal(|ui| {
-                    ui.label("Journal root:");
-                    match &current {
-                        Some((id, title)) => {
-                            ui.label(egui::RichText::new(format!("{title}  (#{id})")).strong());
-                        }
-                        None => {
-                            ui.label(egui::RichText::new("none — daily notes are off").weak());
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    let sel = self.selected.and_then(|id| {
-                        self.doc.nodes.get(&id).map(|n| (id, n.title.clone()))
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.history_keep)
+                                .range(HISTORY_KEEP_RANGE)
+                                .speed(0.25),
+                        );
+                        ui.label("snapshots kept");
                     });
-                    let label = match &sel {
-                        Some((_, t)) => format!("Use selected node: {t}"),
-                        None => "Select a node in the tree first".to_string(),
-                    };
-                    if ui
-                        .add_enabled(sel.is_some(), egui::Button::new(label))
-                        .on_hover_text(
-                            "Point it at the node holding your journal — for a year-per-root \
-                             tree, the year itself. When the year turns over, Trellis moves to \
-                             that year's sibling rather than nesting the new year inside the old.",
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.history_gap_mins)
+                                .range(HISTORY_GAP_MINS_RANGE)
+                                .speed(0.5),
+                        );
+                        ui.label("minutes between snapshots")
+                            .on_hover_text(
+                                "A burst of edits saves repeatedly; without a gap that would churn \
+                                 through the whole history in a minute.",
+                            );
+                    });
+                    // Concrete numbers beat abstract settings: show what this costs
+                    // for THIS document, using the size it actually is on disk.
+                    if let Some(sz) = self
+                        .doc_path
+                        .as_ref()
+                        .and_then(|p| std::fs::metadata(p).ok())
+                        .map(|m| m.len())
+                    {
+                        ui.small(
+                            egui::RichText::new(format!(
+                                "This document is {:.1} MB, so history can reach about {:.1} MB.",
+                                sz as f64 / 1e6,
+                                (sz as f64 / 1e6) * self.history_keep as f64
+                            ))
+                            .weak(),
+                        );
+                    }
+                    ui.small(
+                        egui::RichText::new(
+                            "No snapshot is taken when you close the app — the document is saved \
+                             either way, and skipping it keeps closing quick on a big document.",
                         )
-                        .clicked()
-                    {
-                        if let Some((id, _)) = sel {
-                            self.daily_root = Some(id);
-                        }
-                    }
-                    if ui
-                        .add_enabled(self.daily_root.is_some(), egui::Button::new("Turn off"))
-                        .on_hover_text("Stops Ctrl+T and POST /api/daily. Nothing is deleted.")
-                        .clicked()
-                    {
-                        self.daily_root = None;
-                    }
-                });
+                        .weak(),
+                    );
 
-                ui.add_space(10.0);
-                ui.heading("Canvas");
-                ui.checkbox(
-                    &mut self.zoom_enabled,
-                    "Zoom with Ctrl+scroll and Ctrl +/−",
-                )
-                .on_hover_text("Ctrl+0 and Reset view still reset zoom when this is off.");
-                ui.checkbox(&mut self.minimap_enabled, "Minimap (overview + view reticle, bottom-right)")
-                    .on_hover_text(
-                        "A small map of the whole basket in the canvas corner, with a box showing \
-                         your current view. Click or drag on it to jump the view. Spot cards that \
-                         sit outside the main cluster without zooming out.",
+                    ui.add_space(10.0);
+                    ui.heading("Daily notes");
+                    ui.small(
+                        egui::RichText::new(
+                            "Off unless you choose a journal root. Trellis then keeps \
+                             <root> → <month> → <day> under it, and Ctrl+T opens today's node, \
+                             creating it only if it isn't there. Nothing dated is ever created \
+                             any other way. This setting belongs to this instance, so one \
+                             document can keep a journal while another never grows one.",
+                        )
+                        .weak(),
                     );
-                ui.separator();
-                ui.label(egui::RichText::new("Notifications").strong());
-                ui.label(
-                    egui::RichText::new(
-                        "Desktop notifications, from this instance, about this document. \
-                         They only fire while Trellis is running — a desktop app is not a \
-                         service — and never while this window has focus, because an edit \
-                         you can see does not need announcing. For something that reaches \
-                         you with Trellis closed, and that waits to be dealt with rather \
-                         than being swiped away, use the Telegram plugin.",
+                    let current = self
+                        .daily_root
+                        .and_then(|id| self.doc.nodes.get(&id).map(|n| (id, n.title.clone())));
+                    ui.horizontal(|ui| {
+                        ui.label("Journal root:");
+                        match &current {
+                            Some((id, title)) => {
+                                ui.label(egui::RichText::new(format!("{title}  (#{id})")).strong());
+                            }
+                            None => {
+                                ui.label(egui::RichText::new("none — daily notes are off").weak());
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let sel = self.selected.and_then(|id| {
+                            self.doc.nodes.get(&id).map(|n| (id, n.title.clone()))
+                        });
+                        let label = match &sel {
+                            Some((_, t)) => format!("Use selected node: {t}"),
+                            None => "Select a node in the tree first".to_string(),
+                        };
+                        if ui
+                            .add_enabled(sel.is_some(), egui::Button::new(label))
+                            .on_hover_text(
+                                "Point it at the node holding your journal — for a year-per-root \
+                                 tree, the year itself. When the year turns over, Trellis moves to \
+                                 that year's sibling rather than nesting the new year inside the old.",
+                            )
+                            .clicked()
+                        {
+                            if let Some((id, _)) = sel {
+                                self.daily_root = Some(id);
+                            }
+                        }
+                        if ui
+                            .add_enabled(self.daily_root.is_some(), egui::Button::new("Turn off"))
+                            .on_hover_text("Stops Ctrl+T and POST /api/daily. Nothing is deleted.")
+                            .clicked()
+                        {
+                            self.daily_root = None;
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    ui.heading("Canvas");
+                    ui.checkbox(
+                        &mut self.zoom_enabled,
+                        "Zoom with Ctrl+scroll and Ctrl +/−",
                     )
-                    .weak()
-                    .small(),
-                );
-                ui.checkbox(&mut self.notify_digest, "On startup: what is overdue or due today")
-                    .on_hover_text(
-                        "Sent once when the document opens, and only when there is something \
-                         to say. A notifier that reports \"nothing due\" is one you learn to \
-                         ignore.",
-                    );
-                ui.checkbox(&mut self.notify_agent, "When an agent changes something")
-                    .on_hover_text(
-                        "Changes that arrive over the API while you are in another window. \
-                         One notification per batch, not one per card.",
-                    );
-                if !cfg!(target_os = "linux") || crate::deps::which("notify-send").is_some() {
-                    // Nothing to say: the tool is there.
-                } else {
+                    .on_hover_text("Ctrl+0 and Reset view still reset zoom when this is off.");
+                    ui.checkbox(&mut self.minimap_enabled, "Minimap (overview + view reticle, bottom-right)")
+                        .on_hover_text(
+                            "A small map of the whole basket in the canvas corner, with a box showing \
+                             your current view. Click or drag on it to jump the view. Spot cards that \
+                             sit outside the main cluster without zooming out.",
+                        );
+                    ui.separator();
+                    ui.label(egui::RichText::new("Notifications").strong());
                     ui.label(
                         egui::RichText::new(
-                            "notify-send is not installed, so nothing can be delivered — \
-                             Tools → Requirements… installs it.",
+                            "Desktop notifications, from this instance, about this document. \
+                             They only fire while Trellis is running — a desktop app is not a \
+                             service — and never while this window has focus, because an edit \
+                             you can see does not need announcing. For something that reaches \
+                             you with Trellis closed, and that waits to be dealt with rather \
+                             than being swiped away, use the Telegram plugin.",
                         )
                         .weak()
                         .small(),
                     );
-                }
-                ui.separator();
-                ui.checkbox(&mut self.dock_mode, "Dock mode (drag a card onto another to stick it)")
-                    .on_hover_text(
-                        "When on, dropping a card on another docks them so they move together; \
-                         drag a docked card off to detach. Grouping works regardless.",
-                    );
-                ui.checkbox(&mut self.snap_mode, "Snap mode (align card edges while dragging)")
-                    .on_hover_text("When on, a dragged card's edges snap to nearby cards' edges.");
-                if cfg!(target_os = "linux") {
-                    let sel = self.selected;
-                    let on = sel.is_some() && self.desktop_mode == sel;
-                    let mut want = on;
-                    let r = ui.checkbox(
-                        &mut want,
-                        "Desktop mode (this basket's cards become windows on your desktop)",
-                    );
-                    r.on_hover_text(
-                        "Every card in the open basket becomes its own borderless window,                          keeping the arrangement it has here — move the Trellis window away                          and the cards stay on your desktop among your other applications.                          Turn it off to bring them all back.
-
-Linux/X11 only: elsewhere an                          application may not place its own windows.",
-                    );
-                    if want != on {
-                        if let Some(n) = sel {
-                            #[cfg(target_os = "linux")]
-                            if want {
-                                if let Some(prev) = self.desktop_mode {
-                                    self.recall_basket_from_desktop(prev);
+                    ui.checkbox(&mut self.notify_digest, "On startup: what is overdue or due today")
+                        .on_hover_text(
+                            "Sent once when the document opens, and only when there is something \
+                             to say. A notifier that reports \"nothing due\" is one you learn to \
+                             ignore.",
+                        );
+                    ui.checkbox(&mut self.notify_agent, "When an agent changes something")
+                        .on_hover_text(
+                            "Changes that arrive over the API while you are in another window. \
+                             One notification per batch, not one per card.",
+                        );
+                    if !cfg!(target_os = "linux") || crate::deps::which("notify-send").is_some() {
+                        // Nothing to say: the tool is there.
+                    } else {
+                        ui.label(
+                            egui::RichText::new(
+                                "notify-send is not installed, so nothing can be delivered — \
+                                 Tools → Requirements… installs it.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut self.dock_mode, "Dock mode (drag a card onto another to stick it)")
+                        .on_hover_text(
+                            "When on, dropping a card on another docks them so they move together; \
+                             drag a docked card off to detach. Grouping works regardless.",
+                        );
+                    ui.checkbox(&mut self.snap_mode, "Snap mode (align card edges while dragging)")
+                        .on_hover_text("When on, a dragged card's edges snap to nearby cards' edges.");
+                    if cfg!(target_os = "linux") {
+                        let sel = self.selected;
+                        let on = sel.is_some() && self.desktop_mode == sel;
+                        let mut want = on;
+                        let r = ui.checkbox(
+                            &mut want,
+                            "Desktop mode (this basket's cards become windows on your desktop)",
+                        );
+                        r.on_hover_text(
+                            // Continued with `\` on every line: written as a plain
+                            // multi-line literal, the source indentation became part
+                            // of the tooltip, which showed a 26-space gap mid-sentence.
+                            "Every card in the open basket becomes its own borderless \
+                             window, keeping the arrangement it has here — move the \
+                             Trellis window away and the cards stay on your desktop \
+                             among your other applications. Turn it off to bring them \
+                             all back.\n\nLinux/X11 only: elsewhere an application may \
+                             not place its own windows.",
+                        );
+                        if want != on {
+                            if let Some(n) = sel {
+                                #[cfg(target_os = "linux")]
+                                if want {
+                                    if let Some(prev) = self.desktop_mode {
+                                        self.recall_basket_from_desktop(prev);
+                                    }
+                                    let c = ctx.clone();
+                                    self.send_basket_to_desktop(&c, n);
+                                } else {
+                                    self.recall_basket_from_desktop(n);
                                 }
-                                let c = ctx.clone();
-                                self.send_basket_to_desktop(&c, n);
-                            } else {
-                                self.recall_basket_from_desktop(n);
                             }
                         }
                     }
-                }
-                ui.label(
-                    egui::RichText::new(
-                        "Hypercube — a basket is x and y; these two add z and time.",
-                    )
-                    .strong(),
-                );
-                ui.checkbox(&mut self.depth_mode, "Depth (z) — the basket is a volume")
-                    .on_hover_text(
-                        "Cards get a real depth instead of a stacking order: near ones are \
-                         larger and cover far ones, and Shift+scroll over a card slides it \
-                         toward or away from you. Off is exactly the flat canvas — a card's \
-                         depth is kept either way, so turning this off never loses an \
-                         arrangement, and with it off the depth is simply the stacking order.",
+                    ui.label(
+                        egui::RichText::new(
+                            "Hypercube — a basket is x and y; these two add z and time.",
+                        )
+                        .strong(),
                     );
-                ui.checkbox(&mut self.time_mode, "Time — a task is present on every day it spans")
-                    .on_hover_text(
-                        "A card carrying start:: and due:: is shown in every day between them, \
-                         as the same card — one id, one truth, edited in any of them. Off, a \
-                         day shows only the cards that live in it, exactly as now.",
-                    );
-                // Colour emoji come from a font on the machine, not from the
-                // app: say which one, because "still grey" otherwise looks like
-                // a bug rather than a missing font.
-                ui.add_space(4.0);
-                ui.weak(self.emoji.status())
-                    .on_hover_text(
-                        "Emoji are drawn from a colour font's bitmaps, painted over the text. \
-                         Windows' Segoe UI Emoji stores its colour as vector layers rather than \
-                         bitmaps, so it can't be used this way and emoji stay monochrome there.",
-                    );
+                    ui.checkbox(&mut self.depth_mode, "Depth (z) — the basket is a volume")
+                        .on_hover_text(
+                            "Cards get a real depth instead of a stacking order: near ones are \
+                             larger and cover far ones, and Shift+scroll over a card slides it \
+                             toward or away from you. Off is exactly the flat canvas — a card's \
+                             depth is kept either way, so turning this off never loses an \
+                             arrangement, and with it off the depth is simply the stacking order.",
+                        );
+                    ui.checkbox(&mut self.time_mode, "Time — a task is present on every day it spans")
+                        .on_hover_text(
+                            "A card carrying start:: and due:: is shown in every day between them, \
+                             as the same card — one id, one truth, edited in any of them. Off, a \
+                             day shows only the cards that live in it, exactly as now.",
+                        );
+                    // Colour emoji come from a font on the machine, not from the
+                    // app: say which one, because "still grey" otherwise looks like
+                    // a bug rather than a missing font.
+                    ui.add_space(4.0);
+                    ui.weak(self.emoji.status())
+                        .on_hover_text(
+                            "Emoji are drawn from a colour font's bitmaps, painted over the text. \
+                             Windows' Segoe UI Emoji stores its colour as vector layers rather than \
+                             bitmaps, so it can't be used this way and emoji stay monochrome there.",
+                        );
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.label("Authenticate with a header, then call the endpoints:");
-                ui.add_space(4.0);
-                let port = self.api_port;
-                let host = if self.api_lan {
-                    local_ip().unwrap_or_else(|| "127.0.0.1".to_string())
-                } else {
-                    "127.0.0.1".to_string()
-                };
-                ui.code(format!(
-                    "curl -H 'X-API-Key: {}' \\\n     http://{}:{}/api/tree",
-                    if self.api_key.is_empty() { "<key>" } else { &self.api_key },
-                    host,
-                    port
-                ));
-                ui.add_space(4.0);
-                // Copy-paste starters with this instance's real host/port/key —
-                // the endpoint list says what exists, these say how to drive it.
-                ui.collapsing("Examples", |ui| {
-                    let k = if self.api_key.is_empty() { "<key>" } else { &self.api_key };
-                    let a = format!("http://{host}:{port}/api");
-                    for (what, cmd) in [
-                        (
-                            "Which document is this?",
-                            format!("curl -H 'X-API-Key: {k}' {a}/instance"),
-                        ),
-                        (
-                            "The tree, then one basket, then one card",
-                            format!(
-                                "curl -H 'X-API-Key: {k}' {a}/tree\n\
-                                 curl -H 'X-API-Key: {k}' {a}/nodes/1\n\
-                                 curl -H 'X-API-Key: {k}' {a}/nodes/1/cards/1"
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label("Authenticate with a header, then call the endpoints:");
+                    ui.add_space(4.0);
+                    let port = self.api_port;
+                    let host = if self.api_lan {
+                        local_ip().unwrap_or_else(|| "127.0.0.1".to_string())
+                    } else {
+                        "127.0.0.1".to_string()
+                    };
+                    ui.code(format!(
+                        "curl -H 'X-API-Key: {}' \\\n     http://{}:{}/api/tree",
+                        if self.api_key.is_empty() { "<key>" } else { &self.api_key },
+                        host,
+                        port
+                    ));
+                    ui.add_space(4.0);
+                    // Copy-paste starters with this instance's real host/port/key —
+                    // the endpoint list says what exists, these say how to drive it.
+                    ui.collapsing("Examples", |ui| {
+                        let k = if self.api_key.is_empty() { "<key>" } else { &self.api_key };
+                        let a = format!("http://{host}:{port}/api");
+                        for (what, cmd) in [
+                            (
+                                "Which document is this?",
+                                format!("curl -H 'X-API-Key: {k}' {a}/instance"),
                             ),
-                        ),
-                        (
-                            "Add a card (fit sizes it to its content)",
-                            format!(
-                                "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"text\",\"title\":\"Note\",\
-                                 \"body\":\"Hello\",\"fit\":true}}' \\\n     {a}/nodes/1/cards"
+                            (
+                                "The tree, then one basket, then one card",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' {a}/tree\n\
+                                     curl -H 'X-API-Key: {k}' {a}/nodes/1\n\
+                                     curl -H 'X-API-Key: {k}' {a}/nodes/1/cards/1"
+                                ),
                             ),
-                        ),
-                        (
-                            "A task — lands in the Agenda and Kanban",
-                            format!(
-                                "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"text\",\"title\":\"Ship it\",\
-                                 \"body\":\"due:: 2026-08-15\\nstatus:: todo\",\"fit\":true}}' \\\n     {a}/nodes/1/cards"
+                            (
+                                "Add a card (fit sizes it to its content)",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"text\",\"title\":\"Note\",\
+                                     \"body\":\"Hello\",\"fit\":true}}' \\\n     {a}/nodes/1/cards"
+                                ),
                             ),
-                        ),
-                        (
-                            "A table, populated in one call",
-                            format!(
-                                "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"table\",\"title\":\"Revenue\",\
-                                 \"rows\":[[\"Quarter\",\"Revenue\"],[\"Q1\",\"1200\"],[\"Q2\",\"1850\"]]}}' \\\n     {a}/nodes/1/cards"
+                            (
+                                "A task — lands in the Agenda and Kanban",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"text\",\"title\":\"Ship it\",\
+                                     \"body\":\"due:: 2026-08-15\\nstatus:: todo\",\"fit\":true}}' \\\n     {a}/nodes/1/cards"
+                                ),
                             ),
-                        ),
-                        (
-                            "Make that table readable (columns are 110px and don't wrap)",
-                            format!(
-                                "curl -H 'X-API-Key: {k}' -d '{{\"op\":\"autofit_cols\"}}' {a}/nodes/1/cards/1/table\n\
-                                 curl -X PATCH -H 'X-API-Key: {k}' -d '{{\"fit\":true}}' {a}/nodes/1/cards/1   # then the frame"
+                            (
+                                "A table, populated in one call",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"table\",\"title\":\"Revenue\",\
+                                     \"rows\":[[\"Quarter\",\"Revenue\"],[\"Q1\",\"1200\"],[\"Q2\",\"1850\"]]}}' \\\n     {a}/nodes/1/cards"
+                                ),
                             ),
-                        ),
-                        (
-                            "Chart that table (bar | line | scatter | pie)",
-                            format!(
-                                "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"bar\"}}' {a}/nodes/1/cards/1/chart\n\
-                                 curl -X DELETE -H 'X-API-Key: {k}' {a}/nodes/1/cards/1/chart   # back to a grid"
+                            (
+                                "Make that table readable (columns are 110px and don't wrap)",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' -d '{{\"op\":\"autofit_cols\"}}' {a}/nodes/1/cards/1/table\n\
+                                     curl -X PATCH -H 'X-API-Key: {k}' -d '{{\"fit\":true}}' {a}/nodes/1/cards/1   # then the frame"
+                                ),
                             ),
-                        ),
-                        (
-                            "Just this project's tasks",
-                            format!("curl -H 'X-API-Key: {k}' '{a}/tasks?project=1'"),
-                        ),
-                        (
-                            "Wake the moment anything changes",
-                            format!("curl -H 'X-API-Key: {k}' '{a}/wait?rev=0'"),
-                        ),
-                        (
-                            "…then ask what actually changed (re-read only that)",
-                            format!("curl -H 'X-API-Key: {k}' '{a}/changes?since=0'"),
-                        ),
-                        (
-                            "Mirror a file in a card (read-only, tracks the file)",
-                            format!(
-                                "curl -X POST -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
-                                 -d '{{\"kind\":\"text\",\"title\":\"README\",\
-                                 \"source\":\"/srv/app/README.md\",\"fit\":true}}' \\\n  \
-                                 {a}/nodes/1/cards\n\
-                                 # detach later (keeps the text):\n\
-                                 curl -X PATCH -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
-                                 -d '{{\"source\":\"\"}}' {a}/nodes/1/cards/2"
+                            (
+                                "Chart that table (bar | line | scatter | pie)",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' -d '{{\"kind\":\"bar\"}}' {a}/nodes/1/cards/1/chart\n\
+                                     curl -X DELETE -H 'X-API-Key: {k}' {a}/nodes/1/cards/1/chart   # back to a grid"
+                                ),
                             ),
-                        ),
-                    ] {
-                        ui.small(egui::RichText::new(what).strong());
-                        ui.code(cmd);
-                        ui.add_space(4.0);
-                    }
-                    ui.small(
-                        egui::RichText::new("Node/card ids above are placeholders — right-click a node or card → Copy → id.")
-                            .weak(),
-                    );
-                });
-                ui.add_space(4.0);
-                ui.collapsing("Endpoints", |ui| {
-                    for line in [
-                        "GET    /api/health                        (no auth)",
-                        "GET    /api/instance   → which document this port serves",
-                        "GET    /api/settings   → theme, canvas toggles, panels, notifications, retention",
-                        "POST   /api/settings   {theme?, tree_sort?, minimap?, notify_digest?, …}",
-                        "GET    /api/tree",
-                        "GET    /api/nodes",
-                        "POST   /api/nodes               {parent?, title}",
-                        "GET    /api/nodes/{id}",
-                        "PATCH  /api/nodes/{id}          {title?, color?, bg?}",
-                        "DELETE /api/nodes/{id}",
-                        "POST   /api/nodes/{id}/move     {before|after|index|to, parent?}",
-                        "POST   /api/nodes/{id}/expand   {expanded, recursive?}",
-                        "POST   /api/expand              {expanded}   (the whole tree)",
-                        "GET    /api/nodes/{id}/backlinks          (cards that [[link]] here)",
-                        "GET    /api/graph                         (wiki-link nodes + edges)",
-                        "GET    /api/nodes/{id}/cards",
-                        "GET    /api/nodes/{id}/cards/{cid}        (one card, without the whole basket)",
-                        "GET    /api/cards/{cid}                   (find a card from its id alone → {node, node_path, card})",
-                        "GET    /api/cards/{cid}/link              (canonical trellis:// link for this card)",
-                        "GET    /open/card/{cid} · /open/node/{id} · /open/group/{gid}  (no key — what a trellis:// link opens)",
-                        "GET    /api/cards/{cid}/backlinks         (cards whose [[#id]] links point at this card)",
-                        "GET    /api/cards?ids=1391,1392           (read a LIST of cards, any baskets; 'missing' names the ids that are gone)",
-                        "POST   /api/cards/property {cards:[ids], key, value}  ·  DELETE …/property {cards, key}",
-                        "         one property, cards ANYWHERE — for the id lists /api/tasks and /api/claims hand back (whole-document: no confined tokens)",
-                        "PATCH  /api/cards/{cid}   ·  DELETE /api/cards/{cid}          (a card id is a complete address for WRITES too)",
-                        "POST   /api/cards/{cid}/property {key,value}  ·  DELETE …/property?key=due",
-                        "POST   /api/cards/{cid}/move {node,pos?} | {before|after|index|to}",
-                        "POST   /api/cards/{cid}/items/{item}/done {done}  ·  …/items/{item}/property (POST/DELETE)",
-                        "POST   /api/cards/{cid}/append {text, at?, separator?}        (add to a shared card without sending the body back)",
-                        "POST   /api/cards/{cid}/items  {text, done?, at?}  ·  DELETE …/items/{item}   (one line; ids of the rest stay put)",
-                        "         same operations as the /nodes/{id}/cards/{cid}/… twins — no need to look the basket up first",
-                        "GET    /api/groups/{gid}                  (find a group from its id alone → {node, node_path, group})",
-                        "GET    /api/groups/{gid}/link             (canonical trellis:// link + the [[#g…]] form)",
-                        "GET    /api/groups/{gid}/backlinks        (cards whose [[#g…]] links point at this group)",
-                        "POST   /api/nodes/{id}/cards/{cid}/items/{item}/property {key, value}   (one checklist LINE)",
-                        "DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due",
-                        "POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done}   (tick a line)",
-                        "POST   /api/daily  {date?}                (a day's journal node, created on demand; opt-in per instance)",
-                        "GET    /api/daily                         (is it on, and which node is the journal root)",
-                        "POST   /api/daily/root {node}   /   DELETE /api/daily/root   (turn it on / off)",
-                        "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, fit?, image_base64?, inline_images?, source?}",
-                        "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, z?, size?, items?, source?, emphasis?, emphasis_intensity?, emphasis_minutes?, …}",
-                        "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
-                        "DELETE /api/nodes/{id}/cards/{cid}",
-                        "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
-                        "POST   /api/nodes/{id}/cards    [ {…}, {…} ]      (an ARRAY creates a batch; ids come back in order)",
-                        "POST   /api/nodes/{id}/cards/move        {cards:[ids], node, pos?, gap?}  (batch; whole list validated first)",
-                        "POST   /api/nodes/{id}/cards/property    {cards:[ids], key, value}        (one property, many cards)",
-                        "DELETE /api/nodes/{id}/cards/property    {cards:[ids], key}               (take it back off them; key in the BODY here)",
-                        "PATCH  /api/nodes/{id}/cards             {cards:[ids], color?, size?, fit?, font_scale?, z?, emphasis?…}",
-                        "         presentation only — title/body/items/rows/kind/lang/header/source are refused BY NAME (one card at a time)",
-                        "DELETE /api/nodes/{id}/cards             {cards:[ids]}                    (validated in full first; no 'all' form)",
-                        "POST   /api/nodes/{id}/desktop           (DESKTOP MODE — the whole basket becomes windows; DELETE brings it back)",
-                        "GET    /api/desktop                      (cards out on the desktop as their own windows; Linux/X11)",
-                        "POST   /api/cards/{cid}/desktop {pos?}   (send a card to the desktop; DELETE recalls it)",
-                        "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
-                        "DELETE /api/nodes/{id}/cards/{cid}/property?key=due        (remove the line; not the same as value:\"\")",
-                        "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE …/dock)",
-                        "POST   /api/nodes/{id}/cards/{cid}/group {group}           (remove: DELETE …/group)",
-                        "POST   /api/nodes/{id}/cards/{cid}/table {op, …}           (set_cell / insert_row / set_col_width / autofit_cols {col?} …)",
-                        "         …or send an ARRAY of ops, applied in order; a failure names which one",
-                        "         set_rules {rules:[{col?,when,value,bg?,fg?}]}  colour cells by value (gt/lt/ge/le/eq/ne/contains/empty)",
-                        "POST   /api/nodes/{id}/cards/{cid}/chart {kind, label_col?, value_cols?, show_table?}  (bar|line|scatter|pie; DELETE …/chart = plain grid)",
-                        "POST   /api/nodes/{id}/cards/{cid}/sketch {op, …}          (add_stroke / undo / clear)",
-                        "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}    (GET / DELETE …/images/{idx})",
-                        "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",
-                        "POST   /api/nodes/{id}/groups/{gid}/move  {node, pos?}     (the whole group — container, members and id)",
-                        "POST   /api/nodes/{id}/autosort",
-                        "GET    /api/nodes/{id}/overlaps           (which cards cover each other)",
-                        "POST   /api/nodes/{id}/overlaps           (push them clear, keeping x)",
-                        "GET    /api/search?q=...                  (hits carry node + card)",
-                        "GET    /api/tags[?name=<tag>]             (all tags / cards with a tag)",
-                        "GET    /api/properties[?key=<k>&value=<v>]   (keys / matching cards)",
-                        "GET    /api/query?tag=&key=&value=&text=  (combined card query)",
-                        "GET    /api/tasks[?all=true][&project=<id>]  (due:: agenda, bucketed)",
-                        "GET    /api/kanban[?project=<id>]         (cards grouped by status:: → columns)",
-                        "GET    /api/claims[?expired=true][&project=<id>]  (verify:: — which stated facts are out of date)",
-                        "POST   /api/ocr                           (OCR all un-OCR'd images)",
-                        "GET    /api/export?format=markdown|html|json|pdf|png|gif",
-                        "GET    /api/wait?rev=<n>                  (long-poll: that something changed, + epoch)",
-                        "GET    /api/changes?since=<seq>[&limit=<n>]  (what changed: actor/entity/op/fields/property)",
-                        "GET    /api/history                       (version snapshots + keep / min_gap_mins retention)",
-                        "POST   /api/history/restore     {file}    (restore a snapshot)",
-                        "GET    /api/backup                        (status)",
-                        "POST   /api/backup/run                    (back up now)",
-                        "GET    /api/templates                     (saved card templates)",
-                        "POST   /api/templates          {node, card, title?}   (save a card as a template + master)",
-                        "POST   /api/templates/{i}/insert {node, pos?}         (stamp it into a basket)",
-                        "POST   /api/templates/{i}/update {node, card, title?} (re-snapshot in place from a card)",
-                        "DELETE /api/templates/{i}                             (also deletes its master card)",
-                        "POST   /api/templates/rebuild                         (give every template a master card)",
-                        "",
-                        "Full reference: API.md in the source repo.",
-                    ] {
-                        ui.monospace(line);
-                    }
-                });
+                            (
+                                "Just this project's tasks",
+                                format!("curl -H 'X-API-Key: {k}' '{a}/tasks?project=1'"),
+                            ),
+                            (
+                                "Wake the moment anything changes",
+                                format!("curl -H 'X-API-Key: {k}' '{a}/wait?rev=0'"),
+                            ),
+                            (
+                                "…then ask what actually changed (re-read only that)",
+                                format!("curl -H 'X-API-Key: {k}' '{a}/changes?since=0'"),
+                            ),
+                            (
+                                "Mirror a file in a card (read-only, tracks the file)",
+                                format!(
+                                    "curl -X POST -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                     -d '{{\"kind\":\"text\",\"title\":\"README\",\
+                                     \"source\":\"/srv/app/README.md\",\"fit\":true}}' \\\n  \
+                                     {a}/nodes/1/cards\n\
+                                     # detach later (keeps the text):\n\
+                                     curl -X PATCH -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                     -d '{{\"source\":\"\"}}' {a}/nodes/1/cards/2"
+                                ),
+                            ),
+                            (
+                                "Act on a card by its id alone — no basket lookup",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' -d '{{\"key\":\"status\",\"value\":\"done\"}}' \\\n  \
+                                     {a}/cards/1391/property
+                                     # and take its date off, so it LEAVES the agenda:
+                                     curl -X DELETE -H 'X-API-Key: {k}' '{a}/cards/1391/property?key=due'"
+                                ),
+                            ),
+                            (
+                                "Add to a card we both write to (no read-modify-write)",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                     -d '{{\"text\":\"**note** — appended on the server\"}}' \\\n  \
+                                     {a}/cards/1391/append"
+                                ),
+                            ),
+                            (
+                                "A whole list at once — any baskets (what /tasks hands you)",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' '{a}/cards?ids=1391,1392'
+                                     curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                     -d '{{\"cards\":[1391,1392],\"key\":\"status\",\"value\":\"done\"}}' \\\n  \
+                                     {a}/cards/property"
+                                ),
+                            ),
+                            (
+                                "Archive a basket's finished cards in one call (ids survive)",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                     -d '{{\"cards\":[1836,1837],\"node\":378,\"pos\":[40,40],\"gap\":20}}' \\\n  \
+                                     {a}/nodes/1/cards/move"
+                                ),
+                            ),
+                        ] {
+                            ui.small(egui::RichText::new(what).strong());
+                            ui.code(cmd);
+                            ui.add_space(4.0);
+                        }
+                        ui.small(
+                            egui::RichText::new("Node/card ids above are placeholders — right-click a node or card → Copy → id.")
+                                .weak(),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ui.collapsing("Endpoints", |ui| {
+                        for line in [
+                            "GET    /api/health                        (no auth)",
+                            "GET    /api/instance   → which document this port serves",
+                            "GET    /api/settings   → theme, canvas toggles, panels, notifications, retention",
+                            "POST   /api/settings   {theme?, tree_sort?, minimap?, notify_digest?, …}",
+                            "GET    /api/tree",
+                            "GET    /api/nodes",
+                            "POST   /api/nodes               {parent?, title}",
+                            "GET    /api/nodes/{id}",
+                            "PATCH  /api/nodes/{id}          {title?, color?, bg?}",
+                            "DELETE /api/nodes/{id}",
+                            "POST   /api/nodes/{id}/move     {before|after|index|to, parent?}",
+                            "POST   /api/nodes/{id}/expand   {expanded, recursive?}",
+                            "POST   /api/expand              {expanded}   (the whole tree)",
+                            "GET    /api/nodes/{id}/backlinks          (cards that [[link]] here)",
+                            "GET    /api/graph                         (wiki-link nodes + edges)",
+                            "GET    /api/nodes/{id}/cards",
+                            "GET    /api/nodes/{id}/cards/{cid}        (one card, without the whole basket)",
+                            "GET    /api/cards/{cid}                   (find a card from its id alone → {node, node_path, card})",
+                            "GET    /api/cards/{cid}/link              (canonical trellis:// link for this card)",
+                            "GET    /open/card/{cid} · /open/node/{id} · /open/group/{gid}  (no key — what a trellis:// link opens)",
+                            "GET    /api/cards/{cid}/backlinks         (cards whose [[#id]] links point at this card)",
+                            "GET    /api/cards?ids=1391,1392           (read a LIST of cards, any baskets; 'missing' names the ids that are gone)",
+                            "POST   /api/cards/property {cards:[ids], key, value}  ·  DELETE …/property {cards, key}",
+                            "         one property, cards ANYWHERE — for the id lists /api/tasks and /api/claims hand back (whole-document: no confined tokens)",
+                            "PATCH  /api/cards/{cid}   ·  DELETE /api/cards/{cid}          (a card id is a complete address for WRITES too)",
+                            "POST   /api/cards/{cid}/property {key,value}  ·  DELETE …/property?key=due",
+                            "POST   /api/cards/{cid}/move {node,pos?} | {before|after|index|to}",
+                            "POST   /api/cards/{cid}/items/{item}/done {done}  ·  …/items/{item}/property (POST/DELETE)",
+                            "POST   /api/cards/{cid}/append {text, at?, separator?}        (add to a shared card without sending the body back)",
+                            "POST   /api/cards/{cid}/items  {text, done?, at?}  ·  DELETE …/items/{item}   (one line; ids of the rest stay put)",
+                            "         same operations as the /nodes/{id}/cards/{cid}/… twins — no need to look the basket up first",
+                            "GET    /api/groups/{gid}                  (find a group from its id alone → {node, node_path, group})",
+                            "GET    /api/groups/{gid}/link             (canonical trellis:// link + the [[#g…]] form)",
+                            "GET    /api/groups/{gid}/backlinks        (cards whose [[#g…]] links point at this group)",
+                            "POST   /api/nodes/{id}/cards/{cid}/items/{item}/property {key, value}   (one checklist LINE)",
+                            "DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due",
+                            "POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done}   (tick a line)",
+                            "POST   /api/daily  {date?}                (a day's journal node, created on demand; opt-in per instance)",
+                            "GET    /api/daily                         (is it on, and which node is the journal root)",
+                            "POST   /api/daily/root {node}   /   DELETE /api/daily/root   (turn it on / off)",
+                            "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, fit?, image_base64?, inline_images?, source?}",
+                            "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body?, kind?, color?, font_scale?, fit?, pos?, z?, size?, items?, source?, emphasis?, emphasis_intensity?, emphasis_minutes?, …}",
+                            "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
+                            "DELETE /api/nodes/{id}/cards/{cid}",
+                            "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
+                            "POST   /api/nodes/{id}/cards    [ {…}, {…} ]      (an ARRAY creates a batch; ids come back in order)",
+                            "POST   /api/nodes/{id}/cards/move        {cards:[ids], node, pos?, gap?}  (batch; whole list validated first)",
+                            "POST   /api/nodes/{id}/cards/property    {cards:[ids], key, value}        (one property, many cards)",
+                            "DELETE /api/nodes/{id}/cards/property    {cards:[ids], key}               (take it back off them; key in the BODY here)",
+                            "PATCH  /api/nodes/{id}/cards             {cards:[ids], color?, size?, fit?, font_scale?, z?, emphasis?…}",
+                            "         presentation only — title/body/items/rows/kind/lang/header/source are refused BY NAME (one card at a time)",
+                            "DELETE /api/nodes/{id}/cards             {cards:[ids]}                    (validated in full first; no 'all' form)",
+                            "POST   /api/nodes/{id}/desktop           (DESKTOP MODE — the whole basket becomes windows; DELETE brings it back)",
+                            "GET    /api/desktop                      (cards out on the desktop as their own windows; Linux/X11)",
+                            "POST   /api/cards/{cid}/desktop {pos?}   (send a card to the desktop; DELETE recalls it)",
+                            "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
+                            "DELETE /api/nodes/{id}/cards/{cid}/property?key=due        (remove the line; not the same as value:\"\")",
+                            "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE …/dock)",
+                            "POST   /api/nodes/{id}/cards/{cid}/group {group}           (remove: DELETE …/group)",
+                            "POST   /api/nodes/{id}/cards/{cid}/table {op, …}           (set_cell / insert_row / set_col_width / autofit_cols {col?} …)",
+                            "         …or send an ARRAY of ops, applied in order; a failure names which one",
+                            "         set_rules {rules:[{col?,when,value,bg?,fg?}]}  colour cells by value (gt/lt/ge/le/eq/ne/contains/empty)",
+                            "POST   /api/nodes/{id}/cards/{cid}/chart {kind, label_col?, value_cols?, show_table?}  (bar|line|scatter|pie; DELETE …/chart = plain grid)",
+                            "POST   /api/nodes/{id}/cards/{cid}/sketch {op, …}          (add_stroke / undo / clear)",
+                            "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}    (GET / DELETE …/images/{idx})",
+                            "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",
+                            "POST   /api/nodes/{id}/groups/{gid}/move  {node, pos?}     (the whole group — container, members and id)",
+                            "POST   /api/nodes/{id}/autosort",
+                            "GET    /api/nodes/{id}/overlaps           (which cards cover each other)",
+                            "POST   /api/nodes/{id}/overlaps           (push them clear, keeping x)",
+                            "GET    /api/search?q=...                  (hits carry node + card)",
+                            "GET    /api/tags[?name=<tag>]             (all tags / cards with a tag)",
+                            "GET    /api/properties[?key=<k>&value=<v>]   (keys / matching cards)",
+                            "GET    /api/query?tag=&key=&value=&text=  (combined card query)",
+                            "GET    /api/tasks[?all=true][&project=<id>]  (due:: agenda, bucketed)",
+                            "GET    /api/kanban[?project=<id>]         (cards grouped by status:: → columns)",
+                            "GET    /api/claims[?expired=true][&project=<id>]  (verify:: — which stated facts are out of date)",
+                            "POST   /api/ocr                           (OCR all un-OCR'd images)",
+                            "GET    /api/export?format=markdown|html|json|pdf|png|gif",
+                            "GET    /api/wait?rev=<n>                  (long-poll: that something changed, + epoch)",
+                            "GET    /api/changes?since=<seq>[&limit=<n>]  (what changed: actor/entity/op/fields/property)",
+                            "GET    /api/history                       (version snapshots + keep / min_gap_mins retention)",
+                            "POST   /api/history/restore     {file}    (restore a snapshot)",
+                            "GET    /api/backup                        (status)",
+                            "POST   /api/backup/run                    (back up now)",
+                            "GET    /api/templates                     (saved card templates)",
+                            "POST   /api/templates          {node, card, title?}   (save a card as a template + master)",
+                            "POST   /api/templates/{i}/insert {node, pos?}         (stamp it into a basket)",
+                            "POST   /api/templates/{i}/update {node, card, title?} (re-snapshot in place from a card)",
+                            "DELETE /api/templates/{i}                             (also deletes its master card)",
+                            "POST   /api/templates/rebuild                         (give every template a master card)",
+                            "",
+                            "Full reference: API.md in the source repo.",
+                        ] {
+                            ui.monospace(line);
+                        }
+                    });
+                    });
             });
         self.show_settings = open;
     }
@@ -7471,122 +7542,130 @@ Linux/X11 only: elsewhere an                          application may not place 
             .default_width(560.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label(
-                    "Full copies of your document to external locations — this is backup, \
-                     not version history. Each run writes a complete, self-contained file \
-                     (the same compressed format Trellis saves), optionally encrypted.",
-                );
-                ui.add_space(8.0);
-
-                let cfg = &mut self.backup_cfg;
-                ui.checkbox(&mut cfg.enabled, "Run scheduled backups automatically");
-                ui.horizontal(|ui| {
-                    ui.add_enabled(
-                        cfg.enabled,
-                        egui::DragValue::new(&mut cfg.interval_mins).range(0..=100_000).suffix(" min"),
-                    );
-                    ui.label("between backups (0 = manual only)");
-                });
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut cfg.retention).range(0..=10_000));
-                    ui.label("keep newest N per disk destination (0 = keep all)");
-                });
-
-                ui.add_space(6.0);
-                ui.checkbox(&mut cfg.encrypt, "Encrypt backups (gpg symmetric, AES-256)");
-                if cfg.encrypt {
-                    ui.horizontal(|ui| {
-                        ui.label("Passphrase");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut cfg.passphrase)
-                                .password(true)
-                                .desired_width(260.0)
-                                .hint_text("required to encrypt / restore"),
-                        );
-                    });
+                // Scrolls and is capped to the screen: this window holds a
+                // list that grows, and a window that simply grows with it runs
+                // off the display.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .max_height(window_body_max_height(ctx))
+                    .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new(
-                            "Restore with:  gpg -d file.ron.gz.gpg > file.ron.gz  — keep this passphrase safe; \
-                             without it the backup can't be read.",
-                        )
-                        .weak()
-                        .small(),
+                        "Full copies of your document to external locations — this is backup, \
+                         not version history. Each run writes a complete, self-contained file \
+                         (the same compressed format Trellis saves), optionally encrypted.",
                     );
-                }
+                    ui.add_space(8.0);
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.heading("Destinations");
-                    ui.menu_button("+ Add", |ui| {
-                        for kind in [DestKind::Disk, DestKind::Sftp, DestKind::Rclone] {
-                            if ui.button(kind.label()).clicked() {
-                                cfg.destinations.push(BackupDest::new(kind));
-                                ui.close_menu();
-                            }
-                        }
+                    let cfg = &mut self.backup_cfg;
+                    ui.checkbox(&mut cfg.enabled, "Run scheduled backups automatically");
+                    ui.horizontal(|ui| {
+                        ui.add_enabled(
+                            cfg.enabled,
+                            egui::DragValue::new(&mut cfg.interval_mins).range(0..=100_000).suffix(" min"),
+                        );
+                        ui.label("between backups (0 = manual only)");
                     });
-                });
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut cfg.retention).range(0..=10_000));
+                        ui.label("keep newest N per disk destination (0 = keep all)");
+                    });
 
-                let mut remove: Option<usize> = None;
-                for (i, d) in cfg.destinations.iter_mut().enumerate() {
-                    ui.push_id(i, |ui| {
-                        ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut d.enabled, "");
-                                ui.strong(d.kind.label());
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut d.name)
-                                        .desired_width(120.0)
-                                        .hint_text("label (optional)"),
-                                );
-                                if ui.button("×").on_hover_text("Remove this destination").clicked() {
-                                    remove = Some(i);
+                    ui.add_space(6.0);
+                    ui.checkbox(&mut cfg.encrypt, "Encrypt backups (gpg symmetric, AES-256)");
+                    if cfg.encrypt {
+                        ui.horizontal(|ui| {
+                            ui.label("Passphrase");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut cfg.passphrase)
+                                    .password(true)
+                                    .desired_width(260.0)
+                                    .hint_text("required to encrypt / restore"),
+                            );
+                        });
+                        ui.label(
+                            egui::RichText::new(
+                                "Restore with:  gpg -d file.ron.gz.gpg > file.ron.gz  — keep this passphrase safe; \
+                                 without it the backup can't be read.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                    }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.heading("Destinations");
+                        ui.menu_button("+ Add", |ui| {
+                            for kind in [DestKind::Disk, DestKind::Sftp, DestKind::Rclone] {
+                                if ui.button(kind.label()).clicked() {
+                                    cfg.destinations.push(BackupDest::new(kind));
+                                    ui.close_menu();
                                 }
-                            });
-                            let (label, hint) = match d.kind {
-                                DestKind::Disk => ("Directory", "/mnt/usb/trellis-backups  (a local or mounted folder)"),
-                                DestKind::Sftp => ("SSH target", "user@host:/backups/trellis  (uses your SSH keys via scp)"),
-                                DestKind::Rclone => ("Rclone remote", "gdrive:trellis-backups  (configure the remote with `rclone config`)"),
-                            };
-                            ui.horizontal(|ui| {
-                                ui.label(label);
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut d.target)
-                                        .desired_width(340.0)
-                                        .hint_text(hint),
-                                );
-                            });
+                            }
                         });
                     });
-                }
-                if let Some(i) = remove {
-                    cfg.destinations.remove(i);
-                }
-                if cfg.destinations.is_empty() {
-                    ui.weak("No destinations yet — add a Disk, Network (SFTP), or Cloud (rclone) target.");
-                }
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.backing_up, egui::Button::new("Back up now"))
-                        .clicked()
-                    {
-                        do_backup = true;
+                    let mut remove: Option<usize> = None;
+                    for (i, d) in cfg.destinations.iter_mut().enumerate() {
+                        ui.push_id(i, |ui| {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut d.enabled, "");
+                                    ui.strong(d.kind.label());
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut d.name)
+                                            .desired_width(120.0)
+                                            .hint_text("label (optional)"),
+                                    );
+                                    if ui.button("×").on_hover_text("Remove this destination").clicked() {
+                                        remove = Some(i);
+                                    }
+                                });
+                                let (label, hint) = match d.kind {
+                                    DestKind::Disk => ("Directory", "/mnt/usb/trellis-backups  (a local or mounted folder)"),
+                                    DestKind::Sftp => ("SSH target", "user@host:/backups/trellis  (uses your SSH keys via scp)"),
+                                    DestKind::Rclone => ("Rclone remote", "gdrive:trellis-backups  (configure the remote with `rclone config`)"),
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.label(label);
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut d.target)
+                                            .desired_width(340.0)
+                                            .hint_text(hint),
+                                    );
+                                });
+                            });
+                        });
                     }
-                    if self.backing_up {
-                        ui.spinner();
-                        ui.label("Backing up…");
+                    if let Some(i) = remove {
+                        cfg.destinations.remove(i);
                     }
-                });
-                if let Some(t) = self.last_backup {
-                    ui.weak(format!("Last run: {}s ago", t.elapsed().as_secs()));
-                }
-                if !self.backup_status.is_empty() {
-                    ui.label(&self.backup_status);
-                }
+                    if cfg.destinations.is_empty() {
+                        ui.weak("No destinations yet — add a Disk, Network (SFTP), or Cloud (rclone) target.");
+                    }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!self.backing_up, egui::Button::new("Back up now"))
+                            .clicked()
+                        {
+                            do_backup = true;
+                        }
+                        if self.backing_up {
+                            ui.spinner();
+                            ui.label("Backing up…");
+                        }
+                    });
+                    if let Some(t) = self.last_backup {
+                        ui.weak(format!("Last run: {}s ago", t.elapsed().as_secs()));
+                    }
+                    if !self.backup_status.is_empty() {
+                        ui.label(&self.backup_status);
+                    }
+                    });
             });
         self.show_backup = open;
         if do_backup {
