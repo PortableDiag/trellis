@@ -28,6 +28,7 @@ jobs:
   prepare:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Create the release if it isn't there yet
@@ -45,6 +46,12 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # A normal run of this job is ~13 minutes. Without a bound it inherits the
+    # runner's 6-hour default, and twice now the Linux job has wedged in apt and
+    # burned that entire budget before the run was cancelled by hand — leaving a
+    # tag whose release quietly has three of its four binaries. Failing after 30
+    # minutes turns a lost afternoon into a re-run of one job.
+    timeout-minutes: 30
     # `always()` so a manual (non-tag) run still builds, since `prepare` is
     # skipped there and a skipped dependency would otherwise skip this too.
     needs: [prepare]
@@ -85,11 +92,26 @@ jobs:
       # no libgtk-3-dev here.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
+        # Bounded and retried: this is the step that hung, both times, and a
+        # stalled mirror connection is not something `Acquire::Retries` recovers
+        # from on its own — it needs the attempt to be cut short first. Three
+        # tries of five minutes fails in fifteen instead of six hours.
+        timeout-minutes: 16
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev libwayland-dev libssl-dev
+          set -eux
+          for attempt in 1 2 3; do
+            if timeout 300 sudo apt-get -o Acquire::Retries=3 update \
+               && timeout 300 sudo apt-get -o Acquire::Retries=3 install -y \
+                    --no-install-recommends \
+                    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+                    libxkbcommon-dev libwayland-dev libssl-dev; then
+              exit 0
+            fi
+            echo "apt attempt ${attempt} failed or timed out; retrying" >&2
+            sleep 15
+          done
+          echo "apt did not complete in three bounded attempts" >&2
+          exit 1
 
       - name: Install the Rust toolchain
         shell: bash
