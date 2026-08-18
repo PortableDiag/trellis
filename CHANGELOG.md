@@ -6,6 +6,74 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.122.0]
+
+### Added
+- **A link a phone can actually follow — `GET /go/card/{cid}`** (and `/go/node/`,
+  `/go/group/`). Where `/open/…` moves the window on the machine Trellis is running
+  on, `/go/…` serves a small page that opens the target in the **Android app on the
+  device that loaded it**, and leaves the desktop alone.
+
+  It exists because of one constraint, measured rather than assumed: **Telegram
+  silently strips a link with a custom scheme.** A message containing
+  `<a href="trellis://…">` is accepted with `ok:true` and arrives with **no link
+  entity at all** — the anchor is gone, and a bare `trellis://…` is not auto-linked
+  either. Only `http(s)` survives. So a notification could not carry a tappable link
+  to a card without an `http` hop, and this is that hop.
+
+  The page builds the `trellis://` URL from **`location.host`**, the one address
+  known to be reachable from the device reading it — a link minted here would say
+  `127.0.0.1`, which on a phone is the phone. And it offers a **link to tap, not a
+  redirect**: an automatic jump to a custom scheme is what in-app browsers block,
+  while a user gesture is the case they allow. Unauthenticated, like `/open/…`, for
+  the same reason: a link nobody can click buys nothing.
+
+- **`lan_host` and `lan_hosts` on `GET /api/instance`** — the address(es) another
+  device can reach this instance on, so a plugin can build the link above. Found by
+  asking the routing table rather than enumerating interfaces (a UDP socket is
+  `connect`ed and its own local address read back; **no packet is sent**).
+
+  One probe was not enough, and the machine this was written on is why: its default
+  route is a **VPN**, so "the route off this machine" was confidently the one
+  address a phone cannot use. Each private range is probed as well and **RFC 1918
+  is preferred over CGNAT**. It is still a hint — that box reports three addresses
+  and only the reader knows which network their phone is on — so it is offered as
+  `lan_hosts` too, and the notify plugin can override it.
+
+- **The notify plugin (v1.1.0) links every card it names.** A digest line or an
+  agent-edit line is now a link that opens that card in Trellis on whatever you
+  tapped it from. `link_host` overrides the auto-detected address, which matters on
+  a VPN.
+
+### Fixed
+- **A card that *quotes* the link syntax no longer acquires the link.**
+  `wikilinks_to_md` and `extract_wikilinks` scanned raw text with no idea what code
+  was, so a card documenting `` `[[Title]]` `` had its example rewritten and
+  rendered as `` `[[Title]](trellis:Title)` `` — the URL leaking into text meant to
+  read as literal source. Worse, `extract_wikilinks` feeds **backlinks and the link
+  graph**, so a card explaining `` `[[Archive]]` `` appeared in Archive's backlinks
+  as though it pointed there.
+
+  Exactly the false-property defect v0.96.0 fixed one layer along, with the same
+  remedy and the same two helpers. Measured against the operator's own document:
+  **18 backlink hits and 7 graph edges removed, every one of them inside backticks**
+  — `` `[[wiki-link]]` ``, `` `[[#g146]]` ``, `` `[[#1391]]` ``, and two
+  deliberately-invalid examples (`` `[[#999999]]` ``, `` `[[No Such Basket]]` ``).
+  **No real link was lost**: all seven `trellis://` forms the desktop accepts still
+  resolve, and 23 genuine links in those same cards still count.
+
+  A link is also **line-scoped** now. It could previously span a newline, producing
+  a target with a newline in it that could never resolve — the defect going away,
+  not behaviour being lost.
+
+  The same hole was in the Android mirror, and is fixed there too (viewer v0.35.0).
+
+### Changed
+- **A response carries its own content type.** Every reply was labelled
+  `application/json` from a fixed header, which was harmless while every consumer
+  was a program that already knew — but a page meant for a **browser** is not
+  rendered at all under the wrong type.
+
 ## [0.121.0]
 
 ### Fixed

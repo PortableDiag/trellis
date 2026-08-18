@@ -4000,23 +4000,40 @@ impl Document {
 
 /// Targets of `[[wiki-links]]` in `text`, in order. `[[Target|Display]]` yields
 /// `Target`. Whitespace-trimmed; empties skipped.
+///
+/// **Code is skipped**, so a card that documents the syntax does not acquire the
+/// links it describes. This feeds backlinks and the link graph, which is what
+/// makes it worth more than tidiness: a handoff card writing `` `[[Archive]]` ``
+/// as an *example* was showing up in Archive's backlinks as though it pointed
+/// there, and drawing an edge in the graph. Exactly the false-property problem
+/// v0.96.0 fixed one layer along, with the same remedy and the same helpers.
 pub(crate) fn extract_wikilinks(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let b = text.as_bytes();
-    let mut i = 0;
-    while i + 1 < b.len() {
-        if b[i] == b'[' && b[i + 1] == b'[' {
-            if let Some(end) = text[i + 2..].find("]]") {
-                let inner = &text[i + 2..i + 2 + end];
-                let target = inner.split('|').next().unwrap_or("").trim();
-                if !target.is_empty() {
-                    out.push(target.to_string());
-                }
-                i = i + 2 + end + 2;
-                continue;
-            }
+    let mut in_fence = false;
+    for line in text.lines() {
+        if is_code_fence(line) {
+            in_fence = !in_fence;
+            continue;
         }
-        i += 1;
+        if in_fence {
+            continue;
+        }
+        let b = line.as_bytes();
+        let mut i = 0;
+        while i + 1 < b.len() {
+            if b[i] == b'[' && b[i + 1] == b'[' && !in_code_span(line, i) {
+                if let Some(end) = line[i + 2..].find("]]") {
+                    let inner = &line[i + 2..i + 2 + end];
+                    let target = inner.split('|').next().unwrap_or("").trim();
+                    if !target.is_empty() {
+                        out.push(target.to_string());
+                    }
+                    i = i + 2 + end + 2;
+                    continue;
+                }
+            }
+            i += 1;
+        }
     }
     out
 }
@@ -4127,14 +4144,56 @@ pub fn wikilink_segments(text: &str) -> Vec<(String, Option<String>)> {
     out
 }
 
+/// Rewrite `[[wiki-links]]` into Markdown links, **except where the card is
+/// quoting the syntax rather than using it**.
+///
+/// Code is skipped for the same reason [`extract_properties`] skips it, and it is
+/// the same defect one layer along: a card that *documents* `[[Title]]` had the
+/// example rewritten, so a handoff card explaining the link syntax rendered as
+/// `` `[[Title]](trellis:Title)` `` — the URL leaking into text that was meant to
+/// read as the literal source. Found on the Android canvas, where the rewrite is
+/// a deliberate mirror of this one and had the same hole.
+///
+/// A dead give-away that this is right: `` `[[Archive]]` `` inside backticks can
+/// never be a link anyway. The Markdown renderer would print it verbatim, so
+/// rewriting it cannot produce a link — only a mangled code span.
 pub fn wikilinks_to_md(text: &str) -> String {
-    let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    let mut first = true;
+    for line in text.split_inclusive('\n') {
+        let bare = line.strip_suffix('\n').unwrap_or(line);
+        if is_code_fence(bare) {
+            in_fence = !in_fence;
+            out.push_str(line);
+            first = false;
+            continue;
+        }
+        if in_fence {
+            out.push_str(line);
+            first = false;
+            continue;
+        }
+        out.push_str(&wikilinks_in_line(line));
+        first = false;
+    }
+    // `split_inclusive` yields nothing for an empty string, which would otherwise
+    // turn "" into "" by accident rather than by intent.
+    if first {
+        return text.to_string();
+    }
+    out
+}
+
+/// [`wikilinks_to_md`] for one line, leaving inline `` `code spans` `` alone.
+fn wikilinks_in_line(line: &str) -> String {
+    let b = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
     let mut i = 0;
     while i < b.len() {
-        if i + 1 < b.len() && b[i] == b'[' && b[i + 1] == b'[' {
-            if let Some(end) = text[i + 2..].find("]]") {
-                let inner = &text[i + 2..i + 2 + end];
+        if i + 1 < b.len() && b[i] == b'[' && b[i + 1] == b'[' && !in_code_span(line, i) {
+            if let Some(end) = line[i + 2..].find("]]") {
+                let inner = &line[i + 2..i + 2 + end];
                 let mut parts = inner.splitn(2, '|');
                 let target = parts.next().unwrap_or("").trim();
                 let display = parts.next().map(|d| d.trim()).filter(|d| !d.is_empty()).unwrap_or(target);
@@ -4145,7 +4204,7 @@ pub fn wikilinks_to_md(text: &str) -> String {
                 }
             }
         }
-        let ch = text[i..].chars().next().unwrap();
+        let ch = line[i..].chars().next().unwrap();
         out.push(ch);
         i += ch.len_utf8();
     }
@@ -4834,6 +4893,12 @@ pub(crate) fn hard_wrap(md: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// [`escape_html`] for callers outside this module — the `/go/` page puts a card
+/// title into HTML, and that title is arbitrary operator text.
+pub fn escape_html_pub(s: &str) -> String {
+    escape_html(s)
 }
 
 fn escape_html(s: &str) -> String {
@@ -6061,6 +6126,46 @@ mod tests {
 
         // An empty target is not a link; the brackets stay as written.
         assert_eq!(wikilink_segments("[[]]")[0].0, "[[]]");
+    }
+
+    /// A card that *quotes* the link syntax must not have it rewritten, and must
+    /// not acquire the link either. Both halves were broken: the rendering leaked
+    /// a URL into a code span, and the backlink scan counted the example as a real
+    /// link, so a card explaining `[[Archive]]` appeared in Archive's backlinks.
+    #[test]
+    fn quoting_the_link_syntax_is_not_using_it() {
+        // Inline code span: left exactly as written.
+        let quoted = "A `[[Title]]` link resolves to [[Roadmap]] here";
+        let md = wikilinks_to_md(quoted);
+        assert!(md.contains("`[[Title]]`"), "code span was rewritten: {md}");
+        assert!(md.contains("[Roadmap](trellis:Roadmap)"), "real link not rewritten: {md}");
+        // ...and only the real one is a backlink.
+        assert_eq!(extract_wikilinks(quoted), vec!["Roadmap".to_string()]);
+
+        // A fenced block: every line of it is source, not prose.
+        let fenced = "before [[A]]\n```\n[[B]]\n```\nafter [[C]]";
+        let md = wikilinks_to_md(fenced);
+        assert!(md.contains("[A](trellis:A)") && md.contains("[C](trellis:C)"), "{md}");
+        assert!(md.contains("\n[[B]]\n"), "fenced example was rewritten: {md}");
+        assert_eq!(extract_wikilinks(fenced), vec!["A".to_string(), "C".to_string()]);
+
+        // The line structure survives the rewrite — it is now line-by-line, and a
+        // body whose blank lines moved would re-paragraph the whole card.
+        let shaped = "one\n\ntwo [[X]]\n";
+        assert_eq!(wikilinks_to_md(shaped), "one\n\ntwo [X](trellis:X)\n");
+        assert_eq!(wikilinks_to_md(""), "");
+
+        // A link is now line-scoped. It could previously span a newline, which
+        // produced a target with a newline in it that could never resolve — so
+        // this is the defect going away, not behaviour being lost.
+        assert_eq!(extract_wikilinks("[[Some\nTitle]]"), Vec::<String>::new());
+
+        // DELIBERATELY unchanged: a table cell is painted as monospace with no
+        // Markdown engine involved, so a backtick there is a literal character
+        // rather than markup, and `wikilink_segments` keeps linkifying. The rule
+        // is "prose quoting the syntax", and a cell is not prose.
+        let segs = wikilink_segments("`[[Roadmap]]`");
+        assert_eq!(segs[1].1, Some("Roadmap".to_string()), "{segs:?}");
     }
 
     #[test]

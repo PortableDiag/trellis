@@ -84,6 +84,14 @@ worth adding to anything durable because card ids repeat across documents. The
 **File → Restart** brings this same instance back on the same port after an
 upgrade.
 
+**A link that works from your phone** — `http://<lan-host>:<port>/go/card/<cid>`
+(the LAN address is `lan_host` from `GET /api/instance`). Where `/open/…` moves
+the window on *this* machine, `/go/…` serves a small page that opens the card in
+the **Android app on the device you tapped it from**, and leaves the desktop alone.
+It exists because **Telegram silently strips a `trellis://` link** — the message is
+accepted and arrives with the link simply gone, so a notification needs an `http`
+hop to reach the app. The notify plugin makes every card it names one of these.
+
 **Depth and time — the hypercube.** A **basket** is the space: `x` and `y`
 always, `z` when **Depth** is on, and a time axis when **Time** is on — at which
 point a basket is a hypercube. (The tree is not a dimension; it is the index over

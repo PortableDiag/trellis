@@ -276,6 +276,22 @@ pub enum ApiRequest {
     /// has to be clickable from a terminal or a browser and anything that
     /// returned data would let a web page read notes by walking ids.
     Open { kind: OpenKind, id: u64, doc: Option<String> },
+    /// `GET /go/{card|node|group}/{id}` — a **page** that hands the reader's own
+    /// device off to `trellis://`, rather than moving this window.
+    ///
+    /// It exists because of one external constraint, measured rather than assumed:
+    /// **Telegram silently strips a link with a custom scheme.** A message
+    /// containing `<a href="trellis://…">` is accepted with `ok: true` and arrives
+    /// with no link entity at all — the anchor is simply gone, and a bare
+    /// `trellis://…` is not auto-linked either. Only `http(s)` survives. So a
+    /// notification cannot carry a tappable link to a card without an `http` hop,
+    /// and this is that hop: the phone opens the page over the LAN, and the page
+    /// offers the `trellis://` link its own app is registered for.
+    ///
+    /// The page builds that link from **`location.host`**, which is by definition
+    /// an address the reader's device just reached us on — the desktop cannot know
+    /// it, and `127.0.0.1` (what a minted link carries) is useless from a phone.
+    Go { kind: OpenKind, id: u64 },
     /// `GET /api/cards/{cid}/link` — the canonical URL for a card, so an agent
     /// never builds one by hand. Hand-built identifiers are how the work journal
     /// grew three spellings of the same day.
@@ -856,11 +872,24 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
 pub struct ApiResponse {
     pub status: u16,
     pub body: String,
+    /// What the body actually is. Every response was labelled
+    /// `application/json` from a fixed header in the serve loop, which was
+    /// harmless while every consumer was a program that already knew — but a
+    /// page meant for a **browser** is not rendered at all under the wrong type,
+    /// so the type travels with the body rather than being assumed.
+    pub content_type: &'static str,
 }
+
+pub const JSON: &str = "application/json";
+pub const HTML: &str = "text/html; charset=utf-8";
 
 impl ApiResponse {
     fn json(status: u16, v: Value) -> Self {
-        Self { status, body: serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()) }
+        Self {
+            status,
+            body: serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()),
+            content_type: JSON,
+        }
     }
     pub fn ok(v: Value) -> Self {
         Self::json(200, v)
@@ -870,6 +899,10 @@ impl ApiResponse {
     }
     pub fn err(status: u16, msg: &str) -> Self {
         Self::json(status, json!({ "error": msg }))
+    }
+    /// A page for a browser to render, rather than data for a program to parse.
+    pub fn html(status: u16, body: String) -> Self {
+        Self { status, body, content_type: HTML }
     }
 }
 
@@ -1435,9 +1468,15 @@ pub fn serve(
                         handle(&mut request, &ctx, &tx, &key, &revision, &changes, &grants);
                     let header = tiny_http::Header::from_bytes(
                         &b"Content-Type"[..],
-                        &b"application/json"[..],
+                        resp.content_type.as_bytes(),
                     )
-                    .unwrap();
+                    .unwrap_or_else(|_| {
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            JSON.as_bytes(),
+                        )
+                        .expect("a constant header always parses")
+                    });
                     // Permissive CORS so browser extensions / bookmarklets / web
                     // clients can call the (still key-gated) API from any origin.
                     let cors = [
@@ -1481,7 +1520,7 @@ fn handle(
     // preflight). The actual CORS headers are attached to every response in the
     // serve loop, so a browser extension / bookmarklet can call the API.
     if method == Method::Options {
-        return ApiResponse { status: 204, body: String::new() };
+        return ApiResponse { status: 204, body: String::new(), content_type: JSON };
     }
 
     // Everything but health requires a credential: the instance's own key, or a
@@ -1492,7 +1531,9 @@ fn handle(
     // and only moves the window, so a key would buy nothing except making the
     // links unclickable — which is the entire feature.
     let is_health = method == Method::Get
-        && (path == "/api/health" || path.starts_with("/open/"));
+        && (path == "/api/health"
+            || path.starts_with("/open/")
+            || path.starts_with("/go/"));
     let mut scope: Option<crate::plugins::Scope> = None;
     if !is_health {
         let configured = key.lock().map(|k| k.clone()).unwrap_or_default();
@@ -1653,6 +1694,19 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             id: pid(gid)?,
             doc: query_get(query, "doc"),
         }),
+        // The `/go/` twins of `/open/`: same three id spaces, but they answer a
+        // page instead of moving this window. Unauthenticated for the same reason
+        // `/open/` is — a link nobody can click buys nothing — and they carry no
+        // document content beyond the target's own title.
+        (Method::Get, ["go", "card", cid]) => {
+            Ok(ApiRequest::Go { kind: OpenKind::Card, id: pid(cid)? })
+        }
+        (Method::Get, ["go", "node", id]) => {
+            Ok(ApiRequest::Go { kind: OpenKind::Node, id: pid(id)? })
+        }
+        (Method::Get, ["go", "group", gid]) => {
+            Ok(ApiRequest::Go { kind: OpenKind::Group, id: pid(gid)? })
+        }
         (Method::Get, ["api", "tree"]) => Ok(ApiRequest::Tree),
         (Method::Get, ["api", "nodes"]) => Ok(ApiRequest::ListNodes),
         (Method::Post, ["api", "nodes"]) => {
@@ -3796,6 +3850,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::TemplateRebuild
         | ApiRequest::TemplateDelete(_)
         | ApiRequest::Open { .. }
+        | ApiRequest::Go { .. }
         | ApiRequest::CardLink(_)
         | ApiRequest::GroupLink(_)
         | ApiRequest::SetCardDesktop { .. }

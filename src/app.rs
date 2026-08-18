@@ -2645,6 +2645,10 @@ impl TrellisApp {
                 let _ = cmd.resp.send(resp);
                 continue;
             }
+            if let Some(resp) = self.handle_api_go(&cmd.req) {
+                let _ = cmd.resp.send(resp);
+                continue;
+            }
             if let Some(resp) = self.handle_api_instance(&cmd.req) {
                 let _ = cmd.resp.send(resp);
                 continue;
@@ -3340,6 +3344,83 @@ impl TrellisApp {
         })
     }
 
+    /// `GET /go/{kind}/{id}` — the page that hands a phone off to `trellis://`.
+    ///
+    /// **This window does not move.** That is the whole difference from `/open/`:
+    /// the reader is on another device, and focusing the desktop because someone
+    /// tapped a notification on the sofa is a jump nobody asked for.
+    ///
+    /// The `trellis://` URL is assembled **in the page**, from `location.host`,
+    /// because only the reader's browser knows how it reached us — a link minted
+    /// here would say `127.0.0.1`, which on a phone is the phone. The document
+    /// name is baked in, because that is what lets the app pick the right
+    /// workstation when two of them serve the same port.
+    ///
+    /// It is a **link, not a redirect**. An automatic `location =` to a custom
+    /// scheme is what in-app browsers block; a link the reader taps is a user
+    /// gesture, which is the case they allow.
+    fn handle_api_go(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
+        let api::ApiRequest::Go { kind, id } = req else {
+            return None;
+        };
+        let doc_name = self
+            .doc_path
+            .as_ref()
+            .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
+            .unwrap_or_default();
+        // Resolve for real, so a stale link says so instead of handing the phone
+        // a URL that will fail again at the other end.
+        let (path, what) = match kind {
+            api::OpenKind::Node => {
+                let nid = *id as crate::model::NodeId;
+                match self.doc.nodes.get(&nid) {
+                    Some(n) => (format!("node/{nid}"), n.title.clone()),
+                    None => return Some(api::ApiResponse::err(404, "no such basket")),
+                }
+            }
+            api::OpenKind::Card => {
+                let cid = *id as crate::model::CardId;
+                match self.doc.locate_card(cid) {
+                    Some(n) => {
+                        let title = self
+                            .doc
+                            .card(n, cid)
+                            .map(card_label)
+                            .unwrap_or_else(|| format!("card {cid}"));
+                        (format!("card/{cid}"), title)
+                    }
+                    None => return Some(api::ApiResponse::err(404, "no such card")),
+                }
+            }
+            api::OpenKind::Group => {
+                let gid = *id as crate::model::GroupId;
+                match self.doc.locate_group(gid) {
+                    Some(n) => {
+                        let title = self
+                            .doc
+                            .nodes
+                            .get(&n)
+                            .and_then(|node| node.groups.iter().find(|g| g.id == gid))
+                            .map(|g| g.title.clone())
+                            .unwrap_or_else(|| format!("group {gid}"));
+                        (format!("group/{gid}"), title)
+                    }
+                    None => return Some(api::ApiResponse::err(404, "no such group")),
+                }
+            }
+        };
+        let where_ = match kind {
+            api::OpenKind::Node => String::new(),
+            _ => self
+                .doc
+                .locate_card(*id as crate::model::CardId)
+                .or_else(|| self.doc.locate_group(*id as crate::model::GroupId))
+                .map(|n| self.doc.node_path(n))
+                .unwrap_or_default(),
+        };
+        Some(api::ApiResponse::html(200, go_page(&path, &doc_name, &what, &where_)))
+    }
+
     /// The app-level settings, as the API sees them.
     ///
     /// **Why these are an endpoint at all.** Everything a person can do in this
@@ -3487,6 +3568,18 @@ impl TrellisApp {
                 "path": self.doc_path.as_ref().map(|p| p.display().to_string()),
                 "port": self.api_port,
                 "lan": self.api_lan,
+                // The address another device on the network can reach this
+                // instance on, when LAN access is on. `port` alone is not enough
+                // to build a link for a phone: everything this app mints says
+                // `127.0.0.1`, which on the phone is the phone. Null when LAN
+                // access is off, because then there is honestly no such address.
+                "lan_host": self.api_lan
+                    .then(lan_addresses)
+                    .and_then(|v| v.first().cloned()),
+                // Every candidate, because the first is a heuristic: a machine on
+                // two LANs plus a VPN has three, and only the reader knows which
+                // network their phone is on.
+                "lan_hosts": self.api_lan.then(lan_addresses).unwrap_or_default(),
                 "nodes": self.doc.nodes.len(),
                 "unsaved_changes": self.dirty,
                 // How many cards assert state that is past its check date.
@@ -7316,6 +7409,17 @@ impl TrellisApp {
                                 format!("curl -H 'X-API-Key: {k}' {a}/instance"),
                             ),
                             (
+                                "A link that opens a card on your PHONE",
+                                format!(
+                                    "# lan_host is an address the phone can reach this machine on.\n\
+                                     curl -s -H 'X-API-Key: {k}' {a}/instance   # read lan_host\n\
+                                     # then the link is simply:\n\
+                                     http://<lan_host>:{port}/go/card/1391\n\
+                                     # Telegram strips a trellis:// link silently, so a message needs\n\
+                                     # this http hop; the page it serves opens the app on the phone."
+                                ),
+                            ),
+                            (
                                 "The tree, then one basket, then one card",
                                 format!(
                                     "curl -H 'X-API-Key: {k}' {a}/tree\n\
@@ -7450,6 +7554,7 @@ impl TrellisApp {
                             "GET    /api/cards/{cid}                   (find a card from its id alone → {node, node_path, card})",
                             "GET    /api/cards/{cid}/link              (canonical trellis:// link for this card)",
                             "GET    /open/card/{cid} · /open/node/{id} · /open/group/{gid}  (no key — what a trellis:// link opens)",
+                            "GET    /go/card/{cid} · /go/node/{id} · /go/group/{gid}   (no key — a PAGE that opens the card on the PHONE that loaded it; Telegram strips trellis:// links, so a notification needs this http hop. Build it with lan_host from /api/instance)",
                             "GET    /api/cards/{cid}/backlinks         (cards whose [[#id]] links point at this card)",
                         "         every card carries `empty` — a checklist/table has NO body, so never read body alone to decide a card is blank",
                         "         a bare [[Title]] resolves to the linking card's own project first, then the lowest node id (stable across runs)",
@@ -10961,4 +11066,102 @@ mod tests {
         assert_eq!(pick_exe(None, Some("trellis".into()), here), None);
         assert_eq!(pick_exe(None, None, here), None);
     }
+}
+
+/// The `/go/…` hand-off page.
+///
+/// Deliberately tiny and self-contained: no network, no fonts, no images. It is
+/// served over plain LAN HTTP to whatever browser a notification opened, so the
+/// fewer assumptions it makes the more devices it works on.
+///
+/// **A link, not a redirect.** An automatic jump to a custom scheme is the thing
+/// in-app browsers refuse; a tap is a user gesture, which they allow. The link is
+/// also shown as text, because the one failure this cannot prevent is the app not
+/// being installed — and then the reader needs to see what it was trying to open
+/// rather than watch nothing happen.
+fn go_page(path: &str, doc: &str, what: &str, where_: &str) -> String {
+    // `path` and `doc` are ours (a kind plus an integer, and a file name), but the
+    // title is the operator's text and goes into the document, so it is escaped.
+    let title = crate::model::escape_html_pub(what);
+    let place = crate::model::escape_html_pub(where_);
+    let doc_js = doc.replace('\\', "\\\\").replace('"', "\\\"");
+    let subtitle = if place.is_empty() { String::new() } else { format!("<p class=\"where\">{place}</p>") };
+    format!(
+        r##"<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open in Trellis</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ margin: 0; min-height: 100vh; display: flex; align-items: center;
+         justify-content: center; font: 16px/1.5 system-ui, sans-serif;
+         background: #faf9f7; color: #1c1917; padding: 24px; }}
+  main {{ max-width: 30rem; width: 100%; text-align: center; }}
+  h1 {{ font-size: 1.05rem; font-weight: 600; margin: 0 0 .25rem; }}
+  .where {{ margin: 0 0 1.5rem; font-size: .85rem; opacity: .65; }}
+  a.go {{ display: block; padding: .9rem 1.25rem; border-radius: .6rem;
+          background: #4f46e5; color: #fff; text-decoration: none;
+          font-weight: 600; }}
+  code {{ display: block; margin-top: 1.5rem; font-size: .72rem; opacity: .55;
+          word-break: break-all; }}
+  @media (prefers-color-scheme: dark) {{
+    body {{ background: #1c1917; color: #f5f5f4; }}
+  }}
+</style>
+</head><body><main>
+<h1>{title}</h1>
+{subtitle}
+<a class="go" id="go" href="#">Open in Trellis</a>
+<code id="url"></code>
+<script>
+  // location.host is the only address known to be reachable from THIS device:
+  // the desktop would have written 127.0.0.1, which on a phone is the phone.
+  var url = "trellis://" + location.host + "/{path}?doc=" + encodeURIComponent("{doc_js}");
+  document.getElementById("go").href = url;
+  document.getElementById("url").textContent = url;
+</script>
+</main></body></html>
+"##
+    )
+}
+
+/// This machine's addresses another device could reach it on, best first.
+///
+/// Found by asking the **routing table** rather than enumerating interfaces, which
+/// needs no dependency: a UDP socket is `connect`ed to an address and its own
+/// local address read back. **No packet is sent** — `connect` on a UDP socket only
+/// fixes the peer and selects a route.
+///
+/// One probe is not enough, and this machine is why. Its default route is a **VPN**
+/// (`tun0`, a 100.64/10 carrier-grade-NAT address) while the phone is on one of two
+/// ordinary LANs — so the single "route off this machine" answer was confidently
+/// the one address a phone cannot use. Probing each private range as well finds the
+/// on-link address for each, and **RFC 1918 is preferred over CGNAT** because a
+/// 100.64 address is nearly always the VPN rather than the network the reader is on.
+///
+/// Still a guess, so it is offered as a hint and every consumer can override it.
+fn lan_addresses() -> Vec<String> {
+    // 192.0.2.1 is TEST-NET-1 (reserved, never routed to) and stands for "off this
+    // machine"; the rest each stand for their own private range.
+    // `192.168.1.x` earns its own probe rather than being covered by
+    // `192.168.0.x`: they are separate /24s, and this machine is on both (wired
+    // and wireless), so probing only one found one of its two LANs.
+    const PROBES: [&str; 5] =
+        ["192.0.2.1:9", "192.168.0.1:9", "192.168.1.1:9", "10.0.0.1:9", "172.16.0.1:9"];
+    let mut found: Vec<std::net::Ipv4Addr> = Vec::new();
+    for probe in PROBES {
+        let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else { continue };
+        if sock.connect(probe).is_err() {
+            continue;
+        }
+        if let Ok(std::net::SocketAddr::V4(addr)) = sock.local_addr() {
+            let ip = *addr.ip();
+            if !ip.is_loopback() && !ip.is_unspecified() && !found.contains(&ip) {
+                found.push(ip);
+            }
+        }
+    }
+    found.sort_by_key(|ip| !ip.is_private()); // private first, stable otherwise
+    found.into_iter().map(|ip| ip.to_string()).collect()
 }

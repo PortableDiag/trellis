@@ -50,6 +50,36 @@ def trellis(path):
         die(f"Trellis {path}: {e}")
 
 
+def go_link(base_host, port, kind, ident, label):
+    """An `http` link that opens `kind/ident` in Trellis on the reader's device.
+
+    **Why http and not trellis://.** Measured against the Bot API on 2026-08-18:
+    a message containing `<a href="trellis://…">` is accepted with `ok: true` and
+    arrives with **no link entity at all** — Telegram strips a custom scheme
+    silently, and does not auto-link a bare one either. Only http(s) survives. So
+    the link points at the desktop's own `/go/…` page, which is a page whose only
+    job is to offer the `trellis://` link the phone's app is registered for.
+
+    Returns the label unlinked when there is no host to build on, because a link
+    to `127.0.0.1` from a phone is a link to the phone.
+    """
+    if not base_host:
+        return label
+    return f'<a href="http://{base_host}:{port}/go/{kind}/{ident}">{label}</a>'
+
+
+def link_host(cfg, inst):
+    """Where the phone should reach this desktop.
+
+    Config wins, because the auto-detected answer is the address on the route out
+    of this machine and that can be a VPN rather than the LAN the phone is on —
+    measured here as a 100.64/10 CGNAT address on a box whose LAN is 192.168.
+    `lan_host` is null when LAN access is off, and then there is honestly nothing
+    to link to.
+    """
+    return (cfg.get("link_host") or "").strip() or (inst.get("lan_host") or "")
+
+
 def yes(cfg, key, default=True):
     v = (cfg.get(key) or "").strip().lower()
     if not v:
@@ -123,7 +153,7 @@ def save_state(s):
 
 # --- the two messages ---------------------------------------------------------
 
-def task_digest(cfg, doc):
+def task_digest(cfg, doc, host="", port=0):
     q = "/tasks"
     project = (cfg.get("project") or "").strip()
     if project:
@@ -138,7 +168,12 @@ def task_digest(cfg, doc):
     def line(t):
         where = t.get("node_path") or t.get("node_title") or ""
         due = f" · {t['due']}" if t.get("due") else ""
-        return f"• {t.get('title') or '(untitled)'}{due}\n   <i>{where}</i>"
+        title = t.get("title") or "(untitled)"
+        # The title itself is the link, so the message does not grow a column of
+        # "open" words. A task with no card id (there should be none) still reads.
+        if t.get("card") and host:
+            title = go_link(host, port, "card", t["card"], title)
+        return f"• {title}{due}\n   <i>{where}</i>"
 
     parts = [f"<b>{doc}</b>"]
     if overdue:
@@ -160,7 +195,7 @@ def task_digest(cfg, doc):
     return "\n".join(parts), key
 
 
-def agent_changes(doc, since):
+def agent_changes(doc, since, host="", port=0):
     data = trellis(f"/changes?since={since}&limit=500")
     if data.get("truncated"):
         print("(change log had rotated past our position — reporting a count only)")
@@ -169,24 +204,33 @@ def agent_changes(doc, since):
         return None, data.get("rev", since)
 
     baskets, titles = set(), []
+    # The card each title belongs to, so the line can link to the thing that
+    # changed rather than to the document in general — which is the whole point
+    # of a notification you can act on from the sofa.
+    card_of = {}
     for c in changes:
         if c.get("node"):
             baskets.add(c["node"])
         t = c.get("title")
         if t and t not in titles:
             titles.append(t)
+        if t and c.get("entity") == "card" and c.get("id") and t not in card_of:
+            card_of[t] = c["id"]
     props = [c for c in changes if c.get("property")]
 
     parts = [f"<b>{doc}</b>", f"\nAn agent made {len(changes)} change(s)"]
     if baskets:
         parts.append(f"in {len(baskets)} basket(s).")
     for t in titles[:8]:
-        parts.append(f"• {t}")
+        parts.append("• " + go_link(host, port, "card", card_of[t], t) if t in card_of else f"• {t}")
     if len(titles) > 8:
         parts.append(f"…and {len(titles) - 8} more")
     for c in props[:5]:
         k, v = c["property"]
-        parts.append(f"• <i>{c.get('title') or 'a card'}</i> — {k} → {v}")
+        name = c.get("title") or "a card"
+        if c.get("entity") == "card" and c.get("id"):
+            name = go_link(host, port, "card", c["id"], name)
+        parts.append(f"• <i>{name}</i> — {k} → {v}")
     return "\n".join(parts), data.get("rev", since)
 
 
@@ -199,6 +243,8 @@ def main():
 
     inst = trellis("/instance")
     doc = inst.get("document") or "Trellis"
+    host = link_host(cfg, inst)
+    port = inst.get("port") or 0
     trigger = os.environ.get("TRELLIS_TRIGGER", "manual")
     state = load_state()
 
@@ -211,7 +257,7 @@ def main():
             print("Agent-edit notifications are off")
             return
         since = os.environ.get("TRELLIS_SINCE") or state.get("since") or 0
-        text, new_since = agent_changes(doc, since)
+        text, new_since = agent_changes(doc, since, host, port)
         state["since"] = new_since
         save_state(state)
         if not text:
@@ -223,7 +269,7 @@ def main():
     if not yes(cfg, "digest"):
         print("Task digest is off")
         return
-    text, key = task_digest(cfg, doc)
+    text, key = task_digest(cfg, doc, host, port)
     if not text:
         print("Nothing overdue or due today — no notification")
         return

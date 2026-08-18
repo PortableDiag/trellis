@@ -147,11 +147,26 @@ on its own port), call this first to confirm you're driving the right one.
 GET /api/instance
   → 200 {"app":"trellis","version":"0.65.1","document":"work.ron",
          "path":"/home/you/work.ron","port":7373,"lan":false,
+         "lan_host":"192.168.0.101","lan_hosts":["192.168.0.101","100.64.100.6"],
          "nodes":42,"unsaved_changes":false,"stale_claims":0}
 ```
 `document` is the file name (`"untitled"` for a never-saved document) and `path`
 is its full path, or `null` when untitled. `nodes` is the document's node count.
 Unlike `/api/health` this needs the key, since it reveals a file path.
+
+`lan_host` is an address **another device on the network** can reach this instance
+on, and `lan_hosts` is every candidate, best first. Both are `null`/empty when LAN
+access is off, because then there honestly is no such address. They exist because
+`port` alone is not enough to build a link for a phone: everything the app mints
+says `127.0.0.1`, which on the phone *is* the phone — see `GET /go/…`.
+
+They are a **hint, not an answer**. The addresses come from asking the routing
+table (a UDP socket is `connect`ed and its own local address read back; no packet
+is sent), which means a machine whose default route is a **VPN** reports the VPN
+first unless a private-LAN probe finds something better — RFC 1918 is preferred
+over CGNAT for exactly that reason. A box on two LANs and a VPN reports three
+addresses and only the reader knows which network their phone is on, so anything
+building links should let that be overridden.
 
 **`stale_claims` is a warning about the document you are about to read.** It
 counts the cards that state how something *is* and are past their own
@@ -239,6 +254,28 @@ GET /open/card/{cid} · /open/node/{id} · /open/group/{gid}   [no key; not unde
         what a `trellis://` link resolves to. Navigation only — it focuses the
         window and reveals the target, and deliberately returns no document
         content, because it is the one route that answers without a key.
+
+GET /go/card/{cid} · /go/node/{id} · /go/group/{gid}          [no key; not under /api]
+  → 200 <html>   | 404 (no such target)
+        a **page that hands the reader's own device off** to `trellis://`, instead
+        of moving this window. `/open/…` is for the machine Trellis is running on;
+        `/go/…` is for the phone in your hand.
+
+        It exists because of one external constraint, measured rather than assumed:
+        **Telegram silently strips a link with a custom scheme.** A message
+        containing `<a href="trellis://…">` is accepted with `ok:true` and arrives
+        with **no link entity at all**; a bare `trellis://…` is not auto-linked
+        either. Only `http(s)` survives. So a notification cannot carry a tappable
+        link to a card without an `http` hop — and this is that hop.
+
+        The page builds the `trellis://` URL from **`location.host`**, the one
+        address known to be reachable from the device reading it. A link minted by
+        the desktop says `127.0.0.1`, which on a phone is the phone. It offers a
+        **link to tap, not a redirect**: an automatic jump to a custom scheme is
+        what in-app browsers block, while a user gesture is the case they allow.
+
+        Build one with `lan_host` from `GET /api/instance`:
+        `http://192.168.0.101:7374/go/card/1391`.
 
 GET /api/cards/{cid}
   → 200 {node, node_title, node_path, card:{<card>}}              | 404
