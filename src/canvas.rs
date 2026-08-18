@@ -2139,7 +2139,72 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                         }
                     } else {
                         // View mode: read-only item text (wraps within the card).
-                        ui.label(&item.text);
+                        //
+                        // **A checklist item is painted, so `[[…]]` was literal
+                        // text here.** Only the title, the Markdown body and table
+                        // cells ever linkified — and since v0.90.0 a checklist item
+                        // is a task in its own right, so "one card, N dated lines,
+                        // each pointing at the card it is about" is the shape this
+                        // app pushes people toward. Every one of those links was
+                        // dead: reported from a work-instance bug queue whose
+                        // eleven lines each named a card.
+                        //
+                        // Same treatment as a table cell: build the runs, colour
+                        // and underline the link ones, and follow the run a click
+                        // actually landed in.
+                        let segments = crate::model::wikilink_segments(&item.text);
+                        if !segments.iter().any(|(_, t)| t.is_some()) {
+                            ui.label(&item.text);
+                        } else {
+                            let font = egui::TextStyle::Body.resolve(ui.style());
+                            let base = ui.visuals().text_color();
+                            let link_col = ui.visuals().hyperlink_color;
+                            let mut job = egui::text::LayoutJob::default();
+                            job.wrap.max_width = ui.available_width();
+                            for (text, target) in &segments {
+                                job.append(
+                                    text,
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: font.clone(),
+                                        color: if target.is_some() { link_col } else { base },
+                                        underline: if target.is_some() {
+                                            egui::Stroke::new(1.0, link_col)
+                                        } else {
+                                            egui::Stroke::NONE
+                                        },
+                                        ..Default::default()
+                                    },
+                                );
+                            }
+                            let galley = ui.fonts(|f| f.layout_job(job));
+                            let resp = ui.add(
+                                egui::Label::new(galley.clone()).sense(egui::Sense::click()),
+                            );
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                if resp.clicked() {
+                                    // Ask the galley which character was hit, then
+                                    // walk the runs — right at any zoom, unlike
+                                    // measuring x offsets.
+                                    let idx = galley
+                                        .cursor_from_pos(pos - resp.rect.min)
+                                        .ccursor
+                                        .index;
+                                    let mut seen = 0usize;
+                                    for (text, target) in &segments {
+                                        let n = text.chars().count();
+                                        if idx >= seen && idx < seen + n {
+                                            if let Some(t) = target {
+                                                actions
+                                                    .push(CanvasAction::FollowLink(t.clone()));
+                                            }
+                                            break;
+                                        }
+                                        seen += n;
+                                    }
+                                }
+                            }
+                        }
                     }
                 });
             }

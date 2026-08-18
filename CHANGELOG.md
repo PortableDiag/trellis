@@ -6,6 +6,24 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.122.1]
+
+### Fixed
+- **A `[[link]]` in a checklist item was literal text.** Only the card title, the
+  Markdown body and table cells ever linkified; a checklist item was painted with a
+  plain label, so every `[[#1391]]` in one rendered as its own brackets and did
+  nothing when clicked.
+
+  That is the wrong half to have missed. Since v0.90.0 a **checklist item is a task
+  in its own right**, so "one card, N dated lines, each pointing at the card it is
+  about" is the shape this app pushes people toward — and every one of those links
+  was dead. Reported from a work-instance bug queue whose eleven lines each named a
+  card.
+
+  Same treatment table cells already had: the runs are built, link runs get the
+  link colour and an underline, and a click follows the run it actually landed in
+  (asked of the galley, so it stays right at any zoom).
+
 ## [0.122.0]
 
 ### Added
