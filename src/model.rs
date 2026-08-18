@@ -834,6 +834,30 @@ fn is_zero(v: &f32) -> bool {
 }
 
 impl Card {
+    /// Whether this card has content **of its own kind**.
+    ///
+    /// A checklist keeps its content in `items` and a table in `rows`, so neither
+    /// has a `body` — which is how an agent auditing a workspace read two
+    /// checklist cards holding 23 lines as "completely empty" and came within one
+    /// step of deleting them as noise. One definition here, rather than one per
+    /// caller getting a kind wrong.
+    ///
+    /// The **title is not content**: a titled card with nothing in it reports
+    /// `true`, because that is exactly the state worth noticing.
+    pub fn is_empty(&self) -> bool {
+        match &self.kind {
+            CardKind::Text => self.body.trim().is_empty() && self.inline_images.is_empty(),
+            CardKind::Code { .. } => self.body.trim().is_empty(),
+            CardKind::Checklist { items } => items.iter().all(|i| i.text.trim().is_empty()),
+            CardKind::Table { table } => table
+                .rows
+                .iter()
+                .all(|r| r.iter().all(|c| c.text.trim().is_empty())),
+            CardKind::Image { data, extra, .. } => data.is_empty() && extra.is_empty(),
+            CardKind::Sketch { strokes } => strokes.is_empty(),
+        }
+    }
+
     /// The emphasis actually in force at `now` (unix seconds), after expiry.
     ///
     /// Everything that draws attention goes through this rather than reading the
@@ -3536,12 +3560,27 @@ impl Document {
     /// the graph, the old backlinks — keeps working and simply sees the basket a
     /// linked card lives in. Use [`resolve_link_target`] when you need to know
     /// that a card specifically was named.
+    /// Resolved without knowing where the link was written. Prefer
+    /// [`resolve_link_from`]: every caller inside the app knows the basket, and a
+    /// bare title is ambiguous without it. Kept for a caller that genuinely has
+    /// no context — a name typed into the palette — and to pin that behaviour.
+    #[allow(dead_code)]
     pub fn resolve_link(&self, target: &str) -> Option<NodeId> {
-        match self.resolve_link_target(target)? {
-            LinkTarget::Node(id) => Some(id),
-            LinkTarget::Card { node, .. } => Some(node),
-            LinkTarget::Group { node, .. } => Some(node),
-        }
+        Self::link_node(self.resolve_link_target(target)?)
+    }
+
+    /// [`resolve_link`], resolved from the basket the link was written in — so a
+    /// bare title prefers that project's basket. See [`resolve_title_from`].
+    pub fn resolve_link_from(&self, target: &str, from: NodeId) -> Option<NodeId> {
+        Self::link_node(self.resolve_link_target_from(target, from)?)
+    }
+
+    fn link_node(t: LinkTarget) -> Option<NodeId> {
+        Some(match t {
+            LinkTarget::Node(id) => id,
+            LinkTarget::Card { node, .. } => node,
+            LinkTarget::Group { node, .. } => node,
+        })
     }
 
     /// Resolve a `[[wiki-link]]` to whatever it names.
@@ -3574,11 +3613,60 @@ impl Document {
                 return Some(LinkTarget::Node(id));
             }
         }
-        let tl = t.to_lowercase();
-        self.nodes
+        self.resolve_title_from(t, None).map(LinkTarget::Node)
+    }
+
+    /// Resolve a `[[wiki-link]]` **written in a known basket**.
+    ///
+    /// Same as [`resolve_link_target`] except that a bare title prefers a basket
+    /// in the linking card's own project. `[[Archive]]` written inside *Trellis*
+    /// means *Trellis › Archive*, which is the only reading anybody intends.
+    pub fn resolve_link_target_from(&self, target: &str, from: NodeId) -> Option<LinkTarget> {
+        let t = target.trim();
+        if t.starts_with('#') || t.parse::<NodeId>().is_ok() {
+            // Ids are already unambiguous; context cannot improve them.
+            return self.resolve_link_target(t);
+        }
+        self.resolve_title_from(t, Some(from)).map(LinkTarget::Node)
+    }
+
+    /// A basket by title — **deterministically**, and preferring `from`'s project.
+    ///
+    /// This used to be `self.nodes.values().find(…)`, and `nodes` is a `HashMap`:
+    /// with more than one basket of a given title the winner came out of
+    /// hash order, which Rust seeds **per process**. Measured on 2026-08-17
+    /// against three baskets called `Archive`: the same link in the same document
+    /// resolved to node 7, 7, 5, 3, 3, 7 over six runs of the same binary. A link
+    /// that opens a different basket every restart is worse than one that fails.
+    ///
+    /// Duplicate titles are not an edge case here — "one `Archive` basket per
+    /// project" is the archiving convention, so a real document has dozens. Two
+    /// rules, in order:
+    ///
+    /// 1. **Same project wins.** A link is written from somewhere, and it means
+    ///    the nearest thing of that name.
+    /// 2. **Then the lowest node id**, so the answer is stable across runs and
+    ///    across machines. Oldest-wins is also the least surprising tie-break: it
+    ///    is the basket that has been called this the longest.
+    fn resolve_title_from(&self, title: &str, from: Option<NodeId>) -> Option<NodeId> {
+        let tl = title.to_lowercase();
+        let mut matches: Vec<NodeId> = self
+            .nodes
             .values()
-            .find(|n| n.title.to_lowercase() == tl)
-            .map(|n| LinkTarget::Node(n.id))
+            .filter(|n| n.title.to_lowercase() == tl)
+            .map(|n| n.id)
+            .collect();
+        if matches.len() <= 1 {
+            return matches.first().copied();
+        }
+        matches.sort_unstable();
+        if let Some(from) = from {
+            let root = self.root_of(from);
+            if let Some(near) = matches.iter().copied().find(|&id| self.root_of(id) == root) {
+                return Some(near);
+            }
+        }
+        matches.first().copied()
     }
 
     /// Cards anywhere whose `[[links]]` point at one specific card.
@@ -3596,7 +3684,7 @@ impl Document {
                 }
                 let hay = format!("{}\n{}", c.title, searchable_body(c));
                 let points_here = extract_wikilinks(&hay).iter().any(|t| {
-                    matches!(self.resolve_link_target(t),
+                    matches!(self.resolve_link_target_from(t, n.id),
                              Some(LinkTarget::Card { card: tc, .. }) if tc == card)
                 });
                 if points_here {
@@ -3623,7 +3711,7 @@ impl Document {
             for c in &n.cards {
                 let hay = format!("{}\n{}", c.title, searchable_body(c));
                 let points_here = extract_wikilinks(&hay).iter().any(|t| {
-                    matches!(self.resolve_link_target(t),
+                    matches!(self.resolve_link_target_from(t, n.id),
                              Some(LinkTarget::Group { group: tg, .. }) if tg == group)
                 });
                 if points_here {
@@ -3649,7 +3737,10 @@ impl Document {
             for card in &n.cards {
                 let hay = format!("{}\n{}", card.title, searchable_body(card));
                 for target in extract_wikilinks(&hay) {
-                    if let Some(t) = self.resolve_link(&target) {
+                    // From this card's basket, so the graph draws the edge the
+                    // writer meant rather than one to another project's basket
+                    // that happens to share a title.
+                    if let Some(t) = self.resolve_link_from(&target, n.id) {
                         if t != n.id {
                             edges.push((n.id, t));
                             involved.insert(n.id);
@@ -3672,7 +3763,10 @@ impl Document {
             for card in &n.cards {
                 let hay = format!("{}\n{}", card.title, searchable_body(card));
                 let links = extract_wikilinks(&hay);
-                if links.iter().any(|t| self.resolve_link(t) == Some(node)) {
+                // Resolved from the LINKING card's basket: a bare `[[Archive]]`
+                // means the writer's own project, so it must not count as a
+                // backlink for every other project's Archive.
+                if links.iter().any(|t| self.resolve_link_from(t, n.id) == Some(node)) {
                     hits.push(SearchHit {
                         node: n.id,
                         card: Some(card.id),
@@ -7233,4 +7327,95 @@ mod tests {
         assert_eq!(back.emphasis, Emphasis::None);
         assert_eq!(back.emphasis_intensity, 1.0, "the default survives a round trip");
     }
+
+    /// A link to a duplicated basket title used to come out of HashMap order,
+    /// which Rust seeds per process: the same link in the same document resolved
+    /// to node 7, 7, 5, 3, 3, 7 over six runs of the same binary (measured
+    /// 2026-08-17, three baskets called `Archive`). Duplicates are not an edge
+    /// case — "one Archive per project" is the archiving convention.
+    #[test]
+    fn a_duplicated_basket_title_resolves_the_same_way_every_time() {
+        let mut doc = Document::empty();
+        let p1 = doc.add_node(None, "P1".into());
+        let p2 = doc.add_node(None, "P2".into());
+        let p3 = doc.add_node(None, "P3".into());
+        let a1 = doc.add_node(Some(p1), "Archive".into());
+        let a2 = doc.add_node(Some(p2), "Archive".into());
+        let a3 = doc.add_node(Some(p3), "Archive".into());
+        assert!(a1 < a2 && a2 < a3);
+
+        // With no context: the lowest id, and the SAME one every call.
+        for _ in 0..20 {
+            assert_eq!(doc.resolve_link_target("Archive"), Some(LinkTarget::Node(a1)));
+        }
+        // Case-insensitive, as before.
+        assert_eq!(doc.resolve_link_target("archive"), Some(LinkTarget::Node(a1)));
+
+        // From a basket, its OWN project's Archive wins — the only reading anyone
+        // intends when they write [[Archive]] inside a project.
+        let inner = doc.add_node(Some(p2), "Working notes".into());
+        assert_eq!(doc.resolve_link_target_from("Archive", inner), Some(LinkTarget::Node(a2)));
+        assert_eq!(doc.resolve_link_target_from("Archive", p3), Some(LinkTarget::Node(a3)));
+        // A project with no Archive of its own falls back to the stable choice.
+        let p4 = doc.add_node(None, "P4".into());
+        assert_eq!(doc.resolve_link_target_from("Archive", p4), Some(LinkTarget::Node(a1)));
+        // An id is already unambiguous, and context must not change it.
+        assert_eq!(doc.resolve_link_target_from(&a3.to_string(), p1), Some(LinkTarget::Node(a3)));
+        // A title nobody has is still nothing.
+        assert_eq!(doc.resolve_link_target_from("Nowhere", p1), None);
+    }
+
+    /// Backlinks are computed from the linking card's own basket, so a
+    /// `[[Archive]]` written in project 2 counts against project 2's Archive.
+    #[test]
+    fn backlinks_follow_the_link_to_the_writers_own_project() {
+        let mut doc = Document::empty();
+        let p1 = doc.add_node(None, "P1".into());
+        let p2 = doc.add_node(None, "P2".into());
+        let a1 = doc.add_node(Some(p1), "Archive".into());
+        let a2 = doc.add_node(Some(p2), "Archive".into());
+        let work = doc.add_node(Some(p2), "Work".into());
+        let c = doc.add_card(work, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(work, c).unwrap().body = "filed under [[Archive]]".into();
+
+        assert_eq!(doc.backlinks(a2).len(), 1, "P2's Archive is the one linked");
+        assert!(doc.backlinks(a1).is_empty(), "P1's Archive must not claim it");
+    }
+
+    /// A checklist keeps its content in `items`, a table in `rows` — neither has a
+    /// body. An audit that reads `body` alone concludes "empty" and reaches for
+    /// the delete button, which is one step from losing 23 checklist lines.
+    #[test]
+    fn empty_means_empty_for_every_kind() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let mk = |doc: &mut Document, k: CardKind| doc.add_card(n, egui::pos2(0.0, 0.0), k).unwrap();
+
+        let list = mk(&mut doc, CardKind::Checklist { items: vec![ChecklistItem::new("a line")] });
+        doc.card_mut(n, list).unwrap().title = "Working list".into();
+        assert!(!doc.card(n, list).unwrap().is_empty(), "items ARE the content");
+        assert!(doc.card(n, list).unwrap().body.is_empty(), "and it has no body at all");
+
+        let blank = mk(&mut doc, CardKind::Checklist { items: vec![] });
+        assert!(doc.card(n, blank).unwrap().is_empty());
+
+        let table = mk(&mut doc, CardKind::Table { table: TableData::empty(2, 2) });
+        assert!(doc.card(n, table).unwrap().is_empty(), "a grid of blank cells is empty");
+        if let CardKind::Table { table } = &mut doc.card_mut(n, table).unwrap().kind {
+            table.rows[0][0].text = "x".into();
+        }
+        assert!(!doc.card(n, table).unwrap().is_empty());
+
+        let text = mk(&mut doc, CardKind::Text);
+        doc.card_mut(n, text).unwrap().title = "titled, but nothing in it".into();
+        assert!(doc.card(n, text).unwrap().is_empty(), "a title is not content");
+        doc.card_mut(n, text).unwrap().body = "  \n ".into();
+        assert!(doc.card(n, text).unwrap().is_empty(), "whitespace is not content");
+        doc.card_mut(n, text).unwrap().body = "something".into();
+        assert!(!doc.card(n, text).unwrap().is_empty());
+
+        let sketch = mk(&mut doc, CardKind::Sketch { strokes: vec![] });
+        assert!(doc.card(n, sketch).unwrap().is_empty());
+    }
+
 }

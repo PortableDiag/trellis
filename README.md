@@ -425,6 +425,12 @@ behind anything is a HUD, not part of the desktop.
 `Archive` basket; a card moved there keeps its id, so links and backlinks to it
 still resolve. `POST /api/nodes/{id}/cards/move` moves a whole batch in one call.
 
+**A `[[Title]]` link means the one in your own project.** Duplicate basket names
+are normal — every project has an `Archive` — so a bare title resolves to the
+basket under the same root as the card the link is written in, then to the lowest
+node id. It used to come out of hash order, which meant the same link could open a
+different basket after a restart.
+
 **The API documents itself, for the build that answers.** `GET /api/docs` returns
 this instance's own `API.md` — compiled into the binary, so it is not a copy that
 can drift — and `?section=examples` returns one part of it. An agent on the phone or

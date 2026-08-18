@@ -6,6 +6,40 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.121.0]
+
+### Fixed
+- **A `[[Title]]` link could open a different basket after every restart.** The
+  lookup was `self.nodes.values().find(…)` and `nodes` is a `HashMap`, whose
+  iteration order Rust seeds **per process**. Measured against three baskets called
+  `Archive`: the same link, in the same document, resolved to node **7, 7, 5, 3, 3,
+  7** over six runs of the same binary.
+
+  Duplicate basket titles are not an edge case — *"one `Archive` basket per
+  project"* is the archiving convention this project has been promoting all week,
+  and the operator's document has **47** baskets called `Archive` and 19 duplicated
+  titles across 99 baskets. Reported by an agent working in another workspace, who
+  noticed a card claiming generic names were prefixed to prevent exactly this.
+
+  Two rules now, in order: **the linking card's own project wins**, then the
+  **lowest node id**. So `[[Archive]]` written inside a project means that
+  project's archive — the only reading anyone intends — and where that cannot
+  decide, the answer is at least the same on every run and every machine. Card,
+  group and numeric-id links are untouched: they were never ambiguous.
+
+  Every caller that knows where the link was written now says so — backlinks (both
+  card- and basket-level), the link graph, and the canvas click.
+
+- **`GET` on a card now says whether it is `empty`.** A **checklist keeps its
+  content in `items` and a table in `rows`, so neither carries a `body` at all** —
+  and an agent auditing a workspace read two checklist cards as "completely empty"
+  and came within one step of deleting them as noise. They held 23 lines.
+
+  `empty` is computed per kind in one place, so nobody has to branch on `kind` to
+  answer the question and there is one definition rather than one per caller. The
+  title is deliberately not content: a titled card with nothing in it reports
+  `true`, which is exactly the state worth noticing.
+
 ## [0.120.1]
 
 ### Fixed

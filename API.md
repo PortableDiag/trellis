@@ -353,6 +353,23 @@ GET /api/search?q=<text>
 Note: `tree` and `nodes` report `cards` as a **count**; `GET /api/nodes/{id}`
 returns the **full card objects**.
 
+Every card object carries **`empty`** — whether it has content *of its own kind*.
+Read that rather than `body`: a **checklist keeps its content in `items` and a
+table in `rows`, so neither has a `body` at all**, and an audit that treats a
+missing body as an empty card will read a 23-line working list as noise. (One
+nearly deleted two.) The title is deliberately not counted as content, so a titled
+card with nothing in it reports `empty: true` — which is the state worth noticing.
+
+**A bare `[[Title]]` link resolves to the linking card's own project first.**
+Duplicate basket titles are normal, not an edge case: "one `Archive` basket per
+project" is the archiving convention, so a real document has dozens. The rule is
+(1) a basket under the same root as the card the link is written in, then (2) the
+**lowest node id**, so the answer never changes between runs. Before v0.121.0 the
+lookup walked a `HashMap`, whose order Rust seeds per process — measured against
+three baskets called `Archive`, the same link in the same document resolved to
+node 7, 7, 5, 3, 3, 7 over six runs of the same binary. Use `[[42]]` or
+`[[#1391]]` when you mean a specific one and there is any doubt.
+
 In every `hits` list (search, tags, properties, query, backlinks), `card` is the
 id of the matching card so a client can point straight at it. It is `null` only
 for a search hit that matched a **node title** rather than a card.

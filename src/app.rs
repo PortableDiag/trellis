@@ -7451,6 +7451,8 @@ impl TrellisApp {
                             "GET    /api/cards/{cid}/link              (canonical trellis:// link for this card)",
                             "GET    /open/card/{cid} · /open/node/{id} · /open/group/{gid}  (no key — what a trellis:// link opens)",
                             "GET    /api/cards/{cid}/backlinks         (cards whose [[#id]] links point at this card)",
+                        "         every card carries `empty` — a checklist/table has NO body, so never read body alone to decide a card is blank",
+                        "         a bare [[Title]] resolves to the linking card's own project first, then the lowest node id (stable across runs)",
                             "GET    /api/cards?ids=1391,1392           (read a LIST of cards, any baskets; 'missing' names the ids that are gone)",
                             "POST   /api/cards/property {cards:[ids], key, value}  ·  DELETE …/property {cards, key}",
                             "         one property, cards ANYWHERE — for the id lists /api/tasks and /api/claims hand back (whole-document: no confined tokens)",
@@ -8912,7 +8914,13 @@ impl TrellisApp {
     /// round trip that could only introduce a difference between the two paths.
     fn follow_link_target(&mut self, ctx: &egui::Context, target: &str) {
         let target = target.to_string();
-        match self.doc.resolve_link_target(&target) {
+        // From the basket the link was clicked in, so a bare [[Archive]] means
+        // this project's Archive rather than whichever one hashed first.
+        let resolved = match self.selected {
+            Some(here) => self.doc.resolve_link_target_from(&target, here),
+            None => self.doc.resolve_link_target(&target),
+        };
+        match resolved {
             Some(crate::model::LinkTarget::Node(id)) => self.jump_to_node(id),
             // A card link lands *on the card* — recentre and flash — not merely
             // in its basket. In a journal-shaped document the basket is a day

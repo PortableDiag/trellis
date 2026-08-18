@@ -4081,6 +4081,15 @@ pub(crate) fn card_json(c: &Card) -> Value {
         "group": c.group,
         "docked_to": c.docked_to,
         "font_scale": c.font_scale,
+        // Whether the card has content OF ITS OWN KIND. A checklist keeps its
+        // content in `items` and a table in `rows`, so neither carries a `body`
+        // at all — and an agent auditing a workspace read two checklist cards
+        // holding 23 lines as "completely empty" and came within one step of
+        // deleting them. Answering it here means nobody has to branch on `kind`
+        // to find out, and there is one definition of empty rather than one per
+        // caller. The title is deliberately not content: a titled card with
+        // nothing in it is exactly the state worth noticing.
+        "empty": c.is_empty(),
     });
     // Only when it is set, so a document full of ordinary cards does not grow a
     // field per card in every response.
