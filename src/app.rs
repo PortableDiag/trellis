@@ -3581,6 +3581,11 @@ impl TrellisApp {
                 // network their phone is on.
                 "lan_hosts": self.api_lan.then(lan_addresses).unwrap_or_default(),
                 "nodes": self.doc.nodes.len(),
+                // What the embedded files cost. The document is written whole on
+                // every save, so this number is paid on each autosave and copied
+                // into every snapshot and backup — and it is otherwise invisible
+                // until a backup gets slow.
+                "attachment_bytes": self.doc.attachment_bytes(),
                 "unsaved_changes": self.dirty,
                 // How many cards assert state that is past its check date.
                 // It rides on `/api/instance` because that is the call every
@@ -4310,7 +4315,14 @@ impl TrellisApp {
             | CanvasAction::RevealElsewhere(..)
             | CanvasAction::SaveAsTemplate(_)
             | CanvasAction::UpdateTemplate(..)
-            | CanvasAction::DeleteTemplate(_) => return None,
+            | CanvasAction::DeleteTemplate(_)
+            // Writing a copy of an attachment out to disk changes no document.
+            | CanvasAction::SaveAttachment(..) => return None,
+
+            // Detaching one does: the bytes leave the document with it.
+            CanvasAction::RemoveAttachment(c, _) => {
+                card(Op::Updated, *c).titled(title(c)).field("attachments")
+            }
 
             // Created — the id doesn't exist yet; `flush_notes` fills it in.
             CanvasAction::AddCard(kind, _) => card(Op::Created, 0).field(kind.label()),
@@ -4594,6 +4606,87 @@ impl TrellisApp {
             .map(|c| c.id)
     }
 
+    /// The card under `pos`, whatever kind it is — an attachment can ride on any
+    /// card, so unlike [`text_card_at`] this does not care.
+    fn any_card_at(&self, node: NodeId, pos: egui::Pos2) -> Option<crate::model::CardId> {
+        let n = self.doc.nodes.get(&node)?;
+        n.cards
+            .iter()
+            .rev()
+            .find(|c| egui::Rect::from_min_size(c.pos, c.size).contains(pos))
+            .map(|c| c.id)
+    }
+
+    /// Bytes above which a dropped file asks first. **A warning, not a refusal:**
+    /// the operator's call, and the reason it is asked at all is below.
+    const ATTACH_WARN_BYTES: usize = 10 * 1024 * 1024;
+
+    /// Attach a dropped file to the card under the cursor, or to a new card named
+    /// after it. `false` if the operator declined.
+    ///
+    /// **Why size is worth a prompt.** The document is one gzip-compressed RON
+    /// file written *whole*, atomically, on every save — so an embedded file is
+    /// re-serialised on every autosave, and copied into every version-history
+    /// snapshot and every backup archive. That is a real cost and it is invisible
+    /// at the moment of the drop, which is exactly when someone can still decide
+    /// against it.
+    fn attach_dropped(
+        &mut self,
+        node: NodeId,
+        bytes: Vec<u8>,
+        name: String,
+        pos: egui::Pos2,
+        at: egui::Pos2,
+    ) -> bool {
+        if bytes.len() > Self::ATTACH_WARN_BYTES {
+            let mb = bytes.len() as f64 / (1024.0 * 1024.0);
+            let ok = matches!(
+                self.message_dialog()
+                    .set_title("Large attachment")
+                    .set_description(&format!(
+                        "{name} is {mb:.1} MB.\n\nThe bytes are stored inside the \
+                         document, which is written whole on every save — so this is \
+                         re-written on each autosave and copied into every snapshot \
+                         and backup.\n\nAttach it anyway?"
+                    ))
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show(),
+                rfd::MessageDialogResult::Yes
+            );
+            if !ok {
+                self.status = format!("Did not attach {name}");
+                return false;
+            }
+        }
+        // Onto the card you dropped it on, if there is one — "the spec belongs to
+        // this task" is the case worth serving. Otherwise a card of its own.
+        let target = self.any_card_at(node, pos).or_else(|| {
+            let cid = self.doc.add_card(node, at, CardKind::Text)?;
+            if let Some(c) = self.doc.card_mut(node, cid) {
+                c.title = name.clone();
+                c.editing = false;
+            }
+            Some(cid)
+        });
+        let Some(cid) = target else { return false };
+        self.doc.add_attachment(node, cid, bytes, name).is_some()
+    }
+
+    /// Write one attachment back out to a file the user picks.
+    ///
+    /// The whole point of storing bytes rather than a path: the file can be taken
+    /// back out anywhere the document goes, long after whatever produced it is
+    /// gone from this disk.
+    fn save_attachment(&mut self, node: NodeId, card: crate::model::CardId, idx: usize) {
+        let Some(att) = self.doc.attachment(node, card, idx) else { return };
+        let (name, data) = (att.name.clone(), att.data.clone());
+        let Some(path) = self.file_dialog().set_file_name(&name).save_file() else { return };
+        match std::fs::write(&path, &data) {
+            Ok(()) => self.status = format!("Saved {} \u{2192} {}", name, path.display()),
+            Err(e) => self.status = format!("Could not save {name}: {e}"),
+        }
+    }
+
     fn drop_files(&mut self, node: NodeId, files: Vec<egui::DroppedFile>, pos: egui::Pos2) {
         let mut n = 0usize;
         for f in files {
@@ -4638,7 +4731,7 @@ impl TrellisApp {
                         n += 1;
                     }
                 }
-            } else if let Ok(text) = String::from_utf8(bytes) {
+            } else if let Ok(text) = String::from_utf8(bytes.clone()) {
                 // A dropped Trellis JSON card file becomes that exact card; any
                 // other `.json` (or text) falls back to a text card.
                 let imported = ext == "json"
@@ -4648,13 +4741,44 @@ impl TrellisApp {
                 if imported {
                     n += 1;
                 } else if let Some(cid) = self.doc.add_card(node, at, CardKind::Text) {
+                    // A note from Obsidian (or Jekyll, or Hugo) arrives with its
+                    // metadata in a YAML frontmatter block, which Trellis cannot
+                    // read: the property parser needs `::` and YAML uses a single
+                    // colon, so `due: 2026-09-01` would land as inert prose. Turn
+                    // it into the lines this app actually reads, and let the rest
+                    // of the file be the body.
+                    let (fields, rest) = crate::model::split_frontmatter(&text);
+                    // `title:` becomes the card's title below, so it must not also
+                    // become a `title::` property — the round trip would grow one
+                    // copy per export/import cycle.
+                    let carried: Vec<(String, String)> = fields
+                        .iter()
+                        .filter(|(k, _)| !k.eq_ignore_ascii_case("title"))
+                        .cloned()
+                        .collect();
+                    let front = crate::model::frontmatter_to_trellis(&carried);
                     if let Some(c) = self.doc.card_mut(node, cid) {
-                        c.title = name;
-                        c.body = text;
+                        // A `title:` field is the note's name, so it becomes the
+                        // card's rather than being repeated as a property.
+                        let titled = fields
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("title"))
+                            .map(|(_, v)| v.clone());
+                        c.title = titled.unwrap_or(name);
+                        c.body = if front.is_empty() {
+                            rest.to_string()
+                        } else {
+                            format!("{front}\n{rest}")
+                        };
                         c.editing = false;
                     }
                     n += 1;
                 }
+            } else if self.attach_dropped(node, bytes, name, pos, at) {
+                // Anything else — a PDF, a .docx, a .zip, an .mp3. Before this it
+                // fell off the end of the chain: no card, no error, no status
+                // line, which is the one answer worse than a refusal.
+                n += 1;
             }
         }
         if n > 0 {
@@ -4714,6 +4838,20 @@ impl TrellisApp {
         }
         for a in actions {
             match a {
+                CanvasAction::SaveAttachment(cid, idx) => {
+                    self.save_attachment(node, cid, idx);
+                }
+                CanvasAction::RemoveAttachment(cid, idx) => {
+                    let name = self
+                        .doc
+                        .attachment(node, cid, idx)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_default();
+                    if self.doc.remove_attachment(node, cid, idx) {
+                        self.dirty = true;
+                        self.status = format!("Removed {name}");
+                    }
+                }
                 // Desktop MODE: the whole basket at once, which is what "the
                 // cards of a workspace are on the screen" means — a per-card
                 // action is the exception, not the feature.
@@ -7602,6 +7740,8 @@ impl TrellisApp {
                             "POST   /api/nodes/{id}/cards/{cid}/chart {kind, label_col?, value_cols?, show_table?}  (bar|line|scatter|pie; DELETE …/chart = plain grid)",
                             "POST   /api/nodes/{id}/cards/{cid}/sketch {op, …}          (add_stroke / undo / clear)",
                             "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}    (GET / DELETE …/images/{idx})",
+                            "GET    /api/nodes/{id}/cards/{cid}/attachments             (files carried by ANY card — the bytes, not a path; names + sizes only)",
+                            "POST   /api/nodes/{id}/cards/{cid}/attachments {name, data_base64}  ·  GET / DELETE …/attachments/{idx}   (the document is written WHOLE on every save, so size costs every autosave, snapshot and backup — attachment_bytes on /api/instance is the running total)",
                             "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",
                             "POST   /api/nodes/{id}/groups/{gid}/move  {node, pos?}     (the whole group — container, members and id)",
                             "POST   /api/nodes/{id}/autosort",

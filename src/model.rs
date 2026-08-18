@@ -599,6 +599,30 @@ pub struct ImageEntry {
     pub name: String,
 }
 
+/// One file attached to a card — the **bytes**, not a path to them.
+///
+/// A pointer to a file on this disk is worthless the moment the document is opened
+/// on the phone, restored from a backup, or read by anyone else, which is the whole
+/// reason images are embedded too. Same `image_bytes` serialisation, so an
+/// attachment costs 1.33x its size in the RON rather than 3.5x as a decimal array,
+/// and the whole document still gzips.
+///
+/// `name` is the file name as dropped, kept verbatim: it is what the reader has to
+/// recognise, and what a "Save as..." offers back.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FileEntry {
+    #[serde(with = "image_bytes")]
+    pub data: Vec<u8>,
+    pub name: String,
+}
+
+impl FileEntry {
+    /// The extension, lowercased, or `""`.
+    pub fn ext(&self) -> String {
+        self.name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default()
+    }
+}
+
 /// A single freehand stroke on a Sketch card. `points` are in the card's local
 /// logical coordinates (top-left of the drawing area = origin, zoom-independent).
 #[derive(Clone, Serialize, Deserialize)]
@@ -761,6 +785,15 @@ pub struct Card {
     /// no inline images (i.e. every card until one is added).
     #[serde(default)]
     pub inline_images: Vec<ImageEntry>,
+    /// Files carried by this card, bytes and all.
+    ///
+    /// **On the card rather than in a card kind of its own.** A seventh `CardKind`
+    /// touches ~180 exhaustive match sites, and the thing people actually want is
+    /// to drop a spec *onto the task card about it* — which a separate file card
+    /// cannot express. Any card can carry files, exactly as any text card can carry
+    /// inline images.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<FileEntry>,
     /// Runtime-only: whether the card is in edit mode. Never persisted.
     #[serde(skip)]
     pub editing: bool,
@@ -845,6 +878,12 @@ impl Card {
     /// The **title is not content**: a titled card with nothing in it reports
     /// `true`, because that is exactly the state worth noticing.
     pub fn is_empty(&self) -> bool {
+        // An attached file is content whatever the card's kind is: a text card
+        // whose whole point is the PDF on it must not read as noise to an agent
+        // tidying a workspace — the exact mistake `empty` was added to prevent.
+        if !self.attachments.is_empty() {
+            return false;
+        }
         match &self.kind {
             CardKind::Text => self.body.trim().is_empty() && self.inline_images.is_empty(),
             CardKind::Code { .. } => self.body.trim().is_empty(),
@@ -902,6 +941,7 @@ impl Card {
             docked_to: None,
             font_scale: 1.0,
             inline_images: Vec::new(),
+            attachments: Vec::new(),
             editing,
         }
     }
@@ -1989,6 +2029,52 @@ impl Document {
         Some(c.inline_images.len() - 1)
     }
 
+    /// Attach a file's bytes to any card, returning its index.
+    ///
+    /// No size limit here on purpose: the cost of a large attachment is a
+    /// *storage* decision (the document is written whole on every save), so the
+    /// warning and the operator's override belong at the point of the drop, not
+    /// buried in the model where an API caller would silently inherit a policy it
+    /// was never told about.
+    pub fn add_attachment(
+        &mut self,
+        node: NodeId,
+        card: CardId,
+        bytes: Vec<u8>,
+        file_name: String,
+    ) -> Option<usize> {
+        let c = self.card_mut(node, card)?;
+        c.attachments.push(FileEntry { data: bytes, name: file_name });
+        Some(c.attachments.len() - 1)
+    }
+
+    /// Drop the `idx`th attachment. `false` when there is no such index, so a
+    /// caller can tell "removed" from "was never there".
+    pub fn remove_attachment(&mut self, node: NodeId, card: CardId, idx: usize) -> bool {
+        let Some(c) = self.card_mut(node, card) else { return false };
+        if idx >= c.attachments.len() {
+            return false;
+        }
+        c.attachments.remove(idx);
+        true
+    }
+
+    /// One attachment, by index.
+    pub fn attachment(&self, node: NodeId, card: CardId, idx: usize) -> Option<&FileEntry> {
+        self.card(node, card)?.attachments.get(idx)
+    }
+
+    /// Total bytes of every attachment in the document — what embedding costs on
+    /// every whole-document save, in one number a human can act on.
+    pub fn attachment_bytes(&self) -> u64 {
+        self.nodes
+            .values()
+            .flat_map(|n| n.cards.iter())
+            .flat_map(|c| c.attachments.iter())
+            .map(|a| a.data.len() as u64)
+            .sum()
+    }
+
     /// Remove the `idx`th image (display order) from an Image card. Removing
     /// the primary image promotes the next `extra` entry into its place.
     pub fn remove_image(&mut self, node: NodeId, card: CardId, idx: usize) -> bool {
@@ -2997,9 +3083,16 @@ impl Document {
     }
 
     /// Render a single card to Markdown. `None` if the card no longer exists.
+    /// One card as a standalone Markdown document, with **YAML frontmatter**.
+    ///
+    /// A single card is the unit that matches a note file elsewhere, so this is
+    /// where frontmatter earns its place: without it a card exported to Obsidian
+    /// arrives with its `due::`, `status::` and `#tags` flattened into prose, and
+    /// the round trip loses everything a query could have used. Cards with no
+    /// properties and no tags get no block at all.
     pub fn export_card_markdown(&self, node: NodeId, card: CardId) -> Option<String> {
         let c = self.card(node, card)?;
-        let mut s = String::new();
+        let mut s = frontmatter_for(c);
         if !c.title.is_empty() {
             s.push_str(&format!("# {}\n\n", c.title));
         }
@@ -3058,6 +3151,7 @@ impl Document {
             z: c.z,
             font_scale: c.font_scale,
             inline_images: c.inline_images.clone(),
+            attachments: c.attachments.clone(),
             kind: c.kind.clone(),
         };
         serde_json::to_string_pretty(&exp).ok()
@@ -3083,6 +3177,7 @@ impl Document {
             c.z = exp.z;
             c.font_scale = if exp.font_scale > 0.0 { exp.font_scale } else { 1.0 };
             c.inline_images = exp.inline_images;
+            c.attachments = exp.attachments;
             c.editing = false;
         }
         Some(cid)
@@ -4756,6 +4851,10 @@ pub struct CardExport {
     /// the card file (and any template built from it) is self-contained.
     #[serde(default)]
     pub inline_images: Vec<ImageEntry>,
+    /// Attached files, so an exported card — and a template built from one — is as
+    /// self-contained as it looks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<FileEntry>,
     pub kind: CardKind,
 }
 
@@ -4974,6 +5073,173 @@ fn card_body_html(card: &Card) -> String {
 
 /// The Markdown for one card's body (no title). Shared by the whole-document and
 /// single-card Markdown exporters.
+/// Split a leading **YAML frontmatter** block off a Markdown document.
+///
+/// Returns `(fields, rest)`; `fields` is empty when there is no block, and `rest`
+/// is then the input untouched.
+///
+/// **A deliberate subset, and the boundary is the point.** Trellis does not adopt
+/// frontmatter as its own model — `key:: value` already does that job, works on a
+/// single checklist line, and reaches an agent as parsed JSON rather than as text
+/// to parse. What frontmatter is *for* here is the edge: Obsidian, Jekyll and Hugo
+/// all write it, and a note imported from one of them arrives with its dates and
+/// tags inert unless someone reads them.
+///
+/// Handled: `key: value`, quoted values, `key: [a, b]` inline lists, and `key:`
+/// followed by `- item` lines. **Nested mappings are not**, and are skipped rather
+/// than flattened into something that reads like a value someone wrote — guessing
+/// at structure is how an import quietly invents data.
+pub fn split_frontmatter(text: &str) -> (Vec<(String, String)>, &str) {
+    let body = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n"));
+    let Some(body) = body else { return (Vec::new(), text) };
+    // The closing fence must be a line of its own.
+    let mut end = None;
+    let mut at = 0usize;
+    for line in body.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        if bare.trim_end() == "---" || bare.trim_end() == "..." {
+            end = Some((at, at + line.len()));
+            break;
+        }
+        at += line.len();
+    }
+    let Some((yaml_end, rest_start)) = end else {
+        // An opening fence with no closing one is not frontmatter; treat the whole
+        // thing as content rather than silently eating the document.
+        return (Vec::new(), text);
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut pending_list: Option<(String, Vec<String>)> = None;
+    for raw in body[..yaml_end].lines() {
+        let line = raw.trim_end();
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        // A `- item` continuation of the previous `key:` line.
+        if let Some(item) = line.trim_start().strip_prefix("- ") {
+            if let Some((_, items)) = pending_list.as_mut() {
+                items.push(unquote(item.trim()));
+                continue;
+            }
+        }
+        if let Some((key, items)) = pending_list.take() {
+            out.push((key, items.join(", ")));
+        }
+        // Indented and not a list item: part of a nested mapping. Skipped.
+        if line.starts_with(' ') || line.starts_with('\t') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else { continue };
+        let key = key.trim();
+        if key.is_empty() || !key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            pending_list = Some((key.to_string(), Vec::new()));
+            continue;
+        }
+        let value = match value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+            Some(inner) => inner
+                .split(',')
+                .map(|v| unquote(v.trim()))
+                .filter(|v| !v.is_empty())
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => unquote(value),
+        };
+        out.push((key.to_string(), value));
+    }
+    if let Some((key, items)) = pending_list {
+        out.push((key, items.join(", ")));
+    }
+    (out, &body[rest_start..])
+}
+
+/// Strip one layer of matching quotes, as YAML scalars carry.
+fn unquote(s: &str) -> String {
+    let t = s.trim();
+    for q in ['"', '\''] {
+        if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) {
+            return t[1..t.len() - 1].to_string();
+        }
+    }
+    t.to_string()
+}
+
+/// Frontmatter fields turned into the lines Trellis actually reads.
+///
+/// `tags` becomes `#tags`, because that is what the tag index scans; everything
+/// else becomes `key:: value`, which is what the Agenda, Kanban and query surfaces
+/// read. Keys Trellis has no meaning for still come across verbatim — dropping
+/// them would lose the half of an import nobody can get back.
+pub fn frontmatter_to_trellis(fields: &[(String, String)]) -> String {
+    let mut out = String::new();
+    for (k, v) in fields {
+        if v.trim().is_empty() {
+            continue;
+        }
+        if k.eq_ignore_ascii_case("tags") || k.eq_ignore_ascii_case("tag") {
+            let tags: Vec<String> = v
+                .split(',')
+                .map(|t| t.trim().trim_start_matches('#').replace(' ', "-"))
+                .filter(|t| !t.is_empty())
+                .map(|t| format!("#{t}"))
+                .collect();
+            if !tags.is_empty() {
+                out.push_str(&tags.join(" "));
+                out.push('\n');
+            }
+            continue;
+        }
+        out.push_str(&format!("{k}:: {v}\n"));
+    }
+    out
+}
+
+/// A card's properties and tags as a YAML frontmatter block, or `""` when it has
+/// none — so an exported card lands in Obsidian with its metadata intact rather
+/// than flattened into prose.
+pub fn frontmatter_for(card: &Card) -> String {
+    // The same haystack `Document::card_properties` uses, so an exported card's
+    // frontmatter is exactly the properties the Agenda and Kanban read — the rule
+    // that a checklist card's properties come from its title and items, never its
+    // body, holds here for free.
+    let hay = format!("{}\n{}", card.title, searchable_body(card));
+    let props = extract_properties(&hay);
+    let tags = extract_tags(&hay);
+    if props.is_empty() && tags.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("---\n");
+    if !card.title.trim().is_empty() {
+        s.push_str(&format!("title: {}\n", yaml_scalar(&card.title)));
+    }
+    if !tags.is_empty() {
+        s.push_str(&format!("tags: [{}]\n", tags.join(", ")));
+    }
+    for (k, v) in props {
+        s.push_str(&format!("{k}: {}\n", yaml_scalar(&v)));
+    }
+    s.push_str("---\n\n");
+    s
+}
+
+/// Quote a value where YAML would otherwise read it as structure.
+fn yaml_scalar(v: &str) -> String {
+    let needs = v.is_empty()
+        || v.starts_with(['[', '{', '&', '*', '!', '|', '>', '%', '@', '`', '#', '-', '?'])
+        || v.contains(": ")
+        || v.ends_with(':')
+        || v.contains('\n')
+        || v.contains('"');
+    if needs {
+        format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        v.to_string()
+    }
+}
+
 fn card_body_md(card: &Card) -> String {
     let mut s = String::new();
     match &card.kind {
@@ -6194,6 +6460,133 @@ mod tests {
         assert_eq!(doc.cards_with_property("due", None).len(), 2);
         assert_eq!(doc.cards_with_property("status", Some("open")).len(), 1);
         assert_eq!(doc.cards_with_property("status", Some("closed")).len(), 0);
+    }
+
+    /// Frontmatter is read at the boundary and turned into what Trellis reads.
+    ///
+    /// The whole reason this exists: `due: 2026-09-01` is not a Trellis property —
+    /// the parser needs `::` and YAML uses one colon — so an imported note's dates
+    /// and tags are inert until something maps them.
+    #[test]
+    fn frontmatter_is_read_at_the_boundary() {
+        let md = "---\ntitle: Q3 planning\ntags: [work, planning]\ndue: 2026-09-01\n\
+                  status: doing\n---\n\nthe note itself\n";
+        let (fields, rest) = split_frontmatter(md);
+        assert_eq!(rest, "\nthe note itself\n", "the block is removed from the body");
+        let get = |k: &str| {
+            fields.iter().find(|(f, _)| f == k).map(|(_, v)| v.clone()).unwrap_or_default()
+        };
+        assert_eq!(get("title"), "Q3 planning");
+        assert_eq!(get("tags"), "work, planning");
+        assert_eq!(get("due"), "2026-09-01");
+
+        // …and becomes lines the Agenda and the tag index actually scan.
+        let carried: Vec<(String, String)> =
+            fields.iter().filter(|(k, _)| k != "title").cloned().collect();
+        let lines = frontmatter_to_trellis(&carried);
+        assert!(lines.contains("#work #planning"), "tags become #tags: {lines}");
+        assert!(lines.contains("due:: 2026-09-01"), "a date becomes a real due:: — {lines}");
+        assert!(lines.contains("status:: doing"), "{lines}");
+        // And it is genuinely a task now, which is the point of the whole mapping.
+        assert!(
+            extract_properties(&lines).iter().any(|(k, v)| k == "due" && v == "2026-09-01"),
+            "the mapped line parses as a property"
+        );
+    }
+
+    /// The shapes that must not turn into data that was never written.
+    #[test]
+    fn frontmatter_parsing_refuses_to_guess() {
+        // No block at all: the text is returned untouched.
+        let plain = "# just a heading\n";
+        let (f, rest) = split_frontmatter(plain);
+        assert!(f.is_empty());
+        assert_eq!(rest, plain);
+
+        // An opening fence with no closing one is not frontmatter. Eating the rest
+        // of the document here would be silent data loss.
+        let unterminated = "---\ntitle: x\n\nbody goes on forever\n";
+        let (f, rest) = split_frontmatter(unterminated);
+        assert!(f.is_empty(), "no fields claimed: {f:?}");
+        assert_eq!(rest, unterminated, "and the body is intact");
+
+        // A `---` rule further down is not a frontmatter fence either.
+        let (f, _) = split_frontmatter("intro\n---\ntitle: x\n---\n");
+        assert!(f.is_empty());
+
+        // Block list form, and quoted scalars.
+        let (f, _) = split_frontmatter("---\ntags:\n  - a\n  - b\nname: \"quoted: value\"\n---\n");
+        let get = |k: &str| f.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(get("tags"), "a, b");
+        assert_eq!(get("name"), "quoted: value");
+
+        // A nested mapping is SKIPPED rather than flattened — inventing
+        // `owner: name` out of a two-level structure would be worse than dropping it.
+        let (f, _) = split_frontmatter("---\nowner:\n  name: ada\nkeep: yes\n---\n");
+        assert!(f.iter().any(|(k, v)| k == "keep" && v == "yes"));
+        assert!(!f.iter().any(|(_, v)| v == "ada"), "no invented value: {f:?}");
+    }
+
+    /// An exported card carries its metadata, so the round trip is lossless.
+    #[test]
+    fn a_card_exports_with_its_metadata() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        {
+            let c = doc.card_mut(n, cid).unwrap();
+            c.title = "Q3 planning".into();
+            c.body = "#work\n\ndue:: 2026-09-01\n\nthe note".into();
+        }
+        let md = doc.export_card_markdown(n, cid).unwrap();
+        assert!(md.starts_with("---\n"), "frontmatter leads the file: {md}");
+        assert!(md.contains("title: Q3 planning"), "{md}");
+        assert!(md.contains("tags: [work]"), "{md}");
+        assert!(md.contains("due: 2026-09-01"), "a Trellis property becomes a field: {md}");
+
+        // Read back what we just wrote: the fields survive the round trip.
+        let (fields, _) = split_frontmatter(&md);
+        let get = |k: &str| fields.iter().find(|(f, _)| f == k).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(get("due"), "2026-09-01");
+        assert_eq!(get("title"), "Q3 planning");
+
+        // A card with neither properties nor tags gets no block — an empty
+        // `---\n---` header is noise in every reader that renders it.
+        let plain = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, plain).unwrap().body = "just prose".into();
+        assert!(!doc.export_card_markdown(n, plain).unwrap().starts_with("---"));
+    }
+
+    /// Attached bytes live on the card, survive an export round trip, and count as
+    /// content — a card whose whole point is the PDF on it must not read as noise.
+    #[test]
+    fn an_attachment_is_carried_by_the_card() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        // A blank text card is empty; attaching a file makes it content.
+        assert!(doc.card(n, cid).unwrap().is_empty());
+        let bytes = vec![0x25, 0x50, 0x44, 0x46, 0xff, 0x00, 0xfe]; // not valid UTF-8
+        assert_eq!(doc.add_attachment(n, cid, bytes.clone(), "spec.pdf".into()), Some(0));
+        assert!(!doc.card(n, cid).unwrap().is_empty(), "a file is content");
+        assert_eq!(doc.attachment_bytes(), bytes.len() as u64);
+
+        let a = doc.attachment(n, cid, 0).unwrap();
+        assert_eq!(a.name, "spec.pdf");
+        assert_eq!(a.ext(), "pdf");
+        assert_eq!(a.data, bytes, "the BYTES are stored, not a path to them");
+
+        // Through an export and back — a card that looks self-contained is.
+        let json = doc.export_card_json(n, cid).unwrap();
+        let exp = parse_card_export(&json).unwrap();
+        let copy = doc.add_card_from_export(n, egui::pos2(0.0, 0.0), exp).unwrap();
+        assert_eq!(doc.attachment(n, copy, 0).unwrap().data, bytes);
+
+        // Removing one is honest about whether it was there.
+        assert!(doc.remove_attachment(n, cid, 0));
+        assert!(!doc.remove_attachment(n, cid, 0), "no such index is false, not a panic");
+        assert!(doc.attachment(n, cid, 0).is_none());
     }
 
     #[test]

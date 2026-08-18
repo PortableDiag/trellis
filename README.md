@@ -84,6 +84,19 @@ worth adding to anything durable because card ids repeat across documents. The
 **File → Restart** brings this same instance back on the same port after an
 upgrade.
 
+**Drop any file in** — a PDF, a spreadsheet, a zip. The **bytes are stored in the
+document**, not a path to them, so the file travels with the notes to the phone, a
+backup or another machine. Drop it on a card to attach it there, or on empty canvas
+for a card of its own; click it to save a copy back out. Above 10 MB it asks first,
+because the document is written whole on every save — an embedded file is re-written
+on each autosave and copied into every snapshot and backup.
+
+**Notes from other apps keep their metadata.** A dropped `.md` with a YAML
+frontmatter block (Obsidian, Jekyll, Hugo) has it read: `tags:` become `#tags`,
+`due:`/`status:` and the rest become `key:: value`, and `title:` becomes the card's
+title. Exporting a card to Markdown writes the block back out, so the round trip
+keeps what a query can use.
+
 **A link that works from your phone** — `http://<lan-host>:<port>/go/card/<cid>`
 (the LAN address is `lan_host` from `GET /api/instance`). Where `/open/…` moves
 the window on *this* machine, `/go/…` serves a small page that opens the card in

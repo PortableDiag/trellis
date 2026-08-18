@@ -6,6 +6,61 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.123.0]
+
+### Added
+- **Drop any file into a basket and the bytes come with it.** A PDF, a spreadsheet,
+  a zip, an audio file — stored **inside the document**, not as a path to it,
+  because a path is worthless the moment the notes are opened on the phone,
+  restored from a backup, or read by anyone else. Drop it *on a card* to attach it
+  there ("the spec belongs to this task"), or on empty canvas for a card named after
+  the file. Click an attachment to save a copy back out.
+
+  **It replaces a silent failure.** Only images and UTF-8 text were handled; anything
+  else fell off the end of the chain with no card, no error and no status line.
+
+  **On the card, not in a new card kind.** A seventh `CardKind` touches ~180
+  exhaustive match sites, and a file card could not express "attached to *this*
+  task" anyway — so `attachments` sits beside `inline_images` and any card can carry
+  one. They ride through card export/import and templates, and a card holding only a
+  file reports `empty: false`.
+
+  Over the API: `GET`/`POST /api/nodes/{id}/cards/{cid}/attachments` and
+  `GET`/`DELETE …/attachments/{idx}`. The listing returns names and **sizes**, never
+  the bytes.
+
+  **The cost is stated rather than hidden.** The document is one gzip-compressed RON
+  file written *whole* on every save, so an embedded file is re-serialised on each
+  autosave and copied into every version-history snapshot and every backup archive.
+  The app **warns above 10 MB and lets you go ahead** (the operator's call);
+  `attachment_bytes` on `GET /api/instance` is the running total. The API sets no
+  limit deliberately — a policy buried in the model is one a caller inherits without
+  ever being told about it.
+
+- **YAML frontmatter, at the boundary only.** Trellis does not adopt it as an
+  internal model: `key:: value` already does that job, works on a single checklist
+  line, and reaches a caller as parsed JSON rather than text to parse. What it is
+  *for* is the edge, where other tools speak it.
+
+  **Import** — a `.md` dropped in has its leading `---` block read: `tags:` becomes
+  `#tags`, `title:` becomes the card's title, and everything else becomes
+  `key:: value`. Without this an Obsidian note's `due: 2026-09-01` is inert prose,
+  because the property parser needs `::` and YAML uses one colon.
+
+  **Export** — `GET /api/nodes/{id}/cards/{cid}/export?format=markdown|html|json`
+  (new) and **Copy → Markdown** emit the block, so a card lands in another tool with
+  its dates, status and tags intact. The whole-document export deliberately does not:
+  a file of many cards has no single set of fields describing it.
+
+  A deliberate subset is understood — `key: value`, quoted scalars, `key: [a, b]`,
+  and `key:` + `- item` lists. **Nested mappings are skipped, not flattened**, because
+  guessing at structure is how an import quietly invents data; and an opening `---`
+  with no closing fence is treated as ordinary content rather than swallowing the
+  document.
+
+### Changed
+- `GET /api/instance` reports **`attachment_bytes`**.
+
 ## [0.122.2]
 
 ### Fixed

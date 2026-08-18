@@ -182,6 +182,10 @@ pub enum CanvasAction {
     /// A `[[wiki-link]]` clicked inside a table cell. Carries the raw target;
     /// the app resolves it exactly as it resolves one clicked in a text card.
     FollowLink(String),
+    /// Write attachment `idx` of this card back out to a file the user picks.
+    SaveAttachment(CardId, usize),
+    /// Detach attachment `idx` — the bytes leave the document with it.
+    RemoveAttachment(CardId, usize),
     /// Go to a card that is *projected* into this day but lives elsewhere —
     /// the only interaction a projection offers, because it is a view of a card
     /// and the card is where you edit it.
@@ -1829,6 +1833,52 @@ fn resolve_inline_images(
 
 fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &mut Vec<CanvasAction>) {
     ui.set_width(ui.available_width());
+    kind_ui(ui, card, env, zoom, actions);
+    attachments_ui(ui, card, zoom, actions);
+}
+
+/// The strip of attached files under a card's content.
+///
+/// Shown for **every** kind, because attachments hang off the card rather than off
+/// a card kind — the point of putting them there. Nothing is drawn when there are
+/// none, so a card that has never seen a file is unchanged.
+fn attachments_ui(ui: &mut egui::Ui, card: &Card, zoom: f32, actions: &mut Vec<CanvasAction>) {
+    if card.attachments.is_empty() {
+        return;
+    }
+    ui.add_space(4.0 * zoom);
+    ui.separator();
+    for (i, att) in card.attachments.iter().enumerate() {
+        ui.horizontal(|ui| {
+            // Size is shown because it is the cost the operator agreed to at the
+            // drop, and the only place they can still see it afterwards.
+            let kb = att.data.len() as f64 / 1024.0;
+            let size = if kb >= 1024.0 {
+                format!("{:.1} MB", kb / 1024.0)
+            } else {
+                format!("{kb:.0} KB")
+            };
+            let label = format!("\u{1f4ce} {}  ({size})", att.name);
+            if ui
+                .add(egui::Button::new(label).frame(false))
+                .on_hover_text("Save a copy of this file")
+                .clicked()
+            {
+                actions.push(CanvasAction::SaveAttachment(card.id, i));
+            }
+            if card.editing
+                && ui
+                    .add(egui::Button::new("\u{00d7}").frame(false).small())
+                    .on_hover_text("Remove this attachment (its bytes leave the document)")
+                    .clicked()
+            {
+                actions.push(CanvasAction::RemoveAttachment(card.id, i));
+            }
+        });
+    }
+}
+
+fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &mut Vec<CanvasAction>) {
     match &card.kind {
         CardKind::Text => {
             // `source.is_none()`: a mirrored body belongs to the file, so the

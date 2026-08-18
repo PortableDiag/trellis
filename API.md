@@ -154,6 +154,10 @@ GET /api/instance
 is its full path, or `null` when untitled. `nodes` is the document's node count.
 Unlike `/api/health` this needs the key, since it reveals a file path.
 
+`attachment_bytes` is the total size of every file embedded in the document — what
+the attachments cost on each whole-document save, and otherwise invisible until a
+backup gets slow.
+
 `lan_host` is an address **another device on the network** can reach this instance
 on, and `lan_hosts` is every candidate, best first. Both are `null`/empty when LAN
 access is off, because then there honestly is no such address. They exist because
@@ -781,6 +785,72 @@ GET    /api/nodes/{id}/cards/{cid}/images/{idx}  → 200 {index, name, base64}  
 
 DELETE /api/nodes/{id}/cards/{cid}/images/{idx}  → 200 {<updated card>}   | 404
 ```
+
+### YAML frontmatter — at the boundary only
+Trellis does **not** adopt frontmatter as its internal model: `key:: value` already
+does that job, works on a single checklist line (which is what lets one card hold N
+independently-dated tasks), and reaches a caller as parsed JSON in `properties`
+rather than as a block of text to parse. Frontmatter earns its place at the **edges**,
+where other tools speak it.
+
+- **Import.** A `.md` **dropped into a basket** has a leading `---` block read and
+  mapped onto what Trellis scans: `tags:` becomes `#tags`, everything else becomes
+  `key:: value`, and `title:` becomes the card's title. Without this an imported
+  Obsidian note's `due: 2026-09-01` is inert prose — the property parser needs `::`
+  and YAML uses a single colon.
+- **Export.** `GET /api/nodes/{id}/cards/{cid}/export?format=markdown|html|json`
+  (and **Copy → Markdown** on a card) emits the block, so a card lands in Obsidian
+  with its dates, status and tags intact. A card with no properties and no tags gets
+  no block rather than an empty one. The **whole-document** export
+  (`GET /api/export`) does not carry frontmatter and should not: a file of many
+  cards has no one set of fields that describes it.
+
+```
+GET /api/nodes/{id}/cards/{cid}/export?format=markdown|html|json
+  → 200 {card, format, content}   | 400 (unknown format)  | 404
+```
+
+A deliberate subset is understood: `key: value`, quoted scalars, `key: [a, b]` and
+`key:` + `- item` lists. **Nested mappings are skipped, not flattened** — guessing at
+structure is how an import quietly invents data — and an opening `---` with no
+closing fence is treated as ordinary content rather than swallowing the document.
+
+### Attachments
+Files carried by a card — **the bytes, not a path to them**. A pointer to a file on
+one machine's disk is worthless the moment the document is opened on the phone,
+restored from a backup, or read by anyone else, which is the same reason images are
+embedded.
+
+**On the card, not in a card kind.** Any card can carry attachments, whatever its
+kind, so "drop the spec onto the task card about it" works without a container card
+in between. They ride along through card export/import and templates.
+```
+GET    /api/nodes/{id}/cards/{cid}/attachments
+  → 200 {card, attachments:[{index, name, ext, bytes}]}   | 404
+  (names and SIZES only — listing must not drag every attached file through the
+   response; fetch one by index for its content)
+
+GET    /api/nodes/{id}/cards/{cid}/attachments/{idx}
+  → 200 {index, name, ext, bytes, base64}   | 404
+
+POST   /api/nodes/{id}/cards/{cid}/attachments   {name, data_base64}
+  → 201 {card, index, name, bytes}   | 400 (no name / bad base64)  | 404
+
+DELETE /api/nodes/{id}/cards/{cid}/attachments/{idx}
+  → 200 {card, removed}   | 404
+```
+**The cost is real and worth knowing before you use this.** The document is one
+gzip-compressed RON file written **whole**, atomically, on every save — so an
+embedded file is re-serialised on each autosave and copied into every
+version-history snapshot and every backup archive. `attachment_bytes` on
+`GET /api/instance` is the running total. The app warns above **10 MB** on a drop
+and lets you go ahead anyway; the API sets no limit at all, deliberately, because a
+policy buried in the model is one an API caller would inherit without ever being
+told about it.
+
+In the app: **drop any file** onto a basket. Onto a card, it attaches to that card;
+onto empty canvas, it becomes a card named after the file. Click an attachment to
+save a copy back out; the `×` in edit mode detaches it.
 
 ### Autosort
 Arrange a node's cards into a tidy, non-overlapping grid (the same as the app's

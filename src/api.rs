@@ -216,6 +216,21 @@ pub enum ApiRequest {
     // Sketch editing (add stroke / undo / clear).
     SketchOp { node: NodeId, card: u64, op: SketchOpInput },
     // Image bytes.
+    /// `…/attachments` — files carried by a card, bytes and all.
+    ///
+    /// A card, not a card *kind*: attachments hang off `Card` beside
+    /// inline images, so any card can carry one. Node-addressed only, like the
+    /// other kind-shaped ops.
+    /// `GET …/cards/{cid}/export?format=` — one card as a standalone document.
+    ///
+    /// A single card is the unit that matches a note file in other tools, which is
+    /// why the **markdown** form carries YAML frontmatter while the whole-document
+    /// export cannot: a file of many cards has no one set of fields to describe it.
+    ExportCard { node: NodeId, card: u64, format: String },
+    ListAttachments { node: NodeId, card: u64 },
+    GetAttachment { node: NodeId, card: u64, index: usize },
+    AddAttachment { node: NodeId, card: u64, name: String, bytes: Vec<u8> },
+    RemoveAttachment { node: NodeId, card: u64, index: usize },
     AddImage { node: NodeId, card: u64, name: String, bytes: Vec<u8> },
     RemoveImage { node: NodeId, card: u64, index: usize },
     GetImage { node: NodeId, card: u64, index: usize },
@@ -577,6 +592,11 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::AddImage { node, .. }
         | ApiRequest::RemoveImage { node, .. }
         | ApiRequest::GetImage { node, .. }
+        | ApiRequest::ExportCard { node, .. }
+        | ApiRequest::ListAttachments { node, .. }
+        | ApiRequest::GetAttachment { node, .. }
+        | ApiRequest::AddAttachment { node, .. }
+        | ApiRequest::RemoveAttachment { node, .. }
         | ApiRequest::CreateGroup { node, .. }
         | ApiRequest::UpdateGroup { node, .. }
         | ApiRequest::SetNodeDesktop { node, .. }
@@ -762,6 +782,12 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
             .in_node(*node)
             .titled(card_title(node, card))
             .field(if spec.is_some() { "chart" } else { "chart.clear" }),
+        ApiRequest::AddAttachment { node, card, .. } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .field("attachments"),
+        ApiRequest::RemoveAttachment { node, card, .. } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .field("attachments"),
         ApiRequest::AddImage { node, card, .. } => ch(E::Card, Op::Updated, *card)
             .in_node(*node)
             .titled(card_title(node, card))
@@ -1292,6 +1318,16 @@ struct DockInput {
 struct GroupCardInput {
     /// The group the card should join.
     group: GroupId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddAttachmentInput {
+    /// The file name, kept verbatim — it is what a "Save as…" offers back.
+    name: String,
+    /// Base64-encoded file bytes. Any type: the point is that Trellis does not
+    /// need to understand a file to carry it.
+    data_base64: String,
 }
 
 #[derive(Deserialize)]
@@ -1976,6 +2012,32 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "nodes", nid, "cards", cid, "sketch"]) => {
             let op: SketchOpInput = parse(body)?;
             Ok(ApiRequest::SketchOp { node: pid(nid)?, card: pid(cid)?, op })
+        }
+        (Method::Get, ["api", "nodes", nid, "cards", cid, "export"]) => Ok(ApiRequest::ExportCard {
+            node: pid(nid)?,
+            card: pid(cid)?,
+            format: query_get(query, "format").unwrap_or_else(|| "markdown".into()),
+        }),
+        (Method::Get, ["api", "nodes", nid, "cards", cid, "attachments"]) => {
+            Ok(ApiRequest::ListAttachments { node: pid(nid)?, card: pid(cid)? })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "attachments"]) => {
+            let i: AddAttachmentInput = parse(body)?;
+            if i.name.trim().is_empty() {
+                return Err((400, "an attachment needs a name".into()));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(i.data_base64.trim())
+                .map_err(|e| (400, format!("invalid base64 file data: {e}")))?;
+            Ok(ApiRequest::AddAttachment { node: pid(nid)?, card: pid(cid)?, name: i.name, bytes })
+        }
+        (Method::Get, ["api", "nodes", nid, "cards", cid, "attachments", idx]) => {
+            let index = idx.parse::<usize>().map_err(|_| (400, format!("bad index: {idx}")))?;
+            Ok(ApiRequest::GetAttachment { node: pid(nid)?, card: pid(cid)?, index })
+        }
+        (Method::Delete, ["api", "nodes", nid, "cards", cid, "attachments", idx]) => {
+            let index = idx.parse::<usize>().map_err(|_| (400, format!("bad index: {idx}")))?;
+            Ok(ApiRequest::RemoveAttachment { node: pid(nid)?, card: pid(cid)?, index })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "images"]) => {
             let i: AddImageInput = parse(body)?;
@@ -3576,6 +3638,82 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 (true, ApiResponse::ok(card_json(c)))
             } else {
                 (false, ApiResponse::err(404, "card/image not found or not an image card"))
+            }
+        }
+        ApiRequest::ExportCard { node, card, format } => {
+            let content = match format.as_str() {
+                "markdown" | "md" => doc.export_card_markdown(node, card),
+                "html" => doc.export_card_html(node, card),
+                "json" => doc.export_card_json(node, card),
+                other => {
+                    return (
+                        false,
+                        ApiResponse::err(
+                            400,
+                            &format!("format: markdown | html | json (not {other:?})"),
+                        ),
+                    )
+                }
+            };
+            match content {
+                Some(content) => (
+                    false,
+                    ApiResponse::ok(json!({
+                        "card": card,
+                        "format": if format == "md" { "markdown" } else { &format },
+                        "content": content,
+                    })),
+                ),
+                None => (false, ApiResponse::err(404, "card not found")),
+            }
+        }
+        ApiRequest::ListAttachments { node, card } => match doc.card(node, card) {
+            Some(c) => (
+                false,
+                ApiResponse::ok(json!({
+                    "card": card,
+                    "attachments": c.attachments.iter().enumerate().map(|(i, a)| json!({
+                        "index": i,
+                        "name": a.name,
+                        "ext": a.ext(),
+                        // The size, not the bytes: listing a basket must not drag
+                        // every attached file through the response.
+                        "bytes": a.data.len(),
+                    })).collect::<Vec<_>>(),
+                })),
+            ),
+            None => (false, ApiResponse::err(404, "card not found")),
+        },
+        ApiRequest::GetAttachment { node, card, index } => match doc.attachment(node, card, index) {
+            Some(a) => (
+                false,
+                ApiResponse::ok(json!({
+                    "index": index,
+                    "name": a.name,
+                    "ext": a.ext(),
+                    "bytes": a.data.len(),
+                    "base64": base64::engine::general_purpose::STANDARD.encode(&a.data),
+                })),
+            ),
+            None => (false, ApiResponse::err(404, "card/attachment not found")),
+        },
+        ApiRequest::AddAttachment { node, card, name, bytes } => {
+            let len = bytes.len();
+            match doc.add_attachment(node, card, bytes, name.clone()) {
+                Some(index) => (
+                    true,
+                    ApiResponse::created(json!({
+                        "card": card, "index": index, "name": name, "bytes": len,
+                    })),
+                ),
+                None => (false, ApiResponse::err(404, "card not found")),
+            }
+        }
+        ApiRequest::RemoveAttachment { node, card, index } => {
+            if doc.remove_attachment(node, card, index) {
+                (true, ApiResponse::ok(json!({ "card": card, "removed": index })))
+            } else {
+                (false, ApiResponse::err(404, "card/attachment not found"))
             }
         }
         ApiRequest::GetImage { node, card, index } => {
