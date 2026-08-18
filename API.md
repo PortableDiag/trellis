@@ -864,9 +864,15 @@ POST /api/nodes/{id}/cards/{cid}/property  {key, value}
 DELETE /api/nodes/{id}/cards/{cid}/property?key=<key>
   → 200 {"cleared":true|false,"key":"due"}          | 400 (no key) | 404 (card not found)
         Removes the whole `key:: value` line. `cleared:false` means the card
-        never had it — not an error. **Setting a property to "" is not the
-        same**: that leaves `due::` present but unparseable, so the task stays
-        on the agenda under "No date" instead of leaving it.
+        never had it — not an error.
+
+        **Setting a property to `""` is not the same, but not for the reason this
+        page used to give.** An empty value is not parsed as a property at all, so
+        the task does leave the agenda — what it leaves behind is a dangling
+        `due:: ` line in the body for the next reader to puzzle over. The case that
+        actually traps you is a **non-empty value that is not a date**: `due:: soon`
+        *is* a property, so the card is still a task, and with nothing to sort by it
+        sits under **"No date"** indefinitely. Measured, both ways, on 2026-08-17.
     → 200 {"card":<cid>,"key":<k>,"value":<v>}   | 404
 ```
 
@@ -1091,9 +1097,11 @@ curl -s -X POST -H "X-API-Key: $KEY" -d '{"key":"status","value":"doing"}' \
 curl -s -X POST -H "X-API-Key: $KEY" -d '{"key":"due","value":"2026-08-18"}' \
   $API/nodes/$NID/cards/$CID/property     # slipped a day? edit the date, don't copy
 
-# 2b. Drop a date entirely. DELETE removes the `due::` line; setting it to ""
-#     would leave the property there, unreadable, and the card would sit under
-#     "No date" instead of leaving the agenda.
+# 2b. Drop a date entirely. DELETE removes the `due::` line. Setting it to ""
+#     also takes the card off the agenda (an empty value is not a property), but
+#     leaves a dangling `due:: ` in the body. A value that is not a date —
+#     `due:: soon` — is the real trap: still a property, still a task, parked
+#     under "No date" for good.
 curl -s -X DELETE -H "X-API-Key: $KEY" \
   "$API/nodes/$NID/cards/$CID/property?key=due"
 
@@ -1750,9 +1758,10 @@ curl -s -H "X-API-Key: $KEY" \
   $API/nodes/$NID/cards/property
 ```
 
-…and so is taking a property back off them. A finished task should **leave** the
-agenda, and a `due::` set to `""` does not do that — it leaves an unreadable line
-behind and the card sits under *No date* forever:
+…and so is taking a property back off them. Note that **`status:: done` is already
+enough to take a card off the agenda** — the default `/api/tasks` and the Agenda
+panel both hide done rows, and `?all=true` is how you see them again. Clearing the
+date is about the card reading cleanly afterwards, not about the agenda:
 
 ```sh
 curl -s -X DELETE -H "X-API-Key: $KEY" \

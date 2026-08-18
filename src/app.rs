@@ -8421,8 +8421,14 @@ impl TrellisApp {
                         if ui
                             .button("Clear date")
                             .on_hover_text(
-                                "Removes the due:: line — the task moves to \"No date\" \
-                                 rather than leaving the agenda",
+                                // This said the task "moves to No date rather than
+                                // leaving the agenda". It does not: the button
+                                // clears the property, and `tasks()` skips a card
+                                // with no `due` at all, so the row goes. "No date"
+                                // is where a due:: that will not PARSE lands.
+                                "Removes the due:: line, so this leaves the agenda \
+                                 entirely. (A due:: whose value is not a date — \
+                                 `due:: soon` — is what sits under \"No date\".)",
                             )
                             .clicked()
                         {

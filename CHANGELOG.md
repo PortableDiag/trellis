@@ -6,6 +6,45 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.120.1]
+
+### Fixed
+- **A claim this project had been repeating about `due::` was wrong, in the docs
+  and in a tooltip.** Three surfaces said that setting a date property to `""`
+  leaves it *"present but unparseable, so the task sits under No date instead of
+  leaving the agenda"*. Measured, on a scratch instance, both cases:
+
+  - `due:: ` (empty) is **not parsed as a property at all**, so the card stops
+    being a task and *does* leave the agenda. What it actually leaves is a dangling
+    `due:: ` line in the body — untidy, and confusing to the next reader, but not
+    an agenda problem.
+  - The case that really traps you is a **non-empty value that is not a date**.
+    `due:: soon` *is* a property, so the card is still a task, and with nothing to
+    sort by it sits in **"No date"** indefinitely.
+  - And `status:: done` is **already enough** to take a row off the agenda: the
+    default `/api/tasks` and the Agenda panel both hide done rows (`?all=true`
+    shows them). The docs implied it was not.
+
+  `Document::tasks()` settles it in one line — `let Some((_, due)) = props… else {
+  continue }` — so a card with no `due` is never a task, which is why the *"No
+  date"* bucket cannot mean *"no date"*.
+
+- **The Agenda's "Clear date" tooltip described its own button backwards.** It
+  said the task *"moves to No date rather than leaving the agenda"*; the button
+  calls `clear_card_property` / `clear_item_property`, so the row goes entirely.
+
+  This one is worth naming as a class: the wrong explanation had been copied
+  forward into `API.md` twice, an in-app tooltip and two Prompt Manager prompts,
+  and every copy sounded confident. A `check::` on a card is supposed to be a
+  command whose output disagrees with the card — the same standard applies to a
+  sentence in the docs, and nobody had run one.
+
+### Note
+- Because `API.md` is compiled into the binary since v0.120.0, **a documentation
+  correction now requires a release** for `GET /api/docs` to serve it. That is the
+  cost of the docs being unable to drift from the build, and it is the right way
+  round — but it does mean doc-only fixes ship as versions.
+
 ## [0.120.0]
 
 ### Added
