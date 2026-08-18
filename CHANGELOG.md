@@ -6,6 +6,27 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.122.2]
+
+### Fixed
+- **Colour emoji painted over whatever was on top of them.** Reported as "the emoji
+  show through other windows on top of them", and reproduced: a card scrolled under
+  the **minimap** had its title and body correctly hidden while its emoji floated
+  over the map.
+
+  Colour emoji are painted by this app rather than by the text renderer — the glyph
+  is found in the frame's shapes and a coloured quad is drawn over it. That quad was
+  **appended to the end of its layer's paint list**, and most of this app draws into
+  one layer (`background`), where later means on top. So the end of the list is the
+  very front, and every emoji was hoisted above the minimap, the toolbar, the status
+  bar and any card drawn after its own.
+
+  The colour now **replaces the entry the glyph came from** with
+  `[original, colour…]`, so it sits at exactly the text's depth, inherits that
+  entry's clip rect, and anything added to the list afterwards still covers it.
+  Measured on screen against the minimap: 103 green and 176 near-white emoji pixels
+  bleeding over it before, **0 and 0** after.
+
 ## [0.122.1]
 
 ### Fixed

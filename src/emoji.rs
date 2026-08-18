@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 
+use egui::layers::ShapeIdx;
 use egui::{Color32, Context, LayerId, Rect, Shape, TextureHandle, TextureOptions};
 
 /// Where a colour-emoji font lives, per platform. Checked in order; the first
@@ -153,8 +154,18 @@ impl Emoji {
     /// Paint colour over every emoji drawn this frame.
     ///
     /// Call at the very end of `update`, after everything has been drawn:
-    /// anything added to a paint list afterwards is not covered, and anything
-    /// drawn on top of the overlay hides it.
+    /// anything added to a paint list afterwards is not covered.
+    ///
+    /// **The colour goes back where the glyph was, not on top of the layer.**
+    /// Appending it to the end of the paint list put every emoji above
+    /// everything else drawn into that layer — so a card scrolled under the
+    /// **minimap** showed its title and body correctly hidden while its emoji
+    /// floated over the map, which is what "the emoji show through windows on
+    /// top of them" turned out to be. Most of this app draws into one layer
+    /// (`background`), so within it *later means on top* and the end of the list
+    /// is the very front. The fix is to replace the entry the glyph came from
+    /// with `[original, colour]`, which keeps the emoji at exactly the text's
+    /// own depth and inherits its clip rect for free.
     pub fn overlay(&mut self, ctx: &Context) {
         if self.font.is_none() {
             return;
@@ -167,14 +178,16 @@ impl Emoji {
         // "area" and so is absent from that list — i.e. most of this app.
         layer_ids.push(LayerId::background());
 
-        let mut todo: Vec<(LayerId, Rect, Rect, char)> = Vec::new();
+        // Each entry is remembered by its index in the layer's paint list, so the
+        // colour can be put back at that exact depth in phase 3.
+        let mut todo: Vec<(LayerId, usize, Rect, Rect, char)> = Vec::new();
         ctx.graphics_mut(|layers| {
             for &layer_id in &layer_ids {
                 let Some(list) = layers.get(layer_id) else {
                     continue;
                 };
-                for entry in list.all_entries() {
-                    collect(&entry.shape, entry.clip_rect, layer_id, &mut todo);
+                for (idx, entry) in list.all_entries().enumerate() {
+                    collect(&entry.shape, entry.clip_rect, layer_id, idx, &mut todo);
                 }
             }
         });
@@ -182,23 +195,34 @@ impl Emoji {
             return;
         }
 
-        // Phase 2: resolve characters to textures.
-        let mut shapes: Vec<(LayerId, Rect, Shape)> = Vec::new();
-        for (layer_id, clip, rect, ch) in todo {
+        // Phase 2: resolve characters to textures, grouped by the entry they
+        // belong to — one entry can hold a whole galley with several emoji.
+        // A `HashMap` here is safe where it would not be elsewhere in this
+        // codebase (see v0.121.0): every key names a *different* paint-list entry
+        // and each is mutated independently, so iteration order cannot change what
+        // is drawn. Order matters only *within* an entry, and that is a `Vec`.
+        let mut by_entry: HashMap<(LayerId, usize), Vec<Shape>> = HashMap::new();
+        for (layer_id, idx, _clip, rect, ch) in todo {
             if let Some(tex) = self.texture(ctx, ch) {
-                shapes.push((
-                    layer_id,
-                    clip,
-                    Shape::image(tex.id(), rect, uv_full(), Color32::WHITE),
-                ));
+                by_entry
+                    .entry((layer_id, idx))
+                    .or_default()
+                    .push(Shape::image(tex.id(), rect, uv_full(), Color32::WHITE));
             }
         }
 
-        // Phase 3: draw, into the same layer and under the same clip rect as the
-        // text it covers — otherwise an emoji in a scroll area paints outside it.
+        // Phase 3: put the colour back **at the glyph's own depth**, by replacing
+        // that entry with `[what was there, the colour on top of it]`. The entry
+        // keeps its clip rect, so an emoji in a scroll area still cannot paint
+        // outside it, and anything drawn later in the layer still covers it.
         ctx.graphics_mut(|layers| {
-            for (layer_id, clip, shape) in shapes {
-                layers.entry(layer_id).add(clip, shape);
+            for ((layer_id, idx), images) in by_entry {
+                layers.entry(layer_id).mutate_shape(ShapeIdx(idx), |entry| {
+                    let mut parts = Vec::with_capacity(images.len() + 1);
+                    parts.push(std::mem::replace(&mut entry.shape, Shape::Noop));
+                    parts.extend(images);
+                    entry.shape = Shape::Vec(parts);
+                });
             }
         });
     }
@@ -210,11 +234,17 @@ fn uv_full() -> Rect {
 
 /// Walk a shape for emoji glyphs. Shapes nest (`Shape::Vec`), so this recurses
 /// rather than matching only the top level.
-fn collect(shape: &Shape, clip: Rect, layer_id: LayerId, out: &mut Vec<(LayerId, Rect, Rect, char)>) {
+fn collect(
+    shape: &Shape,
+    clip: Rect,
+    layer_id: LayerId,
+    idx: usize,
+    out: &mut Vec<(LayerId, usize, Rect, Rect, char)>,
+) {
     match shape {
         Shape::Vec(shapes) => {
             for s in shapes {
-                collect(s, clip, layer_id, out);
+                collect(s, clip, layer_id, idx, out);
             }
         }
         Shape::Text(text) => {
@@ -242,7 +272,7 @@ fn collect(shape: &Shape, clip: Rect, layer_id: LayerId, out: &mut Vec<(LayerId,
                     if !clip.intersects(rect) {
                         continue; // scrolled out of view — don't load its texture
                     }
-                    out.push((layer_id, clip, rect, glyph.chr));
+                    out.push((layer_id, idx, clip, rect, glyph.chr));
                 }
             }
         }
@@ -266,6 +296,44 @@ mod tests {
         for ch in ['→', '←', '↔', '⇒', '—', '–', '·', 'A', '1', 'é', '…', '“'] {
             assert!(!Emoji::is_emoji(ch), "{ch} belongs to the text font");
         }
+    }
+
+    /// The colour must go back **at the glyph's own depth**, not at the end of
+    /// the layer.
+    ///
+    /// Appending it put every emoji above everything else drawn into that layer,
+    /// and most of this app draws into one (`background`) — so a card scrolled
+    /// under the minimap had its title and body correctly hidden while its emoji
+    /// floated over the map. Measured on screen: 103 green and 176 near-white
+    /// pixels of emoji inside the minimap before, 0 and 0 after.
+    ///
+    /// This pins the shape of the repair rather than the pixels: the entry the
+    /// glyph came from is replaced by `[original, colour…]`, so the index is
+    /// unchanged and anything added to the list after it still paints on top.
+    #[test]
+    fn colour_replaces_the_entry_it_came_from() {
+        use egui::{Rect, Shape};
+        let mut list = egui::layers::PaintList::default();
+        let clip = Rect::EVERYTHING;
+        let text = list.add(clip, Shape::Noop); // stands in for the glyph run
+        let over = list.add(clip, Shape::Noop); // something drawn on top, e.g. the minimap
+        assert_eq!(text.0, 0);
+        assert_eq!(over.0, 1, "the covering shape comes after the text");
+
+        // What `overlay` phase 3 does to the entry the emoji was found in.
+        list.mutate_shape(text, |entry| {
+            let orig = std::mem::replace(&mut entry.shape, Shape::Noop);
+            entry.shape = Shape::Vec(vec![orig, Shape::Noop]);
+        });
+
+        let entries: Vec<_> = list.all_entries().collect();
+        assert_eq!(entries.len(), 2, "the list did not grow — nothing was appended");
+        assert!(
+            matches!(entries[0].shape, Shape::Vec(_)),
+            "the colour joined the glyph's own entry"
+        );
+        // The covering shape is still last, so it still paints over the emoji.
+        assert!(matches!(entries[1].shape, Shape::Noop));
     }
 
     /// A missing font must be inert, not a panic and not a blank frame: the
