@@ -900,6 +900,81 @@ GET /api/export?format=<fmt>
 `format` defaults to `markdown`. `pdf` is a paginated A4 document; `png`/`gif`
 are a single rendered image of the document text. Decode `base64` to get the file.
 
+### Import an Obsidian vault
+A folder of Markdown notes on **this machine's disk** becomes a tree of baskets.
+```
+POST /api/import/vault   {"path":"/abs/path/to/Vault", "parent":<node id>?}
+  → 200 {"root":<node id>,"baskets":N,"cards":N,"attachments":N,
+         "links_rewritten":N,"unresolved":["Note name",…]}
+  | 400 path is not a directory / the folder holds no files to import
+  | 404 parent node not found
+  | 403 for a scoped token
+```
+`parent` omitted imports the vault as a new **root project** — a vault is
+somebody's whole notes, and burying it under whatever basket happened to be
+selected is the wrong default. The same import is on **File → Import → Obsidian
+vault…**, and dropping a **folder** onto a basket does it too.
+
+The mapping:
+
+| Obsidian | Trellis |
+|---|---|
+| folder | basket (nested, the same shape as the vault) |
+| note (`.md`) | **card** |
+| YAML frontmatter | `key:: value`, and `tags:` → `#tags` |
+| `title:` field | the card's title (the file name otherwise) |
+| `![[file.pdf]]` | an **attachment** on the card that names it |
+| `[[Note]]` | `[[#<cid>\|Note]]` — a real card link |
+
+**A note is a card, not a basket.** A basket is a *space* holding things and a
+note is a *thing*; mapping notes to baskets would produce a tree of empty
+containers. It also settles the link question, because Trellis's bare
+`[[Title]]` resolves to a **basket** — so every imported note link would dangle.
+Links are rewritten to `[[#id|Note]]` in a second pass, after every card exists
+and has an id, and the pipe keeps the name the author wrote. `[[Note#Heading]]`
+and `[[Note#^block]]` resolve to the card and keep the subpath as the label:
+there is no sub-card address to point at, but the reader still sees which section
+was meant.
+
+**A link naming no note is left exactly as written** and reported in
+`unresolved` — a dangling link someone can read and fix beats content silently
+deleted. A **bare** name that two notes share is deliberately *not* resolved
+(the full path still is): picking one would point half the vault's links at the
+wrong card while looking like it worked.
+
+**A `.canvas` becomes a basket.** [JSON Canvas](https://jsoncanvas.org) is an open
+format and it is a Trellis basket almost exactly — nodes with `x`, `y`, `width`,
+`height`, arranged in space and boxed into labelled groups. Importing the only
+genuinely spatial file in a vault as bytes on a card would make it unreadable, so:
+
+| canvas | Trellis |
+|---|---|
+| the file | a **basket** (under the folder's basket) |
+| `text` node | a text card at the same place and size |
+| `file` node → a note | a card **linking** to the card that note became |
+| `file` node → an asset | an image card, or a card carrying the file |
+| `link` node | a card holding the URL |
+| `group` node | a **card group**, from what falls inside its rectangle |
+| `edge` | `→ [[#id]]` in the card the arrow leaves, with its label |
+
+Coordinates are shifted so the arrangement lands on screen with **every relative
+position unchanged** — the layout is the content. Colours come across, both
+Obsidian's `"1"`–`"6"` presets and a raw `#rrggbb`. Group membership is read off
+the geometry by each card's **centre**, so a card straddling an edge belongs to
+the group it is mostly in rather than to both. A `[[Note]]` written inside a
+canvas text node is rewritten like any other. Unknown fields are ignored on
+purpose: strictness is the rule for API *input*, and a canvas written by a newer
+Obsidian is *reading*. A `.canvas` that will not parse keeps its bytes as an
+attachment rather than vanishing.
+
+Dot-directories are skipped — `.obsidian` is the other app's workspace layout and
+plugin config, `.trash` is deleted notes, `.git` is not vault content. An
+unreferenced attachment still comes in, as its own card, because bytes discarded
+here cannot be recovered from the document afterwards.
+
+**It reads an arbitrary local path**, so like `source` file mirroring it is a
+whole-document route and is refused for a scoped token.
+
 ### Card links — `[[#id]]`
 A link works in a card's **body**, in a **table cell**, and (since v0.103.0) in a
 card's **title** — which is where the diagram recipe puts one, to tie a figure to

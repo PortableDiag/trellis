@@ -3553,6 +3553,40 @@ impl TrellisApp {
 
     fn handle_api_instance(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
         match req {
+            // Answered here rather than in `process` because it reads the
+            // filesystem and moves the selection and status line — none of which
+            // the pure-over-Document path has.
+            api::ApiRequest::ImportVault { parent, path } => {
+                let dir = std::path::PathBuf::from(path);
+                if !dir.is_dir() {
+                    return Some(api::ApiResponse::err(400, "path is not a directory"));
+                }
+                if let Some(p) = parent {
+                    if !self.doc.nodes.contains_key(p) {
+                        return Some(api::ApiResponse::err(404, "parent node not found"));
+                    }
+                }
+                let name = dir
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Vault".to_string());
+                let files = match crate::vault::read_vault(&dir) {
+                    Ok(f) => f,
+                    Err(e) => return Some(api::ApiResponse::err(400, &e.to_string())),
+                };
+                if files.is_empty() {
+                    return Some(api::ApiResponse::err(400, "the folder holds no files to import"));
+                }
+                let r = crate::vault::import_vault(&mut self.doc, *parent, &name, files);
+                if let Some(n) = self.doc.nodes.get_mut(&r.root) {
+                    n.expanded = true;
+                }
+                self.mark_dirty();
+                self.status = crate::vault::describe(&r, &name);
+                Some(api::ApiResponse::ok(
+                    serde_json::to_value(&r).unwrap_or(serde_json::Value::Null),
+                ))
+            }
             api::ApiRequest::SettingsGet => Some(api::ApiResponse::ok(self.settings_json())),
             api::ApiRequest::SettingsSet(patch) => Some(match self.apply_settings(patch) {
                 // A theme change repaints and a sort reorders the tree, so the
@@ -4562,6 +4596,35 @@ impl TrellisApp {
         }
     }
 
+    /// Import an **Obsidian vault** the user picks, as a new root-level project.
+    ///
+    /// A root rather than a child of the selection: a vault is somebody's whole
+    /// notes, and burying it inside whatever basket happened to be selected is
+    /// the wrong default. Moving a basket afterwards is one drag; digging one out
+    /// is not.
+    fn import_vault(&mut self) {
+        let Some(dir) = self.file_dialog().pick_folder() else { return };
+        let name = dir
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Vault".to_string());
+        match crate::vault::read_vault(&dir) {
+            Ok(files) if files.is_empty() => {
+                self.status = format!("Nothing to import: {} holds no files", dir.display());
+            }
+            Ok(files) => {
+                let r = crate::vault::import_vault(&mut self.doc, None, &name, files);
+                self.selected = Some(r.root);
+                if let Some(n) = self.doc.nodes.get_mut(&r.root) {
+                    n.expanded = true;
+                }
+                self.mark_dirty();
+                self.status = crate::vault::describe(&r, &name);
+            }
+            Err(e) => self.status = format!("Import failed: {e}"),
+        }
+    }
+
     /// Import a basket JSON file as a child of `parent`, rebuilding its cards
     /// (and any subtree) with fresh ids.
     fn import_basket(&mut self, parent: NodeId) {
@@ -4689,7 +4752,34 @@ impl TrellisApp {
 
     fn drop_files(&mut self, node: NodeId, files: Vec<egui::DroppedFile>, pos: egui::Pos2) {
         let mut n = 0usize;
+        // A vault import writes its own status line, which says far more than a
+        // card count; don't let a file dropped alongside it overwrite that.
+        let mut vault_status = false;
         for f in files {
+            // A dropped **folder** is a vault, not a file: it has no bytes to
+            // read, so before this it fell through the whole chain and did
+            // nothing at all. Dragging a vault in is the gesture people try
+            // first, and it is the same import the File menu offers.
+            if let Some(dir) = f.path.as_ref().filter(|p| p.is_dir()) {
+                let name = dir
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Vault".to_string());
+                match crate::vault::read_vault(dir) {
+                    Ok(vf) if !vf.is_empty() => {
+                        let r = crate::vault::import_vault(&mut self.doc, None, &name, vf);
+                        if let Some(nd) = self.doc.nodes.get_mut(&r.root) {
+                            nd.expanded = true;
+                        }
+                        self.mark_dirty();
+                        self.status = crate::vault::describe(&r, &name);
+                    }
+                    Ok(_) => self.status = format!("Nothing to import: {name} holds no files"),
+                    Err(e) => self.status = format!("Import failed: {e}"),
+                }
+                vault_status = true;
+                continue;
+            }
             let bytes: Vec<u8> = match f.bytes.as_ref() {
                 Some(b) => b.to_vec(),
                 None => match f.path.as_ref().and_then(|p| std::fs::read(p).ok()) {
@@ -4764,7 +4854,16 @@ impl TrellisApp {
                             .iter()
                             .find(|(k, _)| k.eq_ignore_ascii_case("title"))
                             .map(|(_, v)| v.clone());
-                        c.title = titled.unwrap_or(name);
+                        // The note's **name** is the file name without its
+                        // extension — Obsidian's own identity rule, and what the
+                        // vault importer uses. A card called "Glossary.md" is
+                        // the extension leaking into the title.
+                        c.title = titled.unwrap_or_else(|| {
+                            match name.rsplit_once('.') {
+                                Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+                                _ => name.clone(),
+                            }
+                        });
                         c.body = if front.is_empty() {
                             rest.to_string()
                         } else {
@@ -4783,7 +4882,10 @@ impl TrellisApp {
         }
         if n > 0 {
             self.mark_dirty();
-            self.status = format!("Added {n} card{} from dropped files", if n == 1 { "" } else { "s" });
+            if !vault_status {
+                self.status =
+                    format!("Added {n} card{} from dropped files", if n == 1 { "" } else { "s" });
+            }
         }
     }
 
@@ -5997,6 +6099,20 @@ impl TrellisApp {
                         }
                         if ui.button("JSON…").clicked() {
                             self.import_json();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui
+                            .button("Obsidian vault…")
+                            .on_hover_text(
+                                "A folder of Markdown notes becomes a tree of baskets: folder \
+                                 → basket, note → card, frontmatter → key:: value, and \
+                                 ![[file.pdf]] → an attachment on the card that names it. \
+                                 [[Note]] links are rewritten to card links so they resolve.",
+                            )
+                            .clicked()
+                        {
+                            self.import_vault();
                             ui.close_menu();
                         }
                     });

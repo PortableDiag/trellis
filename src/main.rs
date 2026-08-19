@@ -17,6 +17,7 @@ mod model;
 mod notify;
 mod plugins;
 mod tree;
+mod vault;
 
 use std::path::PathBuf;
 

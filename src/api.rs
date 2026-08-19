@@ -322,6 +322,15 @@ pub enum ApiRequest {
     /// Desktop **mode**: take a whole basket out onto the desktop at once, or
     /// bring it back. The per-card route is the exception; this is the feature.
     SetNodeDesktop { node: NodeId, on: bool },
+    /// `POST /api/import/vault` — an **Obsidian vault** on this machine's disk
+    /// becomes a tree of baskets: folder → basket, note → card, frontmatter →
+    /// `key:: value`, `![[file]]` → an attachment, `[[Note]]` → a card link.
+    ///
+    /// It reads an arbitrary local path, which is why it is a **whole-document**
+    /// route and therefore refused for a confined token — the same rule, and the
+    /// same reason, as `source` file mirroring. Answered in the app loop because
+    /// it touches the filesystem and the status line.
+    ImportVault { parent: Option<NodeId>, path: String },
 }
 
 /// `POST /api/cards/{cid}/desktop` — optional screen position for the window.
@@ -1069,6 +1078,20 @@ pub struct DoneInput {
 pub struct DailyRootInput {
     /// The node to keep the journal under — the year, in a year-per-root tree.
     pub node: NodeId,
+}
+
+/// `POST /api/import/vault`. `parent` omitted imports the vault as a new
+/// **root project**, which is what the File menu does: a vault is somebody's
+/// whole notes, and burying it under whatever basket was selected is the wrong
+/// default.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportVaultInput {
+    /// An absolute path to the vault folder **on the machine Trellis runs on**.
+    pub path: String,
+    /// Omitted → a new root project.
+    #[serde(default)]
+    pub parent: Option<NodeId>,
 }
 
 #[derive(Deserialize)]
@@ -1874,6 +1897,10 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::SetDailyRoot(Some(i.node)))
         }
         (Method::Delete, ["api", "daily", "root"]) => Ok(ApiRequest::SetDailyRoot(None)),
+        (Method::Post, ["api", "import", "vault"]) => {
+            let i: ImportVaultInput = parse(body)?;
+            Ok(ApiRequest::ImportVault { parent: i.parent, path: i.path })
+        }
         (Method::Post, ["api", "daily"]) => {
             let i: DailyInput = if body.trim().is_empty() { DailyInput { date: None } } else { parse(body)? };
             Ok(ApiRequest::DailyNote { date: i.date })
@@ -4016,7 +4043,8 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         | ApiRequest::ListCardDesktop
         | ApiRequest::DailyNote { .. }
         | ApiRequest::DailyConfig
-        | ApiRequest::SetDailyRoot(_) => {
+        | ApiRequest::SetDailyRoot(_)
+        | ApiRequest::ImportVault { .. } => {
             (false, ApiResponse::err(500, "request not handled by the app loop"))
         }
         // A card-addressed request is rewritten into its node-addressed twin by

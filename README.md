@@ -216,6 +216,13 @@ from the main cluster, and click or drag on it to jump there without zooming out
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
+- **Import an Obsidian vault** — **File → Import → Obsidian vault…**, or drop the
+  **folder** onto a basket. Folder → basket, note → **card**, frontmatter →
+  `key:: value` / `#tags`, `![[file.pdf]]` → an attachment on the card that names it,
+  and `[[Note]]` rewritten to a real card link so it resolves. A **`.canvas`** comes
+  in as a **basket** keeping its arrangement, colours and groups — JSON Canvas is an
+  open format and a Trellis basket is very nearly one already. Links that name no
+  note are kept verbatim and reported rather than deleted.
 - **Export / import a single basket** — right-click a tree node → **Export basket** (its
   cards) or **Export basket + subnodes** (the whole subtree) as **Markdown / HTML / JSON**,
   and **Import basket…** to bring a JSON basket file back in as a child node. Share one

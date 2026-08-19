@@ -6,6 +6,63 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.124.0]
+
+### Added
+- **Import a whole Obsidian vault.** v0.123.0 taught the boundary to speak YAML
+  frontmatter, one dropped file at a time — the *field* half. A vault is not a
+  file, it is a **shape**: a folder tree, notes that link to each other by name,
+  and attachments referenced with `![[file.pdf]]`. Importing it a file at a time
+  loses every one of those relationships.
+
+  **File → Import → Obsidian vault…**, dropping a **folder** onto a basket, or
+  `POST /api/import/vault`. Folder → basket, note → **card**, frontmatter →
+  `key:: value` / `#tags`, `![[file.pdf]]` → an attachment on the card that names
+  it.
+
+  **A note is a card, not a basket.** A basket is a *space* holding things and a
+  note is a *thing*; mapping notes to baskets would build a tree of empty
+  containers. It also settles the link question — Trellis's bare `[[Title]]`
+  resolves to a **basket**, so every imported note link would dangle. Links are
+  rewritten to `[[#id|Note]]` in a second pass, once every card exists and has an
+  id, and the pipe keeps the name the author wrote. `[[Note#Heading]]` and
+  `[[Note#^block]]` reach the card and keep the subpath as the label.
+
+  **A link naming no note is left exactly as written** and reported, because a
+  dangling link someone can read and fix beats content silently deleted. A
+  **bare** name two notes share is deliberately not resolved — picking one would
+  point half the vault's links at the wrong card while looking like it worked.
+
+- **A `.canvas` becomes a basket.** [JSON Canvas](https://jsoncanvas.org) is an
+  open format, and it is a Trellis basket almost exactly: nodes with `x`, `y`,
+  `width`, `height`, arranged in space and boxed into labelled groups. This is
+  the one file in a vault whose shape Trellis already has, so importing it as
+  bytes on a card would take the only genuinely spatial thing there and make it
+  unreadable.
+
+  `text` nodes become cards, a `file` node **links** to the card its note already
+  became rather than copying the text, a `link` node keeps its URL, a `group`
+  becomes a card group read off **the geometry**, and an `edge` becomes
+  `→ [[#id]]` with its label — which also puts it in the backlink index and the
+  link graph, where an arrow drawn on a canvas was never visible at all.
+  Coordinates shift so the arrangement lands on screen with every relative
+  position unchanged; the layout is the content. Obsidian's `"1"`–`"6"` presets
+  and raw `#rrggbb` both come across.
+
+### Fixed
+- **A dropped `.md` was titled with its extension.** `Glossary.md` became a card
+  called "Glossary.md". A note's name is the file name **without** it — Obsidian's
+  own identity rule, and what the vault importer uses.
+- **A dropped folder did nothing at all.** It has no bytes to read, so it fell
+  through the whole drop chain: no card, no error, no status line. Dragging a
+  vault in is the gesture people try first.
+
+### Notes
+- Two defects were found by **driving the importer against a real vault** rather
+  than by reading it: an `![[spec.pdf]]` that had imported perfectly was reported
+  as a dangling note link, and `[[../../Reference/Glossary]]` — a link relative to
+  the linking note's folder — did not resolve. Neither was visible in the code.
+
 ## [0.123.1]
 
 ### Fixed
