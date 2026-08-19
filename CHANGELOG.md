@@ -6,6 +6,34 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.126.0]
+
+### Added
+- **A card can be reached by an alias.** `alias:: Start Here` (or
+  `aliases:: Start Here, Front Door`) on a card makes `[[Start Here]]` open it.
+  Obsidian notes carry `aliases:` in their frontmatter and a note becomes a
+  **card** here, so until now every alias in an imported vault was inert text.
+
+  **A basket still wins.** `[[Name]]` has always meant a basket, and links already
+  written must keep meaning what they meant — so an alias is consulted only when
+  no basket has that title. Additive by construction: it can rescue a link that
+  used to dangle and can never redirect one that worked. Ties break the way
+  duplicate basket titles do, **same project first then the lowest card id**,
+  never `HashMap` order.
+
+- **`[[#1391^766]]` names one checklist line.** Obsidian's block reference, in the
+  id space this app already had: since v0.90.0 a checklist item with its own
+  `due::` is a task in its own right and carries a **stable id**, so a line is a
+  thing worth pointing at.
+
+  The **link** resolves to the card, because that is what a reveal can scroll to
+  and flash. What the item part buys is the **embed** — `![[#1391^766]]` shows
+  that one line instead of pasting a 23-line working list in to point at one task.
+  Deliberately **not** a new `LinkTarget` variant: the enum is matched in 35
+  places and a variant every one of them would treat as "the card" is a cost with
+  no reader. A reference naming no such item, or a card that is not a checklist,
+  says so in the frame.
+
 ## [0.125.0]
 
 ### Added

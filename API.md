@@ -1025,6 +1025,45 @@ GET /api/groups/{gid}/link
 `trellis://` form, for leaving the app. In the UI: right-click a group's header
 → **Copy** → *Group link*, and **Ctrl+O** accepts `g146` or `#g146`.
 
+### Aliases — reaching a card by another name
+A card that carries an `alias::` (or `aliases::`) property can be linked to by
+that name.
+
+```
+alias:: Start Here             on the card
+aliases:: Start Here, Front Door   several names, one property
+
+[[Start Here]]                 → that card
+```
+
+Obsidian notes carry `aliases:` in their frontmatter and a note becomes a **card**
+here, so without this every alias in an imported vault was inert text.
+
+**A basket still wins.** `[[Name]]` has always meant a basket, and links already
+written must keep meaning what they meant, so an alias is consulted **only when no
+basket has that title**. It can rescue a link that used to dangle; it can never
+redirect one that worked.
+
+Matching is case-insensitive. Two cards claiming one alias is undecidable, so the
+tie is broken the way duplicate basket titles are: **same project first, then the
+lowest card id** — never `HashMap` order. A checklist card's aliases come from its
+**title and items**, like all its properties, never its body.
+
+### Block references — `[[#id^item]]` names one checklist line
+```
+[[#1391^766]]     links to card 1391 (the reveal scrolls to the card)
+![[#1391^766]]    embeds just that one line
+```
+Since v0.90.0 a checklist item with its own `due::` is a task in its own right,
+with a **stable id** — so a line is a thing worth pointing at, and this is
+Obsidian's block reference expressed in the id space this app already had. Item
+ids come back from `GET /api/nodes/{id}/cards` and the task surfaces.
+
+The **link** resolves to the card, because that is what a reveal can scroll to and
+flash. What the item part buys is the **embed**: showing one line instead of
+pasting a 23-line working list in to point at one task. A reference naming no such
+item, or a card that is not a checklist, says so in the frame.
+
 ### Embeds — `![[#id]]` shows a card inside another
 The complement of `[[#id]]`. A link says *go and look at that*; an **embed** says
 *show it here*.

@@ -216,6 +216,12 @@ from the main cluster, and click or drag on it to jump there without zooming out
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
+- **Reach a card by another name** — `alias:: Start Here` on a card makes
+  `[[Start Here]]` open it. A **basket still wins** if one has that title, so this
+  only ever rescues a link that would have dangled. It is also what makes an
+  imported Obsidian vault's `aliases:` field mean anything.
+- **Point at one checklist line** — `[[#1391^766]]` names an item by its stable id,
+  and `![[#1391^766]]` embeds just that line rather than the whole working list.
 - **Embed a card in another card** — `![[#1391]]` shows card 1391's content in
   place, where `[[#1391]]` only links to it. **One task is one card, never
   copied**: an embed is how you see the same card in two places without making a

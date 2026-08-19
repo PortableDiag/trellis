@@ -3699,7 +3699,19 @@ impl Document {
                 let node = self.locate_group(id)?;
                 return Some(LinkTarget::Group { node, group: id });
             }
-            let id: CardId = rest.parse().ok()?;
+            // `#1391^766` addresses one **checklist item** — Obsidian's block
+            // reference, in the id space this app already has. Since v0.90.0 a
+            // dated item is a task in its own right, so a line is a thing worth
+            // pointing at; the ids are stable and backfilled on load.
+            //
+            // The link resolves to the **card**, because that is what a reveal can
+            // scroll to and flash. What the item part buys is `![[#1391^766]]`,
+            // which embeds that one line — see `expand_embeds`. Deliberately not a
+            // new `LinkTarget` variant: the enum is matched in 35 places, and a
+            // variant every one of them would treat as "the card" is a cost with
+            // no reader.
+            let card_part = rest.split('^').next().unwrap_or(rest).trim();
+            let id: CardId = card_part.parse().ok()?;
             let node = self.locate_card(id)?;
             return Some(LinkTarget::Card { node, card: id });
         }
@@ -3708,7 +3720,12 @@ impl Document {
                 return Some(LinkTarget::Node(id));
             }
         }
-        self.resolve_title_from(t, None).map(LinkTarget::Node)
+        if let Some(n) = self.resolve_title_from(t, None) {
+            return Some(LinkTarget::Node(n));
+        }
+        // No basket of that name: try a card alias. Only ever reached when the
+        // link would otherwise dangle, so nothing already written changes.
+        self.resolve_alias_from(t, None).map(|(node, card)| LinkTarget::Card { node, card })
     }
 
     /// Resolve a `[[wiki-link]]` **written in a known basket**.
@@ -3722,7 +3739,11 @@ impl Document {
             // Ids are already unambiguous; context cannot improve them.
             return self.resolve_link_target(t);
         }
-        self.resolve_title_from(t, Some(from)).map(LinkTarget::Node)
+        if let Some(n) = self.resolve_title_from(t, Some(from)) {
+            return Some(LinkTarget::Node(n));
+        }
+        self.resolve_alias_from(t, Some(from))
+            .map(|(node, card)| LinkTarget::Card { node, card })
     }
 
     /// A basket by title — **deterministically**, and preferring `from`'s project.
@@ -3758,6 +3779,56 @@ impl Document {
         if let Some(from) = from {
             let root = self.root_of(from);
             if let Some(near) = matches.iter().copied().find(|&id| self.root_of(id) == root) {
+                return Some(near);
+            }
+        }
+        matches.first().copied()
+    }
+
+    /// A card by one of its **aliases** — `alias:: Start Here` on the card.
+    ///
+    /// Obsidian notes carry `aliases:` in their frontmatter, and a note is a
+    /// *card* here, so without this every alias in an imported vault was inert
+    /// text. It is also useful on its own: `[[#1391]]` is precise but says
+    /// nothing about what it points at, and a card's title is often not what you
+    /// want to call it mid-sentence.
+    ///
+    /// **A basket still wins.** `[[Name]]` has always meant a basket, and links
+    /// already written must keep meaning what they meant — so this is only
+    /// consulted when no basket has that title. Additive by construction: it can
+    /// resolve links that used to dangle and can never redirect one that worked.
+    ///
+    /// Ties are broken the same way [`resolve_title_from`] breaks them, and for
+    /// the same reason: **same project first, then the lowest card id**, so the
+    /// answer cannot depend on `HashMap` order.
+    fn resolve_alias_from(&self, name: &str, from: Option<NodeId>) -> Option<(NodeId, CardId)> {
+        let want = name.trim().to_lowercase();
+        if want.is_empty() {
+            return None;
+        }
+        let mut matches: Vec<(NodeId, CardId)> = Vec::new();
+        for n in self.nodes.values() {
+            for c in &n.cards {
+                let hay = format!("{}\n{}", c.title, searchable_body(c));
+                for (k, v) in extract_properties(&hay) {
+                    if k != "alias" && k != "aliases" {
+                        continue;
+                    }
+                    // One property, several names: `aliases:: Start Here, Front Door`
+                    // is what the frontmatter importer writes from a YAML list.
+                    if v.split(',').any(|a| a.trim().to_lowercase() == want) {
+                        matches.push((n.id, c.id));
+                    }
+                }
+            }
+        }
+        if matches.is_empty() {
+            return None;
+        }
+        matches.sort_unstable_by_key(|&(_, c)| c);
+        if let Some(from) = from {
+            let root = self.root_of(from);
+            if let Some(&near) = matches.iter().find(|&&(n, _)| self.root_of(n) == root) {
                 return Some(near);
             }
         }
@@ -5290,8 +5361,13 @@ impl Document {
                     let inner = &text[i + 3..i + 3 + end];
                     let target = inner.split('|').next().unwrap_or("").trim();
                     if let Some(rest) = target.strip_prefix('#') {
-                        if let Ok(cid) = rest.trim().parse::<CardId>() {
-                            out.push_str(&self.embed_one(cid, seen));
+                        let rest = rest.trim();
+                        let (card_part, item_part) = match rest.split_once('^') {
+                            Some((c, it)) => (c.trim(), it.trim().parse::<u64>().ok()),
+                            None => (rest, None),
+                        };
+                        if let Ok(cid) = card_part.parse::<CardId>() {
+                            out.push_str(&self.embed_one(cid, item_part, seen));
                             i += 3 + end + 2;
                             continue;
                         }
@@ -5306,7 +5382,11 @@ impl Document {
     }
 
     /// One embed, as a blockquote — or an inline note saying why not.
-    fn embed_one(&self, cid: CardId, seen: &mut Vec<CardId>) -> String {
+    ///
+    /// `item` names a single checklist line (`![[#1391^766]]`), in which case only
+    /// that line is shown. Embedding a whole working list to point at one task is
+    /// the noise this addresses.
+    fn embed_one(&self, cid: CardId, item: Option<u64>, seen: &mut Vec<CardId>) -> String {
         if seen.contains(&cid) {
             return format!("> *embed cycle: `![[#{cid}]]` is already being shown*\n");
         }
@@ -5321,6 +5401,17 @@ impl Document {
         let Some(card) = self.card(node, cid) else {
             return format!("> *no card `#{cid}`*\n");
         };
+        // One line, not the whole list.
+        if let Some(want) = item {
+            let CardKind::Checklist { items } = &card.kind else {
+                return format!("> *`#{cid}` is not a checklist, so `^{want}` names nothing*\n");
+            };
+            let Some(it) = items.iter().find(|i| i.id == want) else {
+                return format!("> *no item `^{want}` on card `#{cid}`*\n");
+            };
+            let mark = if it.done { "x" } else { " " };
+            return format!("> - [{mark}] {}\n>\n> from [[#{cid}^{want}]]\n", it.text);
+        }
         seen.push(cid);
         let mut inner = String::new();
         if !card.title.trim().is_empty() {
@@ -6571,6 +6662,151 @@ mod tests {
         assert_eq!(doc.cards_with_property("due", None).len(), 2);
         assert_eq!(doc.cards_with_property("status", Some("open")).len(), 1);
         assert_eq!(doc.cards_with_property("status", Some("closed")).len(), 0);
+    }
+
+    /// `[[#1391^766]]` addresses one **checklist item** — Obsidian's block
+    /// reference, in the id space this app already had. Since v0.90.0 a dated
+    /// item is a task in its own right, so a line is worth pointing at.
+    #[test]
+    fn a_block_reference_names_one_checklist_line() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc
+            .add_card(
+                n,
+                egui::pos2(0.0, 0.0),
+                CardKind::Checklist {
+                    items: vec![
+                        ChecklistItem { id: 11, text: "cut the tag".into(), done: false },
+                        ChecklistItem { id: 22, text: "verify assets".into(), done: true },
+                    ],
+                },
+            )
+            .unwrap();
+
+        // The LINK reaches the card — that is what a reveal can scroll to.
+        assert!(matches!(
+            doc.resolve_link_target(&format!("#{c}^22")),
+            Some(LinkTarget::Card { card, .. }) if card == c
+        ));
+
+        // The EMBED shows only that line, which is what the item part buys.
+        let out = doc.expand_embeds(&format!("![[#{c}^22]]"));
+        assert!(out.contains("- [x] verify assets"), "{out}");
+        assert!(!out.contains("cut the tag"), "only the named line: {out}");
+        assert!(out.contains(&format!("from [[#{c}^22]]")), "{out}");
+
+        // The whole card still embeds whole.
+        let whole = doc.expand_embeds(&format!("![[#{c}]]"));
+        assert!(whole.contains("cut the tag") && whole.contains("verify assets"));
+    }
+
+    /// A block reference that names nothing says so, rather than rendering an
+    /// empty frame or silently falling back to the whole card.
+    #[test]
+    fn a_block_reference_to_nothing_is_reported() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let list = doc
+            .add_card(
+                n,
+                egui::pos2(0.0, 0.0),
+                CardKind::Checklist {
+                    items: vec![ChecklistItem { id: 5, text: "only line".into(), done: false }],
+                },
+            )
+            .unwrap();
+        let text = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, text).unwrap().body = "plain".into();
+
+        assert!(doc.expand_embeds(&format!("![[#{list}^999]]")).contains("no item"));
+        assert!(doc
+            .expand_embeds(&format!("![[#{text}^5]]"))
+            .contains("not a checklist"));
+    }
+
+    /// A card can be reached by an **alias**, which is what makes an imported
+    /// Obsidian vault's `aliases:` field mean anything: a note is a card here, so
+    /// without this every alias in the vault was inert text.
+    #[test]
+    fn an_alias_reaches_the_card_that_declares_it() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Project".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().title = "Kestrel Overview".into();
+        doc.card_mut(n, c).unwrap().body = "aliases:: Start Here, Front Door\n\ntext".into();
+
+        for name in ["Start Here", "front door", "  Start Here  "] {
+            assert!(
+                matches!(doc.resolve_link_target(name), Some(LinkTarget::Card { card, .. }) if card == c),
+                "{name:?} should reach the card"
+            );
+        }
+        assert!(doc.resolve_link_target("Nothing Like It").is_none());
+    }
+
+    /// **A basket still wins.** `[[Name]]` has always meant a basket, so an alias
+    /// is only consulted when no basket has that title — additive by
+    /// construction, and unable to redirect a link that already worked.
+    #[test]
+    fn a_basket_beats_an_alias_of_the_same_name() {
+        let mut doc = Document::empty();
+        let home = doc.add_node(None, "Home".into());
+        let basket = doc.add_node(None, "Inbox".into());
+        let c = doc.add_card(home, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(home, c).unwrap().body = "alias:: Inbox".into();
+
+        assert!(
+            matches!(doc.resolve_link_target("Inbox"), Some(LinkTarget::Node(n)) if n == basket),
+            "the basket, not the card"
+        );
+    }
+
+    /// Two cards claiming one alias is undecidable, so the answer must at least
+    /// be **stable** — same project first, then the lowest card id, never
+    /// `HashMap` order. This is the v0.121.0 rule, applied to a second namespace.
+    #[test]
+    fn a_contested_alias_resolves_the_same_way_every_time() {
+        let mut doc = Document::empty();
+        let a = doc.add_node(None, "A".into());
+        let b = doc.add_node(None, "B".into());
+        let first = doc.add_card(a, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let second = doc.add_card(b, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(a, first).unwrap().body = "alias:: Shared".into();
+        doc.card_mut(b, second).unwrap().body = "alias:: Shared".into();
+
+        // With no context, the lowest card id wins — and does so every run.
+        for _ in 0..20 {
+            assert!(
+                matches!(doc.resolve_link_target("Shared"), Some(LinkTarget::Card { card, .. }) if card == first)
+            );
+        }
+        // Written from inside B, B's card wins: a link means the nearest thing of
+        // that name.
+        assert!(
+            matches!(doc.resolve_link_target_from("Shared", b), Some(LinkTarget::Card { card, .. }) if card == second)
+        );
+    }
+
+    /// A checklist card's properties come from its **title and items**, never its
+    /// body — so an alias declared on a checklist line works, and one buried in a
+    /// checklist's body does not exist at all.
+    #[test]
+    fn an_alias_on_a_checklist_follows_the_property_rule() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc
+            .add_card(
+                n,
+                egui::pos2(0.0, 0.0),
+                CardKind::Checklist {
+                    items: vec![ChecklistItem { id: 1, text: "alias:: The List".into(), done: false }],
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(doc.resolve_link_target("The List"), Some(LinkTarget::Card { card, .. }) if card == c)
+        );
     }
 
     /// `![[#id]]` shows another card's content in place. The complement of
