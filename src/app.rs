@@ -7740,6 +7740,7 @@ impl TrellisApp {
                             "POST   /api/nodes/{id}/cards/{cid}/chart {kind, label_col?, value_cols?, show_table?}  (bar|line|scatter|pie; DELETE …/chart = plain grid)",
                             "POST   /api/nodes/{id}/cards/{cid}/sketch {op, …}          (add_stroke / undo / clear)",
                             "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}    (GET / DELETE …/images/{idx})",
+                            "  NOTE  `body` is REFUSED (400) on checklist/table/image/sketch — their items/rows/bytes are the content, and text in their body is never read as a property. Send `items` or `rows`. Judged on the kind the card WILL be, so {kind:\"text\", body:…} still converts.",
                             "GET    /api/nodes/{id}/cards/{cid}/attachments             (files carried by ANY card — the bytes, not a path; names + sizes only)",
                             "POST   /api/nodes/{id}/cards/{cid}/attachments {name, data_base64}  ·  GET / DELETE …/attachments/{idx}   (the document is written WHOLE on every save, so size costs every autosave, snapshot and backup — attachment_bytes on /api/instance is the running total)",
                             "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",

@@ -441,7 +441,18 @@ each other. `size` is `[w,h]`. **`z`** is depth in the **same units as `pos`** �
 toward the viewer, so `z: 200` is as far *forward* as `pos` `+200` is to the
 right. See [Depth and time](#depth-and-time) before using it. `color` sets the title-bar accent at creation (see
 the accepted formats below). `items` is used only for `checklist`; `lang` only
-for `code`. `rows` fills a **table** card's cells row by row (`[["a","b"],…]`,
+for `code`.
+
+**`body` is refused on the kinds that cannot show one** — `checklist`, `table`,
+`image` and `sketch` answer **400** naming the field that works (`items`, `rows`) or
+the sub-resource. A checklist's lines and a table's cells *are* its content, so text
+in their `body` is stored nowhere the reader sees it and, the trap that matters,
+**is never read as a property**: a checklist card's properties come from its title
+and items alone. `kind: "checklist"` with a `body` carrying `due:: …` used to answer
+201 and drop the body, so the card silently never reached the Agenda. Send the dated
+line as an **item** instead. The same check applies to `PATCH`, on the kind the card
+*will be* — `{"kind":"text","body":"…"}` converts the card and keeps the body, which
+is a legitimate call and unaffected. `rows` fills a **table** card's cells row by row (`[["a","b"],…]`,
 ragged rows padded to the widest) and `header` styles its first row — so a
 populated table, and a chart drawn from it, take one call instead of three. `image_base64` gives an `image` card its first image (base64 file
 bytes; the `title` becomes its name). `inline_images` embeds images **inside a
@@ -472,7 +483,9 @@ every other field; overrides `size`); `font_scale` sizes text/code body font (1.
 `lang` applies to code cards, `items` replaces a checklist's items (send them in
 the desired order to **reorder** a checklist), `rows` bulk-replaces a table's cell
 text, `header` toggles a table's header row, `inline_images` replaces the text
-card's embedded inline images (same base64 + `![](trellis:N)` scheme as create). **`kind` converts the card to
+card's embedded inline images (same base64 + `![](trellis:N)` scheme as create).
+A `body` is refused for the kinds that cannot show one, judged on the kind the card
+**will be** after the patch (see create, above). **`kind` converts the card to
 another kind** (`text`/`code`/`checklist`/`table`/`image`) — apply it in the same
 PATCH as `items`/`rows`/etc. and the new content lands in the converted card. The
 response is the full updated card object.

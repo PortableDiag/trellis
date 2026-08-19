@@ -2748,6 +2748,26 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             if inputs.is_empty() {
                 return (false, ApiResponse::err(400, "the array must contain at least one card"));
             }
+            // **Validate the whole list before creating anything**, the same rule
+            // the batch move, edit and delete follow: a partial write leaves the
+            // caller unable to tell how far it got.
+            //
+            // This was unreachable until the body/kind check above existed —
+            // `add_one` could only fail on "node not found", which is the same
+            // answer for every element, so the loop below could never stop
+            // half-way. Adding a *per-element* failure made the hole live, and it
+            // showed up immediately: a three-card batch with a bad one in the
+            // middle answered 400 having already created the first.
+            for input in &inputs {
+                if input.body.trim().is_empty() {
+                    continue;
+                }
+                // An unrecognised kind becomes Text and keeps its body, which is
+                // what `add_one` does — so only a kind it recognises is judged.
+                if let Some(why) = kind_probe(&input.kind).as_ref().and_then(body_not_shown_by) {
+                    return (false, ApiResponse::err(400, why));
+                }
+            }
             let mut ids = Vec::with_capacity(inputs.len());
             for input in inputs {
                 match add_one(doc, node, input) {
@@ -2776,6 +2796,24 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                              Send \"source\": \"\" to detach it first.",
                         ),
                     );
+                }
+                // A body this card cannot show is refused here, for the same
+                // reason the mirror check moved up: **before anything is applied**,
+                // so a refusal never leaves half an edit behind.
+                //
+                // The test is the kind the card will BE, not the kind it is: a
+                // patch may convert it, and `{kind:"text", body:"…"}` on a
+                // checklist is a legitimate call that has always worked. Checking
+                // the current kind would have broken it.
+                if patch.body.as_deref().is_some_and(|b| !b.trim().is_empty()) {
+                    let resulting = patch
+                        .kind
+                        .as_deref()
+                        .and_then(kind_probe)
+                        .unwrap_or_else(|| c.kind.clone());
+                    if let Some(why) = body_not_shown_by(&resulting) {
+                        return (false, ApiResponse::err(400, why));
+                    }
                 }
                 apply_presentation(c, &patch);
                 if let Some(t) = patch.title {
@@ -3194,25 +3232,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     ),
                 );
             }
-            // Refused where the body is not what the card shows. A checklist's
-            // lines and a table's cells are the content; text appended to their
-            // `body` is stored, never displayed, and — the trap that matters —
-            // never read as a property either, because a checklist card's
-            // properties come from its title and items alone. A silent no-op that
-            // answers 200 is worse than a 400 naming the route that works.
-            let wrong_kind = match &c.kind {
-                CardKind::Checklist { .. } => {
-                    Some("a checklist card's lines are its content — POST …/cards/{cid}/items")
-                }
-                CardKind::Table { .. } => {
-                    Some("a table card's cells are its content — POST …/cards/{cid}/table")
-                }
-                CardKind::Image { .. } | CardKind::Sketch { .. } => {
-                    Some("this kind of card has no body to append to")
-                }
-                CardKind::Text | CardKind::Code { .. } => None,
-            };
-            if let Some(why) = wrong_kind {
+            if let Some(why) = body_not_shown_by(&c.kind) {
                 return (false, ApiResponse::err(400, why));
             }
             let at_start = matches!(input.at.as_deref(), Some("start"));
@@ -4015,6 +4035,56 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
 /// Extracted so the single create and the batch create are the *same* code:
 /// two copies of this would drift, and the drift would show up as a card that
 /// behaves differently depending on how it was made.
+/// Why a `body` is refused on this kind, or `None` if the kind shows one.
+///
+/// **A checklist's lines and a table's cells are the content**, so text put in
+/// *their* `body` is stored, displayed nowhere, and — the trap that matters —
+/// never read as a property either, because a checklist card's properties come
+/// from its title and items alone. A silent 200 is worse than a 400 that names the
+/// route which works.
+///
+/// This was guarded on `append` and **only** on `append`, which is the half an
+/// agent reaches last. Creating a card sets `kind` and `body` in the same call and
+/// is what everyone hits first: `kind: "checklist"` plus a `body` carrying
+/// `due:: …` answered **201** and dropped the body on the floor, so the card never
+/// reached the agenda and nothing said why. Reported by an agent it bit, who
+/// noticed the codebase already disagreed with itself about it.
+fn body_not_shown_by(kind: &CardKind) -> Option<&'static str> {
+    match kind {
+        CardKind::Checklist { .. } => {
+            Some("a checklist card's lines are its content — send `items`, or POST …/cards/{cid}/items")
+        }
+        CardKind::Table { .. } => {
+            Some("a table card's cells are its content — send `rows`, or POST …/cards/{cid}/table")
+        }
+        CardKind::Image { .. } | CardKind::Sketch { .. } => {
+            Some("this kind of card has no body")
+        }
+        CardKind::Text | CardKind::Code { .. } => None,
+    }
+}
+
+/// An empty card of the kind this name means, for asking questions *about* the
+/// kind. `None` for a name that is not a kind, which a caller's patch may well
+/// contain — an unknown `kind` leaves the card's own kind alone, so the question
+/// then has to be asked of that.
+fn kind_probe(name: &str) -> Option<CardKind> {
+    Some(match name {
+        "text" => CardKind::Text,
+        "code" => CardKind::Code { lang: "text".into() },
+        "checklist" => CardKind::Checklist { items: Vec::new() },
+        "table" => CardKind::Table { table: crate::model::TableData::empty(1, 1) },
+        "image" => CardKind::Image {
+            data: Vec::new(),
+            name: String::new(),
+            extra: Vec::new(),
+            ocr: String::new(),
+        },
+        "sketch" => CardKind::Sketch { strokes: Vec::new() },
+        _ => return None,
+    })
+}
+
 fn add_one(doc: &mut Document, node: NodeId, input: AddCardInput) -> Result<u64, ApiResponse> {
     if !doc.nodes.contains_key(&node) {
                 return Err(ApiResponse::err(404, "node not found"));
@@ -4049,6 +4119,14 @@ fn add_one(doc: &mut Document, node: NodeId, input: AddCardInput) -> Result<u64,
                 "sketch" => CardKind::Sketch { strokes: Vec::new() },
                 _ => CardKind::Text,
             };
+            // The kind and the body are chosen in the same call here, so a body
+            // that this kind cannot show is a caller mistake with an obvious
+            // remedy — not something to accept and quietly drop.
+            if !input.body.trim().is_empty() {
+                if let Some(why) = body_not_shown_by(&kind) {
+                    return Err(ApiResponse::err(400, why));
+                }
+            }
             let pos = input
                 .pos
                 .map(|[x, y]| egui::pos2(x, y))
@@ -6763,6 +6841,109 @@ mod tests {
 
     /// Refused where `body` is not what the card shows. Appending to a checklist's
     /// body would be stored, never displayed, and never read as a property either
+    /// The same guard on **create** and **patch**, not only on `append`.
+    ///
+    /// It existed on `append` alone — the half an agent reaches last. Creating a
+    /// card sets `kind` and `body` in one call and is what everyone hits first, so
+    /// `kind: "checklist"` plus a `body` carrying `due:: …` answered **201** and
+    /// dropped the body on the floor: the card never reached the agenda and nothing
+    /// said why. Reported by an agent it bit, who noticed the codebase already
+    /// disagreed with itself — the comment on the `append` guard calls this exact
+    /// outcome "worse than a 400".
+    #[test]
+    fn a_body_is_refused_by_the_kinds_that_cannot_show_one() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+
+        let create = |doc: &mut Document, json: &str| {
+            let req = route(&Method::Post, &format!("/api/nodes/{nid}/cards"), "", json).unwrap();
+            process(doc, req).1
+        };
+
+        // Refused on create, naming the field that works.
+        for (kind, wants) in [("checklist", "items"), ("table", "rows")] {
+            let r = create(&mut doc, &format!(r#"{{"kind":"{kind}","body":"due:: 2026-09-01"}}"#));
+            assert_eq!(r.status, 400, "{kind} accepted a body it cannot show");
+            assert!(r.body.contains(wants), "{kind} must name the field that works: {}", r.body);
+        }
+        for kind in ["image", "sketch"] {
+            assert_eq!(create(&mut doc, &format!(r#"{{"kind":"{kind}","body":"x"}}"#)).status, 400);
+        }
+
+        // Still allowed: the kinds whose body IS their content, and the correct
+        // way to give a checklist its dated line.
+        assert_eq!(create(&mut doc, r#"{"kind":"text","body":"due:: 2026-09-02"}"#).status, 201);
+        assert_eq!(create(&mut doc, r#"{"kind":"code","body":"fn main(){}"}"#).status, 201);
+        let r = create(&mut doc, r#"{"kind":"checklist","items":[{"text":"due:: 2026-09-03"}]}"#);
+        assert_eq!(r.status, 201);
+        let cid: u64 = serde_json::from_str::<Value>(&r.body).unwrap()["id"].as_u64().unwrap();
+
+        // Refused on PATCH too.
+        let patch = |doc: &mut Document, cid: u64, json: &str| {
+            let req = route(&Method::Patch, &format!("/api/nodes/{nid}/cards/{cid}"), "", json).unwrap();
+            process(doc, req).1
+        };
+        assert_eq!(patch(&mut doc, cid, r#"{"body":"due:: 2026-09-04"}"#).status, 400);
+
+        // …but the kind the card WILL BE is what is judged. Converting to text and
+        // giving it a body in one call is legitimate and has always worked;
+        // testing the CURRENT kind would have broken it.
+        assert_eq!(patch(&mut doc, cid, r#"{"kind":"text","body":"due:: 2026-09-05"}"#).status, 200);
+        assert_eq!(doc.card(nid, cid).unwrap().body, "due:: 2026-09-05");
+        assert!(
+            doc.card_properties(nid, cid).iter().any(|(k, v)| k == "due" && v == "2026-09-05"),
+            "and it reaches the agenda, which is what the reporter lost"
+        );
+
+        // An empty body changes nothing, so it is not an error.
+        let t = create(&mut doc, r#"{"kind":"table"}"#);
+        let tid: u64 = serde_json::from_str::<Value>(&t.body).unwrap()["id"].as_u64().unwrap();
+        assert_eq!(patch(&mut doc, tid, r#"{"body":"   "}"#).status, 200);
+    }
+
+    /// A batch create is validated **before** anything is made.
+    ///
+    /// Unreachable until the check above existed: `add_one` could only fail on
+    /// "node not found", the same answer for every element, so the loop could never
+    /// stop half-way. A per-element failure made the hole live, and the first probe
+    /// found it — a three-card batch with a bad one in the middle answered 400
+    /// having already created the first card.
+    #[test]
+    fn a_batch_create_refuses_before_it_creates_anything() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let before = doc.nodes[&nid].cards.len();
+
+        let req = route(
+            &Method::Post,
+            &format!("/api/nodes/{nid}/cards"),
+            "",
+            r#"[{"kind":"text","body":"fine"},
+                {"kind":"checklist","body":"due:: 2026-09-09"},
+                {"kind":"text","body":"also fine"}]"#,
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, req);
+        assert_eq!(resp.status, 400);
+        assert!(!dirty, "a refused batch must not mark the document dirty");
+        assert_eq!(
+            doc.nodes[&nid].cards.len(),
+            before,
+            "the good card before the bad one must not have been created"
+        );
+
+        // A batch with nothing wrong in it still works.
+        let req = route(
+            &Method::Post,
+            &format!("/api/nodes/{nid}/cards"),
+            "",
+            r#"[{"kind":"text","body":"a"},{"kind":"checklist","items":[{"text":"b"}]}]"#,
+        )
+        .unwrap();
+        assert_eq!(process(&mut doc, req).1.status, 201);
+        assert_eq!(doc.nodes[&nid].cards.len(), before + 2);
+    }
+
     /// — a 200 that changed nothing anyone can see is the worst answer available.
     #[test]
     fn append_refuses_the_kinds_whose_body_is_not_their_content() {

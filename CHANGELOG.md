@@ -6,6 +6,31 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.123.1]
+
+### Fixed
+- **A `body` on a card kind that cannot show one was silently dropped.** Creating a
+  card with `kind: "checklist"` and a `body` carrying `due:: 2026-09-01` answered
+  **201** and discarded the body: the card never reached the Agenda, and nothing
+  said why. `PATCH` did the same. Reported by an agent it bit.
+
+  The guard already existed — on `append`, and only there, whose own comment calls
+  this outcome *"worse than a 400"*. `append` is the half an agent reaches last;
+  **create is what everyone hits first**, because `kind` and `body` are chosen in
+  the same call. The codebase disagreed with itself, and the unguarded half won.
+
+  The check now lives in one function used by all three. It is judged on the kind
+  the card **will be**, not the kind it is, so `PATCH {"kind":"text","body":"…"}`
+  on a checklist still converts the card and keeps the body — testing the current
+  kind would have broken a legitimate call that has always worked.
+
+- **A batch create could stop half-way.** With the check above, a three-card batch
+  holding one bad card answered 400 **having already created the cards before it** —
+  the partial write this project refuses everywhere else. Unreachable until now:
+  `add_one` could only fail on *node not found*, the same answer for every element,
+  so the loop could never stop mid-list. The whole array is validated before
+  anything is created, like the batch move, edit and delete.
+
 ## [0.123.0]
 
 ### Added
