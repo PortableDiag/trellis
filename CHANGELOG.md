@@ -6,6 +6,22 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.127.2]
+
+### Fixed
+- **An imported canvas connector lost its direction.** Obsidian's connectors are
+  **nondirectional**, **unidirectional** either way, or **bidirectional**, stored
+  as an arrowhead on each end (`fromEnd` / `toEnd`). v0.124.0 read neither field,
+  so all four imported as a forward arrow — a connector drawn as a plain
+  association was silently promoted to a flow, and one drawn backwards pointed the
+  wrong way. They now come in as `-->`, `<--`, `<->` and `---`.
+
+  Found because the operator asked whether the feature scope had covered "card
+  connectors". It had not: the canvas was scoped from its **file format**, which
+  shows that `fromEnd` exists but not that it is a *user-facing choice with four
+  settings*. The canvas's own menus live in a string table the first sweep never
+  opened.
+
 ## [0.127.1]
 
 ### Fixed

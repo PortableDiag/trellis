@@ -555,6 +555,14 @@ struct CanvasEdge {
     to: String,
     #[serde(default)]
     label: Option<String>,
+    /// `"arrow"` or `"none"`. A connector in Obsidian has a **direction** —
+    /// nondirectional, unidirectional either way, or bidirectional — set by which
+    /// ends carry an arrowhead. Defaults follow JSON Canvas: the *to* end has an
+    /// arrow, the *from* end does not.
+    #[serde(rename = "fromEnd", default)]
+    from_end: Option<String>,
+    #[serde(rename = "toEnd", default)]
+    to_end: Option<String>,
 }
 
 /// Obsidian's six preset colours, which a canvas stores as `"1"`–`"6"`; anything
@@ -735,10 +743,27 @@ fn import_canvas(
     for e in &canvas.edges {
         let (Some(&from), Some(&to)) = (by_id.get(&e.from), by_id.get(&e.to)) else { continue };
         let label = e.label.clone().unwrap_or_default();
+        // **A connector has a direction**, and dropping it loses what the diagram
+        // said. Obsidian offers nondirectional, unidirectional (either way) and
+        // bidirectional, stored as an arrowhead on each end; the defaults are an
+        // arrow at the *to* end and none at the *from* end.
+        let head = |v: &Option<String>, default_arrow: bool| {
+            v.as_deref().map_or(default_arrow, |s| s == "arrow")
+        };
+        let back = head(&e.from_end, false);
+        let fwd = head(&e.to_end, true);
+        let mark = match (back, fwd) {
+            (true, true) => "<->",
+            (true, false) => "<--",
+            (false, true) => "-->",
+            // Both ends bare: a plain association, not a flow. Said as a line
+            // rather than silently promoted to an arrow it never had.
+            (false, false) => "---",
+        };
         let line = if label.is_empty() {
-            format!("→ [[#{to}]]")
+            format!("{mark} [[#{to}]]")
         } else {
-            format!("→ [[#{to}|{label}]]")
+            format!("{mark} [[#{to}|{label}]]")
         };
         if let Some(c) = doc.card_mut(node, from) {
             if !c.body.is_empty() && !c.body.ends_with('\n') {
@@ -1055,7 +1080,7 @@ mod tests {
 
         // An edge is a link with a direction, and a labelled one keeps its label.
         let n2 = board.cards.iter().find(|c| c.title == "Target").unwrap();
-        assert!(n1.body.contains(&format!("→ [[#{}|why]]", n2.id)), "{}", n1.body);
+        assert!(n1.body.contains(&format!("--> [[#{}|why]]", n2.id)), "{}", n1.body);
 
         // A `file` node pointing at a note **links** to the card that note became
         // rather than copying its text — two cards saying the same thing is the
@@ -1075,6 +1100,41 @@ mod tests {
         let outside = board.cards.iter().find(|c| c.body.contains("outside")).unwrap();
         assert_eq!(outside.group, None, "the node beyond the rectangle stays out");
         assert!(report.unresolved.is_empty(), "{:?}", report.unresolved);
+    }
+
+    /// **A connector carries a direction**, and dropping it loses what the
+    /// diagram said. Obsidian offers nondirectional, unidirectional either way,
+    /// and bidirectional; v0.124.0 rendered all four as a forward arrow.
+    #[test]
+    fn a_connector_keeps_the_direction_it_was_drawn_with() {
+        let canvas = r##"{
+          "nodes": [
+            {"id":"a","type":"text","x":0,"y":0,"width":100,"height":60,"text":"A"},
+            {"id":"b","type":"text","x":200,"y":0,"width":100,"height":60,"text":"B"},
+            {"id":"c","type":"text","x":400,"y":0,"width":100,"height":60,"text":"C"},
+            {"id":"d","type":"text","x":600,"y":0,"width":100,"height":60,"text":"D"},
+            {"id":"e","type":"text","x":800,"y":0,"width":100,"height":60,"text":"E"}
+          ],
+          "edges": [
+            {"id":"1","fromNode":"a","toNode":"b"},
+            {"id":"2","fromNode":"a","toNode":"c","toEnd":"none"},
+            {"id":"3","fromNode":"a","toNode":"d","fromEnd":"arrow"},
+            {"id":"4","fromNode":"a","toNode":"e","fromEnd":"arrow","toEnd":"none"}
+          ]
+        }"##;
+        let mut doc = Document::empty();
+        import_vault(&mut doc, None, "V", vec![f("Board.canvas", canvas)]);
+        let board = doc.nodes.values().find(|n| n.title == "Board").unwrap();
+        let id_of = |t: &str| board.cards.iter().find(|c| c.body.starts_with(t)).unwrap().id;
+        let a = board.cards.iter().find(|c| c.body.starts_with('A')).unwrap();
+        // Default: an arrow at the `to` end only.
+        assert!(a.body.contains(&format!("--> [[#{}]]", id_of("B"))), "{}", a.body);
+        // Both ends bare is an association, not a flow — not silently promoted.
+        assert!(a.body.contains(&format!("--- [[#{}]]", id_of("C"))), "{}", a.body);
+        // Arrows at both ends.
+        assert!(a.body.contains(&format!("<-> [[#{}]]", id_of("D"))), "{}", a.body);
+        // Pointing back at the card the connector was drawn from.
+        assert!(a.body.contains(&format!("<-- [[#{}]]", id_of("E"))), "{}", a.body);
     }
 
     /// A `.canvas` that is not readable as one keeps its bytes rather than
