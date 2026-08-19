@@ -5240,6 +5240,117 @@ fn yaml_scalar(v: &str) -> String {
     }
 }
 
+/// How deep an `![[#id]]` embed may nest before it stops expanding.
+///
+/// A limit rather than only cycle detection, because a chain with no cycle in it
+/// can still be arbitrarily long, and each level is another whole card pasted
+/// into a frame the reader is trying to skim. Four is enough for "a card showing
+/// the two cards it summarises, each showing its source" and short of anything
+/// that reads as a wall.
+const EMBED_DEPTH: usize = 4;
+
+impl Document {
+    /// Expand `![[#id]]` **embeds** into the text of the cards they name.
+    ///
+    /// The complement of `[[#id]]`. A link says *go and look at that*; an embed
+    /// says *show it here* — which is what makes it worth having in an app whose
+    /// central rule is **one task is one card, never copied**. Until now the only
+    /// way to see a card's content in two places was to duplicate it, and a
+    /// duplicated task card is a second task with its own status and date,
+    /// counted twice, with nothing warning you. An embed is the answer: one card,
+    /// shown wherever it is needed, and editing it changes every view of it.
+    ///
+    /// **A view, never the stored text.** The body on disk keeps `![[#id]]`,
+    /// exactly as `html_blocks_to_md` leaves the body alone — expanding on save
+    /// would be the copy this feature exists to avoid, and it is also what
+    /// Obsidian writes, so an exported card still round-trips.
+    ///
+    /// The embedded card is rendered as a **blockquote** headed by its title,
+    /// which gives the indent and the left rule for free from the Markdown
+    /// renderer rather than from a second drawing path.
+    ///
+    /// **Cycles are refused, not survived.** A card embedding itself — directly,
+    /// or round a chain — is the `unconditional_recursion` shape that has shipped
+    /// a crash in this project twice. `seen` carries the ids on the current path,
+    /// so a repeat is reported in place instead of recursing.
+    pub fn expand_embeds(&self, text: &str) -> String {
+        self.expand_embeds_inner(text, &mut Vec::new())
+    }
+
+    fn expand_embeds_inner(&self, text: &str, seen: &mut Vec<CardId>) -> String {
+        if !text.contains("![[") {
+            return text.to_string();
+        }
+        let mut out = String::with_capacity(text.len());
+        let b = text.as_bytes();
+        let mut i = 0usize;
+        while i < b.len() {
+            if b[i] == b'!' && i + 2 < b.len() && b[i + 1] == b'[' && b[i + 2] == b'[' {
+                if let Some(end) = text[i + 3..].find("]]") {
+                    let inner = &text[i + 3..i + 3 + end];
+                    let target = inner.split('|').next().unwrap_or("").trim();
+                    if let Some(rest) = target.strip_prefix('#') {
+                        if let Ok(cid) = rest.trim().parse::<CardId>() {
+                            out.push_str(&self.embed_one(cid, seen));
+                            i += 3 + end + 2;
+                            continue;
+                        }
+                    }
+                }
+            }
+            let ch = text[i..].chars().next().unwrap_or('\u{0}');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        out
+    }
+
+    /// One embed, as a blockquote — or an inline note saying why not.
+    fn embed_one(&self, cid: CardId, seen: &mut Vec<CardId>) -> String {
+        if seen.contains(&cid) {
+            return format!("> *embed cycle: `![[#{cid}]]` is already being shown*\n");
+        }
+        if seen.len() >= EMBED_DEPTH {
+            return format!("> *embeds nested more than {EMBED_DEPTH} deep — [[#{cid}]]*\n");
+        }
+        let Some(node) = self.locate_card(cid) else {
+            // A missing target is said out loud. A silently blank frame is the
+            // answer this project refuses everywhere else.
+            return format!("> *no card `#{cid}`*\n");
+        };
+        let Some(card) = self.card(node, cid) else {
+            return format!("> *no card `#{cid}`*\n");
+        };
+        seen.push(cid);
+        let mut inner = String::new();
+        if !card.title.trim().is_empty() {
+            inner.push_str(&format!("**{}**\n\n", card.title));
+        }
+        inner.push_str(&card_body_md(card));
+        let expanded = self.expand_embeds_inner(&inner, seen);
+        seen.pop();
+        // Quote every line, so the whole embed reads as one block.
+        let mut s = String::new();
+        for line in expanded.trim_end().lines() {
+            if line.is_empty() {
+                s.push_str(">\n");
+            } else {
+                s.push_str(&format!("> {line}\n"));
+            }
+        }
+        // A blank quoted line first: without it a Markdown list in the embedded
+        // card swallows this line as another item, and the attribution renders as
+        // a bullet of the thing it is attributing.
+        s.push_str(">\n");
+        // The source is always one click away — an embed that cannot be traced
+        // back to the card it came from is where "which one is real?" starts.
+        // Plain words rather than an arrow glyph: U+2937 is outside the bundled
+        // font and drew as a hollow box, which is worse than saying it.
+        s.push_str(&format!("> from [[#{cid}]]\n"));
+        s
+    }
+}
+
 fn card_body_md(card: &Card) -> String {
     let mut s = String::new();
     match &card.kind {
@@ -6460,6 +6571,116 @@ mod tests {
         assert_eq!(doc.cards_with_property("due", None).len(), 2);
         assert_eq!(doc.cards_with_property("status", Some("open")).len(), 1);
         assert_eq!(doc.cards_with_property("status", Some("closed")).len(), 0);
+    }
+
+    /// `![[#id]]` shows another card's content in place. The complement of
+    /// `[[#id]]`, and the answer to the rule this project is built on — **one
+    /// task is one card, never copied**. Before it, seeing a card's content in
+    /// two places meant duplicating it.
+    #[test]
+    fn an_embed_shows_the_card_it_names() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let src = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, src).unwrap().title = "The Source".into();
+        doc.card_mut(n, src).unwrap().body = "the real text".into();
+        let host = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        let out = doc.expand_embeds(&format!("before\n![[#{src}]]\nafter"));
+        assert!(out.contains("> **The Source**"), "title heads the block: {out}");
+        assert!(out.contains("> the real text"), "content is quoted in: {out}");
+        assert!(out.contains(&format!("> from [[#{src}]]")), "traceable to source: {out}");
+        assert!(out.contains("before") && out.contains("after"), "surrounding text kept");
+        let _ = host;
+    }
+
+    /// A checklist keeps its content in `items`, so an embed of one has to show
+    /// the lines — reading `body` would render an empty frame, which is the
+    /// near-deletion `empty` was added to prevent, one layer along.
+    #[test]
+    fn an_embed_of_a_checklist_shows_its_items() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc
+            .add_card(
+                n,
+                egui::pos2(0.0, 0.0),
+                CardKind::Checklist {
+                    items: vec![
+                        ChecklistItem { id: 1, text: "ship it".into(), done: false },
+                        ChecklistItem { id: 2, text: "done thing".into(), done: true },
+                    ],
+                },
+            )
+            .unwrap();
+        let out = doc.expand_embeds(&format!("![[#{c}]]"));
+        assert!(out.contains("> - [ ] ship it"), "{out}");
+        assert!(out.contains("> - [x] done thing"), "{out}");
+    }
+
+    /// **A cycle is refused, not survived.** A card embedding itself — directly
+    /// or round a chain — is the `unconditional_recursion` shape that has shipped
+    /// a crash in this project twice, so it is reported in place.
+    #[test]
+    fn an_embed_cycle_is_reported_rather_than_recursing() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let a = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        // A shows B, B shows A.
+        doc.card_mut(n, a).unwrap().body = format!("A then ![[#{b}]]");
+        doc.card_mut(n, b).unwrap().body = format!("B then ![[#{a}]]");
+
+        let out = doc.expand_embeds(&format!("![[#{a}]]"));
+        assert!(out.contains("embed cycle"), "the cycle is named: {out}");
+        // Both cards' own text still appears once — the cycle stops the recursion,
+        // it does not blank the content.
+        assert!(out.contains("A then"), "{out}");
+        assert!(out.contains("B then"), "{out}");
+
+        // Self-embedding is the same answer.
+        let selfie = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, selfie).unwrap().body = format!("me ![[#{selfie}]]");
+        let out = doc.expand_embeds(&format!("![[#{selfie}]]"));
+        assert!(out.contains("embed cycle"), "{out}");
+    }
+
+    /// A chain with no cycle can still be arbitrarily long, and each level is a
+    /// whole card pasted into a frame someone is trying to skim.
+    #[test]
+    fn embeds_stop_at_a_depth_limit() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let ids: Vec<CardId> = (0..EMBED_DEPTH + 3)
+            .map(|_| doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap())
+            .collect();
+        for w in ids.windows(2) {
+            doc.card_mut(n, w[0]).unwrap().body = format!("level ![[#{}]]", w[1]);
+        }
+        let out = doc.expand_embeds(&format!("![[#{}]]", ids[0]));
+        assert!(out.contains("nested more than"), "the limit is stated: {out}");
+        assert_eq!(out.matches("level").count(), EMBED_DEPTH, "exactly the allowed depth");
+    }
+
+    /// A target that does not exist says so. A silently blank frame is the answer
+    /// this project refuses everywhere else.
+    #[test]
+    fn an_embed_of_a_missing_card_says_so() {
+        let doc = Document::empty();
+        let out = doc.expand_embeds("![[#99999]]");
+        assert!(out.contains("no card"), "{out}");
+    }
+
+    /// `[[#id]]` still means **link**, not embed — only the `!` prefix embeds, and
+    /// text with no embed in it comes back untouched.
+    #[test]
+    fn a_plain_link_is_not_an_embed() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().body = "secret".into();
+        let text = format!("see [[#{c}]] and [[Some Basket]]");
+        assert_eq!(doc.expand_embeds(&text), text);
     }
 
     /// Frontmatter is read at the boundary and turned into what Trellis reads.

@@ -9495,9 +9495,14 @@ impl TrellisApp {
             let tex = &mut self.tex_cache;
             let rects = &mut self.card_rects;
             let sent = &mut self.inline_sent;
+            // Bound out here with the other field borrows: a desktop card is a
+            // real window drawn from the same document, and an `![[#id]]` in it
+            // must resolve against the whole document like anywhere else.
+            let doc = &self.doc;
 
             ctx.show_viewport_immediate(vid, builder, |vctx, _| {
                 let mut env = Env {
+                    doc,
                     md, tex, card_rects: rects,
                     templates: &template_names,
                     masters: &masters,
@@ -9915,6 +9920,7 @@ impl eframe::App for TrellisApp {
                     let desktop_ids: std::collections::HashSet<CardId> =
                         self.desktop_cards.keys().copied().collect();
                     let mut env = Env {
+                        doc: &self.doc,
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
                         card_rects: &mut self.card_rects,

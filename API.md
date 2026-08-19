@@ -1025,6 +1025,45 @@ GET /api/groups/{gid}/link
 `trellis://` form, for leaving the app. In the UI: right-click a group's header
 → **Copy** → *Group link*, and **Ctrl+O** accepts `g146` or `#g146`.
 
+### Embeds — `![[#id]]` shows a card inside another
+The complement of `[[#id]]`. A link says *go and look at that*; an **embed** says
+*show it here*.
+
+```
+![[#1391]]      in any card body — renders card 1391's content in place
+[[#1391]]       unchanged: still a link
+```
+
+It exists because of the rule this app is built on — **one task is one card, never
+copied**. Until now, seeing a card's content in two places meant duplicating it,
+and a copied task card is a second task with its own `status::` and `due::`,
+counted twice, with nothing warning you. An embed is the answer: one card, shown
+wherever it is needed, and editing it changes every view of it.
+
+**It is a view, never the stored text.** The body on disk keeps `![[#id]]` —
+`GET /api/cards/{cid}` returns exactly what was written. Expanding on save would
+be the copy the feature exists to avoid, and leaving it alone is also what
+Obsidian writes, so an exported card still round-trips. Same rule as block-HTML
+conversion, which is likewise applied at render.
+
+The embedded card renders as a **blockquote** headed by its title and ending with
+`from [[#id]]`, so the source is always one click away — an embed that cannot be
+traced back to the card it came from is where "which one is real?" starts. A
+**checklist** embeds as its items and a **table** as its rows, because that is
+where those kinds keep their content; reading `body` would render an empty frame.
+
+An embed counts as a **link** for `GET /api/cards/{cid}/backlinks` and the link
+graph, which is what you want: the card is genuinely referenced.
+
+Three things it refuses to do, each reported in place rather than silently:
+- **A cycle** — a card embedding itself, directly or round a chain. This is the
+  `unconditional_recursion` shape that has shipped a crash in this project twice.
+- **More than 4 levels** of nesting. A chain with no cycle in it can still be
+  arbitrarily long, and each level is another whole card pasted into a frame
+  someone is trying to skim.
+- **A target that does not exist** — it says so, because a silently blank frame is
+  the answer this project refuses everywhere else.
+
 ### Backlinks
 `[[Node Title]]` (or `[[id]]`, or `[[Target|shown text]]`) written in a card is a
 wiki-link; in the app it renders as a clickable link that navigates to that node.

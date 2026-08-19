@@ -6,6 +6,35 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.125.0]
+
+### Added
+- **`![[#id]]` shows a card inside another card.** The complement of `[[#id]]`:
+  a link says *go and look at that*, an embed says *show it here*.
+
+  It exists because of the rule this app is built on — **one task is one card,
+  never copied**. Until now, seeing a card's content in two places meant
+  duplicating it, and a copied task card is a second task with its own `status::`
+  and `due::`, counted twice, with nothing warning you. An embed is the answer:
+  one card, shown wherever it is needed, and editing it changes every view of it.
+  Taken from Obsidian's note transclusion, which is the one thing a vault does
+  that this app had no answer to at all.
+
+  **A view, never the stored text.** The body on disk keeps `![[#id]]`, so
+  `GET /api/cards/{cid}` returns what was written — expanding on save would be
+  the copy the feature exists to avoid, and it is also what Obsidian writes, so
+  an exported card still round-trips. Same rule as block-HTML conversion.
+
+  A **checklist** embeds as its items and a **table** as its rows, because that is
+  where those kinds keep their content — reading `body` would render an empty
+  frame, which is the near-deletion `empty` was added to prevent, one layer along.
+  An embed counts as a link for backlinks and the link graph.
+
+  Three refusals, each **reported in the frame** rather than silently: a **cycle**
+  (a card embedding itself, directly or round a chain — the
+  `unconditional_recursion` shape that has shipped a crash here twice), nesting
+  **more than four deep**, and a **target that does not exist**.
+
 ## [0.124.0]
 
 ### Added

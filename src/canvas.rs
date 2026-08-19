@@ -17,6 +17,11 @@ pub const HIGHLIGHT_SECS: f64 = 1.4;
 
 /// Shared, frame-persistent caches the canvas needs.
 pub struct Env<'a> {
+    /// The whole document, read-only — needed to expand `![[#id]]` **embeds**,
+    /// which show another card's content inside this one. A card cannot be found
+    /// from the basket being drawn: the point of an embed is that its source
+    /// lives somewhere else.
+    pub doc: &'a crate::model::Document,
     pub md: &'a mut CommonMarkCache,
     pub tex: &'a mut TextureCache,
     /// Filled each frame with every drawn card's on-screen rect (points), so the
@@ -2069,7 +2074,11 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                     resolve_inline_images(ui.ctx(), card, env.inline_epoch, env.inline_sent);
                 // Block HTML becomes Markdown first, so a [[wiki-link]] inside a
                 // pasted block is still a link once the block is text.
-                let unhtml = crate::model::html_blocks_to_md(&resolved);
+                // `![[#id]]` shows another card's content here. Expanded at
+                // **render**, never on disk: storing the expansion would be the
+                // copy this whole feature exists to avoid.
+                let embedded = env.doc.expand_embeds(&resolved);
+                let unhtml = crate::model::html_blocks_to_md(&embedded);
                 let linked = crate::model::wikilinks_to_md(&unhtml);
                 scale_text(ui, card.font_scale, |ui| {
                     CommonMarkViewer::new().show(ui, env.md, &crate::model::hard_wrap(&linked));

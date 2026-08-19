@@ -1032,11 +1032,16 @@ mod tests {
         assert_eq!(n5.color, [0x8a, 0x4f, 0xff], "#8a4fff parsed");
 
         // A link inside a canvas text node is rewritten like any other.
+        // By **content**, not by title: the canvas's `file` node card is also
+        // called "Target", and `doc.nodes` is a `HashMap` — searching it by title
+        // picks one of the two in per-process hash order. That is the exact
+        // nondeterminism v0.121.0 fixed in link resolution, and a test can have
+        // it too.
         let target = doc
             .nodes
             .values()
             .flat_map(|n| n.cards.iter())
-            .find(|c| c.title == "Target")
+            .find(|c| c.body.contains("the target note"))
             .expect("Target note");
         assert!(n1.body.contains(&format!("[[#{}|Target]]", target.id)), "{}", n1.body);
 

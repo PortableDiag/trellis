@@ -216,6 +216,12 @@ from the main cluster, and click or drag on it to jump there without zooming out
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
+- **Embed a card in another card** — `![[#1391]]` shows card 1391's content in
+  place, where `[[#1391]]` only links to it. **One task is one card, never
+  copied**: an embed is how you see the same card in two places without making a
+  second one that drifts. A view, not stored text — the body still says
+  `![[#1391]]`, and editing the source changes every view of it. Cycles, runaway
+  nesting and missing targets are each reported in the frame rather than silently.
 - **Import an Obsidian vault** — **File → Import → Obsidian vault…**, or drop the
   **folder** onto a basket. Folder → basket, note → **card**, frontmatter →
   `key:: value` / `#tags`, `![[file.pdf]]` → an attachment on the card that names it,
