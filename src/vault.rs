@@ -862,7 +862,15 @@ mod tests {
         let mut doc = Document::empty();
         let report = import_vault(&mut doc, None, "V", vec![f("A.md", "see [[Nowhere]] and [[A]]\n")]);
         assert_eq!(report.unresolved, vec!["Nowhere".to_string()]);
-        let a = doc.nodes.values().flat_map(|n| n.cards.iter()).next().unwrap();
+        // Named, not "the first card": `doc.nodes` is a `HashMap`, so `.next()`
+        // is only deterministic while the fixture has exactly one card — which
+        // is a property of the fixture, not of the test.
+        let a = doc
+            .nodes
+            .values()
+            .flat_map(|n| n.cards.iter())
+            .find(|c| c.title == "A")
+            .expect("card A");
         assert!(a.body.contains("[[Nowhere]]"), "kept verbatim: {}", a.body);
         assert!(a.body.contains(&format!("[[#{}|A]]", a.id)));
     }
@@ -1092,7 +1100,12 @@ mod tests {
     fn a_title_field_names_the_card_exactly_once() {
         let mut doc = Document::empty();
         import_vault(&mut doc, None, "V", vec![f("file-name.md", "---\ntitle: Real Title\n---\n\nbody\n")]);
-        let c = doc.nodes.values().flat_map(|n| n.cards.iter()).next().unwrap();
+        let c = doc
+            .nodes
+            .values()
+            .flat_map(|n| n.cards.iter())
+            .find(|c| c.title == "Real Title")
+            .expect("the card the title: field named");
         assert_eq!(c.title, "Real Title");
         assert!(!c.body.contains("title::"), "not repeated as a property: {}", c.body);
     }

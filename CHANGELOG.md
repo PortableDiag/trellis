@@ -35,6 +35,16 @@ All notable changes to Trellis. Format loosely follows
   `unconditional_recursion` shape that has shipped a crash here twice), nesting
   **more than four deep**, and a **target that does not exist**.
 
+### Fixed
+- **A test of the v0.124.0 canvas importer was hash-order dependent**, and failed
+  the **Windows** release build while passing on Linux and macOS — so v0.124.0
+  published three of its four assets. It looked up a card by title through
+  `Document::nodes`, a `HashMap`, and the fixture has two cards called `Target`
+  (the note, and the canvas node pointing at it). That is the same nondeterminism
+  v0.121.0 fixed in link resolution; a test can have it too. Two neighbouring
+  tests that relied on "the fixture happens to hold one card" were tightened to
+  name what they mean.
+
 ## [0.124.0]
 
 ### Added
