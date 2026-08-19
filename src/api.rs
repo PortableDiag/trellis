@@ -322,6 +322,14 @@ pub enum ApiRequest {
     /// Desktop **mode**: take a whole basket out onto the desktop at once, or
     /// bring it back. The per-card route is the exception; this is the feature.
     SetNodeDesktop { node: NodeId, on: bool },
+    /// `GET /api/properties/problems` — every date-shaped property whose value
+    /// the app cannot read.
+    ///
+    /// `due::`, `start::` and `verify::` are the keys this app *acts* on. A
+    /// non-empty non-date in one of them is the trap v0.120.1 named: the card
+    /// looks scheduled, never reaches the Agenda, and nothing says why. Whole
+    /// document, so a confined token is refused.
+    PropertyProblems,
     /// `POST /api/import/vault` — an **Obsidian vault** on this machine's disk
     /// becomes a tree of baskets: folder → basket, note → card, frontmatter →
     /// `key:: value`, `![[file]]` → an attachment, `[[Note]]` → a card link.
@@ -1897,6 +1905,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::SetDailyRoot(Some(i.node)))
         }
         (Method::Delete, ["api", "daily", "root"]) => Ok(ApiRequest::SetDailyRoot(None)),
+        (Method::Get, ["api", "properties", "problems"]) => Ok(ApiRequest::PropertyProblems),
         (Method::Post, ["api", "import", "vault"]) => {
             let i: ImportVaultInput = parse(body)?;
             Ok(ApiRequest::ImportVault { parent: i.parent, path: i.path })
@@ -3895,6 +3904,16 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 })
                 .collect();
             (false, ApiResponse::ok(json!({ "today_days": today, "count": tasks.len(), "tasks": tasks })))
+        }
+        ApiRequest::PropertyProblems => {
+            let problems = doc.property_problems();
+            (
+                false,
+                ApiResponse::ok(json!({
+                    "count": problems.len(),
+                    "problems": problems,
+                })),
+            )
         }
         ApiRequest::Claims { expired_only, project } => {
             let today = today_days();

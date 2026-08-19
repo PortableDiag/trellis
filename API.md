@@ -1550,6 +1550,36 @@ GET /api/kanban?project=<node id>   only cards under that node (same filter as /
   | 400 (bad id)   | 404 (node not found)
 ```
 
+### Properties the app cannot read
+```
+GET /api/properties/problems
+  → 200 {"count":N,"problems":[{"node":…,"node_title":…,"card":…,"card_title":…,
+                                "item":<item id|null>,"key":"due",
+                                "value":"next friday","why":"…"}]}
+  | 403 for a scoped token   (whole document, names no basket)
+```
+Only `due::`, `start::` and `verify::` are judged — the keys this app **acts** on.
+An arbitrary `owner:: ada` is not wrong, it is just a value, and flagging every
+key the app has no opinion about would bury the three that matter.
+
+This is the useful half of "typed properties", done the way this model wants it.
+Obsidian gives every property a type because YAML is stringly and it edits them in
+a side panel; `key:: value` here is inline text that the Agenda, Kanban, query and
+claims surfaces already interpret, so a type system would be a second syntax for
+something already working — the reasoning that kept frontmatter at the boundary
+rather than inside.
+
+What was missing was the **diagnosis**. v0.120.1's finding was that `due::`
+surprises people: an empty value is not parsed as a property at all, `status::
+done` alone already hides an agenda row, and the real trap is a **non-empty
+non-date** — a card that looks scheduled, never reaches the Agenda, and says
+nothing about why. `verify::` at least counts an unreadable date as stale;
+`due::` and `start::` were simply silent.
+
+A **checklist** is judged by title and items, never body, like everywhere else —
+and since an item with its own `due::` is its own task, `item` names the line.
+Results are ordered by node id so two runs can be diffed against each other.
+
 ### Claims — which stated facts are out of date
 
 **Read this before you trust a workspace card.** A card that says *"both

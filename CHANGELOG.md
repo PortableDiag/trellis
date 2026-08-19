@@ -6,6 +6,36 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.127.0]
+
+### Added
+- **`GET /api/properties/problems` — the date properties this app cannot read.**
+  `due::`, `start::` and `verify::` are the keys it *acts* on; a non-empty
+  non-date in one of them makes a card **look** scheduled while it never reaches
+  the Agenda, and nothing said why. `verify::` at least counted an unreadable date
+  as stale — `due::` and `start::` were simply silent. That is v0.120.1's finding,
+  finally given a surface.
+
+  It also names a genuine surprise: a date-shaped property **stops at the first
+  word**, so `due:: next friday` is read as `next`. The string in the card and the
+  string the app holds are not the same, which is most of why the silence was
+  confusing.
+
+  A **checklist** is judged by title and items, never body, and since an item with
+  its own `due::` is its own task the offending **line** is named. Keys the app has
+  no opinion about (`owner:: ada`) are not flagged — burying three keys that matter
+  under every key that does not is how a diagnostic stops being read.
+
+### Notes
+- **This is the useful half of "typed properties", and deliberately not the rest.**
+  Obsidian gives every property a type because YAML is stringly and it edits
+  properties in a side panel. Here `key:: value` is inline text the Agenda, Kanban,
+  query and claims surfaces already interpret, so a type system would be a second
+  syntax for something already working — the reasoning that kept frontmatter at
+  the boundary rather than inside. What was actually missing was the diagnosis.
+- Run against both live documents (973 and 419 nodes): **zero problems, zero false
+  positives**, and one planted bad value found.
+
 ## [0.126.0]
 
 ### Added

@@ -216,6 +216,11 @@ from the main cluster, and click or drag on it to jump there without zooming out
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
+- **Find properties the app cannot read** — `due::`, `start::` and `verify::` are
+  the keys Trellis *acts* on, and a non-empty non-date in one of them makes a card
+  look scheduled while it never reaches the Agenda. `GET /api/properties/problems`
+  names them. (A date-shaped property stops at the first word, so `due:: next
+  friday` is read as `next` — which is exactly the kind of thing this surfaces.)
 - **Reach a card by another name** — `alias:: Start Here` on a card makes
   `[[Start Here]]` open it. A **basket still wins** if one has that title, so this
   only ever rescues a link that would have dangled. It is also what makes an

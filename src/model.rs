@@ -4875,6 +4875,97 @@ pub fn parse_daily_title(title: &str) -> Option<(i32, u32, u32)> {
 
 /// Parse a `YYYY-MM-DD` date to days since 1970-01-01 (UTC), or `None`. Uses
 /// Howard Hinnant's days-from-civil algorithm (inverse of the stamp formatter).
+/// A property whose value the app **cannot read**, and what that costs.
+///
+/// The other half of the "typed properties" idea, done the way this app's model
+/// wants it. Obsidian gives every property a type because YAML is stringly and it
+/// edits properties in a side panel; `key:: value` here is inline text that the
+/// Agenda, Kanban, query and claims surfaces already interpret, so a type system
+/// would be a second syntax for something already working — the same reasoning
+/// that kept frontmatter at the boundary rather than inside.
+///
+/// What was genuinely missing is the **diagnosis**. v0.120.1's finding was that
+/// `due::` surprises people: an empty value is not parsed as a property at all,
+/// `status:: done` alone already hides an agenda row, and the real trap is a
+/// **non-empty non-date** — a card that looks scheduled, is not on the Agenda,
+/// and says nothing about why. `verify::` at least counts an unreadable date as
+/// stale; `due::` and `start::` were simply silent.
+#[derive(serde::Serialize)]
+pub struct PropertyProblem {
+    pub node: NodeId,
+    pub node_title: String,
+    pub card: CardId,
+    pub card_title: String,
+    /// The checklist item this came from, when the property is on a line.
+    pub item: Option<u64>,
+    pub key: String,
+    pub value: String,
+    pub why: String,
+}
+
+impl Document {
+    /// Every date-shaped property in the document whose value will not parse.
+    ///
+    /// Only the keys the app actually *acts* on are judged. An arbitrary
+    /// `owner:: ada` is not wrong, it is just a value — flagging every key this
+    /// app has no opinion about would bury the three that matter.
+    pub fn property_problems(&self) -> Vec<PropertyProblem> {
+        const DATED: [&str; 3] = ["due", "start", "verify"];
+        let mut out = Vec::new();
+        let mut check = |node: &Node, card: &Card, item: Option<u64>, hay: &str| {
+            for (k, v) in extract_properties(hay) {
+                if !DATED.contains(&k.as_str()) {
+                    continue;
+                }
+                if parse_ymd(&v).is_some() {
+                    continue;
+                }
+                out.push(PropertyProblem {
+                    node: node.id,
+                    node_title: node.title.clone(),
+                    card: card.id,
+                    card_title: card.title.clone(),
+                    item,
+                    key: k,
+                    value: v.clone(),
+                    // The value is what the parser **read**, which for a
+                    // date-shaped key stops at the first word — so `due:: next
+                    // friday` reports "next". Saying so is the point: the string
+                    // in the card and the string the app holds differ, and that
+                    // is exactly what makes the silence confusing.
+                    why: format!(
+                        "{:?} is not a date this app can read (expected YYYY-MM-DD), \
+                         so nothing schedules on it — note that a date-shaped \
+                         property stops at the first word",
+                        v
+                    ),
+                });
+            }
+        };
+        let mut nodes: Vec<&Node> = self.nodes.values().collect();
+        // Sorted: a diagnostic list that reorders itself between runs is one
+        // nobody can diff against the last one.
+        nodes.sort_by_key(|n| n.id);
+        for n in nodes {
+            for c in &n.cards {
+                // A checklist card's properties come from its title and items,
+                // never its body — and an item is its own task, so an unreadable
+                // date on one line is its own problem, named by that line.
+                match &c.kind {
+                    CardKind::Checklist { items } => {
+                        check(n, c, None, &c.title);
+                        for it in items {
+                            check(n, c, Some(it.id), &it.text);
+                        }
+                    }
+                    _ => check(n, c, None, &format!("{}\n{}", c.title, searchable_body(c))),
+                }
+            }
+        }
+        out
+    }
+}
+
 pub fn parse_ymd(s: &str) -> Option<i64> {
     let mut it = s.trim().splitn(3, '-');
     let y: i64 = it.next()?.trim().parse().ok()?;
@@ -6662,6 +6753,60 @@ mod tests {
         assert_eq!(doc.cards_with_property("due", None).len(), 2);
         assert_eq!(doc.cards_with_property("status", Some("open")).len(), 1);
         assert_eq!(doc.cards_with_property("status", Some("closed")).len(), 0);
+    }
+
+    /// A `due::` that is not a date makes a card **look** scheduled while never
+    /// reaching the Agenda, and nothing said why. That is v0.120.1's finding, and
+    /// this is the surface that answers it.
+    #[test]
+    fn an_unreadable_date_property_is_reported() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Work".into());
+        let bad = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, bad).unwrap().title = "Ship it".into();
+        doc.card_mut(n, bad).unwrap().body = "due:: next friday\nowner:: ada".into();
+        let good = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, good).unwrap().body = "due:: 2026-09-01".into();
+
+        let p = doc.property_problems();
+        assert_eq!(p.len(), 1, "only the unreadable one: {:?}", p.iter().map(|x| &x.key).collect::<Vec<_>>());
+        assert_eq!(p[0].card, bad);
+        assert_eq!(p[0].key, "due");
+        // The parser stops a date-shaped property at the **first word**, so what
+        // it actually read is "next" — not the "next friday" that was typed.
+        // That gap is half of why this surface is worth having: the value in the
+        // card and the value the app holds are not the same string.
+        assert_eq!(p[0].value, "next");
+        assert_eq!(p[0].item, None);
+        // `owner:: ada` is not wrong, it is just a value the app has no opinion
+        // about — flagging those would bury the keys that matter.
+        assert!(!p.iter().any(|x| x.key == "owner"));
+    }
+
+    /// A checklist is judged by **title and items, never body** — and since an
+    /// item with its own `due::` is its own task, the offending line is named.
+    #[test]
+    fn an_unreadable_date_on_a_checklist_line_names_the_line() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc
+            .add_card(
+                n,
+                egui::pos2(0.0, 0.0),
+                CardKind::Checklist {
+                    items: vec![
+                        ChecklistItem { id: 7, text: "fine due:: 2026-09-01".into(), done: false },
+                        ChecklistItem { id: 8, text: "broken due:: soon".into(), done: false },
+                    ],
+                },
+            )
+            .unwrap();
+        doc.card_mut(n, c).unwrap().body = "due:: also-not-a-date".into();
+
+        let p = doc.property_problems();
+        assert_eq!(p.len(), 1, "the body of a checklist holds no properties at all");
+        assert_eq!(p[0].item, Some(8));
+        assert_eq!(p[0].value, "soon");
     }
 
     /// `[[#1391^766]]` addresses one **checklist item** — Obsidian's block
