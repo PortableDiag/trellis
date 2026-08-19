@@ -4100,11 +4100,40 @@ fn reap_or_keep(mut child: std::process::Child) -> Option<std::process::Child> {
 fn set_primary_selection(_ui: &egui::Ui, _text: &str) {}
 
 /// Copy the editor's current selection (if any) to the primary selection.
+///
+/// **Only the focused editor may do this**, and that condition is the whole
+/// point of the function rather than a detail of it.
+///
+/// An unfocused `TextEdit` keeps its last cursor range in egui's memory, so a
+/// cell where text was once selected goes on reporting that selection for as
+/// long as the card stays in edit mode. One editor — a card body — makes that
+/// harmless: the text never changes, so the dedupe in `set_primary_selection`
+/// stops after the first write.
+///
+/// **A table is N editors at once.** Select a cell's contents and type over it,
+/// move to the next cell and do the same — the ordinary way anyone fills in a
+/// table — and two cells now hold different stale selections. Each frame both
+/// call through here with different text, so each defeats the single global
+/// dedupe, and Trellis takes X's PRIMARY selection back and forth **tens of
+/// times a second**, killing and respawning the `xclip` that serves it.
+///
+/// The visible damage is not in Trellis. PRIMARY is a **desktop-wide** resource:
+/// selecting a command in a terminal and middle-clicking it somewhere else stops
+/// working, because Trellis overwrites the selection within a frame or two and
+/// any reader races an owner that is being killed. Measured on a live instance:
+/// a selection made in another application was replaced by a fragment of a
+/// three-by-three table card in under 0.3 s.
+///
+/// Focus is also the honest rule on its own terms — a selection you cannot see,
+/// in a widget that does not have the keyboard, is not the user's selection.
 fn mirror_selection_to_primary(
     ui: &egui::Ui,
     out: &egui::widgets::text_edit::TextEditOutput,
     text: &str,
 ) {
+    if !out.response.has_focus() {
+        return;
+    }
     if let Some(range) = out.state.cursor.char_range() {
         let (a, b) = sorted(range);
         if a != b {

@@ -6,6 +6,37 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.127.1]
+
+### Fixed
+- **A table card in edit mode stole the X PRIMARY selection from the whole
+  desktop.** Select a cell's contents and type over it, move to the next cell and
+  do the same — the ordinary way anyone fills in a table — and pasting stopped
+  working *everywhere*, not just in Trellis. Reported as "something with the
+  tables breaks my clipboard".
+
+  An unfocused `egui::TextEdit` keeps its last cursor range in memory, so a cell
+  where text was once selected goes on reporting that selection every frame for as
+  long as the card stays in edit mode. One editor makes that harmless: the text
+  never changes, so the dedupe in `set_primary_selection` stops after the first
+  write. **A table is N editors at once** — two cells with different stale
+  selections each defeat that single global dedupe, so Trellis took PRIMARY back
+  and forth tens of times a second, killing and respawning the `xclip` that serves
+  it. Any other application reading the selection raced an owner that was being
+  killed.
+
+  The fix is one condition: **only the focused editor may mirror its selection.**
+  That is also the honest rule on its own terms — a selection you cannot see, in a
+  widget that does not have the keyboard, is not the user's selection.
+
+  Measured, old build against new, same fixture and the same clicks: with two
+  cells selected, the old binary destroyed an externally-set selection
+  immediately and then alternated between the two cell values on every sample;
+  the new binary never wrote either one. Diagnosed from the live instance first —
+  the value overwriting the operator's selection was traced by search back to a
+  specific three-by-three table card, and it alternated between exactly two
+  fragments of it.
+
 ## [0.127.0]
 
 ### Added
