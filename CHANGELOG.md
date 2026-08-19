@@ -9,11 +9,15 @@ All notable changes to Trellis. Format loosely follows
 ## [0.127.1]
 
 ### Fixed
-- **A table card in edit mode stole the X PRIMARY selection from the whole
-  desktop.** Select a cell's contents and type over it, move to the next cell and
-  do the same — the ordinary way anyone fills in a table — and pasting stopped
-  working *everywhere*, not just in Trellis. Reported as "something with the
-  tables breaks my clipboard".
+- **A card showing more than one single-line editor at once stole the X PRIMARY
+  selection from the whole desktop.** Select a cell's contents and type over it,
+  move to the next cell and do the same — the ordinary way anyone fills in a table
+  — and pasting stopped working *everywhere*, not just in Trellis. Reported as
+  "something with the tables breaks my clipboard"; the reporter's hunch that it
+  was "all tables" was close, and the actual rule is **more than one single-line
+  editor visible at once**. That is a table (one per **cell**), a checklist (one
+  per **item**), and two cards being edited at the same time (one per **title**).
+  The fix lives in the helper all of them share, so all of them are covered.
 
   An unfocused `egui::TextEdit` keeps its last cursor range in memory, so a cell
   where text was once selected goes on reporting that selection every frame for as
