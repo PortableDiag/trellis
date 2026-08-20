@@ -6,6 +6,28 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.128.3]
+
+### Fixed
+- **Reverts v0.128.2, which was wrong.** That release made *Fit to content* size a
+  checklist as if its items wrapped onto extra rows. They do not: both view
+  branches paint inside `ui.horizontal(…)`, which gives its children unbounded
+  width, so a long item renders on **one line and is clipped** at the card's edge.
+  Sizing for a wrap that never happens made the card far too tall and left a large
+  empty gap under the list — the opposite of the complaint it was meant to fix.
+
+  The mistake was trusting a comment over the pixels: the renderer's own comment
+  says the text "wraps within the card", and it does not. Caught by looking at the
+  rendered card, which is the standard this project already sets for the emoji and
+  clipboard fixes and which the first attempt skipped.
+
+### Known, not fixed
+- **A long checklist item is clipped and unreadable**, and no amount of fitting
+  helps because the card's width is capped. That is the real defect underneath
+  v0.128.2, it is filed in the workspace, and fixing it means making items wrap —
+  at which point `fit_size` must measure each item at the width it wraps to, the
+  way the `Text` branch already does.
+
 ## [0.128.2]
 
 ### Fixed
