@@ -1847,6 +1847,72 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
 /// Shown for **every** kind, because attachments hang off the card rather than off
 /// a card kind — the point of putting them there. Nothing is drawn when there are
 /// none, so a card that has never seen a file is unchanged.
+/// Draw a saved view's rows: a header of column names, then one row per card,
+/// each row a link that reveals the card it names.
+///
+/// Deliberately **not** the table-card renderer. That one edits cells and stores
+/// what you type; these rows are derived and must not be editable, or the first
+/// thing anyone would try is typing into one and losing it on the next frame.
+fn view_ui(
+    ui: &mut egui::Ui,
+    card: &Card,
+    spec: &crate::model::ViewSpec,
+    env: &mut Env,
+    zoom: f32,
+    actions: &mut Vec<CanvasAction>,
+) {
+    let rows = env.doc.run_view(spec, Some(card.id));
+    let link = ui.visuals().hyperlink_color;
+    let weak = ui.visuals().weak_text_color();
+    if rows.is_empty() {
+        // Says which question found nothing, rather than looking broken.
+        ui.weak(format!(
+            "no cards match ({} filter{})",
+            spec.filters.len(),
+            if spec.filters.len() == 1 { "" } else { "s" }
+        ));
+        return;
+    }
+    egui::Grid::new(("view_grid", card.id))
+        .num_columns(1 + spec.columns.len())
+        .spacing(egui::vec2(10.0 * zoom, 3.0 * zoom))
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("card").color(weak).small());
+            for c in &spec.columns {
+                ui.label(egui::RichText::new(c).color(weak).small());
+            }
+            ui.end_row();
+            for r in &rows {
+                // The title is the link: clicking reveals the card, through the
+                // same path an Agenda or Kanban row uses.
+                if ui
+                    .add(egui::Label::new(egui::RichText::new(&r.title).color(link)).sense(egui::Sense::click()))
+                    .on_hover_text(format!("{} · #{}", r.node_title, r.card))
+                    .clicked()
+                {
+                    actions.push(CanvasAction::FollowLink(format!("#{}", r.card)));
+                }
+                for v in &r.values {
+                    ui.label(egui::RichText::new(v).small());
+                }
+                ui.end_row();
+            }
+        });
+    let shown = rows.len();
+    ui.add_space(2.0 * zoom);
+    ui.label(
+        egui::RichText::new(match spec.limit {
+            // A truncated view says so. Silently showing the first N of many is
+            // how someone concludes there are only N.
+            Some(l) if shown >= l => format!("{shown} shown (limit {l})"),
+            _ => format!("{shown} card{}", if shown == 1 { "" } else { "s" }),
+        })
+        .color(weak)
+        .small(),
+    );
+}
+
 fn attachments_ui(ui: &mut egui::Ui, card: &Card, zoom: f32, actions: &mut Vec<CanvasAction>) {
     if card.attachments.is_empty() {
         return;
@@ -2065,6 +2131,12 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                 if tab_to_body {
                     ui.memory_mut(|m| m.request_focus(edit_id));
                 }
+            } else if let Some(spec) = card.view.as_ref() {
+                // A **saved view** draws the cards its query selects, in place of
+                // a body it does not have. Computed here, never stored — a stored
+                // row set is a copy that goes stale, which is what this app is
+                // built to prevent.
+                view_ui(ui, card, spec, env, zoom, actions);
             } else if card.body.trim().is_empty() {
                 ui.weak("(empty — double-click title to edit)");
             } else {

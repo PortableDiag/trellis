@@ -322,6 +322,13 @@ pub enum ApiRequest {
     /// Desktop **mode**: take a whole basket out onto the desktop at once, or
     /// bring it back. The per-card route is the exception; this is the feature.
     SetNodeDesktop { node: NodeId, on: bool },
+    /// `GET /api/cards/{cid}/run` — the rows a **saved view** card selects.
+    ///
+    /// The same function the canvas draws from, so the panel and the API cannot
+    /// drift. The rows are computed here and **never stored on the card**:
+    /// storing them would be a copy that goes stale, which is the duplication
+    /// this app exists to prevent.
+    RunView(u64),
     /// `GET /api/properties/problems` — every date-shaped property whose value
     /// the app cannot read.
     ///
@@ -1242,6 +1249,19 @@ struct ChecklistItemInput {
     text: String,
 }
 
+/// Distinguish *absent* from *explicitly null* for an optional field.
+///
+/// `view: null` must **clear** a saved view while omitting `view` leaves it
+/// alone; a plain `Option` collapses both to `None` and would silently wipe a
+/// view on any patch that did not mention it.
+fn de_double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateCardInput {
@@ -1298,6 +1318,10 @@ pub struct UpdateCardInput {
     /// Existing body/items/table are kept when compatible; a new kind starts empty.
     #[serde(default)]
     kind: Option<String>,
+    /// Turn this card into a **saved view**, or (with `null`) back into an
+    /// ordinary card. The rows are never stored — see `GET /api/cards/{cid}/run`.
+    #[serde(default, deserialize_with = "de_double_option")]
+    view: Option<Option<crate::model::ViewSpec>>,
     /// Header-row flag (table cards only).
     #[serde(default)]
     header: Option<bool>,
@@ -1905,6 +1929,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::SetDailyRoot(Some(i.node)))
         }
         (Method::Delete, ["api", "daily", "root"]) => Ok(ApiRequest::SetDailyRoot(None)),
+        (Method::Get, ["api", "cards", cid, "run"]) => Ok(ApiRequest::RunView(pid(cid)?)),
         (Method::Get, ["api", "properties", "problems"]) => Ok(ApiRequest::PropertyProblems),
         (Method::Post, ["api", "import", "vault"]) => {
             let i: ImportVaultInput = parse(body)?;
@@ -2852,6 +2877,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     }
                 }
                 apply_presentation(c, &patch);
+                // `Some(None)` is an explicit `view: null` — clear it. Absent
+                // leaves whatever is there, so an unrelated patch cannot wipe a
+                // saved view by not mentioning it.
+                if let Some(v) = patch.view {
+                    c.view = v;
+                }
                 if let Some(t) = patch.title {
                     c.title = t;
                 }
@@ -3905,6 +3936,30 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 .collect();
             (false, ApiResponse::ok(json!({ "today_days": today, "count": tasks.len(), "tasks": tasks })))
         }
+        ApiRequest::RunView(cid) => {
+            let Some(node) = doc.locate_card(cid) else {
+                return (false, ApiResponse::err(404, "card not found"));
+            };
+            let Some(card) = doc.card(node, cid) else {
+                return (false, ApiResponse::err(404, "card not found"));
+            };
+            let Some(spec) = card.view.clone() else {
+                return (
+                    false,
+                    ApiResponse::err(400, "this card is not a saved view — PATCH it with a `view`"),
+                );
+            };
+            let rows = doc.run_view(&spec, Some(cid));
+            (
+                false,
+                ApiResponse::ok(json!({
+                    "card": cid,
+                    "columns": spec.columns,
+                    "count": rows.len(),
+                    "rows": rows,
+                })),
+            )
+        }
         ApiRequest::PropertyProblems => {
             let problems = doc.property_problems();
             (
@@ -4432,6 +4487,12 @@ pub(crate) fn card_json(c: &Card) -> Value {
         if !table.rules.is_empty() {
             v["rules"] = serde_json::to_value(&table.rules).unwrap_or(Value::Null);
         }
+    }
+    // A saved view reports its definition, so a caller can read back what it
+    // wrote and tell a view card from an ordinary one without running it. Absent
+    // on every other card, exactly as it is absent in the document.
+    if let Some(view) = &c.view {
+        v["view"] = serde_json::to_value(view).unwrap_or(Value::Null);
     }
     if let Some(s) = &c.source {
         v["source"] = json!(s);

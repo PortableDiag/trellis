@@ -216,6 +216,13 @@ from the main cluster, and click or drag on it to jump there without zooming out
 - **File → Export** the whole tree as **Markdown**, styled **HTML**, **JSON**,
   **PDF** (paginated A4), or a **PNG/GIF** image
 - **File → Import** **Markdown**/**HTML** as a new node, or a **JSON**-exported document
+- **Save a search as a card** — the **Find cards** panel builds a query; *Save as
+  view card* keeps it. The card shows the cards it matches with the columns you
+  asked for, **recomputed every time you look** — it stores the question, never
+  the answer, so it can never go stale. Filters AND together with `=`, `!=`, `<`,
+  `<=`, `>`, `>=`, `contains` and `exists`; dates compare as dates through the
+  same parser the Agenda uses, numbers as numbers. Every other view here (Find,
+  Agenda, Kanban) answers a question somebody else chose; this one is yours.
 - **Find properties the app cannot read** — `due::`, `start::` and `verify::` are
   the keys Trellis *acts* on, and a non-empty non-date in one of them makes a card
   look scheduled while it never reaches the Agenda. `GET /api/properties/problems`

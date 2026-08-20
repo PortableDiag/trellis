@@ -6,6 +6,48 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.128.0]
+
+### Added
+- **Saved views — a query you can keep, as a card.** Every other view here is
+  **fixed**: Find cards, the Agenda and the Kanban each answer one question
+  somebody else chose. Now you can say *"cards where `status:: blocked` and
+  `due::` is this month, by date"* and keep it. The **Find cards** panel already
+  builds a query, so it grew a **Save as view card** button — that is the on-ramp.
+
+  A view is an ordinary card carrying an optional **`view` field**, beside
+  `chart`, `source` and `attachments`. **Not a `CardKind`** (a seventh variant
+  costs ~180 exhaustive match arms and buys nothing — a view is a text card that
+  draws something derived, exactly as a `source` mirror already is), and
+  **deliberately not a `view::` property**: a magic property would fire on prose
+  *about* views, which is the false-property class this project has already fixed
+  twice. A switch that triggers on writing is a bug generator.
+
+  **The rows are never stored.** They are computed on read, so a view cannot go
+  stale — storing them would be the copy this app exists to prevent. An unrelated
+  `PATCH` leaves a view alone; only an explicit `view: null` clears it.
+
+  Filters AND together, with `eq` / `ne` / `lt` / `le` / `gt` / `ge` / `contains`
+  / `exists`, over property keys or the pseudo-keys `title`, `basket`, `id`,
+  `kind`, `touched`, `tag`, `text`. **Values compare as what they are**: two dates
+  through the same `parse_ymd` the Agenda uses — so a view and the Agenda cannot
+  disagree about what a day is — two numbers numerically, so `priority:: 10` is
+  not below `priority:: 9`, anything else as text.
+
+  Sorting puts cards with **no value last in both directions**, because an empty
+  first row reads as a broken view, and `limit` truncates **after** the sort, so
+  "top 5 by date" is the first five by date rather than five arbitrary rows put in
+  order. A view never returns its own card. Over the API:
+  `PATCH /api/cards/{cid} {"view": {…}}` and `GET /api/cards/{cid}/run`, which is
+  the same function the canvas draws from — one implementation, not two that drift.
+
+### Notes
+- **Formulas, summaries and group-by are deliberately not in this version**, and
+  neither are Agenda, Kanban and Find re-expressed on top of the new engine.
+  Formulas are a small expression language needing an infinite-loop guard;
+  rewriting three working panels onto a new engine is how three working panels
+  break. Design agreed on [[#1934]] before any code was written.
+
 ## [0.127.2]
 
 ### Fixed

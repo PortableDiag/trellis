@@ -794,9 +794,100 @@ pub struct Card {
     /// inline images.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<FileEntry>,
+    /// A **saved view**: this card shows the cards a query selects, instead of a
+    /// body it holds.
+    ///
+    /// Deliberately a field, not a `CardKind` and **not a property**. A new
+    /// variant costs ~180 exhaustive match arms and buys nothing — a view is a
+    /// text card that draws something derived, exactly as a `source` mirror and a
+    /// table's `chart` already are. And a magic `view::` property would fire on
+    /// *prose about views*, which is the false-property class this project has
+    /// already fixed twice (the v0.96.0 code-span rule, and a `status:: done`
+    /// that hid inside a `check::` line). A switch that triggers on writing is a
+    /// bug generator; this one is set explicitly or not at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<ViewSpec>,
     /// Runtime-only: whether the card is in edit mode. Never persisted.
     #[serde(skip)]
     pub editing: bool,
+}
+
+/// A saved query: which cards, which columns, in what order.
+///
+/// **The results are never stored here.** They are computed on read, like a
+/// chart from its table — storing rows would be a copy that goes stale, which is
+/// the duplication this whole app is built to prevent.
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ViewSpec {
+    /// Restrict to this basket and everything under it. Whole document if unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<NodeId>,
+    /// All must match. One list, ANDed — `or` is the first thing to add if it is
+    /// ever missed, and the first thing to regret adding before it is.
+    #[serde(default)]
+    pub filters: Vec<ViewFilter>,
+    /// Properties (or pseudo-keys) to show as columns. The card's title is always
+    /// the first column, so an empty list still gives a usable list of cards.
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<ViewSort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ViewFilter {
+    /// A property key, or one of the pseudo-keys: `tag`, `text`, `title`,
+    /// `basket`, `id`, `touched`.
+    pub key: String,
+    pub op: ViewOp,
+    #[serde(default)]
+    pub value: String,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Contains,
+    Exists,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ViewSort {
+    pub key: String,
+    #[serde(default)]
+    pub dir: SortDir,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SortDir {
+    #[default]
+    Asc,
+    Desc,
+}
+
+/// One row of a view's result: the card it names, and the column values.
+#[derive(Serialize)]
+pub struct ViewRow {
+    pub node: NodeId,
+    pub node_title: String,
+    pub card: CardId,
+    pub title: String,
+    /// One entry per `columns` entry, in the same order. Missing values are `""`
+    /// rather than absent, so a caller can zip them against the column list
+    /// without checking length.
+    pub values: Vec<String>,
 }
 
 /// How loudly a card asks to be looked at.
@@ -942,6 +1033,7 @@ impl Card {
             font_scale: 1.0,
             inline_images: Vec::new(),
             attachments: Vec::new(),
+            view: None,
             editing,
         }
     }
@@ -5402,6 +5494,197 @@ fn yaml_scalar(v: &str) -> String {
     }
 }
 
+/// The card kind, as the API spells it — so a view's `kind` column and a
+/// `GET /api/cards/{cid}` agree on the word.
+fn view_kind_name(k: &CardKind) -> &'static str {
+    match k {
+        CardKind::Text => "text",
+        CardKind::Code { .. } => "code",
+        CardKind::Checklist { .. } => "checklist",
+        CardKind::Table { .. } => "table",
+        CardKind::Image { .. } => "image",
+        CardKind::Sketch { .. } => "sketch",
+    }
+}
+
+/// What to call a card in a result row. A title if it has one, else the first
+/// line of what it actually holds — a titled-but-blank card and an untitled card
+/// with content are both common, and "(untitled)" for the second is useless.
+fn view_card_label(c: &Card) -> String {
+    if !c.title.trim().is_empty() {
+        return c.title.clone();
+    }
+    let body = searchable_body(c);
+    let first = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    if first.is_empty() {
+        format!("(untitled #{})", c.id)
+    } else {
+        first.chars().take(60).collect()
+    }
+}
+
+impl Document {
+    /// Run a saved view: the cards it selects, with the columns it asks for.
+    ///
+    /// Pure over the document, so the panel and `GET /api/cards/{cid}/run` are
+    /// one implementation rather than two that drift.
+    ///
+    /// **A view never returns itself.** A view card carries no `view::` property
+    /// and would rarely match its own filters, but "cards where `title` contains
+    /// e" would include it, and a row that opens the card you are looking at is
+    /// noise at best and an invitation to a loop at worst.
+    pub fn run_view(&self, spec: &ViewSpec, self_card: Option<CardId>) -> Vec<ViewRow> {
+        let mut rows: Vec<ViewRow> = Vec::new();
+        let mut nodes: Vec<&Node> = self.nodes.values().collect();
+        // `nodes` is a `HashMap`; sort so two runs of the same view agree. Same
+        // rule as link resolution (v0.121.0) and the property diagnostics.
+        nodes.sort_by_key(|n| n.id);
+        for n in nodes {
+            if let Some(scope) = spec.scope {
+                if !self.is_under(n.id, scope) {
+                    continue;
+                }
+            }
+            for c in &n.cards {
+                if Some(c.id) == self_card {
+                    continue;
+                }
+                if !spec.filters.iter().all(|f| self.card_matches(n, c, f)) {
+                    continue;
+                }
+                let values = spec
+                    .columns
+                    .iter()
+                    .map(|k| self.column_value(n, c, k).unwrap_or_default())
+                    .collect();
+                rows.push(ViewRow {
+                    node: n.id,
+                    node_title: n.title.clone(),
+                    card: c.id,
+                    title: view_card_label(c),
+                    values,
+                });
+            }
+        }
+        if let Some(sort) = &spec.sort {
+            rows.sort_by(|a, b| {
+                let av = self.sort_key(a, sort, spec);
+                let bv = self.sort_key(b, sort, spec);
+                // Dates as dates when both parse, else as text — through the same
+                // `parse_ymd` the Agenda uses, so a view and the Agenda cannot
+                // disagree about what a day is.
+                let ord = match (parse_ymd(&av), parse_ymd(&bv)) {
+                    (Some(x), Some(y)) => x.cmp(&y),
+                    _ => av.to_lowercase().cmp(&bv.to_lowercase()),
+                };
+                // Cards with no value for the sort key sink, in either direction:
+                // an empty first row reads as a broken view.
+                match (av.is_empty(), bv.is_empty()) {
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    _ => match sort.dir {
+                        SortDir::Asc => ord,
+                        SortDir::Desc => ord.reverse(),
+                    },
+                }
+            });
+        }
+        if let Some(limit) = spec.limit {
+            rows.truncate(limit);
+        }
+        rows
+    }
+
+    /// The value a view shows in one column, or `None` when the card has none.
+    ///
+    /// Pseudo-keys sit beside real properties so a view can select on what the
+    /// document knows structurally — which basket a card is in, when it was
+    /// touched — and not only on what someone wrote in it.
+    fn column_value(&self, n: &Node, c: &Card, key: &str) -> Option<String> {
+        let k = key.trim().to_lowercase();
+        match k.as_str() {
+            "title" => Some(c.title.clone()),
+            "basket" => Some(n.title.clone()),
+            "id" => Some(c.id.to_string()),
+            "kind" => Some(view_kind_name(&c.kind).to_string()),
+            "touched" => c.touched.map(|t| t.to_string()),
+            "tag" | "tags" => {
+                let hay = format!("{}\n{}", c.title, searchable_body(c));
+                let tags = extract_tags(&hay);
+                if tags.is_empty() { None } else { Some(tags.join(", ")) }
+            }
+            "text" => Some(searchable_body(c)),
+            _ => {
+                let hay = format!("{}\n{}", c.title, searchable_body(c));
+                extract_properties(&hay)
+                    .into_iter()
+                    .filter(|(pk, _)| *pk == k)
+                    .next_back()
+                    .map(|(_, v)| v)
+            }
+        }
+    }
+
+    fn sort_key(&self, row: &ViewRow, sort: &ViewSort, spec: &ViewSpec) -> String {
+        // A column already computed is reused rather than recomputed.
+        if let Some(i) = spec.columns.iter().position(|c| c.eq_ignore_ascii_case(&sort.key)) {
+            return row.values.get(i).cloned().unwrap_or_default();
+        }
+        let Some(n) = self.nodes.get(&row.node) else { return String::new() };
+        let Some(c) = self.card(row.node, row.card) else { return String::new() };
+        self.column_value(n, c, &sort.key).unwrap_or_default()
+    }
+
+    fn card_matches(&self, n: &Node, c: &Card, f: &ViewFilter) -> bool {
+        let got = self.column_value(n, c, &f.key);
+        // `exists` asks whether the card has the key at all, which is a different
+        // question from "is it empty" — `due::` with nothing after it is not
+        // parsed as a property, and this must not claim it is.
+        if f.op == ViewOp::Exists {
+            return got.is_some_and(|v| !v.trim().is_empty());
+        }
+        let Some(got) = got else { return false };
+        let want = f.value.trim();
+        // `tag` and `text` are haystacks, so equality on them means "contains one
+        // of these" rather than "is exactly this string" — matching `/api/query`,
+        // where `tag=todo` has always meant *has* that tag.
+        if matches!(f.key.trim().to_lowercase().as_str(), "tag" | "tags" | "text")
+            && matches!(f.op, ViewOp::Eq | ViewOp::Contains)
+        {
+            let hay = got.to_lowercase();
+            let want = want.trim_start_matches('#').to_lowercase();
+            return hay
+                .split(|ch: char| ch == ',' || ch.is_whitespace())
+                .any(|t| t.trim().trim_start_matches('#') == want)
+                || (f.op == ViewOp::Contains && hay.contains(&want));
+        }
+        match f.op {
+            ViewOp::Exists => unreachable!("handled above"),
+            ViewOp::Contains => got.to_lowercase().contains(&want.to_lowercase()),
+            ViewOp::Eq => got.trim().eq_ignore_ascii_case(want),
+            ViewOp::Ne => !got.trim().eq_ignore_ascii_case(want),
+            _ => {
+                let ord = match (parse_ymd(got.trim()), parse_ymd(want)) {
+                    (Some(a), Some(b)) => a.cmp(&b),
+                    // Numbers compare as numbers; `priority:: 10` must not sort
+                    // below `priority:: 9` because "1" < "9".
+                    _ => match (got.trim().parse::<f64>(), want.parse::<f64>()) {
+                        (Ok(a), Ok(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                        _ => got.trim().to_lowercase().cmp(&want.to_lowercase()),
+                    },
+                };
+                match f.op {
+                    ViewOp::Lt => ord.is_lt(),
+                    ViewOp::Le => ord.is_le(),
+                    ViewOp::Gt => ord.is_gt(),
+                    ViewOp::Ge => ord.is_ge(),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
 /// How deep an `![[#id]]` embed may nest before it stops expanding.
 ///
 /// A limit rather than only cycle detection, because a chain with no cycle in it
@@ -6952,6 +7235,185 @@ mod tests {
         assert!(
             matches!(doc.resolve_link_target("The List"), Some(LinkTarget::Card { card, .. }) if card == c)
         );
+    }
+
+    fn view_doc() -> (Document, NodeId, NodeId) {
+        let mut doc = Document::empty();
+        let proj = doc.add_node(None, "Project".into());
+        let other = doc.add_node(None, "Elsewhere".into());
+        let mk = |doc: &mut Document, n: NodeId, title: &str, body: &str| {
+            let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+            doc.card_mut(n, c).unwrap().title = title.into();
+            doc.card_mut(n, c).unwrap().body = body.into();
+            c
+        };
+        mk(&mut doc, proj, "Blocked A", "#work\nstatus:: blocked\ndue:: 2026-09-10\npriority:: 9");
+        mk(&mut doc, proj, "Blocked B", "status:: blocked\ndue:: 2026-09-02\npriority:: 10");
+        mk(&mut doc, proj, "Open one", "status:: open\ndue:: 2026-09-05");
+        mk(&mut doc, proj, "No status", "just prose");
+        mk(&mut doc, other, "Blocked elsewhere", "status:: blocked\ndue:: 2026-08-01");
+        (doc, proj, other)
+    }
+
+    fn filt(key: &str, op: ViewOp, value: &str) -> ViewFilter {
+        ViewFilter { key: key.into(), op, value: value.into() }
+    }
+
+    /// The thing every fixed panel cannot do: name your own question and keep it.
+    #[test]
+    fn a_view_selects_by_property_and_shows_the_columns_it_asks_for() {
+        let (doc, _, _) = view_doc();
+        let spec = ViewSpec {
+            filters: vec![filt("status", ViewOp::Eq, "blocked")],
+            columns: vec!["due".into(), "status".into(), "basket".into()],
+            ..Default::default()
+        };
+        let rows = doc.run_view(&spec, None);
+        assert_eq!(rows.len(), 3, "three blocked cards across two baskets");
+        let a = rows.iter().find(|r| r.title == "Blocked A").unwrap();
+        assert_eq!(a.values, vec!["2026-09-10", "blocked", "Project"]);
+        // A missing value is "" rather than absent, so columns and values zip.
+        let spec2 = ViewSpec {
+            filters: vec![filt("status", ViewOp::Exists, "")],
+            columns: vec!["nonesuch".into()],
+            ..Default::default()
+        };
+        assert!(doc.run_view(&spec2, None).iter().all(|r| r.values == vec![""]));
+    }
+
+    /// `scope` confines a view to one basket and its subtree, which is what makes
+    /// a per-project view possible in a document whose baskets are days.
+    #[test]
+    fn a_scoped_view_stays_inside_its_subtree() {
+        let (doc, proj, _) = view_doc();
+        let spec = ViewSpec {
+            scope: Some(proj),
+            filters: vec![filt("status", ViewOp::Eq, "blocked")],
+            ..Default::default()
+        };
+        let rows = doc.run_view(&spec, None);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.node == proj));
+    }
+
+    /// **Dates compare as dates and numbers as numbers.** `priority:: 10` must
+    /// not sort below `priority:: 9` because "1" < "9", and a due date must go
+    /// through the same `parse_ymd` the Agenda uses — a view and the Agenda
+    /// disagreeing about what a day is would be the worst kind of bug here.
+    #[test]
+    fn comparisons_use_the_type_the_value_actually_is() {
+        let (doc, proj, _) = view_doc();
+        let before = ViewSpec {
+            scope: Some(proj),
+            filters: vec![filt("due", ViewOp::Le, "2026-09-05")],
+            ..Default::default()
+        };
+        let titles: Vec<String> = doc.run_view(&before, None).into_iter().map(|r| r.title).collect();
+        assert_eq!(titles.len(), 2, "{titles:?}");
+        assert!(titles.contains(&"Blocked B".to_string()) && titles.contains(&"Open one".to_string()));
+
+        let big = ViewSpec {
+            scope: Some(proj),
+            filters: vec![filt("priority", ViewOp::Ge, "10")],
+            ..Default::default()
+        };
+        let t: Vec<String> = doc.run_view(&big, None).into_iter().map(|r| r.title).collect();
+        assert_eq!(t, vec!["Blocked B".to_string()], "10 >= 10 and 9 is not");
+    }
+
+    /// Sorting is date-aware, and cards with no value sink rather than leading.
+    #[test]
+    fn a_view_sorts_by_date_and_sinks_the_blanks() {
+        let (doc, proj, _) = view_doc();
+        let spec = ViewSpec {
+            scope: Some(proj),
+            columns: vec!["due".into()],
+            sort: Some(ViewSort { key: "due".into(), dir: SortDir::Asc }),
+            ..Default::default()
+        };
+        let rows = doc.run_view(&spec, None);
+        let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, vec!["Blocked B", "Open one", "Blocked A", "No status"]);
+        // Descending flips the dated rows but still sinks the undated one.
+        let desc = ViewSpec {
+            sort: Some(ViewSort { key: "due".into(), dir: SortDir::Desc }),
+            ..spec.clone()
+        };
+        let t: Vec<String> = doc.run_view(&desc, None).into_iter().map(|r| r.title).collect();
+        assert_eq!(t, vec!["Blocked A", "Open one", "Blocked B", "No status"]);
+    }
+
+    /// `limit` truncates **after** sorting — a "top 2 by date" that truncated
+    /// first would return two arbitrary rows and then order them.
+    #[test]
+    fn a_limit_applies_after_the_sort() {
+        let (doc, proj, _) = view_doc();
+        let spec = ViewSpec {
+            scope: Some(proj),
+            sort: Some(ViewSort { key: "due".into(), dir: SortDir::Asc }),
+            limit: Some(2),
+            ..Default::default()
+        };
+        let t: Vec<String> = doc.run_view(&spec, None).into_iter().map(|r| r.title).collect();
+        assert_eq!(t, vec!["Blocked B".to_string(), "Open one".to_string()]);
+    }
+
+    /// A tag filter means *has that tag*, matching what `tag=` has always meant
+    /// on `/api/query` — with or without the `#`.
+    #[test]
+    fn a_tag_filter_asks_whether_the_card_has_the_tag() {
+        let (doc, _, _) = view_doc();
+        for want in ["work", "#work"] {
+            let spec = ViewSpec { filters: vec![filt("tag", ViewOp::Eq, want)], ..Default::default() };
+            let t: Vec<String> = doc.run_view(&spec, None).into_iter().map(|r| r.title).collect();
+            assert_eq!(t, vec!["Blocked A".to_string()], "{want}");
+        }
+    }
+
+    /// **A view never returns itself.** A row that opens the card you are looking
+    /// at is noise, and an invitation to a loop.
+    #[test]
+    fn a_view_excludes_its_own_card() {
+        let (mut doc, proj, _) = view_doc();
+        let me = doc.add_card(proj, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(proj, me).unwrap().title = "Blocked view".into();
+        let spec = ViewSpec {
+            filters: vec![filt("title", ViewOp::Contains, "Blocked")],
+            ..Default::default()
+        };
+        assert!(doc.run_view(&spec, Some(me)).iter().all(|r| r.card != me));
+        assert!(doc.run_view(&spec, None).iter().any(|r| r.card == me), "only excluded when named");
+    }
+
+    /// `exists` is not "is not empty text": an empty `due::` is not parsed as a
+    /// property at all, and this must not claim the card has one.
+    #[test]
+    fn exists_means_the_key_is_actually_there() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let has = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, has).unwrap().title = "has".into();
+        doc.card_mut(n, has).unwrap().body = "due:: 2026-09-01".into();
+        let empty = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, empty).unwrap().title = "empty".into();
+        doc.card_mut(n, empty).unwrap().body = "due::".into();
+
+        let spec = ViewSpec { filters: vec![filt("due", ViewOp::Exists, "")], ..Default::default() };
+        let t: Vec<String> = doc.run_view(&spec, None).into_iter().map(|r| r.title).collect();
+        assert_eq!(t, vec!["has".to_string()]);
+    }
+
+    /// A card carrying no view is untouched, and a document written before views
+    /// existed still loads — the field is absent, not null.
+    #[test]
+    fn the_view_field_is_absent_on_an_ordinary_card() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let json = serde_json::to_string(&doc).unwrap();
+        assert!(!json.contains("\"view\""), "no view key is written for a plain card");
+        let back: Document = serde_json::from_str(&json).unwrap();
+        assert!(back.nodes.values().flat_map(|n| n.cards.iter()).all(|c| c.view.is_none()));
     }
 
     /// `![[#id]]` shows another card's content in place. The complement of

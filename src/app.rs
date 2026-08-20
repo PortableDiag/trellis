@@ -8481,6 +8481,7 @@ impl TrellisApp {
     /// text (all dropdown-driven, no syntax), with click-to-jump results.
     fn find_panel(&mut self, ctx: &egui::Context) {
         let mut jump: Option<(NodeId, Option<CardId>)> = None;
+        let mut save_view = false;
         let tags = self.doc.tag_counts();
         let keys = self.doc.property_keys();
         egui::SidePanel::right("find").resizable(true).default_width(280.0).show(ctx, |ui| {
@@ -8520,12 +8521,31 @@ impl TrellisApp {
                 ui.label("Text");
                 ui.add(egui::TextEdit::singleline(&mut self.find_text).hint_text("contains…").desired_width(150.0));
             });
-            if ui.button("Clear filters").clicked() {
-                self.find_tag = None;
-                self.find_key = None;
-                self.find_value.clear();
-                self.find_text.clear();
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Clear filters").clicked() {
+                    self.find_tag = None;
+                    self.find_key = None;
+                    self.find_value.clear();
+                    self.find_text.clear();
+                }
+                // **The on-ramp.** This panel has already built the query; a
+                // saved view only adds keeping it. Building one by hand means
+                // writing a `view` field over the API, which nobody discovers.
+                let any = self.find_tag.is_some()
+                    || self.find_key.is_some()
+                    || !self.find_text.trim().is_empty();
+                if ui
+                    .add_enabled(any, egui::Button::new("Save as view card"))
+                    .on_hover_text(
+                        "Put these filters on a new card in the selected basket. It shows \
+                         the cards they match, recomputed every time you look — it stores \
+                         the question, never the answer.",
+                    )
+                    .clicked()
+                {
+                    save_view = true;
+                }
+            });
             ui.separator();
 
             let val = self.find_value.trim();
@@ -8554,9 +8574,85 @@ impl TrellisApp {
                 }
             });
         });
+        if save_view {
+            self.save_find_as_view();
+        }
         if let Some((node, card)) = jump {
             self.reveal_hit(ctx, node, card);
         }
+    }
+
+    /// A spot in `node` no existing card occupies: below everything, at the left
+    /// margin. Deliberately not "the middle of the view" — a card dropped into
+    /// the arrangement someone made is a card they have to move.
+    fn free_spot(&self, node: NodeId) -> egui::Pos2 {
+        let bottom = self
+            .doc
+            .nodes
+            .get(&node)
+            .map(|n| n.cards.iter().map(|c| c.pos.y + c.size.y).fold(0.0_f32, f32::max))
+            .unwrap_or(0.0);
+        egui::pos2(40.0, bottom + 40.0)
+    }
+
+    /// Turn the Find panel's current filters into a saved-view card.
+    ///
+    /// Lands in the **selected basket**, so it appears where the person was
+    /// already looking. Columns default to the property being filtered on: a view
+    /// of "cards where `status:: blocked`" that does not show `status` is a list
+    /// you then have to open one by one.
+    fn save_find_as_view(&mut self) {
+        use crate::model::{CardKind, ViewFilter, ViewOp, ViewSpec};
+        let Some(node) = self.selected else {
+            self.status = "Select a basket to put the view card in".to_string();
+            return;
+        };
+        let mut filters = Vec::new();
+        let mut columns: Vec<String> = Vec::new();
+        if let Some(t) = self.find_tag.clone() {
+            filters.push(ViewFilter { key: "tag".into(), op: ViewOp::Eq, value: t });
+        }
+        if let Some(k) = self.find_key.clone() {
+            let v = self.find_value.trim().to_string();
+            // A key with no value means "has this property at all", which is what
+            // the panel means by picking a key and leaving the value blank.
+            let op = if v.is_empty() { ViewOp::Exists } else { ViewOp::Eq };
+            filters.push(ViewFilter { key: k.clone(), op, value: v });
+            columns.push(k);
+        }
+        let txt = self.find_text.trim().to_string();
+        if !txt.is_empty() {
+            filters.push(ViewFilter { key: "text".into(), op: ViewOp::Contains, value: txt });
+        }
+        if filters.is_empty() {
+            self.status = "Nothing to save — pick a tag, a property, or some text".to_string();
+            return;
+        }
+        // `due` earns a column on every view: it is what this document is
+        // organised around and what people sort by.
+        if !columns.iter().any(|c| c == "due") {
+            columns.push("due".into());
+        }
+        let title = describe_find(
+            self.find_tag.as_deref(),
+            self.find_key.as_deref(),
+            &self.find_value,
+            &self.find_text,
+        );
+        let pos = self.free_spot(node);
+        let Some(cid) = self.doc.add_card(node, pos, CardKind::Text) else {
+            self.status = "Could not create the view card".to_string();
+            return;
+        };
+        if let Some(c) = self.doc.card_mut(node, cid) {
+            c.title = title.clone();
+            c.size = egui::vec2(420.0, 260.0);
+            c.editing = false;
+            c.view = Some(ViewSpec { filters, columns, ..Default::default() });
+        }
+        self.mark_dirty();
+        self.focus_card = Some(cid);
+        self.status = format!("Saved view \"{title}\"");
     }
 
     /// Right-side panel: every open task (a card with a `due::` date) across the
@@ -11427,4 +11523,26 @@ fn lan_addresses() -> Vec<String> {
     }
     found.sort_by_key(|ip| !ip.is_private()); // private first, stable otherwise
     found.into_iter().map(|ip| ip.to_string()).collect()
+}
+
+/// A readable name for a view built from the Find panel's filters, so the card
+/// says what it shows without anyone opening it.
+fn describe_find(tag: Option<&str>, key: Option<&str>, value: &str, text: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(t) = tag {
+        parts.push(format!("#{t}"));
+    }
+    if let Some(k) = key {
+        let v = value.trim();
+        parts.push(if v.is_empty() { format!("has {k}::") } else { format!("{k}:: {v}") });
+    }
+    let t = text.trim();
+    if !t.is_empty() {
+        parts.push(format!("\u{201c}{t}\u{201d}"));
+    }
+    if parts.is_empty() {
+        "Saved view".to_string()
+    } else {
+        parts.join(" \u{b7} ")
+    }
 }

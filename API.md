@@ -1550,6 +1550,71 @@ GET /api/kanban?project=<node id>   only cards under that node (same filter as /
   | 400 (bad id)   | 404 (node not found)
 ```
 
+### Saved views — a query you can keep, as a card
+Every other view here is **fixed**: Find cards, the Agenda and the Kanban each
+answer one question someone else chose. A saved view is your question, kept.
+
+A view is an ordinary card carrying a **`view` field**. Set it with `PATCH`, clear
+it with `view: null`:
+```
+PATCH /api/cards/{cid}
+{"view": {
+   "scope":   <node id>,              // optional; whole document if omitted
+   "filters": [{"key":"status","op":"eq","value":"blocked"},
+               {"key":"due","op":"le","value":"2026-09-30"}],
+   "columns": ["due","status","basket"],
+   "sort":    {"key":"due","dir":"asc"},
+   "limit":   50
+}}
+
+GET /api/cards/{cid}/run
+  → 200 {"card":…,"columns":[…],"count":N,
+         "rows":[{"node":…,"node_title":…,"card":…,"title":…,"values":[…]}]}
+  | 400 this card is not a saved view
+  | 404 card not found
+  | 403 for a scoped token
+```
+
+**It is a field, not a `CardKind` and not a property.** A new kind costs ~180
+exhaustive match arms and buys nothing — a view is a text card that draws
+something derived, exactly as a `source` mirror and a table's `chart` already are.
+And a magic `view::` *property* would fire on prose **about** views, which is the
+false-property class this project has already fixed twice. A switch that triggers
+on writing is a bug generator.
+
+**The rows are never stored.** They are computed on read, so a view cannot go
+stale — storing them would be the copy this app exists to prevent. `omitting`
+`view` on an unrelated `PATCH` leaves it alone; only an explicit `null` clears it.
+
+**Filters** are ANDed. `op` is one of `eq`, `ne`, `lt`, `le`, `gt`, `ge`,
+`contains`, `exists`. `key` is a property key or one of the pseudo-keys `title`,
+`basket`, `id`, `kind`, `touched`, `tag`, `text` — so a view can select on what
+the document knows structurally, not only on what someone wrote.
+
+**Values compare as what they are.** Two dates compare through the same
+`parse_ymd` the Agenda uses, so a view and the Agenda cannot disagree about what
+a day is; two numbers compare numerically, so `priority:: 10` is not below
+`priority:: 9`; anything else compares as text, case-insensitively. `tag` and
+`text` are haystacks, so `eq` on them means *has that tag* — the same meaning
+`tag=` has always had on `/api/query` — with or without the `#`.
+
+`exists` asks whether the key is **there**, which is not "is not empty": an empty
+`due::` is not parsed as a property at all, and this does not claim it is.
+
+**Sorting** puts cards with no value for the sort key **last in both directions** —
+an empty first row reads as a broken view. `limit` truncates **after** sorting, so
+"top 5 by date" means the first five by date rather than five arbitrary rows put
+in order.
+
+**A view never returns its own card.** A row that opens the card you are looking
+at is noise, and an invitation to a loop.
+
+**Not in this version, on purpose:** formulas, summaries and group-by. Formulas
+are a small expression language needing an infinite-loop guard; filter + columns +
+sort + limit is the useful part. The Agenda, Kanban and Find panels are also
+**not** re-expressed on top of this — rewriting three working panels onto a new
+engine is how three working panels break.
+
 ### Properties the app cannot read
 ```
 GET /api/properties/problems
