@@ -2253,7 +2253,14 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                 let unhtml = crate::model::html_blocks_to_md(&embedded);
                 let linked = crate::model::wikilinks_to_md(&unhtml);
                 scale_text(ui, card.font_scale, |ui| {
-                    CommonMarkViewer::new().show(ui, env.md, &crate::model::hard_wrap(&linked));
+                    // Callout titles first, then hard breaks: the title becomes
+                    // its own line, and that line then gets its own break like
+                    // any other.
+                    md_viewer().show(
+                        ui,
+                        env.md,
+                        &crate::model::hard_wrap(&crate::model::split_callout_titles(&linked)),
+                    );
                 });
             }
         }
@@ -2299,7 +2306,7 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
             } else {
                 let fenced = format!("```{}\n{}\n```", lang, card.body);
                 scale_text(ui, card.font_scale, |ui| {
-                    CommonMarkViewer::new().show(ui, env.md, &fenced);
+                    md_viewer().show(ui, env.md, &fenced);
                 });
             }
         }
@@ -2675,6 +2682,62 @@ fn sketch_ui(
             ui.data_mut(|d| d.insert_temp(buf_key, buf));
         }
     }
+}
+
+/// The Markdown viewer, configured once so the two call sites cannot drift.
+///
+/// **Callouts.** The renderer ships GitHub's five alert types, so `[!note]` and
+/// `[!warning]` already drew as titled coloured blocks; Obsidian's wider set did
+/// not, and vault import (v0.124.0) means those now arrive in real content and
+/// showed as a blockquote with a literal `[!info]` in it.
+///
+/// Every Obsidian identifier is mapped onto **one of the five glyphs the bundled
+/// font is known to draw**, differentiated by colour rather than by finding a
+/// more apt character. That is deliberate: emoji are monochrome outlines here (a
+/// standing decision), and a glyph outside the bundled font renders as a hollow
+/// box — which has happened before. A right-looking icon that draws as a box is
+/// worse than an approximate one that draws.
+fn md_viewer() -> CommonMarkViewer {
+    CommonMarkViewer::new().alerts(callout_bundle())
+}
+
+/// GitHub's five alert types plus Obsidian's, including their aliases.
+fn callout_bundle() -> egui_commonmark::AlertBundle {
+    use egui_commonmark::Alert;
+    const BLUE: egui::Color32 = egui::Color32::from_rgb(10, 80, 210);
+    const GREEN: egui::Color32 = egui::Color32::from_rgb(0, 130, 20);
+    const PURPLE: egui::Color32 = egui::Color32::from_rgb(150, 30, 140);
+    const AMBER: egui::Color32 = egui::Color32::from_rgb(200, 120, 0);
+    const RED: egui::Color32 = egui::Color32::from_rgb(220, 0, 0);
+    // (identifiers sharing a rendering, rendered name, icon, colour)
+    let spec: &[(&[&str], &str, char, egui::Color32)] = &[
+        (&["NOTE"], "Note", '\u{2755}', BLUE),
+        (&["INFO"], "Info", '\u{2755}', BLUE),
+        (&["ABSTRACT", "SUMMARY", "TLDR"], "Summary", '\u{2755}', BLUE),
+        (&["TODO"], "Todo", '\u{2755}', BLUE),
+        (&["EXAMPLE"], "Example", '\u{1f4ac}', PURPLE),
+        (&["QUOTE", "CITE"], "Quote", '\u{1f4ac}', PURPLE),
+        (&["IMPORTANT"], "Important", '\u{1f4ac}', PURPLE),
+        (&["TIP", "HINT"], "Tip", '\u{1f4a1}', GREEN),
+        (&["SUCCESS", "CHECK", "DONE"], "Success", '\u{1f4a1}', GREEN),
+        (&["QUESTION", "HELP", "FAQ"], "Question", '\u{26a0}', AMBER),
+        (&["WARNING", "CAUTION", "ATTENTION"], "Warning", '\u{26a0}', AMBER),
+        (&["FAILURE", "FAIL", "MISSING"], "Failure", '\u{1f534}', RED),
+        (&["DANGER", "ERROR"], "Danger", '\u{1f534}', RED),
+        (&["BUG"], "Bug", '\u{1f534}', RED),
+    ];
+    egui_commonmark::AlertBundle::from_alerts(
+        spec.iter()
+            .flat_map(|(ids, rendered, icon, color)| {
+                ids.iter().map(move |id| Alert {
+                    accent_color: *color,
+                    icon: *icon,
+                    identifier: (*id).to_string(),
+                    identifier_rendered: (*rendered).to_string(),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// The world-space bounding box of the selected cards, or `None` if nothing in

@@ -8246,6 +8246,48 @@ impl TrellisApp {
                 });
             }
         }
+        // **Card titles, below every basket.** The palette could resolve a card by
+        // its *id* since v0.87.0 but never by its name, so the one thing you
+        // actually remember about a card was the one thing you could not type.
+        //
+        // Three rules keep it reach rather than discovery, which is Ctrl+F's job:
+        // only the **title** is matched (never the body); a card with **no title**
+        // is skipped entirely, because matching its body-derived label would make
+        // the palette answer with rows nobody can predict; and nothing is offered
+        // for an **empty query**, where `fuzzy_score` matches everything and the
+        // list would become every card in the document.
+        //
+        // `CARD_SCORE_BASE` puts every card after every basket rather than
+        // interleaving them by score. That is the same call the id rows already
+        // make — the basket is the coarser, likelier target — and it means the
+        // palette's first screen never changes shape because a card happened to
+        // score well.
+        const CARD_SCORE_BASE: i32 = 10_000;
+        if !q.is_empty() {
+            for (&nid, n) in &self.doc.nodes {
+                let mut path: Option<String> = None;
+                for c in &n.cards {
+                    if c.title.trim().is_empty() || Some(c.id) == card_by_id.map(|(_, c)| c) {
+                        continue;
+                    }
+                    let title_lc = c.title.to_lowercase();
+                    let p = path
+                        .get_or_insert_with(|| crate::tree::node_path(&self.doc, nid))
+                        .clone();
+                    let hay = format!("{}\n{}", title_lc, p.to_lowercase());
+                    let Some(score) = fuzzy_score(&q, &title_lc, &hay) else { continue };
+                    matches.push(SwitcherHit {
+                        node: nid,
+                        card: Some(c.id),
+                        group: None,
+                        id: c.id,
+                        label: c.title.clone(),
+                        path: p,
+                        score: score.saturating_add(CARD_SCORE_BASE),
+                    });
+                }
+            }
+        }
         for (&id, n) in &self.doc.nodes {
             let path = crate::tree::node_path(&self.doc, id);
             let title_lc = n.title.to_lowercase();

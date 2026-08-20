@@ -6,6 +6,51 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.132.0]
+
+### Added
+- **Callouts render as titled coloured blocks** — `> [!warning]`, `> [!note]`,
+  `> [!tip]` and the rest of Obsidian's set, motivated rather than cosmetic now
+  that vault import (v0.124.0) means they arrive in real content.
+
+  **The premise turned out to be half wrong, and probing it first changed the
+  work.** The card asking for this said callouts render "as a blockquote with a
+  stray `[!warning]` in it". Rendered on a real card, `[!note]` and `[!warning]`
+  already drew correctly — the renderer ships GitHub's five alert types and had
+  them on by default. What was actually broken was narrower and worse:
+  - **Obsidian's wider set** (`info`, `bug`, `question`, `success`, `example`,
+    `failure`, `abstract`, `todo`, `quote`, and their aliases) fell through to a
+    literal. Now mapped, in one bundle.
+  - **A same-line title killed the callout outright.** `> [!tip] Custom title`
+    lost the *type* as well as the title, because the alert parser reads every
+    text event up to the first break to find the identifier and the title is
+    swallowed into it. `split_callout_titles` moves the title onto its own line as
+    bold text, so both the type heading and the title survive.
+
+  Every identifier maps onto one of the **five glyphs the bundled font is known to
+  draw**, separated by colour rather than by picking a more apt character: emoji
+  are monochrome outlines here by standing decision, and a glyph outside the
+  bundled font renders as a hollow box, which has bitten this project before. An
+  approximate icon that draws beats a perfect one that does not.
+
+  The rewrite runs in the HTML export too, in the same order, so an exported card
+  still matches the card it came from.
+
+- **Card titles in the Ctrl+O switcher.** The palette could resolve a card by its
+  **id** since v0.87.0 but never by its **name**, so the one thing you actually
+  remember about a card was the one thing you could not type. Rows show
+  `card #<id>` and the basket path, and Enter reveals the card as the id rows
+  already did.
+
+  Three rules keep it *reach* rather than *discovery*, which is Ctrl+F's job: only
+  the **title** is matched, never the body; a card with **no title** is skipped,
+  because matching its body-derived label would fill the palette with rows nobody
+  can predict; and an **empty query** offers no cards at all, where the fuzzy
+  matcher matches everything and the list would become every card in the document.
+  Cards sort after every basket rather than interleaving by score — the same call
+  the id rows already make — so the palette's first screen never changes shape
+  because a card happened to score well.
+
 ## [0.131.0]
 
 ### Added

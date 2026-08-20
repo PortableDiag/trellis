@@ -5238,11 +5238,87 @@ fn rects_overlap(ap: egui::Pos2, asz: egui::Vec2, bp: egui::Pos2, bsz: egui::Vec
 
 fn md_to_html(md: &str) -> String {
     use pulldown_cmark::{html, Options, Parser};
-    let wrapped = hard_wrap(md);
+    // Same two rewrites, in the same order, as the canvas renderer — otherwise an
+    // exported card stops matching the card it was exported from.
+    let wrapped = hard_wrap(&split_callout_titles(md));
     let parser = Parser::new_ext(&wrapped, Options::all());
     let mut out = String::new();
     html::push_html(&mut out, parser);
     out
+}
+
+/// Move an Obsidian callout's same-line title onto its own line.
+///
+/// Obsidian writes `> [!tip] Custom title`; the renderer's alert parser reads
+/// every `Text` event up to the first break to find the identifier, so the title
+/// is swallowed into it, the lookup fails, and the whole thing falls back to a
+/// blockquote with a literal `[!tip] Custom title` in it. The **type is lost as
+/// well as the title** — a same-line title breaks a callout that would otherwise
+/// have worked, which is why this is a rewrite rather than a nicety.
+///
+/// The title becomes a bold first line inside the callout, so both the type
+/// heading and the title survive. Obsidian *replaces* the heading with the
+/// title; keeping both is the honest option here, because the heading is what
+/// carries the colour and the icon.
+///
+/// Deliberately narrow. Only a line whose quote marker is followed immediately by
+/// `[!…]` **and** trailing text is touched — a bare `> [!note]` already works and
+/// is left exactly alone, and nothing that is not a callout is looked at twice.
+pub(crate) fn split_callout_titles(md: &str) -> String {
+    let mut out = String::with_capacity(md.len() + 16);
+    let mut in_fence = false;
+    let mut lines = md.lines().peekable();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+        }
+        match (in_fence, callout_title_split(line)) {
+            (false, Some((head, title))) => {
+                out.push_str(&head);
+                out.push('\n');
+                // Re-use the line's own quote prefix, so nesting depth survives.
+                let prefix: String =
+                    head.chars().take_while(|c| *c == '>' || c.is_whitespace()).collect();
+                out.push_str(prefix.trim_end());
+                out.push_str(" **");
+                out.push_str(&title);
+                out.push_str("**");
+            }
+            _ => out.push_str(line),
+        }
+        if lines.peek().is_some() {
+            out.push('\n');
+        }
+    }
+    if md.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Split `> [!tip] Title` into (`> [!tip]`, `Title`), or `None` if the line is
+/// not a callout opener carrying a title.
+fn callout_title_split(line: &str) -> Option<(String, String)> {
+    let after_ws = line.trim_start();
+    if !after_ws.starts_with('>') {
+        return None;
+    }
+    let body = after_ws.trim_start_matches(['>', ' ', '\t']);
+    if !body.starts_with("[!") {
+        return None;
+    }
+    let close = body.find(']')?;
+    // An identifier is a bare word; a `]` further into prose is not a callout.
+    if body[2..close].is_empty() || !body[2..close].chars().all(|c| c.is_alphanumeric()) {
+        return None;
+    }
+    let title = body[close + 1..].trim();
+    if title.is_empty() {
+        return None; // already works untouched
+    }
+    let head_len = line.len() - body.len() + close + 1;
+    Some((line[..head_len].to_string(), title.to_string()))
 }
 
 /// Turn single newlines into Markdown hard breaks so a rendered card matches
@@ -6277,6 +6353,34 @@ article.card h4{color:#aaa}:not(pre)>code{background:#333}}";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A same-line callout title breaks the callout ENTIRELY -- the type is lost
+    /// with it -- so this rewrite is a fix, not a flourish.
+    #[test]
+    fn a_callout_title_moves_onto_its_own_line() {
+        assert_eq!(
+            split_callout_titles("> [!tip] Custom title\n> body"),
+            "> [!tip]\n> **Custom title**\n> body"
+        );
+        // A bare callout already works and is left exactly alone.
+        assert_eq!(split_callout_titles("> [!note]\n> body"), "> [!note]\n> body");
+        // Nesting depth is taken from the line's own prefix, not assumed.
+        assert_eq!(
+            split_callout_titles(">> [!warning] Deep"),
+            ">> [!warning]\n>> **Deep**"
+        );
+        // Not callouts: a plain quote, and a quote whose prose contains a bracket.
+        assert_eq!(split_callout_titles("> just a quote"), "> just a quote");
+        assert_eq!(
+            split_callout_titles("> [not a callout] really"),
+            "> [not a callout] really"
+        );
+        // Inside a fence it is literal text, like every other rewrite here.
+        assert_eq!(
+            split_callout_titles("```\n> [!tip] Title\n```"),
+            "```\n> [!tip] Title\n```"
+        );
+    }
 
     #[test]
     fn hard_wrap_breaks_single_newlines_but_not_code_or_blank_lines() {
