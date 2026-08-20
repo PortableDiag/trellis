@@ -1098,14 +1098,38 @@ impl Card {
                 (longest * cw, lines * line_h)
             }
             CardKind::Checklist { items } => {
+                // **An item wraps, so it is not one row.** The width wanted by the
+                // longest line is clamped to `MAX_W`, and anything longer than
+                // that then wraps — so counting one row per item computes a height
+                // for a layout the card never renders at, and the card comes out
+                // far too SHORT with its last items cut off. That is the mirror of
+                // the trap the Text branch above documents, and it is why fitting a
+                // long working list produced a 258 px box for eight items.
+                //
+                // Decide the width first, then measure each item at the width it
+                // will actually wrap to.
+                const CHECK_W: f32 = 26.0; // checkbox
+                const CTRL_W: f32 = 44.0; // delete / grip controls
                 let longest =
                     items.iter().map(|i| i.text.chars().count()).max().unwrap_or(0) as f32;
-                // checkbox + text + delete/grip controls
-                let w = 26.0 + longest * char_w + 44.0;
-                let rows = items.len().max(1) as f32;
-                // one row per item (a touch taller than a text line) plus the
-                // "+ item" control's row
-                (w, rows * (line_h + 6.0) + 28.0)
+                let want_w = CHECK_W + longest * char_w + CTRL_W;
+                // The same clamp applied after this match, computed early so the
+                // wrap width is the real one.
+                let w = (want_w + PAD * 2.0).max(title_w).clamp(MIN_W, MAX_W);
+                let wrap_w = (w - PAD * 2.0 - CHECK_W - CTRL_W).max(char_w);
+                let rows: f32 = items
+                    .iter()
+                    .map(|i| {
+                        let n = i.text.chars().count() as f32;
+                        let cols = (wrap_w / char_w).max(1.0);
+                        (n / cols).ceil().max(1.0)
+                    })
+                    .sum::<f32>()
+                    .max(1.0);
+                // A little vertical padding per *item* rather than per row, plus
+                // the "+ item" control's own row.
+                let per_item_pad = items.len().max(1) as f32 * 6.0;
+                (want_w, rows * line_h + per_item_pad + 28.0)
             }
             CardKind::Table { table } => {
                 let cols = table.rows.first().map(|r| r.len()).unwrap_or(0);
@@ -7694,6 +7718,55 @@ mod tests {
         // map lets a caller splice arbitrary replacements.
         let mapped = map_inline_images(body, |alt, n| format!("<{n}:{alt}>"));
         assert!(mapped.contains("<0:a cat>") && mapped.contains("<2:>"));
+    }
+
+    /// **A checklist item wraps, so it is not one row.** The width a long item
+    /// wants is clamped to `MAX_W`, and it then wraps — so counting one row per
+    /// item sizes the card for a layout it never renders at and the last items
+    /// are cut off. Measured before the fix: eight items averaging ~250
+    /// characters fitted to **258 px**, roughly a third of what they need.
+    #[test]
+    fn fit_size_measures_a_checklist_item_at_the_width_it_wraps_to() {
+        let long = "x".repeat(300);
+        let mut short_card = Card::new(
+            1,
+            egui::pos2(0.0, 0.0),
+            CardKind::Checklist {
+                items: (0..8)
+                    .map(|i| ChecklistItem { id: i, text: "short".into(), done: false })
+                    .collect(),
+            },
+        );
+        short_card.title = "list".into();
+        let mut long_card = Card::new(
+            2,
+            egui::pos2(0.0, 0.0),
+            CardKind::Checklist {
+                items: (0..8)
+                    .map(|i| ChecklistItem { id: i, text: long.clone(), done: false })
+                    .collect(),
+            },
+        );
+        long_card.title = "list".into();
+
+        let short = short_card.fit_size().expect("checklist fits");
+        let tall = long_card.fit_size().expect("checklist fits");
+        // Same item count, so the difference is purely the wrapping. A 300-char
+        // item wraps to three rows at the clamped width, so the content is 3x —
+        // the ratio of the whole card is less than 3 because the title bar,
+        // padding and the "+ item" row are fixed overheads.
+        assert!(
+            tall.y > short.y * 2.0,
+            "eight wrapped items must be far taller than eight one-line items: {} vs {}",
+            tall.y,
+            short.y
+        );
+        // A concrete floor as well as a ratio: the old one-row-per-item maths
+        // produced 257.6 px here regardless of how long the items were, so any
+        // regression to it fails this outright.
+        assert!(tall.y > 450.0, "enough room for three rows per item: {}", tall.y);
+        // And wide enough that the wrap width used is the real one.
+        assert!(tall.x > 500.0, "a long item widens the card: {}", tall.x);
     }
 
     #[test]

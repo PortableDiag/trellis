@@ -6,6 +6,27 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.128.2]
+
+### Fixed
+- **Fit to content sized a checklist for a layout it never renders at**, so a
+  card with long items came out roughly a third of the height it needed and its
+  last items were cut off. `fit_size` counted **one row per item**; but the width
+  a long item wants is clamped to the 900 px maximum, and anything longer then
+  **wraps**. Eight items averaging ~250 characters — a perfectly ordinary working
+  list — fitted to **258 px** whatever they contained.
+
+  It now decides the width first and measures each item at the width it will
+  actually wrap to. That is the same order the `Text` branch has always used, and
+  its comment describes the mirror-image trap: measure at a wrap width the card
+  does not render at and it comes out *too tall*. The checklist branch had the
+  inverse, and came out too short.
+
+  It mattered more than it looks: since v0.90.0 a dated checklist line is a task
+  in its own right, so "one card, many dated lines" is the shape this app pushes
+  you toward — and `fit` was quietly useless on exactly that shape, in the UI
+  (right-click → Fit to content) and over the API (`"fit": true`) alike.
+
 ## [0.128.1]
 
 ### Fixed
