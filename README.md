@@ -153,6 +153,9 @@ from the main cluster, and click or drag on it to jump there without zooming out
   another card is left where it is, and only an axis no card claimed is
   quantised, so both can be on at once. Resize quantises the resulting *corner*,
   not the size, so a card on the grid has both corners on it.
+- **Tail mode** — a mirrored card can show just the **last N lines** of its file,
+  refreshed faster and pinned to the bottom, for a log rather than a document. The
+  1 MB mirror limit does not apply, because a tail seeks from the end.
 - **Extract** — select text in a card's editor and press *extract*: the text moves
   into a card of its own and an `![[#id]]` embed is left in its place. A move plus
   a view of it, never a copy.

@@ -6,6 +6,32 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.136.0]
+
+### Added
+- **Tail mode for a mirrored file** — right-click a mirroring card → **Tail mode**
+  → last 50 / 200 / 1000 lines, or `PATCH {"source_tail": n}` over the API (`0`
+  turns it off).
+
+  A mirror (v0.78.0) shows a file **from the top**, which pins a growing log to
+  its least interesting end and gives you no way to reach the other one. A tail
+  shows the end, refreshes at **0.6 s instead of 3 s**, and the card's scroll area
+  **sticks to the bottom**, so the newest line is on screen without scrolling.
+
+  **The 1 MB mirror limit does not apply to a tail**, and that is the point rather
+  than a side effect: the cap exists because a mirror loads the whole file, and a
+  growing log was exactly the file it locked out. A tail seeks from the end and
+  reads backwards in 64 KB chunks until it has the lines asked for, so the cost is
+  proportional to what is shown rather than to the file.
+
+  **A partial line at the seek boundary is dropped**, because the first line of a
+  tail is the one place a half-line reads as real content — and invalid UTF-8 at a
+  chunk boundary is trimmed for the same reason, since a chunk can land
+  mid-character in a perfectly valid file.
+
+  Turning tail on or off clears `source_mtime` so the next poll re-reads: the file
+  has not changed, but what we want out of it has.
+
 ## [0.135.0]
 
 ### Added

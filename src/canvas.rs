@@ -292,6 +292,8 @@ pub enum CanvasAction {
     PickSource(CardId),
     /// Stop mirroring: keep the text, drop the link.
     ClearSource(CardId),
+    /// Tail the mirrored file: `Some(lines)` on, `None` off.
+    SetSourceTail(CardId, Option<u32>),
     DockCard(CardId, CardId),
     DetachCard(CardId),
     ToggleDockMode,
@@ -1905,6 +1907,10 @@ fn card_ui(
         egui::ScrollArea::vertical()
             .id_salt(("card_body", card.id))
             .auto_shrink([false, false])
+            // A tail is read at the bottom: without this the card shows the top
+            // of the window it just fetched and you scroll down on every refresh,
+            // which is the same complaint the whole feature exists to answer.
+            .stick_to_bottom(card.source_tail.is_some())
             .show(&mut child, |ui| {
                 body_ui(ui, card, env, zoom, actions);
             });
@@ -3228,6 +3234,39 @@ fn card_menu(
                 }
             }
             true => {
+                // Tail mode: for a file that GROWS. A mirror shows a file from
+                // the top, which pins a log to its least interesting end.
+                let tailing = card.source_tail.is_some();
+                ui.menu_button(
+                    if tailing { "Tail mode  \u{2713}" } else { "Tail mode" },
+                    |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Show only the end of the file, refreshed faster and \
+                                 pinned to the bottom \u{2014} for a log rather than a \
+                                 document. The 1 MB mirror limit does not apply, because \
+                                 a tail seeks from the end.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.separator();
+                        for n in [50u32, 200, 1000] {
+                            let on = card.source_tail == Some(n);
+                            if ui.selectable_label(on, format!("Last {n} lines")).clicked() {
+                                actions.push(CanvasAction::SetSourceTail(card.id, Some(n)));
+                                ui.close_menu();
+                            }
+                        }
+                        if tailing {
+                            ui.separator();
+                            if ui.button("Off \u{2014} show the whole file").clicked() {
+                                actions.push(CanvasAction::SetSourceTail(card.id, None));
+                                ui.close_menu();
+                            }
+                        }
+                    },
+                );
                 if ui
                     .button("Stop mirroring")
                     .on_hover_text("Keep the text that's here and make the card editable again")

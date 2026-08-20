@@ -84,6 +84,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `touched` | all | unix seconds when this card last changed (read-only; omitted entirely if it never has). The document's only timestamp — unlike `/api/changes` it survives a restart |
 | `rules` | table | conditional formatting — colour cells by value (read; set with the `set_rules` table op) |
 | `source` | text, code, **table** | a file this card **mirrors**: `body` becomes a read-only live copy, refreshed while the document is open. Omitted when the card isn't mirroring |
+| `source_tail` | text, code | **tail mode** — show only the last N lines of `source`, refreshed faster (≈0.6 s vs 3 s) and pinned to the bottom, for a file that *grows*. PATCH `0` to turn it off. **The 1 MB `source` limit does not apply to a tail**, because it seeks from the end instead of loading the file. Omitted when off |
 | `source_error` | text, code | why the last read failed (`null` when fine). Only present alongside `source` |
 
 **Group** — a labeled container that a set of cards belong to; drawn as a box you

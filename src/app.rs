@@ -2084,6 +2084,10 @@ impl TrellisApp {
     /// change), but the file, not Trellis, is the author.
     fn pump_sources(&mut self, force: bool) {
         const POLL: Duration = Duration::from_secs(3);
+        /// A tailed file is a log: three seconds is a long time to watch nothing
+        /// happen. Only a `stat` runs at this rate — the read is still gated on
+        /// the mtime actually moving.
+        const TAIL_POLL: Duration = Duration::from_millis(600);
 
         // Ask for a wake-up while any card mirrors a file. egui only calls
         // `update` when something requests a repaint, so on an idle window this
@@ -2092,13 +2096,21 @@ impl TrellisApp {
         // before the timer check, or the first early return silences it forever.
         let any_source =
             self.doc.nodes.values().any(|n| n.cards.iter().any(|c| c.source.is_some()));
+        // A tail polls faster than a plain mirror, so the whole cadence drops to
+        // the faster one as soon as any card is tailing.
+        let any_tail = self
+            .doc
+            .nodes
+            .values()
+            .any(|n| n.cards.iter().any(|c| c.source.is_some() && c.source_tail.is_some()));
+        let poll = if any_tail { TAIL_POLL } else { POLL };
         if any_source {
-            self.egui_ctx.request_repaint_after(POLL);
+            self.egui_ctx.request_repaint_after(poll);
         }
 
         if !force {
             match self.last_source_poll {
-                Some(t) if t.elapsed() < POLL => return,
+                Some(t) if t.elapsed() < poll => return,
                 _ => {}
             }
         }
@@ -2109,7 +2121,7 @@ impl TrellisApp {
 
         // Collect first: reading files while holding a borrow on the document
         // would mean re-borrowing it mutably per card.
-        let mut stale: Vec<(NodeId, CardId, String)> = Vec::new();
+        let mut stale: Vec<(NodeId, CardId, String, Option<u32>)> = Vec::new();
         for (nid, node) in &self.doc.nodes {
             for card in &node.cards {
                 let Some(path) = &card.source else { continue };
@@ -2122,13 +2134,19 @@ impl TrellisApp {
                     _ => true,
                 };
                 if force || changed || card.source_error.is_some() {
-                    stale.push((*nid, card.id, path.clone()));
+                    stale.push((*nid, card.id, path.clone(), card.source_tail));
                 }
             }
         }
 
-        for (nid, cid, path) in stale {
-            let result = crate::model::read_source(&path);
+        for (nid, cid, path, tail) in stale {
+            // A tail seeks from the end, so the size cap does not apply to it —
+            // which is the whole point: a growing log is the file the cap was
+            // locking out.
+            let result = match tail {
+                Some(n) => crate::model::read_source_tail(&path, n),
+                None => crate::model::read_source(&path),
+            };
             let Some(card) = self.doc.card_mut(nid, cid) else { continue };
             let before = source_signature(card);
             match result {
@@ -4430,6 +4448,7 @@ impl TrellisApp {
             CanvasAction::TableImport(c) => upd(c, "rows"),
             CanvasAction::PickSource(c) => upd(c, "source"),
             CanvasAction::ClearSource(c) => upd(c, "source"),
+            CanvasAction::SetSourceTail(c, _) => upd(c, "source_tail"),
             CanvasAction::DockCard(c, _) => upd(c, "dock"),
             CanvasAction::DetachCard(c) => upd(c, "dock"),
 
@@ -5389,6 +5408,19 @@ impl TrellisApp {
                         // Don't wait up to 3s for the timer to notice.
                         self.pump_sources(true);
                     }
+                }
+                CanvasAction::SetSourceTail(cid, n) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        c.source_tail = n;
+                        // Force the next poll to re-read: the mtime has not moved,
+                        // but what we want out of the file has.
+                        c.source_mtime = None;
+                    }
+                    self.pump_sources(true);
+                    self.status = match n {
+                        Some(n) => format!("Tailing the last {n} lines"),
+                        None => "Showing the whole file".into(),
+                    };
                 }
                 CanvasAction::ClearSource(cid) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {

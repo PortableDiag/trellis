@@ -755,6 +755,7 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
                 (patch.font_scale.is_some(), "font_scale"),
                 (patch.inline_images.is_some(), "inline_images"),
                 (patch.source.is_some(), "source"),
+                (patch.source_tail.is_some(), "source_tail"),
             ] {
                 if present {
                     c = c.field(name);
@@ -1342,6 +1343,15 @@ pub struct UpdateCardInput {
     /// content stays, and the card becomes editable again).
     #[serde(default)]
     source: Option<String>,
+    /// **Tail mode**: show only the last N lines of `source`, refreshed faster
+    /// and pinned to the bottom — for a file that *grows*. `0` turns it off and
+    /// shows the whole file, which is the default. The 1 MB mirror limit does not
+    /// apply to a tail, because it seeks from the end rather than loading the
+    /// file. A **double** `Option` so an absent field leaves the setting alone
+    /// while an explicit `null` is still refused as a type error, rather than
+    /// silently clearing it — the same shape `view` uses.
+    #[serde(default)]
+    source_tail: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -2888,6 +2898,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some(b) = patch.body {
                     c.body = b;
+                }
+                if let Some(n) = patch.source_tail {
+                    // 0 is "off": a tail of zero lines shows nothing, so the only
+                    // sensible reading of it is the whole file.
+                    c.source_tail = (n > 0).then_some(n);
+                    c.source_mtime = None; // what we want out of the file changed
                 }
                 if let Some(s) = patch.source {
                     let s = s.trim().to_string();
@@ -4497,6 +4513,9 @@ pub(crate) fn card_json(c: &Card) -> Value {
     if let Some(s) = &c.source {
         v["source"] = json!(s);
         v["source_error"] = json!(c.source_error);
+        if let Some(n) = c.source_tail {
+            v["source_tail"] = json!(n);
+        }
     }
     let props = c.properties();
     if !props.is_empty() {

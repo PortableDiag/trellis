@@ -763,6 +763,15 @@ pub struct Card {
     /// whether anything changed without re-reading the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_mtime: Option<u64>,
+    /// Tail mode: show only the **last N lines** of `source`, refreshed faster.
+    ///
+    /// `None` = the whole file from the top, which is what a mirror has always
+    /// done and is right for a config or a document. `Some(n)` is for a file that
+    /// **grows** — a log — where the top is the least interesting part and the
+    /// bottom is the only part you want. It also makes [`SOURCE_MAX_BYTES`] stop
+    /// mattering, because the read seeks from the end instead of loading the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_tail: Option<u32>,
     /// Why the last read failed, or `None` if it succeeded. Kept in the document
     /// so reopening still shows "file not found" rather than silently presenting
     /// stale content as current. `body` keeps the last good read either way —
@@ -1022,6 +1031,7 @@ impl Card {
             touched: None,
             source: None,
             source_mtime: None,
+            source_tail: None,
             source_error: None,
             size: egui::vec2(240.0, 160.0),
             title: String::new(),
@@ -1565,6 +1575,85 @@ pub fn read_source(path: &str) -> Result<(String, u64), String> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     Ok((text, mtime))
+}
+
+/// Read the last `lines` lines of a file, seeking from the end.
+///
+/// **The size cap does not apply here**, and that is the point: a mirror refuses
+/// a file over [`SOURCE_MAX_BYTES`] because it would load the whole thing, but a
+/// tail reads a bounded window off the end however large the file is. A growing
+/// log is exactly the case the cap was locking out.
+///
+/// Reads backwards in chunks until it has `lines` newlines or reaches the start,
+/// so the cost is proportional to what is shown, not to the file. A partial line
+/// at the seek boundary is dropped rather than shown truncated — the first line
+/// of a tail is the one place a half-line looks like real content. Invalid UTF-8
+/// at the boundary is trimmed for the same reason (a chunk can land mid-character
+/// even when the file is perfectly valid).
+pub fn read_source_tail(path: &str, lines: u32) -> Result<(String, u64), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const CHUNK: u64 = 64 * 1024;
+    let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    if meta.is_dir() {
+        return Err(format!("{path} is a directory"));
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let want = lines.max(1) as usize;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let len = meta.len();
+    let mut end = len;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut hit_start = false;
+    loop {
+        let start = end.saturating_sub(CHUNK);
+        let n = (end - start) as usize;
+        if n == 0 {
+            hit_start = true;
+            break;
+        }
+        let mut chunk = vec![0u8; n];
+        f.seek(SeekFrom::Start(start)).map_err(|e| format!("{path}: {e}"))?;
+        f.read_exact(&mut chunk).map_err(|e| format!("{path}: {e}"))?;
+        chunk.extend_from_slice(&buf);
+        buf = chunk;
+        end = start;
+        if start == 0 {
+            hit_start = true;
+            break;
+        }
+        // +1: the newline that ends the line *before* the window is not needed,
+        // but stopping exactly on it would leave the first line partial.
+        if buf.iter().filter(|b| **b == b'\n').count() > want {
+            break;
+        }
+    }
+    // A chunk boundary can split a UTF-8 character; drop the broken prefix rather
+    // than failing a file that is perfectly valid.
+    let text = match std::str::from_utf8(&buf) {
+        Ok(t) => t.to_string(),
+        Err(e) => {
+            let good = e.valid_up_to();
+            if good == 0 && !hit_start {
+                return Err(format!("{path} is not UTF-8 text"));
+            }
+            String::from_utf8_lossy(&buf[good..]).into_owned()
+        }
+    };
+    let mut out: Vec<&str> = text.lines().collect();
+    // The first line is only whole if we reached the start of the file.
+    if !hit_start && out.len() > 1 {
+        out.remove(0);
+    }
+    if out.len() > want {
+        let cut = out.len() - want;
+        out.drain(..cut);
+    }
+    Ok((out.join("\n"), mtime))
 }
 
 /// The modification time of a pointer's file, for deciding whether to re-read.
@@ -6412,6 +6501,46 @@ mod tests {
         });
         assert_eq!(preview_text(&table).lines().count(), 2);
         assert_eq!(searchable_body(&table).lines().count(), 1);
+    }
+
+    /// **A tail is bounded by the lines asked for, not by the file.** That is the
+    /// point: a mirror refuses a file over `SOURCE_MAX_BYTES` because it loads the
+    /// whole thing, and a growing log is exactly the file the cap locked out.
+    #[test]
+    fn a_tail_reads_the_last_n_whole_lines_however_big_the_file() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("trellis_tail_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grow.log");
+
+        // Comfortably past the 1 MB mirror cap.
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 0..40_000 {
+            writeln!(f, "line {i} {}", "x".repeat(40)).unwrap();
+        }
+        drop(f);
+        assert!(std::fs::metadata(&path).unwrap().len() > SOURCE_MAX_BYTES);
+        // The plain mirror refuses it...
+        assert!(read_source(path.to_str().unwrap()).is_err());
+        // ...and the tail does not.
+        let (text, _) = read_source_tail(path.to_str().unwrap(), 10).expect("tail reads");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 10);
+        assert!(lines[0].starts_with("line 39990 "), "first tailed line: {}", lines[0]);
+        assert!(lines[9].starts_with("line 39999 "), "last tailed line: {}", lines[9]);
+        // Every line is whole — a partial line at the seek boundary is dropped,
+        // because the first line of a tail is where a half-line reads as content.
+        assert!(lines.iter().all(|l| l.ends_with(&"x".repeat(40))));
+
+        // A file SHORTER than the window returns all of it, first line included.
+        let small = dir.join("small.log");
+        std::fs::write(&small, "a\nb\nc\n").unwrap();
+        let (text, _) = read_source_tail(small.to_str().unwrap(), 50).unwrap();
+        assert_eq!(text, "a\nb\nc");
+
+        // A directory is refused, like the plain read.
+        assert!(read_source_tail(dir.to_str().unwrap(), 10).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A same-line callout title breaks the callout ENTIRELY -- the type is lost
