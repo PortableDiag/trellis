@@ -549,6 +549,7 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
         | A::InsertInlineImage(..)
         | A::RemoveImage(..)
         | A::GroupSelected
+        | A::MoveSelectionTo
         | A::Ungroup(_)
         | A::DockCard(..)
         | A::DetachCard(_)
@@ -881,6 +882,17 @@ fn template_key(e: &crate::model::CardExport) -> String {
 /// first time a template is registered, and reused thereafter.
 const TEMPLATES_NODE_TITLE: &str = "Templates";
 
+/// What the Ctrl+O palette will do with the row you pick.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SwitcherPurpose {
+    /// Go there — the original, and what Ctrl+O still means.
+    Jump,
+    /// Move the current card selection into the basket you pick. Card and group
+    /// rows are hidden while this is on: you are choosing a *destination*, and a
+    /// card is not one.
+    MoveSelection,
+}
+
 /// Where a template's master card lives, so deleting or re-snapshotting a
 /// template can find it again.
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -1064,6 +1076,10 @@ pub struct TrellisApp {
     switcher_open: bool,
     switcher_query: String,
     switcher_index: usize,
+    /// What Enter in the palette does. The palette **is** a basket picker
+    /// already, so "move the selection somewhere" reuses it rather than growing
+    /// a second one that would fuzzy-match differently.
+    switcher_purpose: SwitcherPurpose,
     /// A node the tree should scroll into view next frame (set by the switcher).
     scroll_to: Option<NodeId>,
     /// A card the canvas should recenter on next frame (agenda/Kanban row click).
@@ -1578,6 +1594,7 @@ impl TrellisApp {
             switcher_open: false,
             switcher_query: String::new(),
             switcher_index: 0,
+            switcher_purpose: SwitcherPurpose::Jump,
             scroll_to: None,
             focus_card: None,
             pending_reveal: None,
@@ -4453,6 +4470,8 @@ impl TrellisApp {
             CanvasAction::DetachCard(c) => upd(c, "dock"),
 
             CanvasAction::GroupSelected => group(Op::Created, 0).field("group"),
+            // The move itself is logged when it happens; opening a picker is not a change.
+            CanvasAction::MoveSelectionTo => return None,
             CanvasAction::Ungroup(g) => group(Op::Deleted, *g),
             CanvasAction::RaiseGroup(g) => group(Op::Moved, *g).field("order"),
             CanvasAction::MoveGroup(g, _) => group(Op::Moved, *g).field("pos"),
@@ -5054,6 +5073,14 @@ impl TrellisApp {
                         // Moves the card plus anything docked to it.
                         self.doc.move_card_tree(node, cid, delta);
                     }
+                }
+                CanvasAction::MoveSelectionTo => {
+                    // The palette is the basket picker; it already fuzzy-matches
+                    // every node in the document.
+                    self.switcher_open = true;
+                    self.switcher_purpose = SwitcherPurpose::MoveSelection;
+                    self.switcher_query.clear();
+                    self.switcher_index = 0;
                 }
                 CanvasAction::ExtractSelection(cid, (from, to)) => {
                     self.extract_selection(ctx, node, cid, from, to);
@@ -6279,6 +6306,7 @@ impl TrellisApp {
                         .clicked()
                     {
                         self.switcher_open = true;
+                        self.switcher_purpose = SwitcherPurpose::Jump;
                         self.switcher_query.clear();
                         self.switcher_index = 0;
                         ui.close_menu();
@@ -8258,7 +8286,8 @@ impl TrellisApp {
         let by_id = typed.filter(|id| self.doc.nodes.contains_key(id));
         let card_by_id = typed.and_then(|id| self.doc.locate_card(id).map(|node| (node, id)));
         let mut matches: Vec<SwitcherHit> = Vec::new();
-        if let Some((node, card)) = card_by_id {
+        let picking = self.switcher_purpose == SwitcherPurpose::MoveSelection;
+        if let Some((node, card)) = card_by_id.filter(|_| !picking) {
             let path = crate::tree::node_path(&self.doc, node);
             let label = self
                 .doc
@@ -8271,7 +8300,7 @@ impl TrellisApp {
         }
         // A group id is typed `g146`, so it can never collide with the node/card
         // rows above — nothing else in the palette parses a leading letter.
-        if let Some(gid) = queried_group_id(&q) {
+        if let Some(gid) = queried_group_id(&q).filter(|_| !picking) {
             if let Some(node) = self.doc.locate_group(gid) {
                 let path = crate::tree::node_path(&self.doc, node);
                 let label = self
@@ -8315,7 +8344,7 @@ impl TrellisApp {
         // palette's first screen never changes shape because a card happened to
         // score well.
         const CARD_SCORE_BASE: i32 = 10_000;
-        if !q.is_empty() {
+        if !q.is_empty() && !picking {
             for (&nid, n) in &self.doc.nodes {
                 let mut path: Option<String> = None;
                 for c in &n.cards {
@@ -8386,9 +8415,14 @@ impl TrellisApp {
             self.switcher_index = self.switcher_index.saturating_sub(1);
         }
         let mut jump: Option<(NodeId, Option<CardId>, Option<crate::model::GroupId>)> = None;
+        let mut move_to: Option<NodeId> = None;
         if enter {
             if let Some(m) = matches.get(self.switcher_index) {
-                jump = Some((m.node, m.card, m.group));
+                if picking {
+                    move_to = Some(m.node);
+                } else {
+                    jump = Some((m.node, m.card, m.group));
+                }
             }
         }
 
@@ -8400,9 +8434,24 @@ impl TrellisApp {
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
             .fixed_size(egui::vec2(480.0, 0.0))
             .show(ctx, |ui| {
+                if picking {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Move {} selected card{} to…",
+                            self.card_sel.len(),
+                            if self.card_sel.len() == 1 { "" } else { "s" }
+                        ))
+                        .strong(),
+                    );
+                    ui.separator();
+                }
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.switcher_query)
-                        .hint_text("Jump to a node or card…  title, path, or an id")
+                        .hint_text(if picking {
+                            "Pick a basket…  title, path, or an id"
+                        } else {
+                            "Jump to a node or card…  title, path, or an id"
+                        })
                         .desired_width(f32::INFINITY),
                 );
                 resp.request_focus();
@@ -8446,6 +8495,11 @@ impl TrellisApp {
         // A card hit reveals the card itself — recenter and flash — rather than
         // just opening the basket and leaving you to find it. `reveal_hit` is the
         // same path the Agenda, Kanban, Find, Tags and Backlinks rows already use.
+        if let Some(target) = move_to {
+            self.switcher_open = false;
+            self.switcher_purpose = SwitcherPurpose::Jump;
+            self.move_selection_to(ctx, target);
+        }
         if let Some((node, card, group)) = jump {
             self.switcher_open = false;
             match group {
@@ -9635,6 +9689,80 @@ impl TrellisApp {
         self.status = format!("Extracted to card #{new_id}, embedded here");
     }
 
+    /// Move every selected card into `target`, keeping their arrangement.
+    ///
+    /// **The arrangement travels.** Moving cards one at a time drops each at
+    /// whatever the destination's origin happens to be, so a layout you built is
+    /// gone the moment it arrives. The selection's bounding box is translated as
+    /// a whole and dropped **below everything already there**, which is also why
+    /// it cannot land on top of the cards that were there first.
+    ///
+    /// Group and dock membership are dropped, because both are **basket-local**:
+    /// a card cannot stay in a group that did not come with it. That is
+    /// `move_card_to_node`'s existing rule, not a new one — moving a whole group
+    /// is a different operation with its own route, because rebuilding a group
+    /// gives it a new id and breaks every `[[#g…]]` written to it.
+    fn move_selection_to(&mut self, ctx: &egui::Context, target: NodeId) {
+        let Some(from) = self.card_sel_node else { return };
+        if from == target {
+            self.status = "Those cards are already there".into();
+            return;
+        }
+        if !self.doc.nodes.contains_key(&target) {
+            return;
+        }
+        let ids: Vec<CardId> = self
+            .doc
+            .nodes
+            .get(&from)
+            .map(|n| n.cards.iter().filter(|c| self.card_sel.contains(&c.id)).map(|c| c.id).collect())
+            .unwrap_or_default();
+        if ids.is_empty() {
+            return;
+        }
+        // Where the selection sits now, and where it should land.
+        let rects: Vec<(CardId, egui::Pos2)> = self
+            .doc
+            .nodes
+            .get(&from)
+            .map(|n| {
+                n.cards
+                    .iter()
+                    .filter(|c| self.card_sel.contains(&c.id))
+                    .map(|c| (c.id, c.pos))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let min_x = rects.iter().map(|(_, p)| p.x).fold(f32::INFINITY, f32::min);
+        let min_y = rects.iter().map(|(_, p)| p.y).fold(f32::INFINITY, f32::min);
+        let drop_y = self
+            .doc
+            .nodes
+            .get(&target)
+            .map(|n| {
+                n.cards.iter().map(|c| c.pos.y + c.size.y).fold(40.0_f32, f32::max) + canvas::GRID_STEP
+            })
+            .unwrap_or(40.0);
+        // Both baskets change, so both need an undo point.
+        self.push_undo(from);
+        self.push_undo(target);
+        let mut moved = 0usize;
+        for (cid, pos) in rects {
+            let at = egui::pos2(40.0 + (pos.x - min_x), drop_y + (pos.y - min_y));
+            if self.doc.move_card_to_node(from, cid, target, Some(at)).is_some() {
+                moved += 1;
+            }
+        }
+        self.card_sel.clear();
+        self.card_sel_node = None;
+        self.mark_dirty();
+        let name = self.doc.nodes.get(&target).map(|n| n.title.clone()).unwrap_or_default();
+        self.status = format!("Moved {moved} card{} to {name}", if moved == 1 { "" } else { "s" });
+        // Land where they went, rather than leaving you in the basket they left.
+        self.jump_to_node(target);
+        let _ = ctx;
+    }
+
     /// Jump to a uniformly random card anywhere in the document.
     ///
     /// **Uniform over cards, not over baskets.** Picking a basket and then a card
@@ -10114,6 +10242,7 @@ impl eframe::App for TrellisApp {
         }
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::O)) {
             self.switcher_open = true;
+            self.switcher_purpose = SwitcherPurpose::Jump;
             self.switcher_query.clear();
             self.switcher_index = 0;
         }

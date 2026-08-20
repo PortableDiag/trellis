@@ -6,6 +6,38 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.137.0]
+
+### Added
+- **"Move to…" on the selection.** With cards selected, a **Move to…** button
+  beside *Group* and *Arrange* opens the **Ctrl+O palette as a basket picker**;
+  pick one and the whole selection goes there.
+
+  Shift+drag has selected cards and dragged them as one since v0.107.0, and the
+  batch move has existed over the API since v0.112.0 — but the gesture that
+  already means *these cards, together* could not move them to another basket.
+
+  **The palette is reused rather than duplicated.** It already fuzzy-matches every
+  node in the document; a second picker would be a second thing that matches
+  differently. It gains a *purpose* instead: while picking a destination, the
+  header says so and **card and group rows are hidden**, because you are choosing
+  a place and a card is not one.
+
+  **The arrangement travels.** Moving cards one at a time drops each at the
+  destination's origin, so a layout you built is gone the moment it arrives. The
+  selection's bounding box is translated as a whole and dropped **below
+  everything already there**, which is also what stops it landing on top of the
+  cards that were there first. The view follows to the destination, rather than
+  leaving you in the basket the cards just left.
+
+  **Group and dock membership are dropped**, because both are basket-local — a
+  card cannot stay in a group that did not come with it. That is
+  `move_card_to_node`'s existing rule, not a new one, and it is why moving a whole
+  *group* remains a different operation: rebuilding a group gives it a new id and
+  breaks every `[[#g…]]` written to it.
+
+  Both baskets get an undo point, because both changed.
+
 ## [0.136.0]
 
 ### Added

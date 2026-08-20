@@ -153,6 +153,8 @@ from the main cluster, and click or drag on it to jump there without zooming out
   another card is left where it is, and only an axis no card claimed is
   quantised, so both can be on at once. Resize quantises the resulting *corner*,
   not the size, so a card on the grid has both corners on it.
+- **Move to…** — with cards selected, move the whole selection to another basket;
+  Ctrl+O picks the destination and the arrangement travels with them.
 - **Tail mode** — a mirrored card can show just the **last N lines** of its file,
   refreshed faster and pinned to the bottom, for a log rather than a document. The
   1 MB mirror limit does not apply, because a tail seeks from the end.

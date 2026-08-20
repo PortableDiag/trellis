@@ -282,6 +282,8 @@ pub enum CanvasAction {
     ClearSelection,
     // Grouping.
     GroupSelected,
+    /// Open the Ctrl+O palette as a destination picker for the selection.
+    MoveSelectionTo,
     Ungroup(GroupId),
     RaiseGroup(GroupId),
     MoveGroup(GroupId, egui::Vec2),
@@ -1217,6 +1219,20 @@ pub fn ui(
                         .clicked()
                 {
                     actions.push(CanvasAction::GroupSelected);
+                }
+                if !selection.is_empty()
+                    && ui
+                        .button("Move to…")
+                        .on_hover_text(
+                            "Move the selected cards to another basket, keeping \
+                             their arrangement. Ctrl+O picks the destination.\n\n\
+                             Group and dock membership are dropped: both are \
+                             basket-local, so a card cannot stay in a group that \
+                             did not travel with it.",
+                        )
+                        .clicked()
+                {
+                    actions.push(CanvasAction::MoveSelectionTo);
                 }
                 if selection.len() >= 2 {
                     ui.menu_button("Arrange", |ui| {
