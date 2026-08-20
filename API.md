@@ -2360,6 +2360,64 @@ curl -s -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
 400, so a refused write looks like a successful one otherwise. Add `-w '%{http_code}'`
 or `-f`.
 
+### Importing an Obsidian vault
+```bash
+curl -sX POST localhost:7373/api/import/vault -H "X-API-Key: $K" \
+  -H 'Content-Type: application/json' \
+  -d '{"path":"/home/you/Vault"}'
+# → {"root":312,"baskets":9,"cards":74,"attachments":6,
+#    "links_rewritten":58,"unresolved":["Some Note"]}
+```
+`parent` omitted makes it a new **root project**. Read `unresolved` — those are
+links the vault referred to but did not contain; they are kept verbatim in the
+cards so you can fix them. A `.canvas` becomes a **basket** keeping its
+arrangement, colours, groups and connectors.
+
+### Saving a query as a view card
+The complement of asking `/api/query` again every time. Make an ordinary card,
+then give it a `view`:
+```bash
+CID=$(curl -sX POST localhost:7373/api/nodes/42/cards -H "X-API-Key: $K" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Blocked, soonest first","pos":[40,40],"size":[420,260]}' | jq .id)
+
+curl -sX PATCH localhost:7373/api/cards/$CID -H "X-API-Key: $K" \
+  -H 'Content-Type: application/json' -d '{"view":{
+    "filters":[{"key":"status","op":"eq","value":"blocked"},
+               {"key":"due","op":"le","value":"2026-09-30"}],
+    "columns":["due","status","basket"],
+    "sort":{"key":"due","dir":"asc"},
+    "limit":50}}'
+
+curl -s localhost:7373/api/cards/$CID/run -H "X-API-Key: $K"
+# → {"card":…,"columns":["due","status","basket"],"count":7,"rows":[…]}
+```
+The rows are **computed on read** — nothing is stored on the card, so the view
+cannot go stale. An unrelated `PATCH` leaves the view alone; `{"view":null}`
+clears it. `GET /api/cards/{cid}` reports the `view` back, so you can read what
+you wrote.
+
+### Finding dates the app cannot read
+Before trusting an agenda, check nothing fell off it silently:
+```bash
+curl -s localhost:7373/api/properties/problems -H "X-API-Key: $K"
+# → {"count":1,"problems":[{"card":1391,"key":"due","value":"next",
+#     "why":"\"next\" is not a date this app can read …"}]}
+```
+A `due::` that will not parse makes a card **look** scheduled while it never
+reaches the Agenda. Note the value reported is what the parser **read** — a
+date-shaped property stops at the first word, so `due:: next friday` is `next`.
+
+### Showing one card inside another
+```bash
+curl -sX POST localhost:7373/api/cards/1400/append -H "X-API-Key: $K" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Standing work:\n\n![[#1391]]"}'
+```
+`![[#1391]]` renders card 1391 inside this one; `[[#1391]]` only links to it.
+`![[#1391^766]]` shows a single checklist line. The body on disk keeps the
+`![[…]]` — expansion happens at render, so there is never a second copy to drift.
+
 ### Everything else
 
 ```sh

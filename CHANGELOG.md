@@ -6,6 +6,19 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.128.1]
+
+### Fixed
+- **The in-app Settings → Endpoints list had drifted from `API.md`.** Three routes
+  shipped today — `POST /api/import/vault`, `GET /api/properties/problems` and
+  `GET /api/cards/{cid}/run` — were in the reference and the route table but not in
+  the list a person reads inside the app. A test enforces routes→reference; nothing
+  enforces reference→panel, so that half drifts silently.
+- **`API.md` gained worked Examples for all four of today's features.** The
+  reference said what the endpoints are; the Examples section is the copy-paste
+  pattern an agent actually starts from, and it had none for vault import, saved
+  views, property problems or embeds.
+
 ## [0.128.0]
 
 ### Added
