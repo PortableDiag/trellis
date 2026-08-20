@@ -297,6 +297,9 @@ pub enum CanvasAction {
     ToggleDockMode,
     ToggleSnapMode,
     ToggleGridMode,
+    /// Move the selected text out into a card of its own, leaving an embed of it
+    /// behind. `(source card, char range)`.
+    ExtractSelection(CardId, (usize, usize)),
     /// Absolute positions for a list of cards, in one undo step.
     ///
     /// Deliberately not `MoveCard`: that one drags the whole selection when the
@@ -2183,6 +2186,24 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                     }
                     if fmt_btn(ui, "\u{2014}", "Horizontal rule") {
                         edited = Some(insert_hr(&card.body, sel));
+                    }
+                    ui.separator();
+                    // Extract: the selection becomes its own card and an EMBED of
+                    // it is left in place. Disabled with a reason when nothing is
+                    // selected, because a button that silently does nothing is the
+                    // worst answer available.
+                    if ui
+                        .add_enabled(sel.1 > sel.0, egui::Button::new("extract").small())
+                        .on_hover_text(
+                            "Move the selected text into a card of its own and leave \
+                             an embed of it here.\n\nThe text is not copied \u{2014} \
+                             there is one card holding it and a view of it here, so \
+                             the two can never drift.",
+                        )
+                        .on_disabled_hover_text("Select some text first")
+                        .clicked()
+                    {
+                        actions.push(CanvasAction::ExtractSelection(card.id, sel));
                     }
                     ui.separator();
                     // Text color: pick a color, then apply it to the selection.

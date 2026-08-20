@@ -526,6 +526,7 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
         A::MoveCard(..) | A::MoveGroup(..) => UndoKind::Continuous("move"),
         A::ResizeCard(..) => UndoKind::Continuous("resize"),
         A::PlaceCards(..) => UndoKind::Discrete,
+        A::ExtractSelection(..) => UndoKind::Discrete,
         A::TableSetColWidth(..) => UndoKind::Continuous("colwidth"),
         A::AddCard(..)
         | A::PasteCard(_)
@@ -4393,6 +4394,7 @@ impl TrellisApp {
             // them afterwards would lose the count.
             CanvasAction::PlaceCards(m) => card(Op::Moved, m.first().map_or(0, |(c, _)| *c))
                 .field(&format!("arrange:{}", m.len())),
+            CanvasAction::ExtractSelection(c, _) => card(Op::Created, 0).field(&format!("extract={c}")),
             CanvasAction::FitCard(c) => upd(c, "size"),
             CanvasAction::SetTitle(c, _) => upd(c, "title"),
             CanvasAction::SetBody(c, _) => upd(c, "body"),
@@ -5033,6 +5035,9 @@ impl TrellisApp {
                         // Moves the card plus anything docked to it.
                         self.doc.move_card_tree(node, cid, delta);
                     }
+                }
+                CanvasAction::ExtractSelection(cid, (from, to)) => {
+                    self.extract_selection(ctx, node, cid, from, to);
                 }
                 CanvasAction::PlaceCards(moves) => {
                     // Absolute, and each card independently: an arrangement is
@@ -9526,6 +9531,78 @@ impl TrellisApp {
         self.highlight_until = ctx.input(|i| i.time) + canvas::HIGHLIGHT_SECS;
     }
 
+    /// Move a card's selected text into a card of its own, leaving `![[#id]]`
+    /// where it was.
+    ///
+    /// **This is the answer to "one task is one card, never copied", applied to
+    /// prose.** Before `![[#id]]` (v0.125.0) the only way to split a card was to
+    /// copy text into a new one and leave the original behind, which is two
+    /// sources of truth from the moment you finish. Extract *moves* the text and
+    /// leaves a **view** of it, so there is exactly one copy and the card reads
+    /// exactly as it did.
+    ///
+    /// The new card is placed to the right of the source at the canvas grid step,
+    /// so it lands somewhere deliberate rather than on top of whatever is there.
+    fn extract_selection(
+        &mut self,
+        ctx: &egui::Context,
+        node: NodeId,
+        cid: CardId,
+        from: usize,
+        to: usize,
+    ) {
+        let Some(src) = self.doc.card(node, cid) else { return };
+        let chars: Vec<char> = src.body.chars().collect();
+        let (from, to) = (from.min(chars.len()), to.min(chars.len()));
+        if from >= to {
+            return;
+        }
+        let Some((taken, rewritten_head, rewritten_tail)) = split_for_extract(&chars, from, to)
+        else {
+            self.status = "Nothing to extract \u{2014} the selection is blank".into();
+            return;
+        };
+        if taken.trim().is_empty() {
+            self.status = "Nothing to extract \u{2014} the selection is blank".into();
+            return;
+        }
+        let (pos, size) = (src.pos, src.size);
+        let at = egui::pos2(pos.x + size.x + canvas::GRID_STEP, pos.y);
+        let Some(new_id) = self.doc.add_card(node, at, crate::model::CardKind::Text) else {
+            return;
+        };
+        // A title from the first non-blank line, so the new card is findable in
+        // the Ctrl+O palette rather than being one of many "(untitled card)".
+        let title = taken
+            .lines()
+            .map(|l| l.trim_start_matches(['#', '-', '*', '>', ' ']).trim())
+            .find(|l| !l.is_empty())
+            .map(|l| l.chars().take(60).collect::<String>())
+            .unwrap_or_default();
+        if let Some(c) = self.doc.card_mut(node, new_id) {
+            c.title = title;
+            c.body = taken.trim().to_string();
+            c.size = size;
+            // `add_card` opens a new card for typing, which is right when it is
+            // blank and wrong here: the text is already written, and edit mode
+            // would show it — and the embed left behind — as raw Markdown.
+            c.editing = false;
+        }
+        // Fitted through the same path as Fit to content, so an extracted card
+        // opens readable rather than inheriting a size chosen for other text.
+        if let Some(sz) = self.doc.card(node, new_id).and_then(|c| fit_card_size(ctx, c)) {
+            if let Some(c) = self.doc.card_mut(node, new_id) {
+                c.size = sz.max(MIN_CARD);
+            }
+        }
+        if let Some(c) = self.doc.card_mut(node, cid) {
+            c.body = format!("{rewritten_head}![[#{new_id}]]{rewritten_tail}");
+        }
+        self.mark_dirty();
+        self.focus_card = Some(new_id);
+        self.status = format!("Extracted to card #{new_id}, embedded here");
+    }
+
     /// Jump to a uniformly random card anywhere in the document.
     ///
     /// **Uniform over cards, not over baskets.** Picking a basket and then a card
@@ -10920,6 +10997,34 @@ struct SwitcherHit {
 /// What to call a card in the palette. Cards very often have no title, so fall
 /// back to the first non-empty line of the body: a row reading "(untitled card)"
 /// tells you nothing about whether you found the right one.
+/// Split a body for [`App::extract_selection`]: the text to move out, and the
+/// head and tail the `![[#id]]` embed goes between.
+///
+/// **The embed has to land on its own line.** An embed is a block — it renders
+/// the whole target card — so left inline it would be swallowed into the
+/// surrounding paragraph and the card would read as one run of prose with a card
+/// jammed into the middle of a sentence. Newlines are added only where there is
+/// not one already, so extracting a whole paragraph does not leave blank lines
+/// piling up behind it.
+///
+/// Returns `None` for an empty range, so the caller never creates a card for
+/// nothing.
+fn split_for_extract(chars: &[char], from: usize, to: usize) -> Option<(String, String, String)> {
+    if from >= to || to > chars.len() {
+        return None;
+    }
+    let taken: String = chars[from..to].iter().collect();
+    let mut head: String = chars[..from].iter().collect();
+    let mut tail: String = chars[to..].iter().collect();
+    if !head.is_empty() && !head.ends_with('\n') {
+        head.push('\n');
+    }
+    if !tail.is_empty() && !tail.starts_with('\n') {
+        tail.insert(0, '\n');
+    }
+    Some((taken, head, tail))
+}
+
 fn card_label(c: &crate::model::Card) -> String {
     if !c.title.trim().is_empty() {
         return c.title.clone();
@@ -11198,6 +11303,38 @@ fn default_autosave_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An embed is a block**, so it has to land on its own line — left inline it
+    /// is swallowed into the surrounding paragraph and the card reads as prose
+    /// with a whole card jammed mid-sentence. Newlines are added only where there
+    /// is not one already, so extracting a whole paragraph does not pile blank
+    /// lines up behind it.
+    #[test]
+    fn extract_puts_the_embed_on_its_own_line_without_piling_up_newlines() {
+        let body: Vec<char> = "before SELECTED after".chars().collect();
+        let (taken, head, tail) = split_for_extract(&body, 7, 15).unwrap();
+        assert_eq!(taken, "SELECTED");
+        assert_eq!(head, "before \n");
+        assert_eq!(tail, "\n after");
+
+        // Already on its own line: nothing is added.
+        let para: Vec<char> = "one\nTWO\nthree".chars().collect();
+        let (taken, head, tail) = split_for_extract(&para, 4, 7).unwrap();
+        assert_eq!(taken, "TWO");
+        assert_eq!(head, "one\n");
+        assert_eq!(tail, "\nthree");
+
+        // Selecting the whole body leaves nothing either side, and no stray
+        // newline where there is no text to separate from.
+        let all: Vec<char> = "everything".chars().collect();
+        let (taken, head, tail) = split_for_extract(&all, 0, all.len()).unwrap();
+        assert_eq!((taken.as_str(), head.as_str(), tail.as_str()), ("everything", "", ""));
+
+        // An empty or backwards range creates nothing at all.
+        assert!(split_for_extract(&all, 3, 3).is_none());
+        assert!(split_for_extract(&all, 5, 2).is_none());
+        assert!(split_for_extract(&all, 0, 999).is_none());
+    }
 
     /// Typing an id has to find that node and nothing else. The `#` form is
     /// accepted because that is how ids are written in the docs and in the tree.

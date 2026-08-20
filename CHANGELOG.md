@@ -6,6 +6,36 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.135.0]
+
+### Added
+- **Extract the selected text into a card of its own** — select in a text card's
+  editor, press **extract**, and the text moves out into a new card with an
+  `![[#id]]` **embed** left where it was.
+
+  **This is "one task is one card, never copied" applied to prose.** Before embeds
+  (v0.125.0) the only way to split a card was to copy text into a new one and
+  leave the original behind — two sources of truth from the moment you finish.
+  Extract *moves* the text and leaves a **view** of it, so there is exactly one
+  copy, the card reads exactly as it did, and the two can never drift.
+
+  - **The embed lands on its own line.** An embed is a block — it renders a whole
+    card — so left inline it is swallowed into the surrounding paragraph. Newlines
+    are added only where there is not one already, so extracting a whole paragraph
+    does not pile blank lines up behind it.
+  - The new card takes its **title from the first non-blank line**, so it is
+    findable in the Ctrl+O palette (v0.132.0) instead of being one more
+    "(untitled card)", and is **fitted** through the same path as *Fit to content*
+    so it opens readable.
+  - It **renders rather than opening in edit mode**: `add_card` opens a new card
+    for typing, which is right when it is blank and wrong here — the text is
+    already written, and edit mode would show it, and the embed left behind, as
+    raw Markdown.
+  - The button is **disabled with a reason** when nothing is selected, rather than
+    present and inert.
+
+  Merging two cards is the same feature's other half, and is not built.
+
 ## [0.134.0]
 
 ### Added
