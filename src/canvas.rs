@@ -294,6 +294,12 @@ pub enum CanvasAction {
     ToggleDockMode,
     ToggleSnapMode,
     ToggleGridMode,
+    /// Absolute positions for a list of cards, in one undo step.
+    ///
+    /// Deliberately not `MoveCard`: that one drags the whole selection when the
+    /// card it names is in it, which is right for a drag and exactly wrong for an
+    /// arrangement, where each card goes where the layout puts it.
+    PlaceCards(Vec<(CardId, egui::Pos2)>),
 }
 
 pub(crate) const TITLE_H: f32 = 24.0;
@@ -1203,6 +1209,58 @@ pub fn ui(
                         .clicked()
                 {
                     actions.push(CanvasAction::GroupSelected);
+                }
+                if selection.len() >= 2 {
+                    ui.menu_button("Arrange", |ui| {
+                        let picked = [
+                            Arrange::AlignLeft,
+                            Arrange::AlignCentreH,
+                            Arrange::AlignRight,
+                            Arrange::AlignTop,
+                            Arrange::AlignMiddleV,
+                            Arrange::AlignBottom,
+                        ]
+                        .into_iter()
+                        .find(|a| ui.button(a.label()).clicked())
+                        .or_else(|| {
+                            ui.separator();
+                            // Three cards is the first case with more than one
+                            // gap; below that the item would be present and do
+                            // nothing, which reads as broken.
+                            [Arrange::DistributeH, Arrange::DistributeV]
+                                .into_iter()
+                                .find(|a| {
+                                    ui.add_enabled(selection.len() >= 3, egui::Button::new(a.label()))
+                                        .on_disabled_hover_text("Needs three or more cards")
+                                        .clicked()
+                                })
+                        })
+                        .or_else(|| {
+                            ui.separator();
+                            [Arrange::Row, Arrange::Column, Arrange::Grid]
+                                .into_iter()
+                                .find(|a| ui.button(a.label()).clicked())
+                        });
+                        if let Some(how) = picked {
+                            let sel: Vec<(CardId, egui::Rect)> = node
+                                .cards
+                                .iter()
+                                .filter(|c| selection.contains(&c.id))
+                                .map(|c| (c.id, egui::Rect::from_min_size(c.pos, c.size)))
+                                .collect();
+                            let moves = arrange(&sel, how);
+                            if !moves.is_empty() {
+                                actions.push(CanvasAction::PlaceCards(moves));
+                            }
+                            ui.close_menu();
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Align, distribute or re-lay the selected cards. This is not \
+                         Autosort \u{2014} it acts only on what you selected and leaves \
+                         the rest of the basket alone.",
+                    );
                 }
             });
         });
@@ -2682,6 +2740,154 @@ fn sketch_ui(
             ui.data_mut(|d| d.insert_temp(buf_key, buf));
         }
     }
+}
+
+/// What the Arrange menu can do to a selection. Every one of these is a change of
+/// POSITION only — no card is resized, reordered, grouped or copied — so it needs
+/// no model change and nothing to migrate.
+///
+/// This is not autosort. Autosort throws the arrangement away and lays the whole
+/// basket out afresh; these act on the cards you picked and leave the rest alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Arrange {
+    AlignLeft,
+    AlignCentreH,
+    AlignRight,
+    AlignTop,
+    AlignMiddleV,
+    AlignBottom,
+    DistributeH,
+    DistributeV,
+    Row,
+    Column,
+    Grid,
+}
+
+impl Arrange {
+    fn label(self) -> &'static str {
+        match self {
+            Arrange::AlignLeft => "Align left",
+            Arrange::AlignCentreH => "Align centres (vertical axis)",
+            Arrange::AlignRight => "Align right",
+            Arrange::AlignTop => "Align top",
+            Arrange::AlignMiddleV => "Align middles (horizontal axis)",
+            Arrange::AlignBottom => "Align bottom",
+            Arrange::DistributeH => "Distribute horizontally",
+            Arrange::DistributeV => "Distribute vertically",
+            Arrange::Row => "Arrange in a row",
+            Arrange::Column => "Arrange in a column",
+            Arrange::Grid => "Arrange in a grid",
+        }
+    }
+}
+
+/// Apply an [`Arrange`] to `cards`, returning the new top-left of each.
+///
+/// Cards are given as `(id, rect)` in world space. The result names only the
+/// cards that actually move, so an arrangement that changes nothing is an empty
+/// list rather than a no-op write of every position.
+///
+/// **Alignment and distribution work on the selection's own bounding box**, so
+/// the outermost cards never move and the arrangement stays where you built it.
+/// **Distribution equalises the GAPS between adjacent cards**, not their centres:
+/// with mixed card sizes, equal centres leaves visibly uneven space, which is the
+/// thing you were trying to fix. It needs three cards — with two there is one gap
+/// and nothing to equalise, so it does nothing rather than inventing a spacing.
+///
+/// Row / Column / Grid re-lay the cards at a fixed gap in **reading order** of
+/// where they already are (top-to-bottom, then left-to-right), so the order you
+/// arranged them in survives the arrangement.
+pub(crate) fn arrange(cards: &[(CardId, egui::Rect)], how: Arrange) -> Vec<(CardId, egui::Pos2)> {
+    if cards.len() < 2 {
+        return Vec::new();
+    }
+    let bounds = cards.iter().map(|(_, r)| *r).reduce(|a, b| a.union(b)).unwrap();
+    let mut out: Vec<(CardId, egui::Pos2)> = Vec::new();
+    let mut place = |id: CardId, old: egui::Pos2, new: egui::Pos2| {
+        if (new - old).length() > 0.01 {
+            out.push((id, new));
+        }
+    };
+    match how {
+        Arrange::AlignLeft
+        | Arrange::AlignCentreH
+        | Arrange::AlignRight
+        | Arrange::AlignTop
+        | Arrange::AlignMiddleV
+        | Arrange::AlignBottom => {
+            for (id, r) in cards {
+                let p = match how {
+                    Arrange::AlignLeft => egui::pos2(bounds.left(), r.top()),
+                    Arrange::AlignCentreH => {
+                        egui::pos2(bounds.center().x - r.width() / 2.0, r.top())
+                    }
+                    Arrange::AlignRight => egui::pos2(bounds.right() - r.width(), r.top()),
+                    Arrange::AlignTop => egui::pos2(r.left(), bounds.top()),
+                    Arrange::AlignMiddleV => {
+                        egui::pos2(r.left(), bounds.center().y - r.height() / 2.0)
+                    }
+                    _ => egui::pos2(r.left(), bounds.bottom() - r.height()),
+                };
+                place(*id, r.min, p);
+            }
+        }
+        Arrange::DistributeH | Arrange::DistributeV => {
+            if cards.len() < 3 {
+                return Vec::new();
+            }
+            let horiz = how == Arrange::DistributeH;
+            let mut order: Vec<&(CardId, egui::Rect)> = cards.iter().collect();
+            order.sort_by(|a, b| {
+                let (x, y) = if horiz { (a.1.left(), b.1.left()) } else { (a.1.top(), b.1.top()) };
+                x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let span = if horiz { bounds.width() } else { bounds.height() };
+            let used: f32 = order
+                .iter()
+                .map(|(_, r)| if horiz { r.width() } else { r.height() })
+                .sum();
+            let gap = (span - used) / (order.len() - 1) as f32;
+            let mut cursor = if horiz { bounds.left() } else { bounds.top() };
+            for (id, r) in order {
+                let p = if horiz {
+                    egui::pos2(cursor, r.top())
+                } else {
+                    egui::pos2(r.left(), cursor)
+                };
+                place(*id, r.min, p);
+                cursor += (if horiz { r.width() } else { r.height() }) + gap;
+            }
+        }
+        Arrange::Row | Arrange::Column | Arrange::Grid => {
+            let mut order: Vec<&(CardId, egui::Rect)> = cards.iter().collect();
+            // Reading order of where the cards already are.
+            order.sort_by(|a, b| {
+                a.1.top()
+                    .partial_cmp(&b.1.top())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.left().partial_cmp(&b.1.left()).unwrap_or(std::cmp::Ordering::Equal))
+            });
+            let cols = match how {
+                Arrange::Row => order.len(),
+                Arrange::Column => 1,
+                _ => (order.len() as f32).sqrt().ceil() as usize,
+            }
+            .max(1);
+            // Uniform cell, so columns line up whatever the cards measure. A
+            // ragged grid is not an arrangement.
+            let cw = order.iter().map(|(_, r)| r.width()).fold(0.0_f32, f32::max);
+            let ch = order.iter().map(|(_, r)| r.height()).fold(0.0_f32, f32::max);
+            for (i, (id, r)) in order.iter().enumerate() {
+                let (col, row) = (i % cols, i / cols);
+                let p = egui::pos2(
+                    bounds.left() + col as f32 * (cw + GRID_STEP),
+                    bounds.top() + row as f32 * (ch + GRID_STEP),
+                );
+                place(*id, r.min, p);
+            }
+        }
+    }
+    out
 }
 
 /// The Markdown viewer, configured once so the two call sites cannot drift.
@@ -4683,6 +4889,101 @@ mod tests {
         // Not a list.
         assert!(list_enter("just text").is_none());
         assert!(list_enter("").is_none());
+    }
+
+    fn rects(v: &[(CardId, f32, f32, f32, f32)]) -> Vec<(CardId, egui::Rect)> {
+        v.iter()
+            .map(|(id, x, y, w, h)| {
+                (*id, egui::Rect::from_min_size(egui::pos2(*x, *y), egui::vec2(*w, *h)))
+            })
+            .collect()
+    }
+
+    /// Alignment works on the selection's own bounding box, so the outermost
+    /// cards do not move and the arrangement stays where it was built.
+    #[test]
+    fn aligning_moves_the_inner_cards_and_leaves_the_bounds_alone() {
+        // Card 1 spans x 0..100 and so defines both edges of the bounding box;
+        // card 2 sits inside it, narrower, so it is the only one that ever moves.
+        let cs = rects(&[(1, 0.0, 0.0, 100.0, 50.0), (2, 40.0, 200.0, 50.0, 50.0)]);
+        let left: Vec<_> = arrange(&cs, Arrange::AlignLeft);
+        assert_eq!(left, vec![(2, egui::pos2(0.0, 200.0))]);
+
+        // Right alignment lines up the far EDGES, not the origins: card 2 is 50
+        // wide against a box ending at 100, so its origin goes to 50.
+        let right = arrange(&cs, Arrange::AlignRight);
+        assert_eq!(right, vec![(2, egui::pos2(50.0, 200.0))]);
+
+        // A card already where the alignment wants it is not named at all, so an
+        // arrangement that changes nothing writes nothing.
+        let flush = rects(&[(1, 0.0, 0.0, 100.0, 50.0), (2, 0.0, 200.0, 100.0, 50.0)]);
+        assert!(arrange(&flush, Arrange::AlignLeft).is_empty());
+
+        // Centres: each card straddles the bounding box's centre line.
+        let mid = arrange(&cs, Arrange::AlignCentreH);
+        let bounds_centre = 50.0; // union spans x 0..100
+        for (id, p) in mid {
+            let w = cs.iter().find(|(i, _)| *i == id).unwrap().1.width();
+            assert!((p.x + w / 2.0 - bounds_centre).abs() < 0.01);
+        }
+    }
+
+    /// **Distribution equalises the gaps, not the centres** — with mixed sizes
+    /// equal centres leaves visibly uneven space, which is what you were trying
+    /// to fix. And it needs three cards: with two there is one gap and nothing to
+    /// equalise, so it does nothing rather than inventing a spacing.
+    #[test]
+    fn distributing_equalises_gaps_and_needs_three_cards() {
+        // Widths 100 / 20 / 100 across x 0..320 → 100 spare over two gaps = 50.
+        let cs = rects(&[
+            (1, 0.0, 0.0, 100.0, 10.0),
+            (2, 150.0, 0.0, 20.0, 10.0),
+            (3, 220.0, 0.0, 100.0, 10.0),
+        ]);
+        let moved = arrange(&cs, Arrange::DistributeH);
+        let x = |id: CardId| {
+            moved
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, p)| p.x)
+                .unwrap_or_else(|| cs.iter().find(|(i, _)| *i == id).unwrap().1.left())
+        };
+        assert_eq!(x(1), 0.0, "the outermost cards anchor the span");
+        assert_eq!(x(3), 220.0);
+        assert!((x(2) - 150.0).abs() < 0.01, "gap 50 either side: {}", x(2));
+
+        // Two cards: one gap, nothing to equalise.
+        let two = rects(&[(1, 0.0, 0.0, 10.0, 10.0), (2, 500.0, 0.0, 10.0, 10.0)]);
+        assert!(arrange(&two, Arrange::DistributeH).is_empty());
+        // One card is not an arrangement at all.
+        let one = rects(&[(1, 0.0, 0.0, 10.0, 10.0)]);
+        assert!(arrange(&one, Arrange::AlignLeft).is_empty());
+    }
+
+    /// Row / Column / Grid re-lay in READING ORDER of where the cards already
+    /// are, so the order you arranged them in survives being arranged.
+    #[test]
+    fn a_grid_uses_a_uniform_cell_and_reading_order() {
+        let cs = rects(&[
+            (1, 0.0, 0.0, 100.0, 40.0),
+            (2, 200.0, 0.0, 60.0, 40.0),
+            (3, 0.0, 300.0, 100.0, 80.0),
+            (4, 200.0, 300.0, 100.0, 40.0),
+        ]);
+        let moved = arrange(&cs, Arrange::Grid);
+        let at = |id: CardId| moved.iter().find(|(i, _)| *i == id).map(|(_, p)| *p);
+        // 4 cards → 2 columns. Cell is the widest (100) and tallest (80), + gap.
+        assert_eq!(at(2), Some(egui::pos2(100.0 + GRID_STEP, 0.0)));
+        assert_eq!(at(3), Some(egui::pos2(0.0, 80.0 + GRID_STEP)));
+        assert_eq!(at(4), Some(egui::pos2(100.0 + GRID_STEP, 80.0 + GRID_STEP)));
+        // Card 1 is already at the box origin, so it is not named.
+        assert_eq!(at(1), None);
+
+        // A row is one line; a column is one stack.
+        let row = arrange(&cs, Arrange::Row);
+        assert!(row.iter().all(|(_, p)| p.y == 0.0), "a row shares one top: {row:?}");
+        let col = arrange(&cs, Arrange::Column);
+        assert!(col.iter().all(|(_, p)| p.x == 0.0), "a column shares one left: {col:?}");
     }
 
     #[test]

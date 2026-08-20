@@ -6,6 +6,39 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.133.0]
+
+### Added
+- **Align, distribute and arrange a selection** — an **Arrange** menu beside the
+  *Group* button, on the shift+drag selection that has existed since v0.107.0.
+  Align left / centre / right / top / middle / bottom; distribute horizontally or
+  vertically; re-lay as a row, a column or a grid.
+
+  **This is not Autosort.** Autosort throws the arrangement away and re-lays the
+  whole basket; these act only on the cards you picked and leave the rest alone.
+  Every operation is a change of **position** only — nothing is resized,
+  reordered, grouped or copied — so there is no model change and nothing to
+  migrate.
+
+  - **Alignment and distribution work on the selection's own bounding box**, so
+    the outermost cards never move and the arrangement stays where you built it.
+  - **Distribution equalises the gaps between adjacent cards, not their centres.**
+    With mixed card sizes equal centres leaves visibly uneven space, which is the
+    thing you were trying to fix. It needs three cards — with two there is one gap
+    and nothing to equalise — so those two items are *disabled with a reason*
+    rather than present and inert.
+  - **Row, column and grid re-lay in reading order of where the cards already
+    are**, so the order you arranged them in survives being arranged. The grid
+    uses a uniform cell (the widest and tallest card, plus the canvas grid step),
+    because a ragged grid is not an arrangement.
+  - A card already where the layout wants it is **not written at all**, so an
+    arrangement that changes nothing changes nothing — and the change log gets one
+    entry naming how many cards moved, not one row per card.
+
+  It needed a new action: `MoveCard` deliberately drags the *whole* selection when
+  the card it names is in it, which is right for a drag and exactly wrong here,
+  where each card goes where the layout puts it.
+
 ## [0.132.0]
 
 ### Added

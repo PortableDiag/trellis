@@ -525,6 +525,7 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
     match a {
         A::MoveCard(..) | A::MoveGroup(..) => UndoKind::Continuous("move"),
         A::ResizeCard(..) => UndoKind::Continuous("resize"),
+        A::PlaceCards(..) => UndoKind::Discrete,
         A::TableSetColWidth(..) => UndoKind::Continuous("colwidth"),
         A::AddCard(..)
         | A::PasteCard(_)
@@ -4387,6 +4388,11 @@ impl TrellisApp {
             CanvasAction::SetEmphasis(c, _) => upd(c, "emphasis"),
             CanvasAction::RaiseCard(c) => card(Op::Moved, *c).titled(title(c)).field("order"),
             CanvasAction::ResizeCard(c, _) => upd(c, "size"),
+            // One entry for the whole arrangement, naming how many moved: N
+            // separate "moved" rows for one menu click is noise, and collapsing
+            // them afterwards would lose the count.
+            CanvasAction::PlaceCards(m) => card(Op::Moved, m.first().map_or(0, |(c, _)| *c))
+                .field(&format!("arrange:{}", m.len())),
             CanvasAction::FitCard(c) => upd(c, "size"),
             CanvasAction::SetTitle(c, _) => upd(c, "title"),
             CanvasAction::SetBody(c, _) => upd(c, "body"),
@@ -5026,6 +5032,15 @@ impl TrellisApp {
                     } else {
                         // Moves the card plus anything docked to it.
                         self.doc.move_card_tree(node, cid, delta);
+                    }
+                }
+                CanvasAction::PlaceCards(moves) => {
+                    // Absolute, and each card independently: an arrangement is
+                    // exactly the case where the selection must NOT travel as one.
+                    for (cid, pos) in moves {
+                        if let Some(c) = self.doc.card_mut(node, cid) {
+                            c.pos = pos;
+                        }
                     }
                 }
                 CanvasAction::ResizeCard(cid, delta) => {
