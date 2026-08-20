@@ -190,7 +190,7 @@ into the `.ron`.
 
 ```
 GET  /api/settings          → 200 {theme, tree_sort, minimap, dock_mode, snap_mode,
-                                   depth_mode, time_mode, notify_digest, notify_agent,
+                                   grid_mode, depth_mode, time_mode, notify_digest, notify_agent,
                                    zoom_enabled, autosave, stick_windows, agenda_open,
                                    agenda_show_done, agenda_project, kanban_open,
                                    kanban_show_done, kanban_project, tags_open,
@@ -204,6 +204,7 @@ POST /api/settings  {…}     → 200 the settings as they now are   | 400
 | `theme` | string | `Trellis`, `Light`, `TerminalGreen`, `StickyNotes`, `Futuristic`, `SynthWave`, `Blueprint`, `Silkscreen`, `Phosphor` |
 | `tree_sort` | string | `manual`, `name`, `name_desc`, `recent`, `tasks` — orders the **root** projects only |
 | `minimap`, `dock_mode`, `snap_mode`, `zoom_enabled` | bool | canvas behaviour |
+| `grid_mode` | bool | quantise a dragged or resized card to the canvas grid (32 world units, the step `draw_grid` paints). Independent of `snap_mode`, which **wins on any axis it claims** — only an axis no card edge aligned to is quantised |
 | `depth_mode`, `time_mode` | bool | the two hypercube axes |
 | `notify_digest`, `notify_agent` | bool | desktop notifications |
 | `autosave` | bool | background saves; with it off a change sits dirty in memory |

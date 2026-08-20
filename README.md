@@ -148,6 +148,11 @@ from the main cluster, and click or drag on it to jump there without zooming out
   together; drag a docked card off to detach.
 - **Snap** (toggle) — a dragged card's edges snap to nearby cards' edges, with a
   guide line.
+- **Grid** (toggle) — a dragged or resized card lands on the 32-unit grid the
+  canvas paints. **Snap wins over Grid, per axis**: an edge already aligned to
+  another card is left where it is, and only an axis no card claimed is
+  quantised, so both can be on at once. Resize quantises the resulting *corner*,
+  not the size, so a card on the grid has both corners on it.
 - **Autosort** — **Tools → Autosort cards** first **auto-sizes** every card to fit
   its content, then lays the whole basket out in a tidy, non-overlapping grid.
 - **Fit to content** — right-click a card → **Fit to content** resizes just that card

@@ -6,6 +6,35 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.130.0]
+
+### Added
+- **Snap to grid.** A third toggle, **Grid**, beside Dock and Snap: a dragged or
+  resized card lands on the 32-unit grid the canvas already paints. Off by
+  default, like Snap and Dock, and remembered per instance. Over the API it is
+  `grid_mode` on `GET`/`POST /api/settings`.
+
+  **Snap wins over Grid, per axis.** Object snapping (that *is* Snap) runs first;
+  an axis that aligned to another card's edge keeps that alignment, and only an
+  axis no card claimed is quantised. The other order would drag a deliberate
+  edge alignment back off by up to half a step, so turning Grid on would quietly
+  break Snap — which is why the rule is a named function (`grid_after_snap`) with
+  a test per case rather than a condition buried in the drag handler.
+
+  **One constant, so the grid you snap to is the grid you can see.** `draw_grid`
+  used its own `32.0` literal; both now read `GRID_STEP`, pinned by a test. A grid
+  you snap to but cannot see is worse than no grid.
+
+  **Resize quantises the resulting edge, not the size.** A card whose top-left is
+  already on the grid then has *both* corners on it, which is what "on the grid"
+  has to mean for outlines to line up. Both the drag and the resize track the
+  pointer's intended position rather than the frame's delta — quantising a delta
+  would round most frames to zero and the card would never move at all. Resize
+  needed the same grab-offset memory the move path already had.
+
+  A card out on the desktop (v0.114.0) is a real OS window, not a card on the
+  canvas, so nothing quantises it.
+
 ## [0.129.0]
 
 ### Fixed

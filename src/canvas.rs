@@ -293,11 +293,38 @@ pub enum CanvasAction {
     DetachCard(CardId),
     ToggleDockMode,
     ToggleSnapMode,
+    ToggleGridMode,
 }
 
 pub(crate) const TITLE_H: f32 = 24.0;
 /// How close (world units) a dragged edge must be to snap to another card's edge.
 const SNAP_DIST: f32 = 8.0;
+/// The canvas grid step, in world units. `draw_grid` paints it and Grid mode
+/// quantises to it, from this one constant deliberately: a grid you snap to but
+/// cannot see, or see but do not snap to, is worse than no grid at all.
+pub(crate) const GRID_STEP: f32 = 32.0;
+
+/// Quantise one world-space axis to the nearest grid line.
+fn grid_quantise(v: f32) -> f32 {
+    (v / GRID_STEP).round() * GRID_STEP
+}
+
+/// Apply Grid mode to a position that object snapping has already had its say on.
+///
+/// **Object snapping wins inside its threshold, per axis.** `gx`/`gy` are the
+/// guide coordinates [`snap_position`] returned: `Some` means that axis was
+/// aligned to another card's edge, and it is then left exactly where snapping put
+/// it. Only an axis no card claimed is quantised.
+///
+/// That ordering is the whole reason both toggles can be on at once. The other
+/// way round, the grid would drag a deliberate edge alignment back off it by up to
+/// half a step, and Snap would appear broken whenever Grid was on.
+fn grid_after_snap(pos: egui::Pos2, gx: Option<f32>, gy: Option<f32>, grid: bool) -> egui::Pos2 {
+    egui::pos2(
+        if grid && gx.is_none() { grid_quantise(pos.x) } else { pos.x },
+        if grid && gy.is_none() { grid_quantise(pos.y) } else { pos.y },
+    )
+}
 
 /// The canvas view: `view.translation` is the pan (screen px, relative to the
 /// canvas top-left) and `view.scaling` is the zoom. Cards live in "world"
@@ -312,6 +339,9 @@ pub fn ui(
     can_paste: bool,
     dock_mode: bool,
     snap_mode: bool,
+    // Quantise a dragged or resized card to the painted grid. Independent of
+    // `snap_mode`: either, both or neither can be on.
+    grid_mode: bool,
     // Whether this basket is currently out on the desktop as real windows.
     desktop_mode: bool,
     depth_mode: bool,
@@ -902,6 +932,7 @@ pub fn ui(
             env,
             selection.contains(&card.id),
             snap_mode.then_some(&node.cards[..]),
+            grid_mode,
             &mut actions,
         );
     }
@@ -1055,6 +1086,18 @@ pub fn ui(
                     .clicked()
                 {
                     actions.push(CanvasAction::ToggleSnapMode);
+                }
+                if ui
+                    .selectable_label(grid_mode, "Grid")
+                    .on_hover_text(
+                        "Grid mode: a dragged or resized card lands on the grid the \
+                         canvas paints.\n\nSnap still wins where it applies \u{2014} an \
+                         edge within reach of another card's edge is left aligned to \
+                         that card, and only the axis no card claimed is quantised.",
+                    )
+                    .clicked()
+                {
+                    actions.push(CanvasAction::ToggleGridMode);
                 }
                 // Desktop mode is a MODE, like VMware's Unity: one switch takes
                 // the whole basket out onto the desktop, and takes it back. A
@@ -1285,7 +1328,9 @@ pub fn desktop_card_ui(
 ) -> bool {
     let to_window = TSTransform::from_translation(-card.pos.to_vec2());
     let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, card.size);
-    card_ui(ui, card, node_path, to_window, clip, env, false, None, actions);
+    // A desktop card is a real OS window, not a card on the canvas: there is no
+    // grid under it to quantise to.
+    card_ui(ui, card, node_path, to_window, clip, env, false, None, false, actions);
 
     // The title strip is registered AFTER the card so it wins the hit-test —
     // dragging it must move the *window*, not the card's canvas position.
@@ -1322,6 +1367,9 @@ fn card_ui(
     // `Some(all cards)` when snap mode is on: the dragged card's edges snap to
     // these. `None` = snapping off.
     snap_others: Option<&[Card]>,
+    // Quantise the drag/resize to `GRID_STEP` on any axis object snapping did
+    // not already claim.
+    grid_mode: bool,
     actions: &mut Vec<CanvasAction>,
 ) {
     let zoom = to_screen.scaling;
@@ -1573,12 +1621,20 @@ fn card_ui(
     // look behind is the one thing that follows the pointer.
     if handle.dragged() && !ui.input(|i| i.modifiers.alt) {
         let grab = ui.memory(|m| m.data.get_temp::<egui::Vec2>(grab_key));
-        match (snap_others, handle.interact_pointer_pos(), grab) {
-            (Some(others), Some(pp), Some(grab)) => {
+        // Either aid needs the pointer's *intended* position rather than the
+        // frame's delta: quantising a delta would round most frames to zero and
+        // the card would never move at all.
+        match (handle.interact_pointer_pos(), grab) {
+            (Some(pp), Some(grab)) if snap_others.is_some() || grid_mode => {
                 // Snap the pointer-intended top-left to nearby card edges.
                 let intended = (to_screen.inverse() * pp) - grab;
-                let (snapped, gx, gy) =
-                    snap_position(intended, card.size, others, card.id, SNAP_DIST);
+                let (snapped, gx, gy) = match snap_others {
+                    Some(others) => {
+                        snap_position(intended, card.size, others, card.id, SNAP_DIST)
+                    }
+                    None => (intended, None, None),
+                };
+                let snapped = grid_after_snap(snapped, gx, gy, grid_mode);
                 actions.push(CanvasAction::MoveCard(card.id, snapped - card.pos));
                 // Guide lines at the snapped edges.
                 let guide = egui::Stroke::new(1.0, egui::Color32::from_rgb(0xff, 0xd1, 0x66));
@@ -1788,8 +1844,31 @@ fn card_ui(
             egui::Stroke::new(1.2, gcol),
         );
     }
+    let grip_key = ui.id().with(("card_grip_grab", card.id));
+    if grip_resp.drag_started() {
+        if let Some(pp) = grip_resp.interact_pointer_pos() {
+            // Offset from the card's bottom-right corner to the pointer, in world
+            // units — the same drift-free tracking the move path uses above.
+            let off = (to_screen.inverse() * pp) - (card.pos + card.size);
+            ui.memory_mut(|m| m.data.insert_temp(grip_key, off));
+        }
+    }
     if grip_resp.dragged() {
-        actions.push(CanvasAction::ResizeCard(card.id, grip_resp.drag_delta() / zoom));
+        let off = ui.memory(|m| m.data.get_temp::<egui::Vec2>(grip_key));
+        match (grip_resp.interact_pointer_pos(), off) {
+            (Some(pp), Some(off)) if grid_mode => {
+                // Quantise the resulting EDGE, not the size. A card whose
+                // top-left is already on the grid then has *both* corners on it,
+                // which is what "on the grid" has to mean for the outlines to
+                // line up; quantising the size alone would leave the far edge
+                // wherever the near one happened to be.
+                let corner = (to_screen.inverse() * pp) - off;
+                let want =
+                    egui::pos2(grid_quantise(corner.x), grid_quantise(corner.y)) - card.pos;
+                actions.push(CanvasAction::ResizeCard(card.id, want - card.size));
+            }
+            _ => actions.push(CanvasAction::ResizeCard(card.id, grip_resp.drag_delta() / zoom)),
+        }
     }
 
     // A card that is out on the desktop still lives in this basket — it is just
@@ -4335,7 +4414,7 @@ fn minimap_geometry(canvas_rect: egui::Rect, cards: &[Card]) -> Option<MinimapGe
 }
 
 fn draw_grid(painter: &egui::Painter, rect: egui::Rect, view: TSTransform, color: egui::Color32) {
-    let step = 32.0 * view.scaling;
+    let step = GRID_STEP * view.scaling;
     if step < 6.0 {
         return; // too dense to be useful when zoomed far out
     }
@@ -4487,6 +4566,37 @@ mod tests {
         // Not a list.
         assert!(list_enter("just text").is_none());
         assert!(list_enter("").is_none());
+    }
+
+    /// The grid you snap to is the grid you can see: both come from `GRID_STEP`,
+    /// so this also pins that `draw_grid` was not left on its own literal.
+    #[test]
+    fn grid_quantises_to_the_painted_step() {
+        assert_eq!(GRID_STEP, 32.0);
+        assert_eq!(grid_quantise(0.0), 0.0);
+        assert_eq!(grid_quantise(15.0), 0.0); // nearest, not floor
+        assert_eq!(grid_quantise(17.0), 32.0);
+        assert_eq!(grid_quantise(48.0), 64.0);
+        assert_eq!(grid_quantise(-17.0), -32.0); // negative world coords too
+    }
+
+    /// **Snap wins over Grid, per axis** — the rule that lets both be on at once.
+    /// An axis that aligned to another card's edge keeps that alignment; only an
+    /// axis no card claimed is quantised. Without this, turning Grid on would
+    /// quietly break Snap by pulling a deliberate alignment up to 16 px off.
+    #[test]
+    fn object_snapping_wins_over_the_grid_per_axis() {
+        let p = egui::pos2(100.0, 100.0);
+        // Grid off: nothing moves, whatever snapping did.
+        assert_eq!(grid_after_snap(p, None, None, false), p);
+        // Grid on, neither axis claimed: both quantise.
+        assert_eq!(grid_after_snap(p, None, None, true), egui::pos2(96.0, 96.0));
+        // x snapped to a card edge: x is left alone, y still quantises.
+        assert_eq!(grid_after_snap(p, Some(340.0), None, true), egui::pos2(100.0, 96.0));
+        // ...and the mirror image.
+        assert_eq!(grid_after_snap(p, None, Some(340.0), true), egui::pos2(96.0, 100.0));
+        // Both claimed: the snapped position survives untouched.
+        assert_eq!(grid_after_snap(p, Some(1.0), Some(2.0), true), p);
     }
 
     #[test]

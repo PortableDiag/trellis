@@ -78,6 +78,7 @@ pub(crate) const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
 const SNAP_MODE_KEY: &str = "snap_mode";
+const GRID_MODE_KEY: &str = "grid_mode";
 /// Depth (true Z) and Time (a card with extent in days). Both are **view** modes
 /// and both default off: `z` and the span stay on the card whatever these say, so
 /// turning one off flattens what you see rather than discarding what someone
@@ -1162,6 +1163,9 @@ pub struct TrellisApp {
     dock_mode: bool,
     /// When on, a dragged card's edges snap to nearby cards' edges.
     snap_mode: bool,
+    /// When on, a dragged or resized card is quantised to the canvas grid.
+    /// Independent of `snap_mode`, which wins on any axis it claims.
+    grid_mode: bool,
     depth_mode: bool,
     time_mode: bool,
     /// Path this build registered as the link handler, if any — shown in
@@ -1378,6 +1382,11 @@ impl TrellisApp {
         let snap_mode = cc
             .storage
             .and_then(|s| s.get_string(SNAP_MODE_KEY))
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let grid_mode = cc
+            .storage
+            .and_then(|s| s.get_string(GRID_MODE_KEY))
             .map(|s| s == "true")
             .unwrap_or(false);
         let depth_mode = cc
@@ -1676,6 +1685,7 @@ impl TrellisApp {
             reorder_mode: false,
             dock_mode,
             snap_mode,
+            grid_mode,
             depth_mode,
             time_mode,
             url_scheme_registered,
@@ -3440,6 +3450,7 @@ impl TrellisApp {
             "minimap": self.minimap_enabled,
             "dock_mode": self.dock_mode,
             "snap_mode": self.snap_mode,
+            "grid_mode": self.grid_mode,
             "depth_mode": self.depth_mode,
             "time_mode": self.time_mode,
             "notify_digest": self.notify_digest,
@@ -3479,7 +3490,8 @@ impl TrellisApp {
                     .as_str()
                     .map(|s| crate::tree::TreeSort::from_key(s).key() == s)
                     .unwrap_or(false),
-                "minimap" | "dock_mode" | "snap_mode" | "depth_mode" | "time_mode"
+                "minimap" | "dock_mode" | "snap_mode" | "grid_mode" | "depth_mode"
+                | "time_mode"
                 | "notify_digest" | "notify_agent" | "zoom_enabled" | "autosave"
                 | "stick_windows" | "agenda_open" | "agenda_show_done" | "kanban_open"
                 | "kanban_show_done" | "tags_open" | "claims_open" | "find_open"
@@ -3497,7 +3509,8 @@ impl TrellisApp {
                 _ => {
                     return Err(format!(
                         "unknown setting {k:?}. Settable: theme, tree_sort, minimap, \
-                         dock_mode, snap_mode, depth_mode, time_mode, notify_digest, \
+                         dock_mode, snap_mode, grid_mode, depth_mode, time_mode, \
+                         notify_digest, \
                          notify_agent, zoom_enabled, autosave, stick_windows, agenda_open, \
                          agenda_show_done, agenda_project, kanban_open, kanban_show_done, \
                          kanban_project, tags_open, claims_open, find_open, backlinks_open, \
@@ -3522,6 +3535,7 @@ impl TrellisApp {
                 "minimap" => self.minimap_enabled = v.as_bool().unwrap_or(false),
                 "dock_mode" => self.dock_mode = v.as_bool().unwrap_or(false),
                 "snap_mode" => self.snap_mode = v.as_bool().unwrap_or(false),
+                "grid_mode" => self.grid_mode = v.as_bool().unwrap_or(false),
                 "depth_mode" => self.depth_mode = v.as_bool().unwrap_or(false),
                 "time_mode" => self.time_mode = v.as_bool().unwrap_or(false),
                 "notify_digest" => self.notify_digest = v.as_bool().unwrap_or(false),
@@ -4343,6 +4357,7 @@ impl TrellisApp {
             | CanvasAction::ClearSelection
             | CanvasAction::ToggleDockMode
             | CanvasAction::ToggleSnapMode
+            | CanvasAction::ToggleGridMode
             | CanvasAction::ToggleDepthMode
             | CanvasAction::ToggleTimeMode
             | CanvasAction::FollowLink(_)
@@ -5300,6 +5315,7 @@ impl TrellisApp {
                 }
                 CanvasAction::ToggleDockMode => self.dock_mode = !self.dock_mode,
                 CanvasAction::ToggleSnapMode => self.snap_mode = !self.snap_mode,
+                CanvasAction::ToggleGridMode => self.grid_mode = !self.grid_mode,
                 CanvasAction::ToggleDepthMode => self.depth_mode = !self.depth_mode,
                 CanvasAction::ToggleTimeMode => self.time_mode = !self.time_mode,
 
@@ -7568,6 +7584,12 @@ impl TrellisApp {
                             "When on, dropping a card on another docks them so they move together; \
                              drag a docked card off to detach. Grouping works regardless.",
                         );
+                    ui.checkbox(&mut self.grid_mode, "Grid mode (quantise a card to the canvas grid)")
+                        .on_hover_text(
+                            "Snap still wins where it applies: an axis aligned to \
+                             another card's edge is left alone, and only an axis no \
+                             card claimed is quantised.",
+                        );
                     ui.checkbox(&mut self.snap_mode, "Snap mode (align card edges while dragging)")
                         .on_hover_text("When on, a dragged card's edges snap to nearby cards' edges.");
                     if cfg!(target_os = "linux") {
@@ -7791,7 +7813,7 @@ impl TrellisApp {
                             "GET    /api/instance   → which document this port serves",
                         "GET    /api/docs[?section=examples]   → THIS build's API.md, compiled in (any scope; ~100KB whole)",
                             "GET    /api/settings   → theme, canvas toggles, panels, notifications, retention",
-                            "POST   /api/settings   {theme?, tree_sort?, minimap?, notify_digest?, …}",
+                            "POST   /api/settings   {theme?, tree_sort?, minimap?, snap_mode?, grid_mode?, notify_digest?, …}",
                             "GET    /api/tree",
                             "GET    /api/nodes",
                             "POST   /api/nodes               {parent?, title}",
@@ -10090,6 +10112,7 @@ impl eframe::App for TrellisApp {
                         can_paste,
                         self.dock_mode,
                         self.snap_mode,
+                        self.grid_mode,
                         self.desktop_mode == Some(sel),
                         self.depth_mode,
                         &mut eye,
@@ -10256,6 +10279,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(ZOOM_ENABLED_KEY, self.zoom_enabled.to_string());
         storage.set_string(DOCK_MODE_KEY, self.dock_mode.to_string());
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
+        storage.set_string(GRID_MODE_KEY, self.grid_mode.to_string());
         storage.set_string(DEPTH_MODE_KEY, self.depth_mode.to_string());
         storage.set_string(TIME_MODE_KEY, self.time_mode.to_string());
         storage.set_string(AGENDA_OPEN_KEY, self.agenda_open.to_string());
