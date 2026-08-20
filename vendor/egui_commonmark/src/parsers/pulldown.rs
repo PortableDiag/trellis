@@ -11,6 +11,14 @@ use egui_commonmark_backend::misc::*;
 use egui_commonmark_backend::pulldown::*;
 use pulldown_cmark::{CowStr, HeadingLevel};
 
+/// (Trellis patch) Where the destination of the link under the pointer is
+/// published each frame, so the host can preview what it points at. A plain
+/// `egui::Id` rather than a field on the cache, because the cache is the
+/// upstream crate's type.
+pub fn hovered_link_id() -> egui::Id {
+    egui::Id::new("trellis_hovered_md_link")
+}
+
 /// Extract an `#rrggbb` colour from a `<span style="color:#rrggbb">` tag.
 /// (Trellis patch — supports the app's inline text-color button.)
 fn parse_span_color(tag: &str) -> Option<egui::Color32> {
@@ -748,7 +756,37 @@ impl CommonMarkViewerInternal {
             }
             pulldown_cmark::TagEnd::Link { .. } => {
                 if let Some(link) = self.link.take() {
-                    link.end(ui, cache);
+                    // (Trellis patch) `Link::end` in the backend crate renders the
+                    // link and DROPS the response, so nothing downstream can tell
+                    // that the pointer is over one. Trellis needs that to preview
+                    // the card a `[[#id]]` points at without navigating, so the
+                    // link is rendered here instead and the hovered destination is
+                    // published through egui's own data store. The rendering is
+                    // otherwise the same, hook branch included.
+                    let egui_commonmark_backend::misc::Link { destination, text } = link;
+                    let mut layout_job = egui::text::LayoutJob::default();
+                    for t in text {
+                        t.append_to(
+                            &mut layout_job,
+                            ui.style(),
+                            egui::FontSelection::Default,
+                            egui::Align::LEFT,
+                        );
+                    }
+                    let resp = if cache.link_hooks().contains_key(&destination) {
+                        let r = ui.link(layout_job);
+                        if r.clicked() || r.middle_clicked() {
+                            cache.link_hooks_mut().insert(destination.clone(), true);
+                        }
+                        r
+                    } else {
+                        ui.hyperlink_to(layout_job, &destination)
+                    };
+                    if resp.hovered() {
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(hovered_link_id(), destination.clone());
+                        });
+                    }
                 }
             }
             pulldown_cmark::TagEnd::Image { .. } => {

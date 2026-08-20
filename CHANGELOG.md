@@ -6,6 +6,35 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.134.0]
+
+### Added
+- **Hover preview of a `[[…]]` link** — rest the pointer on a link in a card body
+  and the card, basket or group it points at appears in a popup, without
+  navigating. **Embed when it should always be visible, hover when you just want a
+  look**: `![[#id]]` (v0.125.0) is the same content permanently, this is the same
+  content borrowed, so following a reference costs nothing and loses your place in
+  nothing.
+
+  A preview is a **glance, not a second canvas**: the target's title and the first
+  twelve lines of what it holds, with a count of the rest. **Embeds inside a
+  preview are not expanded** — a preview that recursively renders other cards is
+  how one hover paints half the document.
+
+  It reads `preview_text`, not `body`: a **checklist keeps its content in `items`
+  and a table in `rows`**, so previewing `body` would show a working list as empty
+  — the trap that once had an audit reach for delete. Unlike `searchable_body`,
+  which joins everything with spaces because search only wants a haystack, this
+  keeps the line structure, since a preview that has lost it is unreadable.
+
+### Changed
+- **Vendored `egui_commonmark` now renders links itself.** The upstream helper
+  draws the link and **drops the response**, so nothing downstream could tell the
+  pointer was over one. The rendering is otherwise unchanged, link-hook branch
+  included; the hovered destination is published through egui's own data store and
+  cleared at the start of every body render, so a preview closes when the pointer
+  leaves rather than sticking to the last link it was on.
+
 ## [0.133.0]
 
 ### Added

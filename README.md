@@ -153,6 +153,9 @@ from the main cluster, and click or drag on it to jump there without zooming out
   another card is left where it is, and only an axis no card claimed is
   quantised, so both can be on at once. Resize quantises the resulting *corner*,
   not the size, so a card on the grid has both corners on it.
+- **Hover preview** — rest the pointer on a `[[link]]` in a card body to see what
+  it points at in a popup, without navigating. Embed (`![[#id]]`) when it should
+  always be visible; hover when you just want a look.
 - **Arrange** — with two or more cards selected, the *Arrange* menu aligns them
   (left/centre/right/top/middle/bottom), distributes them at even gaps, or re-lays
   them as a row, column or grid. Unlike Autosort it touches only the selection.

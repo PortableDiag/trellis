@@ -74,6 +74,8 @@ use egui::{self, Id};
 mod parsers;
 
 pub use egui_commonmark_backend::alerts::{Alert, AlertBundle};
+/// (Trellis patch) See `parsers::pulldown::hovered_link_id`.
+pub use crate::parsers::pulldown::hovered_link_id;
 pub use egui_commonmark_backend::misc::CommonMarkCache;
 
 // The upstream `macros` re-exports (`egui_commonmark_macros::*` and a hidden

@@ -9734,6 +9734,7 @@ impl TrellisApp {
             ctx.show_viewport_immediate(vid, builder, |vctx, _| {
                 let mut env = Env {
                     doc,
+                    node,
                     md, tex, card_rects: rects,
                     templates: &template_names,
                     masters: &masters,
@@ -10152,6 +10153,7 @@ impl eframe::App for TrellisApp {
                         self.desktop_cards.keys().copied().collect();
                     let mut env = Env {
                         doc: &self.doc,
+                        node: sel,
                         md: &mut self.md_cache,
                         tex: &mut self.tex_cache,
                         card_rects: &mut self.card_rects,

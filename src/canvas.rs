@@ -22,6 +22,9 @@ pub struct Env<'a> {
     /// from the basket being drawn: the point of an embed is that its source
     /// lives somewhere else.
     pub doc: &'a crate::model::Document,
+    /// The basket being drawn. A `[[Title]]` link means "this project's basket"
+    /// (v0.121.0), so resolving one needs to know where it was written.
+    pub node: crate::model::NodeId,
     pub md: &'a mut CommonMarkCache,
     pub tex: &'a mut TextureCache,
     /// Filled each frame with every drawn card's on-screen rect (points), so the
@@ -2311,6 +2314,11 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                 let unhtml = crate::model::html_blocks_to_md(&embedded);
                 let linked = crate::model::wikilinks_to_md(&unhtml);
                 scale_text(ui, card.font_scale, |ui| {
+                    // Nothing hovered until this frame's render says otherwise, so
+                    // a preview closes when the pointer leaves rather than sticking
+                    // to the last link that was under it.
+                    ui.ctx()
+                        .data_mut(|d| d.remove::<String>(egui_commonmark::hovered_link_id()));
                     // Callout titles first, then hard breaks: the title becomes
                     // its own line, and that line then gets its own break like
                     // any other.
@@ -2319,6 +2327,7 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                         env.md,
                         &crate::model::hard_wrap(&crate::model::split_callout_titles(&linked)),
                     );
+                    link_preview(ui, env, env.node);
                 });
             }
         }
@@ -2888,6 +2897,79 @@ pub(crate) fn arrange(cards: &[(CardId, egui::Rect)], how: Arrange) -> Vec<(Card
         }
     }
     out
+}
+
+/// Show what a hovered `[[…]]` link points at, without navigating to it.
+///
+/// **Embed when it should always be visible, hover when you just want a look.**
+/// `![[#id]]` (v0.125.0) already renders a card inside another; this is the same
+/// content, borrowed for as long as the pointer rests on the link, so following a
+/// reference costs nothing and loses your place in nothing.
+///
+/// Deliberately capped and plain: a preview is a glance, not a second canvas. It
+/// shows the target's title and the first [`PREVIEW_LINES`] lines of what it
+/// holds — for a checklist its items, for a table its rows, since neither keeps
+/// anything in `body` — and says so when there is more. **Embeds inside the
+/// preview are not expanded**: a preview that recursively renders other cards is
+/// how one hover paints half the document.
+fn link_preview(ui: &mut egui::Ui, env: &Env, from: crate::model::NodeId) {
+    const PREVIEW_LINES: usize = 12;
+    let Some(dest) = ui
+        .ctx()
+        .data(|d| d.get_temp::<String>(egui_commonmark::hovered_link_id()))
+    else {
+        return;
+    };
+    // Only our own links: an ordinary http link is the browser's business.
+    let Some(target) = dest.strip_prefix("trellis:") else { return };
+    let target = crate::model::decode_link(target);
+    let Some(found) = env.doc.resolve_link_target_from(&target, from) else { return };
+
+    let (title, lines, total) = match found {
+        crate::model::LinkTarget::Card { node, card } => {
+            let Some(c) = env.doc.card(node, card) else { return };
+            let text = crate::model::preview_text(c);
+            let all: Vec<&str> = text.lines().collect();
+            (
+                if c.title.trim().is_empty() { format!("card #{card}") } else { c.title.clone() },
+                all.iter().take(PREVIEW_LINES).map(|l| l.to_string()).collect::<Vec<_>>(),
+                all.len(),
+            )
+        }
+        crate::model::LinkTarget::Node(n) | crate::model::LinkTarget::Group { node: n, .. } => {
+            let Some(basket) = env.doc.nodes.get(&n) else { return };
+            let titles: Vec<String> = basket
+                .cards
+                .iter()
+                .take(PREVIEW_LINES)
+                .map(|c| format!("\u{2022} {}", card_preview_label(c)))
+                .collect();
+            (basket.title.clone(), titles, basket.cards.len())
+        }
+    };
+
+    egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("trellis_link_preview"), |ui| {
+        ui.set_max_width(420.0);
+        ui.strong(title);
+        ui.separator();
+        if lines.is_empty() {
+            ui.weak("(empty)");
+        }
+        for l in &lines {
+            ui.label(l);
+        }
+        if total > lines.len() {
+            ui.weak(format!("\u{2026} {} more", total - lines.len()));
+        }
+    });
+}
+
+/// A one-line name for a card in a basket preview.
+fn card_preview_label(c: &Card) -> String {
+    if !c.title.trim().is_empty() {
+        return c.title.clone();
+    }
+    crate::model::preview_text(c).lines().next().unwrap_or("(untitled)").to_string()
 }
 
 /// The Markdown viewer, configured once so the two call sites cannot drift.

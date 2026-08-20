@@ -5188,6 +5188,33 @@ fn inline_body_with_data_uris(card: &Card) -> String {
     })
 }
 
+/// The card's content as lines, for a preview or a one-line label.
+///
+/// Deliberately not [`searchable_body`], which joins everything with spaces
+/// because search only needs a haystack. A preview has to keep the shape: a
+/// **checklist keeps its content in `items` and a table in `rows`**, so both
+/// would otherwise collapse into one unreadable run — the same trap as reading
+/// `body` and calling a 23-line working list empty.
+pub fn preview_text(card: &Card) -> String {
+    match &card.kind {
+        CardKind::Text => strip_inline_markers(&card.body),
+        CardKind::Code { .. } => card.body.clone(),
+        CardKind::Checklist { items } => items
+            .iter()
+            .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        CardKind::Table { table } => table
+            .rows
+            .iter()
+            .map(|r| r.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("  |  "))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        CardKind::Image { ocr, .. } => ocr.clone(),
+        CardKind::Sketch { .. } => String::new(),
+    }
+}
+
 pub fn searchable_body(card: &Card) -> String {
     match &card.kind {
         CardKind::Text => strip_inline_markers(&card.body),
@@ -6353,6 +6380,39 @@ article.card h4{color:#aaa}:not(pre)>code{background:#333}}";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A checklist keeps its content in `items` and a table in `rows`**, so a
+    /// preview that read `body` would show nothing for either — the same trap that
+    /// once had an audit call a 23-line working list empty. And unlike
+    /// `searchable_body`, which joins with spaces because search only wants a
+    /// haystack, a preview has to keep the line structure or it is unreadable.
+    #[test]
+    fn preview_text_keeps_the_shape_of_every_kind() {
+        let mut cl = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Checklist {
+            items: vec![
+                ChecklistItem { id: 1, text: "first".into(), done: true },
+                ChecklistItem { id: 2, text: "second".into(), done: false },
+            ],
+        });
+        cl.body = "body is not where a checklist lives".into();
+        let p = preview_text(&cl);
+        assert_eq!(p, "[x] first\n[ ] second");
+        assert!(!p.contains("body is not"), "body must not leak into a checklist preview");
+
+        let mut t = Card::new(2, egui::pos2(0.0, 0.0), CardKind::Text);
+        t.body = "line one\nline two".into();
+        assert_eq!(preview_text(&t), "line one\nline two");
+
+        // Two rows stay two lines; searchable_body would flatten them to one.
+        let table = Card::new(3, egui::pos2(0.0, 0.0), CardKind::Table {
+            table: TableData::from_values(vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()],
+            ]),
+        });
+        assert_eq!(preview_text(&table).lines().count(), 2);
+        assert_eq!(searchable_body(&table).lines().count(), 1);
+    }
 
     /// A same-line callout title breaks the callout ENTIRELY -- the type is lost
     /// with it -- so this rewrite is a fix, not a flourish.
