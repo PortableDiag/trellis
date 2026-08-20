@@ -6240,6 +6240,17 @@ impl TrellisApp {
                         ui.close_menu();
                     }
                     if ui
+                        .button("Random card")
+                        .on_hover_text(
+                            "Open a card at random, anywhere in the document — for \
+                             rediscovering what you wrote and forgot",
+                        )
+                        .clicked()
+                    {
+                        self.go_to_random_card(ui.ctx());
+                        ui.close_menu();
+                    }
+                    if ui
                         .button("Tags…")
                         .on_hover_text("Browse #tags and the cards that use them")
                         .clicked()
@@ -9456,6 +9467,48 @@ impl TrellisApp {
         self.focus_card = Some(card);
         self.highlight_card = Some(card);
         self.highlight_until = ctx.input(|i| i.time) + canvas::HIGHLIGHT_SECS;
+    }
+
+    /// Jump to a uniformly random card anywhere in the document.
+    ///
+    /// **Uniform over cards, not over baskets.** Picking a basket and then a card
+    /// inside it would make a card in a two-card basket far likelier than one in
+    /// a basket of fifty, which for rediscovery is exactly backwards: the crowded
+    /// baskets are where the forgotten things are. So the index is drawn across
+    /// the flattened list.
+    ///
+    /// Randomness comes from the OS CSPRNG that already mints the API key rather
+    /// than a new dependency — overkill for this, but it is one call and there is
+    /// no weaker source already in the tree.
+    fn go_to_random_card(&mut self, ctx: &egui::Context) {
+        let all: Vec<(NodeId, CardId)> = self
+            .doc
+            .nodes
+            .iter()
+            .flat_map(|(nid, n)| n.cards.iter().map(move |c| (*nid, c.id)))
+            .collect();
+        if all.is_empty() {
+            self.status = "No cards to pick from".into();
+            return;
+        }
+        let mut b = [0u8; 8];
+        if getrandom::fill(&mut b).is_err() {
+            self.status = "Could not draw a random number".into();
+            return;
+        }
+        // Modulo bias over a 64-bit draw is far below anything observable here.
+        let (node, card) = all[(u64::from_le_bytes(b) % all.len() as u64) as usize];
+        self.jump_to_card(ctx, node, card);
+        let title = self
+            .doc
+            .card(node, card)
+            .map(|c| c.title.clone())
+            .unwrap_or_default();
+        self.status = if title.is_empty() {
+            format!("Random card #{card} of {}", all.len())
+        } else {
+            format!("Random: {title} (#{card} of {})", all.len())
+        };
     }
 
     /// Take a whole basket onto the desktop — Desktop mode proper.

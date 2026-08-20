@@ -1049,6 +1049,7 @@ pub fn ui(
     // background layer, so Middle is already above them — while Foreground is
     // above *windows* too, which had these toggles painting straight through
     // Settings, Kanban and every other window, and taking the clicks with them.
+    let mut zoom_to_selection = false;
     egui::Area::new(ui.id().with("reset_view"))
         .order(egui::Order::Middle)
         .fixed_pos(btn_pos)
@@ -1063,7 +1064,27 @@ pub fn ui(
             {
                 actions.push(CanvasAction::ResetView);
             }
+            // Only offered when there is a selection: a button that silently
+            // does nothing is worse than an absent one — the rule the View menu
+            // already follows for Today's note.
+            if !selection.is_empty()
+                && ui
+                    .button("Zoom to selection")
+                    .on_hover_text(
+                        "Frame the selected cards: zoom and pan so their bounding \
+                         box fills the canvas",
+                    )
+                    .clicked()
+            {
+                zoom_to_selection = true;
+            }
         });
+
+    if zoom_to_selection {
+        if let Some(b) = selection_bounds(node, selection) {
+            *view = frame_rect(b, canvas_rect, view.scaling);
+        }
+    }
 
     // Card tools (top-left): Dock-mode toggle and, when 2+ cards are selected,
     // a Group button.
@@ -2653,6 +2674,39 @@ fn sketch_ui(
         } else {
             ui.data_mut(|d| d.insert_temp(buf_key, buf));
         }
+    }
+}
+
+/// The world-space bounding box of the selected cards, or `None` if nothing in
+/// the selection is actually in this basket — a selection is per-basket, but the
+/// set is just card ids and a stale one must not frame an empty box.
+fn selection_bounds(node: &Node, selection: &HashSet<CardId>) -> Option<egui::Rect> {
+    node.cards
+        .iter()
+        .filter(|c| selection.contains(&c.id))
+        .map(|c| egui::Rect::from_min_size(c.pos, c.size))
+        .reduce(|a, b| a.union(b))
+}
+
+/// A transform that frames `world` inside `canvas`, with a margin so the framed
+/// cards do not sit flush against the edge.
+///
+/// The scale is clamped to the same [`MIN_ZOOM`]/[`MAX_ZOOM`] every other zoom
+/// path obeys, so framing one small card cannot leave the canvas at a zoom the
+/// scroll wheel would refuse to produce — and `current` is the fallback for a
+/// degenerate (zero-area) box, which keeps a zero-size card from asking for an
+/// infinite scale.
+fn frame_rect(world: egui::Rect, canvas: egui::Rect, current: f32) -> TSTransform {
+    const MARGIN: f32 = 0.9; // leave a tenth of the canvas as breathing room
+    let scale = if world.width() > 0.0 && world.height() > 0.0 {
+        (canvas.width() / world.width()).min(canvas.height() / world.height()) * MARGIN
+    } else {
+        current
+    }
+    .clamp(MIN_ZOOM, MAX_ZOOM);
+    TSTransform {
+        scaling: scale,
+        translation: (canvas.center() - canvas.min) - scale * world.center().to_vec2(),
     }
 }
 
@@ -4566,6 +4620,55 @@ mod tests {
         // Not a list.
         assert!(list_enter("just text").is_none());
         assert!(list_enter("").is_none());
+    }
+
+    #[test]
+    fn framing_a_selection_centres_it_and_respects_the_zoom_clamps() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(300.0, 40.0), egui::vec2(900.0, 600.0));
+        // A box the same shape as the canvas frames at the margin factor.
+        let world = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 600.0));
+        let t = frame_rect(world, canvas, 1.0);
+        assert!((t.scaling - 0.9).abs() < 1e-4, "margin applied: {}", t.scaling);
+        // The box's centre lands at the canvas centre (in canvas-local coords).
+        let centre = t.scaling * world.center().to_vec2() + t.translation;
+        assert!((centre - (canvas.center() - canvas.min)).length() < 1e-3);
+
+        // One tiny card would want a huge scale; the shared clamp holds it.
+        let tiny = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(4.0, 4.0));
+        assert_eq!(frame_rect(tiny, canvas, 1.0).scaling, MAX_ZOOM);
+        // An enormous box would want a tiny one; likewise.
+        let huge = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(90000.0, 60000.0));
+        assert_eq!(frame_rect(huge, canvas, 1.0).scaling, MIN_ZOOM);
+        // A zero-area box keeps the zoom it had rather than asking for infinity.
+        let degenerate = egui::Rect::from_min_size(egui::pos2(5.0, 5.0), egui::vec2(0.0, 0.0));
+        assert_eq!(frame_rect(degenerate, canvas, 1.7).scaling, 1.7);
+    }
+
+    /// A selection is a set of ids; the cards it names may not be in this basket.
+    #[test]
+    fn selection_bounds_unions_only_cards_in_this_basket() {
+        use crate::model::{CardKind, Document};
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "Sel".into());
+        let mut place = |x: f32, y: f32| {
+            let id = doc.add_card(n, egui::pos2(x, y), CardKind::Text).unwrap();
+            doc.card_mut(n, id).unwrap().size = egui::vec2(100.0, 100.0);
+            id
+        };
+        let a = place(0.0, 0.0);
+        let b = place(500.0, 300.0);
+        let node = doc.nodes.get(&n).unwrap();
+
+        // An id that is not in this basket is ignored rather than counted.
+        let sel: HashSet<CardId> = [a, b, 99999].into_iter().collect();
+        let bounds = selection_bounds(node, &sel).expect("two cards are here");
+        assert_eq!(bounds.min, egui::pos2(0.0, 0.0));
+        assert_eq!(bounds.max, egui::pos2(600.0, 400.0));
+
+        // Nothing in this basket → no box, rather than a zero-size one at origin
+        // that would frame the empty corner of the canvas.
+        let elsewhere: HashSet<CardId> = [99999].into_iter().collect();
+        assert!(selection_bounds(node, &elsewhere).is_none());
     }
 
     /// The grid you snap to is the grid you can see: both come from `GRID_STEP`,

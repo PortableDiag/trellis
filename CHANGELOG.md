@@ -6,6 +6,30 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.131.0]
+
+### Added
+- **Zoom to selection.** A button beside *Reset view*, shown only while cards are
+  selected, that frames the selection: it zooms and pans so the selected cards'
+  bounding box fills the canvas with a tenth left as breathing room. The canvas
+  already knew the box from the marquee (v0.107.0); this is the other direction.
+
+  The scale obeys the same `MIN_ZOOM`/`MAX_ZOOM` clamp as the scroll wheel and
+  `Ctrl +`, so framing one small card cannot leave the canvas at a zoom no other
+  path could produce, and a zero-area selection keeps the zoom it had rather than
+  asking for an infinite one. A selection is a set of card **ids** and a basket
+  may not hold all of them, so a selection naming nothing here frames nothing
+  rather than framing the empty corner at the origin.
+
+- **Random card** (*View → Random card*) — open something at random, anywhere in
+  the document. Genuinely useful for rediscovery once a document is this old.
+
+  **Uniform over cards, not over baskets.** Picking a basket and then a card
+  inside it would make a card in a two-card basket far likelier than one in a
+  basket of fifty, which for rediscovery is backwards — the crowded baskets are
+  where the forgotten things are. The draw is across the flattened list, from the
+  OS CSPRNG that already mints the API key rather than a new dependency.
+
 ## [0.130.0]
 
 ### Added

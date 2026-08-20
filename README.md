@@ -153,6 +153,8 @@ from the main cluster, and click or drag on it to jump there without zooming out
   another card is left where it is, and only an axis no card claimed is
   quantised, so both can be on at once. Resize quantises the resulting *corner*,
   not the size, so a card on the grid has both corners on it.
+- **Zoom to selection** — with cards selected, the button beside *Reset view*
+  frames them: zoom and pan so the selection's bounding box fills the canvas.
 - **Autosort** — **Tools → Autosort cards** first **auto-sizes** every card to fit
   its content, then lays the whole basket out in a tidy, non-overlapping grid.
 - **Fit to content** — right-click a card → **Fit to content** resizes just that card
