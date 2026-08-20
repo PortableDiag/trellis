@@ -6,6 +6,53 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.129.0]
+
+### Fixed
+- **A long checklist item wraps, and can be read.** Every item was laid out on
+  one line and clipped at the card's edge, so a working list — the shape this app
+  pushes you toward, since a dated checklist line has been a task in its own right
+  since v0.90.0 — showed only its first hundred-odd characters per row. The cause
+  is one layout call: both view branches paint the row inside `ui.horizontal(…)`,
+  which hands its children **unbounded width**, so `ui.label` and the link
+  `LayoutJob` had no width to wrap at. `job.wrap.max_width = ui.available_width()`
+  looked like it set one and did not.
+
+  The row now measures the card's usable width **outside** the horizontal layout,
+  subtracts whatever the row has already spent (checkbox, and the grip in edit
+  mode, taken from the cursor rather than from constants), and hands the text that
+  as an explicit wrap width — which is what the *edit* branch has always done for
+  its field. Link runs wrap with it, and the click test still asks the galley
+  which character was hit, so following a `[[#id]]` in a wrapped item lands on the
+  right run.
+
+- **Fit to content sizes a checklist for the layout it now really draws.**
+  `fit_size` counted one row per item, which was correct only while items did not
+  wrap. It decides the width first and measures each item at the width it wraps
+  to, the same order the `Text` branch uses. The list that prompted this — eight
+  items averaging ~250 characters — fitted to **258 px** before and **458 px**
+  now, with every item visible and no empty gap under the last one.
+
+  **This is v0.128.2's diff, and v0.128.2 was right about the arithmetic and
+  wrong about the renderer.** It shipped this sizing while items still rendered on
+  one line, so it sized for a wrap that never happened and was reverted the same
+  hour. It is correct now only because the renderer was fixed first. The two must
+  move together, and the test that pins the height says so — that assertion has
+  now been written in both directions, and both versions passed, because the
+  number it pins is meaningless without the renderer beside it.
+
+- **A checkbox sits beside the line it belongs to.** Making items wrap exposed
+  that the row was `ui.horizontal(…)`, which **centres** its children: the row's
+  height is settled from the checkbox before the text block grows past it, so the
+  box ended up floating above the item's first line. The row is `horizontal_top`
+  now. Invisible while every item was one line, wrong the moment they wrapped —
+  and reported from the screenshot taken to check the wrap, which is the second
+  time in this cycle that looking at the render found what reading the code did
+  not.
+
+  Verified the way the last two attempts were not: by fitting the real card in a
+  scratch instance and **looking at it**.
+
 ## [0.128.3]
 
 ### Fixed

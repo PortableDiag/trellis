@@ -2208,8 +2208,28 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
             if editing {
                 title_field(ui, card, actions);
             }
+            // **A row is a horizontal layout, and a horizontal layout hands its
+            // children unbounded width.** That is why an item never wrapped
+            // despite the view branch's own comment below saying it did:
+            // `ui.available_width()` *inside* the row is not the card's width, so
+            // `ui.label` and the link `LayoutJob` both laid out on one line and
+            // were clipped at the card's edge. Reading the comment instead of the
+            // pixels is what shipped v0.128.2 and had to be reverted the same
+            // hour.
+            //
+            // So measure the usable width out HERE, where it is still the card's,
+            // and hand the text an explicit wrap width — which is exactly what the
+            // edit branch already does for its field, and has done all along.
+            let content_w = ui.available_width();
+            let row_left = ui.max_rect().left();
             for (i, item) in items.iter().enumerate() {
-                ui.horizontal(|ui| {
+                // `horizontal_top`, not `horizontal`: the default centres the row's
+                // children, which was invisible while every item was one line and
+                // wrong the moment they wrapped — the row's height is decided from
+                // the checkbox before the text block grows past it, so the box ended
+                // up floating above the first line. Top alignment puts the checkbox
+                // beside the line it belongs to however many rows the item takes.
+                ui.horizontal_top(|ui| {
                     // Reorder (drag grip) and delete (×) are structural edits, so
                     // they only appear in edit mode — otherwise a stray drag or
                     // click in view mode could move or delete an item.
@@ -2283,15 +2303,27 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                         // Same treatment as a table cell: build the runs, colour
                         // and underline the link ones, and follow the run a click
                         // actually landed in.
+                        // Whatever the row has already spent (checkbox, and the
+                        // grip in edit mode) comes off the card's width; the rest
+                        // is what the text may wrap within. Taken from the cursor
+                        // rather than from constants so it stays right if the row
+                        // ever grows another control.
+                        let text_w = (content_w - (ui.cursor().min.x - row_left)).max(48.0);
                         let segments = crate::model::wikilink_segments(&item.text);
                         if !segments.iter().any(|(_, t)| t.is_some()) {
-                            ui.label(&item.text);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(text_w, 0.0),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    ui.label(&item.text);
+                                },
+                            );
                         } else {
                             let font = egui::TextStyle::Body.resolve(ui.style());
                             let base = ui.visuals().text_color();
                             let link_col = ui.visuals().hyperlink_color;
                             let mut job = egui::text::LayoutJob::default();
-                            job.wrap.max_width = ui.available_width();
+                            job.wrap.max_width = text_w;
                             for (text, target) in &segments {
                                 job.append(
                                     text,
@@ -2309,9 +2341,18 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
                                 );
                             }
                             let galley = ui.fonts(|f| f.layout_job(job));
-                            let resp = ui.add(
-                                egui::Label::new(galley.clone()).sense(egui::Sense::click()),
-                            );
+                            let resp = ui
+                                .allocate_ui_with_layout(
+                                    egui::vec2(text_w, 0.0),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(galley.clone())
+                                                .sense(egui::Sense::click()),
+                                        )
+                                    },
+                                )
+                                .inner;
                             if let Some(pos) = resp.interact_pointer_pos() {
                                 if resp.clicked() {
                                     // Ask the galley which character was hit, then

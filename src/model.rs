@@ -1098,25 +1098,43 @@ impl Card {
                 (longest * cw, lines * line_h)
             }
             CardKind::Checklist { items } => {
-                // **One row per item, because an item does not wrap.** Both view
-                // branches in `canvas.rs` paint inside `ui.horizontal(…)`, which
-                // gives its children unbounded width — so a long item renders on a
-                // single line and is CLIPPED at the card's edge rather than
-                // flowing onto a second row. Sizing for a wrap that never happens
-                // makes the card far too tall and leaves a large empty gap under
-                // the list, which is what v0.128.2 shipped and v0.128.3 undid.
+                // **An item wraps, so it is not one row.** The width the longest
+                // item wants is clamped to `MAX_W`, and anything longer then wraps
+                // — so counting one row per item computes a height for a layout
+                // the card never renders at, and the card comes out far too SHORT
+                // with its last items cut off. Eight items averaging ~250
+                // characters fitted to 258 px whatever they contained.
                 //
-                // The clipping is a real defect and is filed as one; when items
-                // are made to wrap, this must measure each item at the width it
-                // wraps to, the way the `Text` branch above already does.
+                // v0.128.2 made this change while the renderer still laid items
+                // out on one unwrapped line, so it sized for a wrap that did not
+                // happen and was reverted within the hour. It is correct now only
+                // because `canvas.rs` was fixed to wrap them first; the two must
+                // move together, which is what the render test below pins.
+                //
+                // Decide the width first, then measure each item at the width it
+                // will actually wrap to — the same order the `Text` branch uses.
+                const CHECK_W: f32 = 26.0; // checkbox
+                const CTRL_W: f32 = 44.0; // delete / grip controls, edit mode only
                 let longest =
                     items.iter().map(|i| i.text.chars().count()).max().unwrap_or(0) as f32;
-                // checkbox + text + delete/grip controls
-                let w = 26.0 + longest * char_w + 44.0;
-                let rows = items.len().max(1) as f32;
-                // one row per item (a touch taller than a text line) plus the
-                // "+ item" control's row
-                (w, rows * (line_h + 6.0) + 28.0)
+                let want_w = CHECK_W + longest * char_w + CTRL_W;
+                // The same clamp that is applied after this match, computed early
+                // so the wrap width is the real one.
+                let w = (want_w + PAD * 2.0).max(title_w).clamp(MIN_W, MAX_W);
+                // Measured at the VIEW-mode width: the controls `CTRL_W` covers
+                // only exist while the card is being edited, and fitting is about
+                // how the card reads the rest of the time.
+                let wrap_w = (w - PAD * 2.0 - CHECK_W).max(char_w);
+                let cols = (wrap_w / char_w).max(1.0);
+                let rows: f32 = items
+                    .iter()
+                    .map(|i| (i.text.chars().count() as f32 / cols).ceil().max(1.0))
+                    .sum::<f32>()
+                    .max(1.0);
+                // A little vertical padding per *item* rather than per row, plus
+                // the "+ item" control's own row.
+                let per_item_pad = items.len().max(1) as f32 * 6.0;
+                (want_w, rows * line_h + per_item_pad + 28.0)
             }
             CardKind::Table { table } => {
                 let cols = table.rows.first().map(|r| r.len()).unwrap_or(0);
@@ -7707,14 +7725,19 @@ mod tests {
         assert!(mapped.contains("<0:a cat>") && mapped.contains("<2:>"));
     }
 
-    /// **A checklist item does not wrap, so it is one row.** Both view branches
-    /// paint inside `ui.horizontal(…)`, which gives children unbounded width, so
-    /// a long item renders on one line and is *clipped* at the card edge. Sizing
-    /// for a wrap that never happens leaves a large empty gap under the list —
-    /// shipped as v0.128.2 and undone in v0.128.3, after looking at the rendered
-    /// card instead of at the comment above the renderer, which claims it wraps.
+    /// **A checklist item wraps, so it is not one row.** The width the longest
+    /// item wants is clamped to `MAX_W` and it then wraps, so counting one row
+    /// per item sizes the card for a layout it never renders at and cuts the last
+    /// items off: eight items averaging ~250 characters fitted to **258 px**
+    /// whatever they contained, which is the shape a working list actually has.
+    ///
+    /// This assertion was the exact inverse until v0.128.3, and both versions of
+    /// it passed — because the number they pin is only meaningful next to the
+    /// renderer. `canvas.rs` now hands each item an explicit wrap width instead of
+    /// laying it out inside a horizontal layout with unbounded width; if that is
+    /// ever undone, this test is the one that has to change with it.
     #[test]
-    fn fit_size_gives_a_checklist_one_row_per_item() {
+    fn fit_size_measures_a_checklist_item_at_the_width_it_wraps_to() {
         let mk = |text: &str| {
             let mut c = Card::new(
                 1,
@@ -7730,10 +7753,20 @@ mod tests {
         };
         let short = mk("short");
         let long = mk(&"x".repeat(300));
-        // Same item count, so the same height: length changes the WIDTH it wants,
-        // never the row count.
-        assert_eq!(short.y, long.y, "row count does not depend on item length");
+        // Same item count, so the difference is purely the wrapping.
+        assert!(
+            long.y > short.y * 2.0,
+            "eight wrapped items must be far taller than eight one-line items: {} vs {}",
+            long.y,
+            short.y
+        );
+        // A concrete floor as well as a ratio: the old one-row-per-item maths
+        // produced 257.6 px here regardless of item length, so a regression to it
+        // fails this outright.
+        assert!(long.y > 450.0, "room for the rows a 300-char item wraps to: {}", long.y);
         assert!(long.x > short.x, "a long item still widens the card");
+        // The width is clamped, which is precisely why the wrap happens at all.
+        assert!(long.x <= 900.0, "width stays clamped to MAX_W: {}", long.x);
     }
 
     #[test]
