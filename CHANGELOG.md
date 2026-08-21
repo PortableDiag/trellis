@@ -6,6 +6,78 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.142.0]
+
+### Added
+- **The other half of "a card id is a complete address."** Sixteen routes that
+  had only ever existed in the `/api/nodes/{id}/cards/{cid}/…` form now take a
+  bare card id:
+
+  ```
+  POST   /api/cards/{cid}/table    {op, …} | [{op, …}, …]
+  POST   /api/cards/{cid}/sketch   {op, …}
+  POST   /api/cards/{cid}/chart    {kind, …}       DELETE /api/cards/{cid}/chart
+  POST   /api/cards/{cid}/dock     {anchor}        DELETE /api/cards/{cid}/dock
+  POST   /api/cards/{cid}/group    {group}         DELETE /api/cards/{cid}/group
+  GET    /api/cards/{cid}/attachments              POST   …/attachments {name, data_base64}
+  GET    /api/cards/{cid}/attachments/{idx}        DELETE …/attachments/{idx}
+  POST   /api/cards/{cid}/images   {data_base64}
+  GET    /api/cards/{cid}/images/{idx}             DELETE …/images/{idx}
+  GET    /api/cards/{cid}/export?format=markdown|html|json
+  ```
+
+  **Their absence was never a decision.** v0.117.0 shipped eight card-addressed
+  writes, v0.118.0 added `append` and the single-item pair, and the kind-specific
+  ops were simply not reached — nothing in the changelog, the reference or any
+  session report records a reason. The gap then hardened into a *rule*: a
+  workspace card described the basket form as "still the only form for the
+  kind-specific ops", which reads as a design decision and was only ever a
+  description of where the work stopped. The symptom was
+  `POST /api/cards/{cid}/table` answering **404** while every other way of naming
+  that card worked, on a surface whose whole premise is that an id is an address.
+
+  **Still one implementation, not two.** Each new route parses its body and hands
+  a `CardOp` to the app loop, which resolves the id to a basket and rewrites it
+  into the ordinary node-addressed request — so the scope check, the mirror check,
+  the change log and the apply code are the audited ones. The table body's
+  shape-sniffing and the base64 decodes moved into shared helpers rather than
+  being copied, because those are precisely where a second copy would have
+  drifted, and a test asserts both forms read the same body.
+
+  **The scope check is pinned for every one of them**, at both ends: unresolved
+  they name no basket and are refused; resolved they are checked against the
+  basket the card actually lives in. A `CardOp` that forgets this is a new
+  unchecked end, which is how a confined token could carry its own card out of its
+  basket until v0.111.0.
+
+  Verified live against a scratch instance: **404 before, 200 after**, on all
+  sixteen — including a batch of table ops, an attachment round-tripped by bytes,
+  an image added and deleted on an image card, and a markdown export whose YAML
+  frontmatter carries the card's `status::` and `#tag`.
+
+### Fixed
+- **Both route-parity tests could be satisfied by a *different* route.** They
+  asked only that a doc line contain a route's literal segments *in order*, so
+  `api` … `cards` … `table` was answered by the **node**-addressed line — and all
+  sixteen routes above passed both tests before either surface mentioned them.
+  They now compare the **whole path** with ids blanked (`/api/cards/{}/table`),
+  and blank any `{…}` rather than a fixed list of placeholder names, because that
+  list was itself stale: the template routes' hole is `idx` in the matcher and
+  `{index}` in both doc surfaces.
+
+  Two things fell out of tightening it:
+
+  - **An elided path no longer counts.** The panel wrote `(unstick: DELETE
+    …/dock)`, which stands equally well for the node-addressed route and its new
+    twin. Six routes had only ever been listed that way; they are spelled out now.
+  - **The route scan was reading its own tests.** It keys on lines starting with
+    `(Method::`, which a test-case tuple also does — one carrying a JSON array in
+    its body argument parsed as the path `/{"op":"insert_row` and was reported
+    undocumented. A real arm's first segment is the URL's, and there are only
+    three of those.
+
+  448 → **450** tests.
+
 ## [0.141.2]
 
 ### Fixed

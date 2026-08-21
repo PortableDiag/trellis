@@ -542,10 +542,16 @@ line *is* a task.
 Every query surface hands out card ids (search, the agenda, claims, backlinks, the
 change log) and `[[#1391]]` *is* one, so `PATCH /api/cards/{cid}`,
 `POST /api/cards/{cid}/property`, `…/move`, `…/items/{item}/done` and
-`DELETE /api/cards/{cid}` all take the bare id. No looking the basket up first,
-and nobody has to quote a node number that never came up. They are the same
-operations as their `/nodes/{id}/cards/{cid}/…` twins — the app resolves the id
-and runs the existing path, including the scope check on a confined token.
+`DELETE /api/cards/{cid}` all take the bare id. Since v0.142.0 so do the
+kind-specific ops — `…/table`, `…/sketch`, `…/chart`, `…/dock`, `…/group`,
+`…/images`, `…/attachments` and `…/export` — which had been basket-only for no
+recorded reason, so editing a table someone had just pasted the id of still meant
+a lookup. No looking the basket up first, and nobody has to quote a node number
+that never came up. They are the same operations as their
+`/nodes/{id}/cards/{cid}/…` twins — the app resolves the id and runs the existing
+path, including the scope check on a confined token. Only the **batch** routes
+stay basket-addressed, because a batch is validated against one basket and a list
+of ids can span several.
 
 **Anything you can do to a card, you can do to a list of them.** Create
 (`POST …/cards` with an array), move, set a property, take a property back off

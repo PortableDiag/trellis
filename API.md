@@ -336,6 +336,25 @@ POST   /api/cards/{cid}/move               {node, pos?} or {before|after|index|t
 POST   /api/cards/{cid}/items/{item}/done  {done}
 POST   /api/cards/{cid}/items/{item}/property   {key, value}
 DELETE /api/cards/{cid}/items/{item}/property?key=due
+POST   /api/cards/{cid}/append             {text, at?, separator?}
+POST   /api/cards/{cid}/items              {text, done?, at?}
+DELETE /api/cards/{cid}/items/{item}
+POST   /api/cards/{cid}/table              {op, …} or [{op, …}, …]
+POST   /api/cards/{cid}/sketch             {op, …}
+POST   /api/cards/{cid}/chart              {kind, …}
+DELETE /api/cards/{cid}/chart
+POST   /api/cards/{cid}/dock               {anchor}
+DELETE /api/cards/{cid}/dock
+POST   /api/cards/{cid}/group              {group}
+DELETE /api/cards/{cid}/group
+GET    /api/cards/{cid}/attachments
+POST   /api/cards/{cid}/attachments        {name, data_base64}
+GET    /api/cards/{cid}/attachments/{idx}
+DELETE /api/cards/{cid}/attachments/{idx}
+POST   /api/cards/{cid}/images             {data_base64, name?}
+GET    /api/cards/{cid}/images/{idx}
+DELETE /api/cards/{cid}/images/{idx}
+GET    /api/cards/{cid}/export?format=markdown|html|json
   → exactly what the /nodes/{id}/cards/{cid}/… twin returns
   | 404 (no card with that id in this document)
   | 403 (a token confined to a basket, for **any** id it cannot reach)
@@ -358,6 +377,17 @@ DELETE /api/cards/{cid}/items/{item}/property?key=due
   **A confined token gets 403 for an id it cannot reach, whether or not that id
   exists.** Distinguishing "no such card" from "a card in someone else's basket"
   would make this route a way to probe the rest of the document one id at a time.
+
+  **The kind-specific ops joined them in v0.142.0, and their absence was never a
+  decision.** v0.117.0 shipped eight routes, v0.118.0 added `append` and the
+  single-item pair, and `table`, `sketch`, `chart`, `dock`, `group`, `images`,
+  `attachments` and `export` were simply not reached — nothing anywhere recorded a
+  reason. The gap then hardened into a *rule*, because a workspace card described
+  the basket form as "still the only form for the kind-specific ops", which reads
+  as a design decision and was only ever a description of where the work stopped.
+  The symptom was `POST /api/cards/{cid}/table` answering **404** while every other
+  way of naming that card worked. Each of these is `{node, card, …}` the moment the
+  id resolves; none of them ever needed the caller to supply the basket.
   With the instance key a missing id is an ordinary 404.
 
   The batch routes stay basket-addressed (`/nodes/{id}/cards/…`): a batch is
@@ -2265,6 +2295,28 @@ curl -s -H "X-API-Key: $KEY" -d "{\"node\":$ARCHIVE}" $API/cards/1391/move
 
 No `GET /api/cards/1391` first to learn the basket, and nothing in the reply
 mentions a node number the person you are working with never used.
+
+**Since v0.142.0 that includes what the card *is*, not only what it says.** The
+kind-specific ops take a bare id too, so a table someone pasted the id of is
+editable without a lookup, and a card comes out as a note file the same way:
+
+```sh
+# Two table edits, applied in order — the batch form works by id as well.
+curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '[{"op":"insert_row","at":1},{"op":"set_cell","row":1,"col":0,"text":"new"}]' \
+  $API/cards/1391/table
+
+# Attach the spec to the task card about it — the bytes ride in the document.
+curl -s -H "X-API-Key: $KEY" \
+  -d "{\"name\":\"spec.md\",\"data_base64\":\"$(base64 -w0 spec.md)\"}" \
+  $API/cards/1391/attachments
+
+# And one card out as a note file, frontmatter written from its properties.
+curl -s -H "X-API-Key: $KEY" "$API/cards/1391/export?format=markdown"
+```
+
+Use the table op surface rather than rebuilding `rows`: a wholesale rewrite resets
+every column width, which is a deliberate layout thrown away.
 
 ### Closing out a list of tasks the agenda handed you
 

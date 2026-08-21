@@ -7903,6 +7903,16 @@ impl TrellisApp {
                                 ),
                             ),
                             (
+                                "Edit a table, or export a card, by id alone (v0.142.0)",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                     -d '[{{\"op\":\"insert_row\",\"at\":1}},{{\"op\":\"set_cell\",\"row\":1,\"col\":0,\"text\":\"new\"}}]' \\\n  \
+                                     {a}/cards/1391/table
+                                     # one card as a note file, frontmatter and all:
+                                     curl -H 'X-API-Key: {k}' '{a}/cards/1391/export?format=markdown'"
+                                ),
+                            ),
+                            (
                                 "Archive a basket's finished cards in one call (ids survive)",
                                 format!(
                                     "curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
@@ -7956,10 +7966,20 @@ impl TrellisApp {
                             "PATCH  /api/cards/{cid}   ·  DELETE /api/cards/{cid}          (a card id is a complete address for WRITES too)",
                             "POST   /api/cards/{cid}/property {key,value}  ·  DELETE …/property?key=due",
                             "POST   /api/cards/{cid}/move {node,pos?} | {before|after|index|to}",
-                            "POST   /api/cards/{cid}/items/{item}/done {done}  ·  …/items/{item}/property (POST/DELETE)",
+                            "POST   /api/cards/{cid}/items/{item}/done {done}",
+                            "POST   /api/cards/{cid}/items/{item}/property {key,value}  ·  DELETE /api/cards/{cid}/items/{item}/property?key=due",
                             "POST   /api/cards/{cid}/append {text, at?, separator?}        (add to a shared card without sending the body back)",
-                            "POST   /api/cards/{cid}/items  {text, done?, at?}  ·  DELETE …/items/{item}   (one line; ids of the rest stay put)",
-                            "         same operations as the /nodes/{id}/cards/{cid}/… twins — no need to look the basket up first",
+                            "POST   /api/cards/{cid}/items  {text, done?, at?}  ·  DELETE /api/cards/{cid}/items/{item}   (one line; ids of the rest stay put)",
+                            "POST   /api/cards/{cid}/table {op, …}   ·  /api/cards/{cid}/sketch {op, …}   (same bodies as the node-addressed twins)",
+                            "POST   /api/cards/{cid}/chart {kind, …}  ·  DELETE /api/cards/{cid}/chart",
+                            "POST   /api/cards/{cid}/dock {anchor}    ·  DELETE /api/cards/{cid}/dock",
+                            "POST   /api/cards/{cid}/group {group}    ·  DELETE /api/cards/{cid}/group",
+                            "GET    /api/cards/{cid}/attachments  ·  POST /api/cards/{cid}/attachments {name, data_base64}",
+                            "GET    /api/cards/{cid}/attachments/{idx}   ·  DELETE /api/cards/{cid}/attachments/{idx}",
+                            "POST   /api/cards/{cid}/images {data_base64}  ·  GET /api/cards/{cid}/images/{idx}  ·  DELETE /api/cards/{cid}/images/{idx}",
+                            "GET    /api/cards/{cid}/export?format=markdown|html|json     (ONE card as a note file; markdown writes YAML frontmatter)",
+                            "         the SAME operations as the /nodes/{id}/cards/{cid}/… twins — no need to look the basket up first.",
+                            "         Only the BATCH routes stay basket-addressed: a batch is validated against one basket, and an id list can span several.",
                             "GET    /api/groups/{gid}                  (find a group from its id alone → {node, node_path, group})",
                             "GET    /api/groups/{gid}/link             (canonical trellis:// link + the [[#g…]] form)",
                             "GET    /api/groups/{gid}/backlinks        (cards whose [[#g…]] links point at this group)",
@@ -7986,17 +8006,19 @@ impl TrellisApp {
                             "POST   /api/cards/{cid}/desktop {pos?}   (send a card to the desktop; DELETE recalls it)",
                             "POST   /api/nodes/{id}/cards/{cid}/property {key, value}   (set key:: value)",
                             "DELETE /api/nodes/{id}/cards/{cid}/property?key=due        (remove the line; not the same as value:\"\")",
-                            "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE …/dock)",
-                            "POST   /api/nodes/{id}/cards/{cid}/group {group}           (remove: DELETE …/group)",
+                            "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE /api/nodes/{id}/cards/{cid}/dock)",
+                            "POST   /api/nodes/{id}/cards/{cid}/group {group}           (remove: DELETE /api/nodes/{id}/cards/{cid}/group)",
                             "POST   /api/nodes/{id}/cards/{cid}/table {op, …}           (set_cell / insert_row / set_col_width / autofit_cols {col?} …)",
                             "         …or send an ARRAY of ops, applied in order; a failure names which one",
                             "         set_rules {rules:[{col?,when,value,bg?,fg?}]}  colour cells by value (gt/lt/ge/le/eq/ne/contains/empty)",
-                            "POST   /api/nodes/{id}/cards/{cid}/chart {kind, label_col?, value_cols?, show_table?}  (bar|line|scatter|pie; DELETE …/chart = plain grid)",
+                            "POST   /api/nodes/{id}/cards/{cid}/chart {kind, label_col?, value_cols?, show_table?}  (bar|line|scatter|pie; DELETE /api/nodes/{id}/cards/{cid}/chart = plain grid)",
                             "POST   /api/nodes/{id}/cards/{cid}/sketch {op, …}          (add_stroke / undo / clear)",
-                            "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}    (GET / DELETE …/images/{idx})",
+                            "POST   /api/nodes/{id}/cards/{cid}/images {data_base64}",
+                            "GET    /api/nodes/{id}/cards/{cid}/images/{idx}  ·  DELETE /api/nodes/{id}/cards/{cid}/images/{idx}",
                             "  NOTE  `body` is REFUSED (400) on checklist/table/image/sketch — their items/rows/bytes are the content, and text in their body is never read as a property. Send `items` or `rows`. Judged on the kind the card WILL be, so {kind:\"text\", body:…} still converts.",
                             "GET    /api/nodes/{id}/cards/{cid}/attachments             (files carried by ANY card — the bytes, not a path; names + sizes only)",
-                            "POST   /api/nodes/{id}/cards/{cid}/attachments {name, data_base64}  ·  GET / DELETE …/attachments/{idx}   (the document is written WHOLE on every save, so size costs every autosave, snapshot and backup — attachment_bytes on /api/instance is the running total)",
+                            "POST   /api/nodes/{id}/cards/{cid}/attachments {name, data_base64}   (the document is written WHOLE on every save, so size costs every autosave, snapshot and backup — attachment_bytes on /api/instance is the running total)",
+                            "GET    /api/nodes/{id}/cards/{cid}/attachments/{idx}  ·  DELETE /api/nodes/{id}/cards/{cid}/attachments/{idx}",
                             "POST   /api/nodes/{id}/cards/{cid}/append {text, at?, separator?}   (add to a card without sending its body back)",
                             "GET    /api/nodes/{id}/cards/{cid}/export?format=markdown|html|json  (ONE card as a note file — markdown writes YAML frontmatter from its properties and tags, so it lands in Obsidian intact)",
                             "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",

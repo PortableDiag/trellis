@@ -429,6 +429,25 @@ pub enum CardOp {
     Append(AppendInput),
     AddItem(AddItemInput),
     DeleteItem { item: u64 },
+    // The kind-specific ops (v0.142.0). They were left out of v0.117.0 for no
+    // reason anyone wrote down, and *Project facts* then recorded the gap as if
+    // it were a rule — so `POST /api/cards/{cid}/table` answered 404 while every
+    // other way of naming that card worked. Nothing here needs the caller to
+    // supply the basket: each one is `{node, card, …}` once the id resolves.
+    Dock { anchor: u64 },
+    Undock,
+    SetGroup(Option<GroupId>),
+    Table(Vec<TableOpInput>),
+    Sketch(SketchOpInput),
+    Chart(Option<ChartInput>),
+    Export { format: String },
+    ListAttachments,
+    AddAttachment { name: String, bytes: Vec<u8> },
+    GetAttachment { index: usize },
+    RemoveAttachment { index: usize },
+    AddImage { name: String, bytes: Vec<u8> },
+    GetImage { index: usize },
+    RemoveImage { index: usize },
 }
 
 /// Turn a card-addressed request into the node-addressed one it stands for.
@@ -456,7 +475,70 @@ pub fn resolve_by_card(node: NodeId, card: u64, op: CardOp) -> ApiRequest {
         CardOp::Append(input) => ApiRequest::AppendCard { node, card, input },
         CardOp::AddItem(input) => ApiRequest::AddItem { node, card, input },
         CardOp::DeleteItem { item } => ApiRequest::DeleteItem { node, card, item },
+        CardOp::Dock { anchor } => ApiRequest::DockCard { node, card, anchor },
+        CardOp::Undock => ApiRequest::DetachCard { node, card },
+        CardOp::SetGroup(group) => ApiRequest::SetCardGroup { node, card, group },
+        CardOp::Table(ops) => ApiRequest::TableOp { node, card, ops },
+        CardOp::Sketch(op) => ApiRequest::SketchOp { node, card, op },
+        CardOp::Chart(spec) => ApiRequest::SetChart { node, card, spec },
+        CardOp::Export { format } => ApiRequest::ExportCard { node, card, format },
+        CardOp::ListAttachments => ApiRequest::ListAttachments { node, card },
+        CardOp::AddAttachment { name, bytes } => {
+            ApiRequest::AddAttachment { node, card, name, bytes }
+        }
+        CardOp::GetAttachment { index } => ApiRequest::GetAttachment { node, card, index },
+        CardOp::RemoveAttachment { index } => ApiRequest::RemoveAttachment { node, card, index },
+        CardOp::AddImage { name, bytes } => ApiRequest::AddImage { node, card, name, bytes },
+        CardOp::GetImage { index } => ApiRequest::GetImage { node, card, index },
+        CardOp::RemoveImage { index } => ApiRequest::RemoveImage { node, card, index },
     }
+}
+
+/// Read a `[…]`-or-`{…}` table body into the ops it carries.
+///
+/// Parsed by *shape* rather than through an untagged enum: untagged reports only
+/// *"data did not match any variant"*, which hides the real problem (a bad field,
+/// a wrong type) behind a message naming neither. Pick the branch from the first
+/// character and let serde's own error through.
+///
+/// Shared by the node- and card-addressed arms, so the two cannot disagree about
+/// what a table body is.
+fn table_ops(body: &str) -> Result<Vec<TableOpInput>, (u16, String)> {
+    Ok(if body.trim_start().starts_with('[') {
+        TableOpBody::Many(parse(body)?)
+    } else {
+        TableOpBody::One(parse(body)?)
+    }
+    .into_vec())
+}
+
+/// `{name, data_base64}` for an attachment, decoded. An unnamed file is refused:
+/// the name is what a *Save as…* offers back, so there is nothing useful to store
+/// without one.
+fn attachment_input(body: &str) -> Result<(String, Vec<u8>), (u16, String)> {
+    let i: AddAttachmentInput = parse(body)?;
+    if i.name.trim().is_empty() {
+        return Err((400, "an attachment needs a name".into()));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(i.data_base64.trim())
+        .map_err(|e| (400, format!("invalid base64 file data: {e}")))?;
+    Ok((i.name, bytes))
+}
+
+/// `{name?, data_base64}` for an inline image, decoded. Unlike an attachment the
+/// name is optional — an image is shown, not offered back as a file.
+fn image_input(body: &str) -> Result<(String, Vec<u8>), (u16, String)> {
+    let i: AddImageInput = parse(body)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(i.data_base64.trim())
+        .map_err(|e| (400, format!("invalid base64 image data: {e}")))?;
+    Ok((i.name, bytes))
+}
+
+/// A `{idx}` path segment — an attachment or image position, not an id.
+fn index_seg(idx: &str) -> Result<usize, (u16, String)> {
+    idx.parse::<usize>().map_err(|_| (400, format!("bad index: {idx}")))
 }
 
 /// `POST /api/nodes/{id}/cards/move` — move a list of cards to another basket.
@@ -1914,6 +1996,68 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "cards", cid, "move"]) => {
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Move(parse(body)?) })
         }
+        // The kind-specific ops by card id (v0.142.0). Each parses exactly as its
+        // node-addressed twin does — the same helper, not a second copy — and the
+        // app loop resolves the basket before anything is applied.
+        (Method::Post, ["api", "cards", cid, "dock"]) => {
+            let i: DockInput = parse(body)?;
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Dock { anchor: i.anchor } })
+        }
+        (Method::Delete, ["api", "cards", cid, "dock"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Undock })
+        }
+        (Method::Post, ["api", "cards", cid, "group"]) => {
+            let i: GroupCardInput = parse(body)?;
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::SetGroup(Some(i.group)) })
+        }
+        (Method::Delete, ["api", "cards", cid, "group"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::SetGroup(None) })
+        }
+        (Method::Post, ["api", "cards", cid, "table"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Table(table_ops(body)?) })
+        }
+        (Method::Post, ["api", "cards", cid, "sketch"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Sketch(parse(body)?) })
+        }
+        (Method::Post, ["api", "cards", cid, "chart"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Chart(Some(parse(body)?)) })
+        }
+        (Method::Delete, ["api", "cards", cid, "chart"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Chart(None) })
+        }
+        (Method::Get, ["api", "cards", cid, "export"]) => Ok(ApiRequest::ByCard {
+            card: pid(cid)?,
+            op: CardOp::Export {
+                format: query_get(query, "format").unwrap_or_else(|| "markdown".into()),
+            },
+        }),
+        (Method::Get, ["api", "cards", cid, "attachments"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::ListAttachments })
+        }
+        (Method::Post, ["api", "cards", cid, "attachments"]) => {
+            let (name, bytes) = attachment_input(body)?;
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::AddAttachment { name, bytes } })
+        }
+        (Method::Get, ["api", "cards", cid, "attachments", idx]) => Ok(ApiRequest::ByCard {
+            card: pid(cid)?,
+            op: CardOp::GetAttachment { index: index_seg(idx)? },
+        }),
+        (Method::Delete, ["api", "cards", cid, "attachments", idx]) => Ok(ApiRequest::ByCard {
+            card: pid(cid)?,
+            op: CardOp::RemoveAttachment { index: index_seg(idx)? },
+        }),
+        (Method::Post, ["api", "cards", cid, "images"]) => {
+            let (name, bytes) = image_input(body)?;
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::AddImage { name, bytes } })
+        }
+        (Method::Get, ["api", "cards", cid, "images", idx]) => Ok(ApiRequest::ByCard {
+            card: pid(cid)?,
+            op: CardOp::GetImage { index: index_seg(idx)? },
+        }),
+        (Method::Delete, ["api", "cards", cid, "images", idx]) => Ok(ApiRequest::ByCard {
+            card: pid(cid)?,
+            op: CardOp::RemoveImage { index: index_seg(idx)? },
+        }),
         (Method::Post, ["api", "cards", cid, "items", iid, "done"]) => {
             let i: DoneInput = parse(body)?;
             Ok(ApiRequest::ByCard {
@@ -2078,17 +2222,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::SetChart { node, card, spec: None })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "table"]) => {
-            // Parsed by shape rather than through an untagged enum: untagged
-            // reports only "data did not match any variant", which hides the
-            // real problem (a bad field, a wrong type) behind a message naming
-            // neither. Pick the branch from the first character and let serde's
-            // own error through.
-            let op: TableOpBody = if body.trim_start().starts_with('[') {
-                TableOpBody::Many(parse(body)?)
-            } else {
-                TableOpBody::One(parse(body)?)
-            };
-            Ok(ApiRequest::TableOp { node: pid(nid)?, card: pid(cid)?, ops: op.into_vec() })
+            Ok(ApiRequest::TableOp { node: pid(nid)?, card: pid(cid)?, ops: table_ops(body)? })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "sketch"]) => {
             let op: SketchOpInput = parse(body)?;
@@ -2103,37 +2237,36 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::ListAttachments { node: pid(nid)?, card: pid(cid)? })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "attachments"]) => {
-            let i: AddAttachmentInput = parse(body)?;
-            if i.name.trim().is_empty() {
-                return Err((400, "an attachment needs a name".into()));
-            }
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(i.data_base64.trim())
-                .map_err(|e| (400, format!("invalid base64 file data: {e}")))?;
-            Ok(ApiRequest::AddAttachment { node: pid(nid)?, card: pid(cid)?, name: i.name, bytes })
+            let (name, bytes) = attachment_input(body)?;
+            Ok(ApiRequest::AddAttachment { node: pid(nid)?, card: pid(cid)?, name, bytes })
         }
         (Method::Get, ["api", "nodes", nid, "cards", cid, "attachments", idx]) => {
-            let index = idx.parse::<usize>().map_err(|_| (400, format!("bad index: {idx}")))?;
-            Ok(ApiRequest::GetAttachment { node: pid(nid)?, card: pid(cid)?, index })
+            Ok(ApiRequest::GetAttachment {
+                node: pid(nid)?,
+                card: pid(cid)?,
+                index: index_seg(idx)?,
+            })
         }
         (Method::Delete, ["api", "nodes", nid, "cards", cid, "attachments", idx]) => {
-            let index = idx.parse::<usize>().map_err(|_| (400, format!("bad index: {idx}")))?;
-            Ok(ApiRequest::RemoveAttachment { node: pid(nid)?, card: pid(cid)?, index })
+            Ok(ApiRequest::RemoveAttachment {
+                node: pid(nid)?,
+                card: pid(cid)?,
+                index: index_seg(idx)?,
+            })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "images"]) => {
-            let i: AddImageInput = parse(body)?;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(i.data_base64.trim())
-                .map_err(|e| (400, format!("invalid base64 image data: {e}")))?;
-            Ok(ApiRequest::AddImage { node: pid(nid)?, card: pid(cid)?, name: i.name, bytes })
+            let (name, bytes) = image_input(body)?;
+            Ok(ApiRequest::AddImage { node: pid(nid)?, card: pid(cid)?, name, bytes })
         }
         (Method::Delete, ["api", "nodes", nid, "cards", cid, "images", idx]) => {
-            let index = idx.parse::<usize>().map_err(|_| (400, format!("bad index: {idx}")))?;
-            Ok(ApiRequest::RemoveImage { node: pid(nid)?, card: pid(cid)?, index })
+            Ok(ApiRequest::RemoveImage {
+                node: pid(nid)?,
+                card: pid(cid)?,
+                index: index_seg(idx)?,
+            })
         }
         (Method::Get, ["api", "nodes", nid, "cards", cid, "images", idx]) => {
-            let index = idx.parse::<usize>().map_err(|_| (400, format!("bad index: {idx}")))?;
-            Ok(ApiRequest::GetImage { node: pid(nid)?, card: pid(cid)?, index })
+            Ok(ApiRequest::GetImage { node: pid(nid)?, card: pid(cid)?, index: index_seg(idx)? })
         }
         (Method::Get, ["api", "nodes", id, "groups"]) => Ok(ApiRequest::ListGroups(pid(id)?)),
         (Method::Post, ["api", "nodes", id, "groups"]) => {
@@ -6864,6 +6997,29 @@ mod tests {
             (Method::Post, "/api/cards/9/items/4/done", "", r#"{"done":true}"#),
             (Method::Post, "/api/cards/9/items/4/property", "", r#"{"key":"due","value":"2026-09-01"}"#),
             (Method::Delete, "/api/cards/9/items/4/property", "key=due", ""),
+            (Method::Post, "/api/cards/9/append", "", r#"{"text":"more"}"#),
+            (Method::Post, "/api/cards/9/items", "", r#"{"text":"a line"}"#),
+            (Method::Delete, "/api/cards/9/items/4", "", ""),
+            // The kind-specific ops (v0.142.0). Each was a 404 until it was
+            // routed, because v0.117.0 stopped short and a workspace card then
+            // wrote the gap down as though it were a rule.
+            (Method::Post, "/api/cards/9/table", "", r#"{"op":"set_cell","row":0,"col":0,"text":"x"}"#),
+            (Method::Post, "/api/cards/9/table", "", r#"[{"op":"insert_row","at":1}]"#),
+            (Method::Post, "/api/cards/9/sketch", "", r#"{"op":"clear"}"#),
+            (Method::Post, "/api/cards/9/chart", "", r#"{"kind":"bar"}"#),
+            (Method::Delete, "/api/cards/9/chart", "", ""),
+            (Method::Post, "/api/cards/9/dock", "", r#"{"anchor":8}"#),
+            (Method::Delete, "/api/cards/9/dock", "", ""),
+            (Method::Post, "/api/cards/9/group", "", r#"{"group":146}"#),
+            (Method::Delete, "/api/cards/9/group", "", ""),
+            (Method::Get, "/api/cards/9/attachments", "", ""),
+            (Method::Post, "/api/cards/9/attachments", "", r#"{"name":"a.txt","data_base64":"aGk="}"#),
+            (Method::Get, "/api/cards/9/attachments/0", "", ""),
+            (Method::Delete, "/api/cards/9/attachments/0", "", ""),
+            (Method::Post, "/api/cards/9/images", "", r#"{"data_base64":"aGk="}"#),
+            (Method::Get, "/api/cards/9/images/0", "", ""),
+            (Method::Delete, "/api/cards/9/images/0", "", ""),
+            (Method::Get, "/api/cards/9/export", "format=markdown", ""),
         ];
         for (m, path, q, body) in cases {
             match route(&m, path, q, body) {
@@ -6934,6 +7090,94 @@ mod tests {
             resolve_by_card(3, 9, CardOp::ClearItemProperty { item: 4, key: "due".into() }),
             ApiRequest::ClearItemProperty { node: 3, card: 9, item: 4, .. }
         ));
+
+        // The kind-specific ops (v0.142.0), same rule: one twin each, and the
+        // basket comes from the resolve rather than from the caller.
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::Dock { anchor: 8 }),
+            ApiRequest::DockCard { node: 3, card: 9, anchor: 8 }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::Undock),
+            ApiRequest::DetachCard { node: 3, card: 9 }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::SetGroup(Some(146))),
+            ApiRequest::SetCardGroup { node: 3, card: 9, group: Some(146) }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::SetGroup(None)),
+            ApiRequest::SetCardGroup { node: 3, card: 9, group: None }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::Table(Vec::new())),
+            ApiRequest::TableOp { node: 3, card: 9, .. }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::Sketch(serde_json::from_str(r#"{"op":"clear"}"#).unwrap())),
+            ApiRequest::SketchOp { node: 3, card: 9, .. }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::Chart(None)),
+            ApiRequest::SetChart { node: 3, card: 9, spec: None }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::Export { format: "markdown".into() }),
+            ApiRequest::ExportCard { node: 3, card: 9, .. }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::ListAttachments),
+            ApiRequest::ListAttachments { node: 3, card: 9 }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::AddAttachment { name: "a".into(), bytes: vec![1] }),
+            ApiRequest::AddAttachment { node: 3, card: 9, .. }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::GetAttachment { index: 0 }),
+            ApiRequest::GetAttachment { node: 3, card: 9, index: 0 }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::RemoveAttachment { index: 0 }),
+            ApiRequest::RemoveAttachment { node: 3, card: 9, index: 0 }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::AddImage { name: String::new(), bytes: vec![1] }),
+            ApiRequest::AddImage { node: 3, card: 9, .. }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::GetImage { index: 0 }),
+            ApiRequest::GetImage { node: 3, card: 9, index: 0 }
+        ));
+        assert!(matches!(
+            resolve_by_card(3, 9, CardOp::RemoveImage { index: 0 }),
+            ApiRequest::RemoveImage { node: 3, card: 9, index: 0 }
+        ));
+    }
+
+    /// **A card-addressed kind-specific op parses exactly as its twin does.**
+    ///
+    /// The whole claim of the rewrite is *one implementation*. Two route arms that
+    /// each parse their own body is where that stops being true — the table body's
+    /// shape-sniffing and the base64 decode are the two places a second copy would
+    /// have drifted, so both go through one helper and this pins the result.
+    #[test]
+    fn a_card_addressed_op_parses_the_same_body_as_its_twin() {
+        let body = r#"[{"op":"insert_row","at":1},{"op":"set_cell","row":1,"col":0,"text":"x"}]"#;
+        let by_node = route(&Method::Post, "/api/nodes/3/cards/9/table", "", body).unwrap();
+        let by_card = route(&Method::Post, "/api/cards/9/table", "", body).unwrap();
+        let ApiRequest::ByCard { card, op } = by_card else { panic!("not card-addressed") };
+        match (by_node, resolve_by_card(3, card, op)) {
+            (
+                ApiRequest::TableOp { node: 3, card: 9, ops: a },
+                ApiRequest::TableOp { node: 3, card: 9, ops: b },
+            ) => assert_eq!(a.len(), b.len(), "both forms read the same batch of ops"),
+            _ => panic!("the two forms did not land on the same request"),
+        }
+        // A bad body is refused identically, rather than one form being lenient.
+        assert!(route(&Method::Post, "/api/cards/9/attachments", "", r#"{"name":" ","data_base64":"aGk="}"#).is_err());
+        assert!(route(&Method::Post, "/api/nodes/3/cards/9/attachments", "", r#"{"name":" ","data_base64":"aGk="}"#).is_err());
+        assert!(route(&Method::Post, "/api/cards/9/images", "", r#"{"data_base64":"not base64!!"}"#).is_err());
     }
 
     /// **The security property, pinned from both ends.**
@@ -6950,6 +7194,43 @@ mod tests {
         assert!(!is_scope_neutral(&req), "and never waved through as an orientation read");
         // Resolved, it is checked against the basket it landed in.
         assert_eq!(target_node(&resolve_by_card(42, 9, CardOp::Delete)), Some(42));
+
+        // **Every kind-specific op added in v0.142.0, both ends.** These are the
+        // ops that write a card's actual content — cells, strokes, files, image
+        // bytes — so an unchecked one would be worth more to an escaping token
+        // than the delete above. A new `CardOp` that forgets this is a new
+        // unchecked end, which is exactly how the v0.111.0 escape happened.
+        let ops = || {
+            vec![
+                CardOp::Dock { anchor: 8 },
+                CardOp::Undock,
+                CardOp::SetGroup(Some(146)),
+                CardOp::SetGroup(None),
+                CardOp::Table(Vec::new()),
+                CardOp::Sketch(serde_json::from_str(r#"{"op":"clear"}"#).unwrap()),
+                CardOp::Chart(None),
+                CardOp::Export { format: "markdown".into() },
+                CardOp::ListAttachments,
+                CardOp::AddAttachment { name: "a".into(), bytes: vec![1] },
+                CardOp::GetAttachment { index: 0 },
+                CardOp::RemoveAttachment { index: 0 },
+                CardOp::AddImage { name: String::new(), bytes: vec![1] },
+                CardOp::GetImage { index: 0 },
+                CardOp::RemoveImage { index: 0 },
+            ]
+        };
+        for op in ops() {
+            let unresolved = ApiRequest::ByCard { card: 9, op };
+            assert_eq!(target_node(&unresolved), None, "unresolved must name no basket");
+            assert!(!is_scope_neutral(&unresolved), "and never be waved through");
+        }
+        for op in ops() {
+            assert_eq!(
+                target_node(&resolve_by_card(42, 9, op)),
+                Some(42),
+                "resolved must be checked against the basket the card lives in"
+            );
+        }
     }
 
     /// And if the rewrite is ever skipped, `process` refuses rather than applying
@@ -7468,21 +7749,10 @@ mod tests {
     fn every_route_is_documented_in_the_reference() {
         let mut missing = Vec::new();
         let routes = routes_in_matcher();
+        let doc = blank_placeholders(API_DOC);
         for (method, segs) in &routes {
-            let literals = literal_segments(segs);
-            let documented = API_DOC.lines().any(|l| {
-                let Some(after) = l.to_uppercase().find(method) else { return false };
-                let mut cursor = after;
-                for lit in &literals {
-                    match l[cursor..].find(lit.as_str()) {
-                        Some(at) => cursor += at + lit.len(),
-                        None => return false,
-                    }
-                }
-                true
-            });
-            if !documented {
-                missing.push(format!("{method} /{}", segs.join("/")));
+            if !doc.contains(&canonical_path(segs)) {
+                missing.push(format!("{method} {}", canonical_path(segs)));
             }
         }
         assert!(
@@ -7522,23 +7792,18 @@ mod tests {
             .find("Full reference: API.md")
             .map(|at| start + at)
             .expect("the panel's closing line");
-        let panel = &APP[start..end];
+        let panel = blank_placeholders(&APP[start..end]);
 
         let mut missing = Vec::new();
         for (method, segs) in routes_in_matcher() {
-            let literals = literal_segments(&segs);
-            let listed = panel.lines().any(|l| {
-                let mut cursor = 0;
-                for lit in &literals {
-                    match l[cursor..].find(lit.as_str()) {
-                        Some(at) => cursor += at + lit.len(),
-                        None => return false,
-                    }
-                }
-                true
-            });
-            if !listed {
-                missing.push(format!("{method} /{}", segs.join("/")));
+            let path = canonical_path(&segs);
+            // **An elided path does not count.** The panel writes `(unstick:
+            // DELETE …/dock)`, and `…/dock` stands equally well for the
+            // node-addressed route and its card-addressed twin — so accepting the
+            // ellipsis lets one route vouch for another, which is the hole this
+            // test was just tightened to close. The full path, or it is not listed.
+            if !panel.contains(&path) {
+                missing.push(format!("{method} {path}"));
             }
         }
         assert!(
@@ -7571,16 +7836,70 @@ mod tests {
             if segs.is_empty() {
                 continue;
             }
+            // **A route arm, not a test case.** The scan keys on `(Method::`, and
+            // a test tuple begins the same way — one of them carries a JSON array
+            // in its body argument, which parsed as the path `/{"op":"insert_row`
+            // and was duly reported undocumented. A real arm's first segment is
+            // the URL's first segment, and there are only three of those.
+            if !matches!(segs[0].as_str(), "api" | "open" | "go") {
+                continue;
+            }
             routes.push((method.trim().to_uppercase(), segs));
         }
         routes
     }
 
-    /// Literal path segments only: an id is spelled `{id}`/`{cid}`/… in the docs
-    /// and `id`/`cid`/… in the matcher, so compare what is fixed.
-    fn literal_segments(segs: &[String]) -> Vec<&String> {
-        segs.iter()
-            .filter(|s| !matches!(s.as_str(), "id" | "cid" | "nid" | "gid" | "iid" | "idx"))
-            .collect()
+    /// A route's path with every id position blanked: `/api/cards/{}/table`.
+    ///
+    /// **The whole path, not its literals.** Both parity tests used to ask only
+    /// that a line contain `api`, `cards`, `table` *in that order*, which the
+    /// **node**-addressed twin satisfies — so every one of the sixteen
+    /// card-addressed kind-specific routes added in v0.142.0 passed both tests
+    /// before either surface mentioned it. A parity test that a *different* route
+    /// can satisfy is not checking parity.
+    fn canonical_path(segs: &[String]) -> String {
+        let mut out = String::new();
+        for s in segs {
+            out.push('/');
+            if matches!(s.as_str(), "id" | "cid" | "nid" | "gid" | "iid" | "idx") {
+                out.push_str("{}");
+            } else {
+                out.push_str(s);
+            }
+        }
+        out
+    }
+
+    /// The same blanking applied to prose: `{id}`, `{cid}`, `{index}`, `{item}` —
+    /// whatever a doc surface calls the hole — all become `{}`.
+    ///
+    /// Any `{…}` is collapsed rather than a fixed list of names, because the list
+    /// is the thing that goes stale: the template routes' hole is `idx` in the
+    /// matcher and `{index}` in both doc surfaces. A JSON body is collapsed too
+    /// (`{node, card}` → `{}`), which is harmless: a body is separated from its
+    /// path by a space, so it can never complete one.
+    ///
+    /// **A brace only closes on its own line.** The panel is read out of Rust
+    /// source, where `|ui| {` opens a block that closes hundreds of lines later —
+    /// swallowing the entire endpoint list and reporting every route missing.
+    fn blank_placeholders(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for line in text.lines() {
+            let mut rest = line;
+            while let Some(open) = rest.find('{') {
+                match rest[open..].find('}') {
+                    Some(close) => {
+                        out.push_str(&rest[..open]);
+                        out.push_str("{}");
+                        rest = &rest[open + close + 1..];
+                    }
+                    // No closing brace on this line: it is code, not a hole.
+                    None => break,
+                }
+            }
+            out.push_str(rest);
+            out.push('\n');
+        }
+        out
     }
 }
