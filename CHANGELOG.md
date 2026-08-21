@@ -6,6 +6,31 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.140.0]
+
+### Added
+- **Unlinked mentions** — card menu → *Unlinked mentions…*, and
+  `GET /api/cards/{cid}/mentions`. Cards whose text **names** this card, by its
+  title or any `alias::`, **without linking to it**. Backlinks answer *what points
+  here*; this answers *what should*. Worth much more since aliases (v0.126.0),
+  because a card is usually called several things in prose and only one of them is
+  its title.
+
+  The interesting part is everything it must **not** report:
+  - **Whole-word, case-insensitive** — a substring match would report `Notes`
+    inside `Notebook`.
+  - **Never inside code** — a name in a fenced block or a code span is being
+    *discussed*, not referred to. Same rule that stops prose about a property
+    becoming one.
+  - **Names under three characters are skipped entirely** — a card called `Go`
+    would otherwise "mention" half the document, and a list that long is not read
+    at all, which is worse than not offering one.
+  - **A card that already links here is a backlink, not a mention**, so every row
+    in the list is something you might actually want to turn into a link.
+
+  The route arrived undocumented and the **route-to-reference parity test failed
+  the commit**, which is exactly what it is for.
+
 ## [0.139.0]
 
 ### Added

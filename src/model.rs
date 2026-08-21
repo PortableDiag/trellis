@@ -4097,6 +4097,71 @@ impl Document {
         n
     }
 
+    /// Cards whose text **names** this card without linking to it.
+    ///
+    /// Backlinks answer *what points here*; this answers *what should*. It became
+    /// worth much more with aliases (v0.126.0), because a card is usually called
+    /// several things in prose and only one of them is its title.
+    ///
+    /// **Whole-word, case-insensitive, and never inside code.** A substring match
+    /// would report "Notes" inside "Notebook", and a name quoted in a fenced block
+    /// or a code span is being *discussed*, not referred to — the same rule that
+    /// stops prose about a property becoming one.
+    ///
+    /// **A name shorter than three characters is skipped entirely.** A card called
+    /// "Go" would otherwise mention half the document, and a list that long is not
+    /// read at all — which is worse than not offering it.
+    ///
+    /// A card that already links here is a backlink, not a mention, so it is left
+    /// out: the point of the list is that every row is something you might want to
+    /// turn into a link.
+    pub fn unlinked_mentions_card(&self, node: NodeId, card: CardId) -> Vec<SearchHit> {
+        let Some(target) = self.card(node, card) else { return Vec::new() };
+        let mut names: Vec<String> = Vec::new();
+        if target.title.trim().chars().count() >= 3 {
+            names.push(target.title.trim().to_lowercase());
+        }
+        for (k, v) in target.properties() {
+            if k.eq_ignore_ascii_case("alias") && v.trim().chars().count() >= 3 {
+                names.push(v.trim().to_lowercase());
+            }
+        }
+        if names.is_empty() {
+            return Vec::new();
+        }
+        let mut hits = Vec::new();
+        for n in self.nodes.values() {
+            for c in &n.cards {
+                if c.id == card {
+                    continue; // a card naming itself is not a mention
+                }
+                // Already links here? Then it is a backlink, and this list is for
+                // the ones that are NOT.
+                let hay_links = format!("{}\n{}", c.title, searchable_body(c));
+                if extract_wikilinks(&hay_links).iter().any(|t| {
+                    matches!(self.resolve_link_target_from(t, n.id),
+                             Some(LinkTarget::Card { card: tc, .. }) if tc == card)
+                }) {
+                    continue;
+                }
+                let hay = format!("{}\n{}", c.title, strip_code(&searchable_body(c))).to_lowercase();
+                if let Some((name, pos)) = names
+                    .iter()
+                    .find_map(|nm| whole_word_pos(&hay, nm).map(|p| (nm.clone(), p)))
+                {
+                    hits.push(SearchHit {
+                        node: n.id,
+                        node_title: n.title.clone(),
+                        card: Some(c.id),
+                        snippet: snippet_around(&hay, pos, name.len()),
+                    });
+                }
+            }
+        }
+        hits.sort_by(|a, b| a.node_title.cmp(&b.node_title).then(a.card.cmp(&b.card)));
+        hits
+    }
+
     pub fn backlinks_card(&self, node: NodeId, card: CardId) -> Vec<SearchHit> {
         let mut hits = Vec::new();
         for n in self.nodes.values() {
@@ -4675,6 +4740,61 @@ fn retarget_in(text: &str, from: CardId, to: CardId) -> (String, usize) {
         i += ch.len_utf8();
     }
     (out, count)
+}
+
+/// Byte offset of `needle` in `hay` as a **whole word**, or `None`.
+///
+/// Word-bounded so a card called "Notes" is not reported as mentioned by
+/// "Notebook". Both sides must be a non-alphanumeric character or an edge.
+fn whole_word_pos(hay: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let mut from = 0usize;
+    while let Some(rel) = hay[from..].find(needle) {
+        let at = from + rel;
+        let before_ok = hay[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+        let after_ok =
+            hay[at + needle.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return Some(at);
+        }
+        from = at + needle.len().max(1);
+        if from >= hay.len() {
+            break;
+        }
+    }
+    None
+}
+
+/// Blank out fenced blocks and inline code spans, so a name being *discussed*
+/// is not reported as a name being *used*. Same rule that stops prose about a
+/// property becoming a property.
+fn strip_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    for line in text.lines() {
+        if is_code_fence(line.trim_end()) {
+            in_fence = !in_fence;
+            out.push('\n');
+            continue;
+        }
+        if in_fence {
+            out.push('\n');
+            continue;
+        }
+        let mut in_span = false;
+        for ch in line.chars() {
+            if ch == '`' {
+                in_span = !in_span;
+                out.push(' ');
+            } else {
+                out.push(if in_span { ' ' } else { ch });
+            }
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// Percent-encode the bytes that would break a Markdown link URL (spaces,
@@ -6591,6 +6711,55 @@ mod tests {
         });
         assert_eq!(preview_text(&table).lines().count(), 2);
         assert_eq!(searchable_body(&table).lines().count(), 1);
+    }
+
+    /// **Backlinks answer what points here; mentions answer what should.** The
+    /// interesting cases are all the ones it must NOT report.
+    #[test]
+    fn unlinked_mentions_are_whole_words_outside_code_and_not_already_links() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "b".into());
+        let target = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        {
+            let c = doc.card_mut(n, target).unwrap();
+            c.title = "Notes".into();
+            c.body = "alias:: Scratchpad".into();
+        }
+        let mut mk = |body: &str| {
+            let id = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+            doc.card_mut(n, id).unwrap().body = body.to_string();
+            id
+        };
+        let plain = mk("I put it in Notes yesterday.");
+        let by_alias = mk("see the Scratchpad for it");
+        let _substring = mk("my Notebook is elsewhere");        // NOT a mention
+        let _fenced = mk("```\nNotes\n```");                    // NOT a mention
+        let _span = mk("the `Notes` field");                    // NOT a mention
+        let _already = mk(&format!("linked [[#{target}]] already")); // a BACKLINK
+
+        let hits = doc.unlinked_mentions_card(n, target);
+        let got: Vec<CardId> = hits.iter().filter_map(|h| h.card).collect();
+        assert!(got.contains(&plain), "a whole-word title match is a mention");
+        assert!(got.contains(&by_alias), "an alias counts too");
+        assert_eq!(got.len(), 2, "and nothing else does: {got:?}");
+
+        // A name under three characters is skipped outright, or it would
+        // "mention" half the document.
+        doc.card_mut(n, target).unwrap().title = "Go".into();
+        doc.card_mut(n, target).unwrap().body = String::new();
+        assert!(doc.unlinked_mentions_card(n, target).is_empty());
+    }
+
+    #[test]
+    fn whole_word_matching_is_bounded_at_both_ends() {
+        assert_eq!(whole_word_pos("in notes today", "notes"), Some(3));
+        assert_eq!(whole_word_pos("notes", "notes"), Some(0));
+        assert_eq!(whole_word_pos("(notes)", "notes"), Some(1));
+        assert_eq!(whole_word_pos("notebook", "notes"), None);
+        assert_eq!(whole_word_pos("xnotes", "notes"), None);
+        assert_eq!(whole_word_pos("notesx", "notes"), None);
+        // The first whole-word hit wins even when a substring precedes it.
+        assert_eq!(whole_word_pos("notebook then notes", "notes"), Some(14));
     }
 
     /// **A merge must not leave a dangling link.** The absorbed card stops

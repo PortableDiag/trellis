@@ -210,6 +210,8 @@ pub enum CanvasAction {
     SetEditing(CardId, bool),
     Duplicate(CardId),
     CopyCard(CardId),
+    /// Open the Backlinks panel showing what NAMES this card without linking.
+    ShowMentions(CardId),
     PasteCard(egui::Pos2),
     Remove(CardId),
     ResetView,
@@ -3522,6 +3524,18 @@ fn card_menu(
     }
     // Copy the card's id or its breadcrumb path so you can point an agent at
     // this exact card (`/api/nodes/{node}/cards/{id}`).
+    if ui
+        .button("Unlinked mentions…")
+        .on_hover_text(
+            "Cards that NAME this one \u{2014} by its title or an alias \u{2014} \
+             without linking to it.\n\nBacklinks say what points here; this says \
+             what should.",
+        )
+        .clicked()
+    {
+        actions.push(CanvasAction::ShowMentions(card.id));
+        ui.close_menu();
+    }
     ui.menu_button("Copy", |ui| {
         if ui.button("Card link  [[#…]]").clicked() {
             copy_both(ui, &format!("[[#{}]]", card.id));

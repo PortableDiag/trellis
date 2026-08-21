@@ -1003,6 +1003,28 @@ A link written in a **table cell** counts for backlinks (it always has — cell 
 is scanned), though it is not clickable there; links render as clickable in text
 card bodies.
 
+#### Unlinked mentions — what *should* point here
+
+```
+GET /api/cards/{cid}/mentions
+  → 200 {"card":1391,"node":63,"hits":[{node,card,node_title,node_path,snippet}]}
+  | 404 (card not found)
+```
+
+The mirror of backlinks: cards whose text **names** this card — by its title or any
+`alias::` — **without linking to it**. Backlinks answer *what points here*; this
+answers *what should*. It is worth much more since aliases (v0.126.0), because a
+card is usually called several things in prose and only one of them is its title.
+
+Matching is **whole-word and case-insensitive**, and **never inside code**. A
+substring match would report `Notes` inside `Notebook`, and a name quoted in a
+fenced block or a code span is being *discussed* rather than referred to — the same
+rule that stops prose about a property becoming one. A name shorter than **three
+characters** is skipped entirely: a card called `Go` would otherwise "mention" half
+the document, and a list that long is not read at all, which is worse than not
+offering one. A card that already links here is a backlink, not a mention, so it is
+left out — every row is something you might actually want to turn into a link.
+
 #### Group links — `[[#g146]]`
 A group had an id and no way to address it: the only way to point anyone at one
 was to name a card **inside** it, which says "somewhere near here" rather than

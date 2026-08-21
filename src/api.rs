@@ -57,6 +57,8 @@ pub enum ApiRequest {
     /// `Backlinks` is useless in a journal document, where every card written on
     /// a day shares one basket.
     CardBacklinks(u64),
+    /// Cards that NAME this card without linking to it.
+    CardMentions(u64),
     /// One card from its id alone, without already knowing its basket. Ids are
     /// unique per document, so an id *is* an address — but every other card route
     /// is `/nodes/{node}/cards/{card}`, so an id quoted in a note or read out of
@@ -1838,6 +1840,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             Ok(ApiRequest::GetCard { node: pid(nid)?, card: pid(cid)? })
         }
         (Method::Get, ["api", "cards", cid, "backlinks"]) => Ok(ApiRequest::CardBacklinks(pid(cid)?)),
+        (Method::Get, ["api", "cards", cid, "mentions"]) => Ok(ApiRequest::CardMentions(pid(cid)?)),
         (Method::Get, ["api", "cards", cid]) => Ok(ApiRequest::LocateCard(pid(cid)?)),
         // Whole-document card routes. Literal arms first: `property` sits exactly
         // where a card id would.
@@ -2650,6 +2653,23 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let removed = doc.clear_card_property(node, card, &key);
             (removed, ApiResponse::ok(json!({ "cleared": removed, "key": key })))
         }
+        ApiRequest::CardMentions(card) => match doc.locate_card(card) {
+            Some(node) => {
+                let hits: Vec<Value> = doc
+                    .unlinked_mentions_card(node, card)
+                    .into_iter()
+                    .map(|h| json!({
+                        "node": h.node,
+                        "card": h.card,
+                        "node_title": h.node_title,
+                        "node_path": doc.node_path(h.node),
+                        "snippet": h.snippet,
+                    }))
+                    .collect();
+                (false, ApiResponse::ok(json!({ "card": card, "node": node, "hits": hits })))
+            }
+            None => (false, ApiResponse::err(404, "card not found")),
+        },
         ApiRequest::CardBacklinks(card) => match doc.locate_card(card) {
             Some(node) => {
                 let hits: Vec<Value> = doc

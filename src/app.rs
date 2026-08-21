@@ -1081,6 +1081,8 @@ pub struct TrellisApp {
     /// already, so "move the selection somewhere" reuses it rather than growing
     /// a second one that would fuzzy-match differently.
     switcher_purpose: SwitcherPurpose,
+    /// A card whose unlinked mentions the Backlinks panel is showing, if any.
+    mentions_for: Option<(NodeId, CardId)>,
     /// A node the tree should scroll into view next frame (set by the switcher).
     scroll_to: Option<NodeId>,
     /// A card the canvas should recenter on next frame (agenda/Kanban row click).
@@ -1596,6 +1598,7 @@ impl TrellisApp {
             switcher_query: String::new(),
             switcher_index: 0,
             switcher_purpose: SwitcherPurpose::Jump,
+            mentions_for: None,
             scroll_to: None,
             focus_card: None,
             pending_reveal: None,
@@ -4376,6 +4379,7 @@ impl TrellisApp {
             CanvasAction::SelectCards(_)
             | CanvasAction::ResetView
             | CanvasAction::CopyCard(_)
+            | CanvasAction::ShowMentions(_)
             // Launching a plugin changes nothing by itself. Anything it does to
             // the document arrives over the API and is logged there, as `api`
             // rather than `ui` — which is the honest actor.
@@ -5177,6 +5181,10 @@ impl TrellisApp {
                 }
                 CanvasAction::Duplicate(cid) => {
                     self.doc.duplicate_card(node, cid);
+                }
+                CanvasAction::ShowMentions(cid) => {
+                    self.mentions_for = Some((node, cid));
+                    self.backlinks_open = true;
                 }
                 CanvasAction::CopyCard(cid) => {
                     if let Some(n) = self.doc.nodes.get(&node) {
@@ -9156,6 +9164,46 @@ impl TrellisApp {
                 });
             });
             ui.separator();
+            if let Some((mn, mc)) = self.mentions_for {
+                let title = self
+                    .doc
+                    .card(mn, mc)
+                    .map(|c| if c.title.trim().is_empty() { format!("card #{mc}") } else { c.title.clone() })
+                    .unwrap_or_else(|| format!("card #{mc}"));
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("Mentions of: {title}")).strong());
+                    if ui.small_button("show backlinks").clicked() {
+                        self.mentions_for = None;
+                    }
+                });
+                ui.small(
+                    egui::RichText::new(
+                        "Cards that name it without linking to it. Whole words, \
+                         outside code.",
+                    )
+                    .weak(),
+                );
+                ui.separator();
+                let hits = self.doc.unlinked_mentions_card(mn, mc);
+                if hits.is_empty() {
+                    ui.weak("Nothing names this card that does not already link to it.");
+                } else {
+                    ui.weak(format!("{} card(s) name it", hits.len()));
+                }
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for hit in hits {
+                        let label = format!("{} \u{2014} {}", hit.node_title, hit.snippet);
+                        if ui.add(egui::Label::new(label).sense(egui::Sense::click())).clicked() {
+                            jump = Some((hit.node, hit.card));
+                        }
+                        ui.separator();
+                    }
+                });
+                if let Some((node, card)) = jump {
+                    self.reveal_hit(ctx, node, card);
+                }
+                return;
+            }
             match self.selected {
                 None => {
                     ui.weak("Select a node to see what links to it.");
