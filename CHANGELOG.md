@@ -6,6 +6,37 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.141.2]
+
+### Fixed
+- **The Endpoints panel is now held by a test, not by whoever remembers it.**
+  v0.141.1 fixed the panel by hand after a read caught it, and said out loud that
+  **nothing enforces reference → panel**. That sentence was the defect. It is a
+  test now — `every_route_appears_in_the_endpoints_panel` — so a route that never
+  reaches Settings → Endpoints fails at the commit that added it, the same way
+  `every_route_is_documented_in_the_reference` has held API.md since v0.120.0.
+
+  It found two the hand-check had not, both there since the day they shipped:
+
+  - `GET /api/nodes/{id}/cards/{cid}/export?format=…` (v0.123.0) — **one card as
+    a note file**, with YAML frontmatter written from its properties and tags.
+    The panel listed only the whole-document `/api/export`, so the route that
+    lands a card in Obsidian intact was unfindable from inside the app.
+  - `POST /api/nodes/{id}/cards/{cid}/append` (v0.118.0) — the node-addressed
+    twin. Every other `…/cards/{cid}/…` op is listed in that block; this one was
+    only reachable via the card-addressed form further up.
+
+  **Matched on the path, not the method.** The panel is written for a person and
+  folds a verb pair onto one line — `POST …/dock  (unstick: DELETE …/dock)` — so
+  a test demanding the method sit before the path reports a dozen routes that are
+  plainly there. The path is what makes a route findable; the wording around it is
+  the panel's business. Proved in both directions: the test fails naming the route
+  when either new line is removed.
+
+  Docs-only, and a version anyway, for the reason v0.141.1 gave: API.md is
+  compiled in since v0.120.0, so `GET /api/docs` cannot serve a correction that
+  has not shipped.
+
 ## [0.141.1]
 
 ### Fixed

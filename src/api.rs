@@ -7466,9 +7466,97 @@ mod tests {
     /// cannot find out how the thing works.
     #[test]
     fn every_route_is_documented_in_the_reference() {
-        const SRC: &str = include_str!("api.rs");
         let mut missing = Vec::new();
-        let mut checked = 0;
+        let routes = routes_in_matcher();
+        for (method, segs) in &routes {
+            let literals = literal_segments(segs);
+            let documented = API_DOC.lines().any(|l| {
+                let Some(after) = l.to_uppercase().find(method) else { return false };
+                let mut cursor = after;
+                for lit in &literals {
+                    match l[cursor..].find(lit.as_str()) {
+                        Some(at) => cursor += at + lit.len(),
+                        None => return false,
+                    }
+                }
+                true
+            });
+            if !documented {
+                missing.push(format!("{method} /{}", segs.join("/")));
+            }
+        }
+        assert!(
+            routes.len() > 90,
+            "the route matcher was not parsed properly ({} routes)",
+            routes.len()
+        );
+        assert!(
+            missing.is_empty(),
+            "{} route(s) missing from API.md — the reference moves with the route:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
+    }
+
+    /// **Every route in the table also appears in Settings → Endpoints.**
+    ///
+    /// The sibling above holds the reference. Nothing held the *panel*, and on
+    /// 2026-08-20 that half drifted on its own: both routes shipped that day were
+    /// in `API.md` — the parity test saw to that, twice — and in neither the panel
+    /// nor a test, so only a read caught it, one release later. A doc surface
+    /// nobody checks is one that goes quietly wrong, which is the whole reason the
+    /// reference check stopped being a runbook step.
+    ///
+    /// **Matched on the path alone, not the method.** The panel is written for a
+    /// person and folds a verb pair onto one line — `POST …/dock  (unstick:
+    /// DELETE …/dock)` — so demanding the method sit before the path would report
+    /// a dozen routes that are plainly there. The path is what makes a route
+    /// findable; the wording around it is the panel's business.
+    #[test]
+    fn every_route_appears_in_the_endpoints_panel() {
+        const APP: &str = include_str!("app.rs");
+        // The panel is a literal list; take exactly it, so an unrelated `/api/…`
+        // in a tooltip elsewhere in app.rs cannot vouch for a missing route.
+        let start = APP.find(r#"ui.collapsing("Endpoints""#).expect("the Endpoints panel");
+        let end = APP[start..]
+            .find("Full reference: API.md")
+            .map(|at| start + at)
+            .expect("the panel's closing line");
+        let panel = &APP[start..end];
+
+        let mut missing = Vec::new();
+        for (method, segs) in routes_in_matcher() {
+            let literals = literal_segments(&segs);
+            let listed = panel.lines().any(|l| {
+                let mut cursor = 0;
+                for lit in &literals {
+                    match l[cursor..].find(lit.as_str()) {
+                        Some(at) => cursor += at + lit.len(),
+                        None => return false,
+                    }
+                }
+                true
+            });
+            if !listed {
+                missing.push(format!("{method} /{}", segs.join("/")));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "{} route(s) missing from Settings → Endpoints — the panel moves with the route:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
+    }
+
+    /// Every `(Method::…, [..])` arm of the route table, as `(METHOD, segments)`.
+    ///
+    /// Read out of the source rather than out of a list someone maintains: a list
+    /// is a fourth thing to keep in step, and the failure both parity tests exist
+    /// to catch is exactly a route nobody remembered to add somewhere.
+    fn routes_in_matcher() -> Vec<(String, Vec<String>)> {
+        const SRC: &str = include_str!("api.rs");
+        let mut routes = Vec::new();
         for line in SRC.lines() {
             let t = line.trim_start();
             let Some(rest) = t.strip_prefix("(Method::") else { continue };
@@ -7483,36 +7571,16 @@ mod tests {
             if segs.is_empty() {
                 continue;
             }
-            checked += 1;
-            let method = method.trim().to_uppercase();
-            // Literal path segments only: an id is spelled {id}/{cid}/… in the
-            // docs and `id`/`cid`/… in the matcher, so compare what is fixed.
-            let literals: Vec<&String> = segs
-                .iter()
-                .filter(|s| !matches!(s.as_str(), "id" | "cid" | "nid" | "gid" | "iid" | "idx"))
-                .collect();
-            let documented = API_DOC.lines().any(|l| {
-                let Some(after) = l.to_uppercase().find(&method) else { return false };
-                let mut cursor = after;
-                for lit in &literals {
-                    match l[cursor..].find(lit.as_str()) {
-                        Some(at) => cursor += at + lit.len(),
-                        None => return false,
-                    }
-                }
-                true
-            });
-            if !documented {
-                missing.push(format!("{method} /{}", segs.join("/")));
-            }
+            routes.push((method.trim().to_uppercase(), segs));
         }
-        assert!(checked > 90, "the route matcher was not parsed properly ({checked} routes)");
-        assert!(
-            missing.is_empty(),
-            "{} route(s) missing from API.md — the reference moves with the route:\n  {}",
-            missing.len(),
-            missing.join("\n  ")
-        );
+        routes
     }
 
+    /// Literal path segments only: an id is spelled `{id}`/`{cid}`/… in the docs
+    /// and `id`/`cid`/… in the matcher, so compare what is fixed.
+    fn literal_segments(segs: &[String]) -> Vec<&String> {
+        segs.iter()
+            .filter(|s| !matches!(s.as_str(), "id" | "cid" | "nid" | "gid" | "iid" | "idx"))
+            .collect()
+    }
 }

@@ -7997,6 +7997,8 @@ impl TrellisApp {
                             "  NOTE  `body` is REFUSED (400) on checklist/table/image/sketch — their items/rows/bytes are the content, and text in their body is never read as a property. Send `items` or `rows`. Judged on the kind the card WILL be, so {kind:\"text\", body:…} still converts.",
                             "GET    /api/nodes/{id}/cards/{cid}/attachments             (files carried by ANY card — the bytes, not a path; names + sizes only)",
                             "POST   /api/nodes/{id}/cards/{cid}/attachments {name, data_base64}  ·  GET / DELETE …/attachments/{idx}   (the document is written WHOLE on every save, so size costs every autosave, snapshot and backup — attachment_bytes on /api/instance is the running total)",
+                            "POST   /api/nodes/{id}/cards/{cid}/append {text, at?, separator?}   (add to a card without sending its body back)",
+                            "GET    /api/nodes/{id}/cards/{cid}/export?format=markdown|html|json  (ONE card as a note file — markdown writes YAML frontmatter from its properties and tags, so it lands in Obsidian intact)",
                             "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",
                             "POST   /api/nodes/{id}/groups/{gid}/move  {node, pos?}     (the whole group — container, members and id)",
                             "POST   /api/nodes/{id}/autosort",
