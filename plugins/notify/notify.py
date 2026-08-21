@@ -8,6 +8,13 @@ Two things get sent, matching the two triggers Trellis offers:
   `GET /api/changes?since=…` filtered to `actor: "api"`. This half was
   impossible until the change log existed: the old signal was a bare revision
   counter, which says *that* the document moved and never *what*.
+- **on-change, for a channel card** → the message itself, quoted. A change-log
+  entry holds no content, so it can only ever say *something changed* — which is
+  the one thing you cannot act on from the sofa. Since v1.2.0 a `channel.say`
+  entry is followed to `GET /api/cards/{cid}/channel?since=…` and the text is
+  quoted with the name of whoever said it. That makes a channel a real
+  conversation from the phone: you type into the card, the agent replies, and
+  the reply arrives as words.
 
 **With no bot token it prints the message instead of sending it.** That isn't a
 placeholder — it's how you check the wording before wiring a bot up, and it makes
@@ -50,6 +57,24 @@ def trellis(path):
         die(f"Trellis {path}: {e}")
 
 
+def esc(text):
+    """Escape for Telegram's HTML parse mode.
+
+    Nothing escaped anything before v1.2.0, which was survivable while every
+    label was a card title. Quoting a **message** changes that: a channel carries
+    whatever someone typed, and one `<` in it makes the Bot API reject the whole
+    notification with a 400 that names a byte offset. Ampersand first, or the
+    escapes escape each other.
+    """
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def clip(text, limit):
+    """One line, at most `limit` characters, with an ellipsis when it was longer."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+
+
 def go_link(base_host, port, kind, ident, label):
     """An `http` link that opens `kind/ident` in Trellis on the reader's device.
 
@@ -64,8 +89,8 @@ def go_link(base_host, port, kind, ident, label):
     to `127.0.0.1` from a phone is a link to the phone.
     """
     if not base_host:
-        return label
-    return f'<a href="http://{base_host}:{port}/go/{kind}/{ident}">{label}</a>'
+        return esc(label)
+    return f'<a href="http://{base_host}:{port}/go/{kind}/{ident}">{esc(label)}</a>'
 
 
 def link_host(cfg, inst):
@@ -195,13 +220,67 @@ def task_digest(cfg, doc, host="", port=0):
     return "\n".join(parts), key
 
 
-def agent_changes(doc, since, host="", port=0):
+def channel_messages(changes, state, host, port):
+    """The actual text of any channel messages in this batch.
+
+    The change log says a message *happened* — card, basket, and since v0.143.0
+    which agent — but never what it said, because an entry holds no content. That
+    is right for a log and useless for a notification: "an agent changed
+    something" is exactly the message you cannot act on from the sofa.
+
+    So the text is fetched per card, from a **per-card cursor** kept in state
+    rather than from the change-log position. The two count different things, and
+    a channel's own `seq` is the one that survives the log rotating.
+
+    Messages from `operator` are skipped: they are the reader's own, typed on the
+    phone a moment ago, and telling someone what they just said is noise.
+    """
+    cards = {}
+    for c in changes:
+        if "channel.say" in (c.get("fields") or []) and c.get("entity") == "card" and c.get("id"):
+            cards[c["id"]] = c.get("title") or "a channel"
+    if not cards:
+        return [], set()
+
+    seen = state.setdefault("channel_seq", {})
+    lines = []
+    for cid, title in sorted(cards.items()):
+        key = str(cid)
+        first_time = key not in seen
+        since = seen.get(key, 0)
+        data = trellis(f"/cards/{cid}/channel?since={since}")
+        msgs = [m for m in (data.get("messages") or []) if m.get("from") != "operator"]
+        # A card we have never reported on would otherwise dump its whole history
+        # the first time it is touched. Only the newest is news.
+        if first_time:
+            msgs = msgs[-1:]
+        seen[key] = data.get("seq", since)
+        if not msgs:
+            continue
+        lines.append(f"💬 {go_link(host, port, 'card', cid, title)}")
+        for m in msgs[-3:]:
+            lines.append(f"   <b>{esc(m.get('from') or '?')}</b>: {esc(clip(m.get('text'), 220))}")
+        if len(msgs) > 3:
+            lines.append(f"   …and {len(msgs) - 3} more")
+    return lines, set(cards)
+
+
+def agent_changes(doc, since, state, host="", port=0):
     data = trellis(f"/changes?since={since}&limit=500")
     if data.get("truncated"):
         print("(change log had rotated past our position — reporting a count only)")
     changes = [c for c in (data.get("changes") or []) if c.get("actor") == "api"]
     if not changes:
         return None, data.get("rev", since)
+
+    # A message is quoted, not counted. Everything else is still summarised, and
+    # the two are kept apart so a conversation does not read as "3 edits".
+    said, said_cards = channel_messages(changes, state, host, port)
+    changes = [c for c in changes if "channel.say" not in (c.get("fields") or [])]
+    if not changes:
+        if not said:
+            return None, data.get("rev", since)
+        return "\n".join([f"<b>{esc(doc)}</b>", ""] + said), data.get("rev", since)
 
     baskets, titles = set(), []
     # The card each title belongs to, so the line can link to the thing that
@@ -218,11 +297,16 @@ def agent_changes(doc, since, host="", port=0):
             card_of[t] = c["id"]
     props = [c for c in changes if c.get("property")]
 
-    parts = [f"<b>{doc}</b>", f"\nAn agent made {len(changes)} change(s)"]
+    parts = [f"<b>{esc(doc)}</b>"]
+    if said:
+        parts += [""] + said
+    parts.append(f"\nAn agent made {len(changes)} other change(s)" if said
+                 else f"\nAn agent made {len(changes)} change(s)")
     if baskets:
         parts.append(f"in {len(baskets)} basket(s).")
+    titles = [t for t in titles if card_of.get(t) not in said_cards]
     for t in titles[:8]:
-        parts.append("• " + go_link(host, port, "card", card_of[t], t) if t in card_of else f"• {t}")
+        parts.append("• " + go_link(host, port, "card", card_of[t], t) if t in card_of else f"• {esc(t)}")
     if len(titles) > 8:
         parts.append(f"…and {len(titles) - 8} more")
     for c in props[:5]:
@@ -230,7 +314,9 @@ def agent_changes(doc, since, host="", port=0):
         name = c.get("title") or "a card"
         if c.get("entity") == "card" and c.get("id"):
             name = go_link(host, port, "card", c["id"], name)
-        parts.append(f"• <i>{name}</i> — {k} → {v}")
+        else:
+            name = esc(name)
+        parts.append(f"• <i>{name}</i> — {esc(k)} → {esc(v)}")
     return "\n".join(parts), data.get("rev", since)
 
 
@@ -257,7 +343,7 @@ def main():
             print("Agent-edit notifications are off")
             return
         since = os.environ.get("TRELLIS_SINCE") or state.get("since") or 0
-        text, new_since = agent_changes(doc, since, host, port)
+        text, new_since = agent_changes(doc, since, state, host, port)
         state["since"] = new_since
         save_state(state)
         if not text:

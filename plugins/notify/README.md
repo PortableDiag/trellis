@@ -5,6 +5,13 @@ Tells you what the workspace needs without opening it:
 - **A task digest** — overdue and due-today cards, on a schedule.
 - **An agent nudge** — when something changes the document over the API rather
   than in the app, including `key:: value` changes like `status → done`.
+- **A channel message, quoted** — when an agent posts to a
+  [channel card](../../API.md), the notification carries **what it said** and who
+  said it, not just that something moved. A change-log entry holds no content, so
+  the text is fetched from `GET /api/cards/{cid}/channel?since=…` against a cursor
+  kept per card. Your own messages are skipped: you typed them a moment ago.
+  A card seen for the first time reports only its newest message rather than
+  replaying its history.
 
 Sends to Telegram. **With no bot token it prints the message instead**, which is
 how to check the wording before wiring a bot up — and it means the whole plugin

@@ -6,6 +6,38 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.143.1]
+
+### Changed
+- **The notify plugin (v1.2.0) quotes a channel message instead of counting it.**
+  v0.143.0 shipped channels and left the notification saying *"an agent made 1
+  change"* — the one thing you cannot act on from the sofa, and the half of the
+  feature that makes it a conversation rather than a log you have to go and read.
+
+  A change-log entry deliberately holds no content, so the text is fetched:
+  a `channel.say` entry is followed to `GET /api/cards/{cid}/channel?since=…`
+  against a **per-card cursor** kept in the plugin's state, not the change-log
+  position — the two count different things, and a channel's own `seq` is the one
+  that survives the log rotating.
+
+  - **Your own messages are skipped.** They are `from: operator`, typed on the
+    phone a moment ago; telling someone what they just said is noise.
+  - **A card seen for the first time reports only its newest message**, rather
+    than replaying a conversation's whole history the first time it is touched.
+  - **Quoted messages and ordinary edits are kept apart**, so a conversation does
+    not read as *"3 edits"*, and a card whose message was quoted is not listed
+    again below it.
+
+- **The plugin escapes HTML.** It never did. That was survivable while every label
+  was a card title and became a real bug the moment arbitrary message text went
+  into the same string: Telegram parses these messages as HTML, and one `<` makes
+  the Bot API reject the whole notification with a 400 naming a byte offset. Card
+  titles, property keys and values are escaped now as well.
+
+  Installed into both instances' `<data-dir>/plugins/`, because a plugin release
+  does not install itself — the trap that cost a day of link-less notifications on
+  2026-08-19.
+
 ## [0.143.0]
 
 ### Added
