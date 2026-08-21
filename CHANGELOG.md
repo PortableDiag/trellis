@@ -6,6 +6,31 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.144.1]
+
+### Fixed
+- **A long node title made the sidebar wide, and it would not go back.** Reported
+  in those words. One 59-character title — `Prod Health Watch — INSTANCE 1: LINK /
+  sfo3 / 64.23.236.178` — pushed the tree panel from its 240 px default to about
+  **450 px**, and dragging the splitter in **snapped it straight back out**.
+
+  Three things had to line up, which is why it looked arbitrary: a
+  `SelectableLabel` lays its text out at natural width; the tree's `ScrollArea` is
+  **vertical-only**, so a wide row has nowhere to go but outward; and egui clamps a
+  resizable `SidePanel` to its content's minimum, so the row was setting a floor
+  the user could not get under. It only bit in a project that *had* such a title,
+  and only while that branch was expanded — which is exactly why it read as "for
+  some reason".
+
+  A tree row is now laid out against `ui.available_width()` and truncated with an
+  ellipsis, so a row can never dictate the panel's width. The panel drags freely
+  in both directions and the label re-truncates to match. Nothing is lost: the full
+  title is on the row's hover tooltip, and a deeply nested row truncates sooner
+  because it genuinely has less room.
+
+  Verified by reproducing it — a fresh instance with that exact title, measured
+  before and after, then dragged narrow and hovered.
+
 ### Known-unverified
 - **A channel card has not been looked at on a phone.** v0.143.0 said it "renders
   as an ordinary note on the canvas, in the exports and on the phone". The first

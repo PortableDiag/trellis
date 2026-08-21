@@ -153,6 +153,28 @@ pub fn sorted_roots(doc: &Document, sort: TreeSort) -> Vec<NodeId> {
     roots
 }
 
+/// A tree row's label, truncated to the width the panel actually has.
+///
+/// **A tree row must never dictate the panel's width.** `SelectableLabel` lays a
+/// title out at its natural width, the tree's `ScrollArea` is vertical-only, so a
+/// long title has nowhere to go but outward — and because egui clamps a resizable
+/// `SidePanel` to its content's minimum, the sidebar then *snaps back* when you
+/// try to drag it in. Reported exactly that way: "the sidebar got all wide and
+/// won't move back." Two 57–59 character node titles in one project did it.
+///
+/// The title is not lost: the full text is on the row's tooltip.
+fn row_label(ui: &egui::Ui, title: &str, selected: bool) -> egui::SelectableLabel {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let mut job = egui::text::LayoutJob::simple_singleline(title.to_owned(), font, color);
+    // `available_width` is what is left after the indent, so a deeply nested row
+    // truncates sooner — which is right: it has less room.
+    job.wrap.max_width = ui.available_width();
+    job.wrap.max_rows = 1;
+    job.wrap.overflow_character = Some('…');
+    egui::SelectableLabel::new(selected, ui.fonts(|f| f.layout_job(job)))
+}
+
 pub fn ui(
     ui: &mut egui::Ui,
     doc: &Document,
@@ -279,7 +301,7 @@ fn node_ui(
                 let egui::InnerResponse { inner: resp, response: drag } = ui.dnd_drag_source(
                     ui.make_persistent_id(("tree_drag", id)),
                     id,
-                    |ui| ui.add(egui::SelectableLabel::new(is_sel, &node.title)),
+                    |ui| ui.add(row_label(ui, &node.title, is_sel)),
                 );
                 // When another node is dragged over this row, show where it will
                 // land and perform the move on release.
@@ -300,8 +322,10 @@ fn node_ui(
                 }
                 resp
             } else {
-                ui.add(egui::SelectableLabel::new(is_sel, &node.title))
+                ui.add(row_label(ui, &node.title, is_sel))
             };
+            // Truncation hides nothing: the whole title is one hover away.
+            let resp = resp.on_hover_text(&node.title);
             if scroll_to == Some(id) {
                 resp.scroll_to_me(Some(egui::Align::Center));
             }
