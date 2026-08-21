@@ -6,6 +6,35 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.139.0]
+
+### Added
+- **Zoom to fit** — beside *Reset view*, frames every card in the basket. Zoom is
+  clamped to 20% like every other zoom path, so a basket bigger than that can
+  frame **says so on screen** rather than quietly doing less than the button
+  reads. (The note needed a timestamp, not a flag: a click lasts one frame, and a
+  message drawn only in that frame is a message nobody sees.)
+
+- **Hold Ctrl while dragging a card to drag it freely** — Snap and Grid are both
+  aids, and every aid needs a way to be overruled for the one card that has to sit
+  just *there*. Ctrl+*click* toggles selection; Ctrl+*drag* was unused.
+
+- **Hold Shift while dragging to lock to one axis** — whichever the pointer has
+  travelled furthest along. Nudging a card sideways without losing the row it is
+  lined up with was otherwise a steady hand. An exactly diagonal drag resolves to
+  horizontal rather than flickering between the two as the pointer crosses the
+  diagonal.
+
+- **Level of detail below 45% zoom** — a card draws its **title only**, with a
+  rule at the bottom edge to say there is more here than the strip shows. At that
+  zoom the body is 5–6 px of line height: not read, just grey texture — while
+  still laying out its full Markdown to produce it. Titles are what you navigate
+  by when you are zoomed out to see the shape of a basket.
+
+### Not built — it already existed
+- *Clone card* was on the wanted list; **Duplicate** in the card menu has done it
+  all along. Crossed off rather than built twice.
+
 ## [0.138.0]
 
 ### Added

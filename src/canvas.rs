@@ -321,6 +321,22 @@ const SNAP_DIST: f32 = 8.0;
 /// quantises to it, from this one constant deliberately: a grid you snap to but
 /// cannot see, or see but do not snap to, is worse than no grid at all.
 pub(crate) const GRID_STEP: f32 = 32.0;
+/// Below this zoom a card draws its **title only**.
+///
+/// At 45% the body is around 5–6 px of line height: it is not read, it is a grey
+/// texture, and every card still lays out its full Markdown to produce it. Titles
+/// are what you navigate by when you are zoomed out to see the shape of a basket,
+/// so showing only those is both faster and easier to read. Above the threshold
+/// nothing changes.
+pub(crate) const DETAIL_ZOOM: f32 = 0.45;
+/// How long the "zoom clamp bit here" note stays up after a *Zoom to fit*.
+const FIT_NOTE_SECS: f64 = 4.0;
+
+/// Where that note's timestamp lives. A click lasts one frame; a message drawn
+/// only in that frame is a message nobody sees.
+fn fit_note_id() -> egui::Id {
+    egui::Id::new("trellis_fit_clamped_at")
+}
 
 /// Quantise one world-space axis to the nearest grid line.
 fn grid_quantise(v: f32) -> f32 {
@@ -1068,6 +1084,7 @@ pub fn ui(
     // above *windows* too, which had these toggles painting straight through
     // Settings, Kanban and every other window, and taking the clicks with them.
     let mut zoom_to_selection = false;
+    let mut zoom_to_fit = false;
     egui::Area::new(ui.id().with("reset_view"))
         .order(egui::Order::Middle)
         .fixed_pos(btn_pos)
@@ -1085,6 +1102,19 @@ pub fn ui(
             // Only offered when there is a selection: a button that silently
             // does nothing is worse than an absent one — the rule the View menu
             // already follows for Today's note.
+            if !node.cards.is_empty()
+                && ui
+                    .button("Zoom to fit")
+                    .on_hover_text(
+                        "Frame every card in this basket.\n\nZoom is clamped to \
+                         20% like every other zoom path, so a basket taller than \
+                         about five screens is framed as far as that allows rather \
+                         than shrunk past legibility.",
+                    )
+                    .clicked()
+            {
+                zoom_to_fit = true;
+            }
             if !selection.is_empty()
                 && ui
                     .button("Zoom to selection")
@@ -1102,6 +1132,43 @@ pub fn ui(
         if let Some(b) = selection_bounds(node, selection) {
             *view = frame_rect(b, canvas_rect, view.scaling);
         }
+    }
+    if zoom_to_fit {
+        if let Some(b) = node
+            .cards
+            .iter()
+            .map(|c| egui::Rect::from_min_size(c.pos, c.size))
+            .reduce(|a, b| a.union(b))
+        {
+            *view = frame_rect(b, canvas_rect, view.scaling);
+            // A "fit" that the zoom clamp would not let finish says so, in place.
+            // A button that quietly does less than its label reads as broken.
+            if view.scaling <= MIN_ZOOM
+                && (b.width() * MIN_ZOOM > canvas_rect.width()
+                    || b.height() * MIN_ZOOM > canvas_rect.height())
+            {
+                // Remember WHEN, not just that: the click lasts one frame, and a
+                // message drawn only in that frame is a message nobody sees.
+                let now = ui.input(|i| i.time);
+                ui.ctx().data_mut(|d| d.insert_temp(fit_note_id(), now));
+            }
+        }
+    }
+    let note_until = ui
+        .ctx()
+        .data(|d| d.get_temp::<f64>(fit_note_id()))
+        .map(|t| t + FIT_NOTE_SECS);
+    if note_until.is_some_and(|until| ui.input(|i| i.time) < until) {
+        ui.ctx().request_repaint(); // keep ticking while it is up
+        let p = ui.painter_at(canvas_rect);
+        let at = canvas_rect.center_top() + egui::vec2(0.0, 40.0);
+        let msg = "Zoomed out as far as 20% allows \u{2014} this basket is bigger than that frames";
+        let galley =
+            p.layout_no_wrap(msg.to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
+        let r = egui::Rect::from_center_size(at, galley.size() + egui::vec2(16.0, 8.0));
+        p.rect_filled(r, 4.0, ui.visuals().panel_fill.gamma_multiply(0.92));
+        p.rect_stroke(r, 4.0, egui::Stroke::new(1.0, ui.visuals().weak_text_color()));
+        p.galley(r.min + egui::vec2(8.0, 4.0), galley, egui::Color32::WHITE);
     }
 
     // Card tools (top-left): Dock-mode toggle and, when 2+ cards are selected,
@@ -1740,20 +1807,36 @@ fn card_ui(
     // look behind is the one thing that follows the pointer.
     if handle.dragged() && !ui.input(|i| i.modifiers.alt) {
         let grab = ui.memory(|m| m.data.get_temp::<egui::Vec2>(grab_key));
+        // **Hold Ctrl to drag freely.** Snap and Grid are both aids, and every
+        // aid needs a way to be overruled for the one card that has to sit just
+        // there. Ctrl+*click* toggles selection, but Ctrl+*drag* was unused.
+        let free = ui.input(|i| i.modifiers.command);
+        // **Hold Shift to lock the drag to one axis** — whichever the pointer has
+        // moved furthest along since the grab. Nudging a card sideways without
+        // losing the row it is lined up with is otherwise a steady hand.
+        let axis_lock = ui.input(|i| i.modifiers.shift);
         // Either aid needs the pointer's *intended* position rather than the
         // frame's delta: quantising a delta would round most frames to zero and
         // the card would never move at all.
         match (handle.interact_pointer_pos(), grab) {
-            (Some(pp), Some(grab)) if snap_others.is_some() || grid_mode => {
+            (Some(pp), Some(grab)) if (snap_others.is_some() || grid_mode || axis_lock) && !free => {
                 // Snap the pointer-intended top-left to nearby card edges.
-                let intended = (to_screen.inverse() * pp) - grab;
-                let (snapped, gx, gy) = match snap_others {
+                let mut intended = (to_screen.inverse() * pp) - grab;
+                if axis_lock {
+                    let d = intended - card.pos;
+                    if d.x.abs() >= d.y.abs() {
+                        intended.y = card.pos.y;
+                    } else {
+                        intended.x = card.pos.x;
+                    }
+                }
+                let (snapped, gx, gy) = match snap_others.filter(|_| !axis_lock) {
                     Some(others) => {
                         snap_position(intended, card.size, others, card.id, SNAP_DIST)
                     }
                     None => (intended, None, None),
                 };
-                let snapped = grid_after_snap(snapped, gx, gy, grid_mode);
+                let snapped = grid_after_snap(snapped, gx, gy, grid_mode && !axis_lock);
                 actions.push(CanvasAction::MoveCard(card.id, snapped - card.pos));
                 // Guide lines at the snapped edges.
                 let guide = egui::Stroke::new(1.0, egui::Color32::from_rgb(0xff, 0xd1, 0x66));
@@ -1932,7 +2015,19 @@ fn card_ui(
         egui::pos2(rect.min.x + pad, rect.min.y + title_h + 4.0 * zoom),
         rect.max - egui::vec2(pad, pad),
     );
-    if body_rect.height() > 6.0 {
+    // Level of detail: zoomed out far enough that the body is a grey texture
+    // rather than text, draw the title bar alone. `MIN_ZOOM` is 0.2, so this is a
+    // range you can actually reach.
+    if zoom < DETAIL_ZOOM {
+        // The bottom edge still says there is more here than the strip shows.
+        p.line_segment(
+            [
+                egui::pos2(rect.min.x + 2.0, rect.max.y - 1.0),
+                egui::pos2(rect.max.x - 2.0, rect.max.y - 1.0),
+            ],
+            egui::Stroke::new(1.0, accent.gamma_multiply(0.5)),
+        );
+    } else if body_rect.height() > 6.0 {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
         child.set_clip_rect(body_rect.intersect(clip));
         scale_fonts(&mut child, zoom);
@@ -5207,6 +5302,39 @@ mod tests {
         // that would frame the empty corner of the canvas.
         let elsewhere: HashSet<CardId> = [99999].into_iter().collect();
         assert!(selection_bounds(node, &elsewhere).is_none());
+    }
+
+    /// Level of detail must sit inside the zoom range you can actually reach,
+    /// or it is either always on or unreachable.
+    #[test]
+    fn the_detail_threshold_is_inside_the_zoom_range() {
+        assert!(DETAIL_ZOOM > MIN_ZOOM, "reachable: {DETAIL_ZOOM} vs {MIN_ZOOM}");
+        assert!(DETAIL_ZOOM < 1.0, "not on at 100%: {DETAIL_ZOOM}");
+    }
+
+    /// **Shift locks a drag to one axis**, choosing whichever the pointer has
+    /// travelled furthest along. Nudging a card sideways without losing the row
+    /// it is lined up with is otherwise a steady hand.
+    #[test]
+    fn an_axis_locked_drag_keeps_the_other_coordinate() {
+        let at = egui::pos2(100.0, 100.0);
+        let lock = |intended: egui::Pos2| {
+            let mut i = intended;
+            let d = i - at;
+            if d.x.abs() >= d.y.abs() {
+                i.y = at.y;
+            } else {
+                i.x = at.x;
+            }
+            i
+        };
+        // Mostly sideways → y is pinned.
+        assert_eq!(lock(egui::pos2(180.0, 112.0)), egui::pos2(180.0, 100.0));
+        // Mostly vertical → x is pinned.
+        assert_eq!(lock(egui::pos2(107.0, 240.0)), egui::pos2(100.0, 240.0));
+        // Exactly diagonal resolves to horizontal rather than jittering between
+        // the two as the pointer wobbles across the diagonal.
+        assert_eq!(lock(egui::pos2(150.0, 150.0)), egui::pos2(150.0, 100.0));
     }
 
     /// The grid you snap to is the grid you can see: both come from `GRID_STEP`,
