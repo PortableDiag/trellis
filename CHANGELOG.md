@@ -6,6 +6,19 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.141.1]
+
+### Fixed
+- **The in-app Settings → Endpoints list catches up** with the two routes that
+  shipped today: `GET /api/cards/{cid}/mentions` (v0.140.0) and
+  `GET /api/cards/{cid}/graph` (v0.141.0). API.md had both — the parity test made
+  sure of that, twice — but **nothing enforces reference → panel**, so that half
+  drifts silently and only a read catches it.
+
+  Docs-only, and a version anyway: API.md is compiled in since v0.120.0, so
+  `GET /api/docs` cannot serve a correction that has not shipped. That is the
+  price of docs that cannot drift from the build, and it is the right way round.
+
 ## [0.141.0]
 
 ### Added

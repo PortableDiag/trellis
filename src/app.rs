@@ -7946,6 +7946,8 @@ impl TrellisApp {
                             "GET    /open/card/{cid} · /open/node/{id} · /open/group/{gid}  (no key — what a trellis:// link opens)",
                             "GET    /go/card/{cid} · /go/node/{id} · /go/group/{gid}   (no key — a PAGE that opens the card on the PHONE that loaded it; Telegram strips trellis:// links, so a notification needs this http hop. Build it with lan_host from /api/instance)",
                             "GET    /api/cards/{cid}/backlinks         (cards whose [[#id]] links point at this card)",
+                            "GET    /api/cards/{cid}/mentions          (cards that NAME this card — title or alias:: — WITHOUT linking to it. Backlinks say what points here; this says what should. Whole-word, never inside code, names under 3 chars skipped)",
+                            "GET    /api/cards/{cid}/graph?depth=2     (one card's neighbourhood by link distance, BOTH directions, breadth-first. depth 1–5, bounded at 200 cards; 'capped' says when the bound bit)",
                         "         every card carries `empty` — a checklist/table has NO body, so never read body alone to decide a card is blank",
                         "         a bare [[Title]] resolves to the linking card's own project first, then the lowest node id (stable across runs)",
                             "GET    /api/cards?ids=1391,1392           (read a LIST of cards, any baskets; 'missing' names the ids that are gone)",
