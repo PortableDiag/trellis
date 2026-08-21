@@ -91,6 +91,15 @@ pub struct Change {
     /// is the only "when" in Trellis.
     pub ts: u64,
     pub actor: Actor,
+    /// *Which* agent, when one named itself with `X-Agent` (or held a scoped
+    /// token, whose label is used instead).
+    ///
+    /// `actor` says a change came in over the API; until v0.143.0 that was all it
+    /// said, so with several agents sharing the instance key — the normal setup
+    /// here, because it is what lets one agent leave a finding in another
+    /// project — "which of them did this" was unanswerable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     pub entity: Entity,
     pub op: Op,
     /// The node/card/group id. Card ids are document-global, so this identifies
@@ -118,11 +127,19 @@ pub struct Change {
 impl Change {
     /// Start an entry. `seq` and `ts` are filled in by [`ChangeLog::push`], so a
     /// call site cannot get the ordering wrong.
+    /// Name the agent behind this change. No-op for `None`, so the UI path and
+    /// an unnamed API caller are untouched.
+    pub fn by(mut self, agent: Option<String>) -> Self {
+        self.agent = agent;
+        self
+    }
+
     pub fn new(actor: Actor, entity: Entity, op: Op, id: u64) -> Self {
         Self {
             seq: 0,
             ts: 0,
             actor,
+            agent: None,
             entity,
             op,
             id,
@@ -167,6 +184,7 @@ impl Change {
     /// shouldn't split the run, and the newer entry's title wins anyway.
     fn same_shape(&self, other: &Change) -> bool {
         self.actor == other.actor
+            && self.agent == other.agent
             && self.entity == other.entity
             && self.op == other.op
             && self.id == other.id

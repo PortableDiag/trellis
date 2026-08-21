@@ -6,6 +6,83 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.143.0]
+
+### Added
+- **A card can be a conversation.** Give any card a `channel` and its body becomes
+  a running log: the operator writes into it from the desktop or the Android app,
+  an agent reads it, replies into it, and the reply arrives on the phone through
+  the notification plugin that already exists. Point **two agents** at one card and
+  it is an agent-to-agent log the operator can read — and interrupt — in real time.
+
+  ```
+  PATCH /api/cards/{cid}  {"channel":{"participants":["alice","operator"],"primary":true}}
+  POST  /api/cards/{cid}/say          {text}        ·  POST /api/nodes/{id}/cards/{cid}/say
+  GET   /api/cards/{cid}/channel[?since=<seq>]      ·  GET  /api/nodes/{id}/cards/{cid}/channel
+  GET   /api/channels[?agent=<name>][&project=<id>]
+  ```
+
+  - **A field, not a `CardKind`.** A channel does not *render* differently, which
+    is the only thing that would justify a variant — and the note on `CardKind`
+    now says what one really costs (below). Not a `channel::` property either: a
+    property fires on prose *about* channels, the false-property class this
+    project has now fixed three times.
+  - **The body is the log.** Messages are appended as
+    `### @alice · <rfc3339> · #7` blocks closed by `---`. A Markdown heading and a
+    rule, on purpose: the card renders as an ordinary note on the canvas, in the
+    exports and on the phone, with **no new UI anywhere**.
+  - **A message needs an end, not just a start.** Without the closing `---` a block
+    runs to the next header, so anything the operator types at the *bottom* of the
+    card — the natural place — is swallowed into the last agent's message and
+    attributed to it. That is the exact confusion a channel exists to remove. Cost:
+    a lone `---` inside a message splits it, so `say` reports `split: true` rather
+    than refusing text the caller meant.
+  - **Anything without a header is attributed to the operator.** There is no "post
+    a message" affordance in the Android app and there never needs to be one:
+    typing into the card *is* the person talking. Such a message has `seq: 0`,
+    which no written message ever has, so it is returned regardless of `?since=`.
+  - **`participants` is addressing, not an access list.** It is how an agent finds
+    its conversations (`GET /api/channels?agent=alice`) without being told a card
+    id. A message from a name not on the list is recorded under that name, because
+    an agent leaving a finding in another project's channel is the point.
+  - **One `primary` channel per project**, refused by name against the card that
+    already holds the flag — but a *non*-primary channel in the same workspace
+    stays legal, because an agent-to-agent card is a second channel there and
+    forbidding it would forbid half the feature.
+  - `seq` is stored, not counted from the body, because the operator can edit that
+    body by hand and counting would renumber every earlier message.
+
+- **`X-Agent: <name>` says who is calling**, on any request. It attributes a
+  message, and it lands on `GET /api/changes`, so *which* agent made a change is
+  answerable — until now `actor` said only `api`, and with several agents sharing
+  one key that was unanswerable.
+
+  **Declared, not derived, and that is the design.** Taking the name off the
+  credential is the obvious approach and it fails the case this exists for: the
+  normal deployment is several agents all holding the **instance key** so they can
+  work across every workspace and leave findings in each other's projects, and a
+  shared key names nobody. It is not a security boundary either — anything holding
+  that key can already write any text under any name by editing the body. Where a
+  scoped `agent_…` token *is* used, its label is authoritative and overrides the
+  header, so the confined case keeps the stronger guarantee for free. The name is
+  validated (1–40 chars, letters/digits/`-`/`_`/`.`) because it is written into a
+  header line: a name containing ` · ` could otherwise forge a message boundary and
+  put words in another agent's mouth. `SayInput` has **no** `from` field at all, so
+  a caller trying to sign as somebody else gets a 400.
+
+### Changed
+- **What a new `CardKind` actually costs, measured instead of repeated.** *"~180
+  exhaustive match sites"* had been carried in `model.rs`, `API.md`, the VR
+  proposal, the workspace's *Project facts* and *Release Log* cards, and the
+  Refresher prompt — and **had never been run**. Adding a seventh variant and
+  compiling gives **14** failing sites. The real cost is the part the compiler does
+  *not* find: 26 of the 44 `CardKind` match blocks carry a `_ =>` arm, plus ~20
+  `if let` and ~12 `matches!`, all of which compile clean and silently exclude the
+  new kind — blank render, empty export, invisible to search, an empty rectangle on
+  Android, which is a separate repo dispatching on kind *strings*. The note on
+  `CardKind` now states that, and says how to re-take the numbers rather than quote
+  these.
+
 ## [0.142.0]
 
 ### Added

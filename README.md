@@ -553,6 +553,18 @@ path, including the scope check on a confined token. Only the **batch** routes
 stay basket-addressed, because a batch is validated against one basket and a list
 of ids can span several.
 
+**A card can be a conversation.** Give one a `channel` and its body becomes a
+running log: you write into it from the desktop or the phone, an agent reads it
+with `GET /api/cards/{cid}/channel`, replies with `POST /api/cards/{cid}/say`, and
+the reply reaches you through the notification plugin you already have. Point two
+agents at one card and it is an agent-to-agent log you can read — and interrupt —
+in real time. Messages are appended as `### @name · <time> · #<seq>` blocks, so
+the card renders as an ordinary note everywhere it already renders, phone
+included; **anything you type without a header is attributed to you**, which is
+what makes replying from Android work with no extra feature. Writers say who they
+are with an `X-Agent:` header, which also answers *which* agent made a change in
+`GET /api/changes`.
+
 **Anything you can do to a card, you can do to a list of them.** Create
 (`POST …/cards` with an array), move, set a property, take a property back off
 (`DELETE …/cards/property`), restyle (`PATCH …/cards`) and delete

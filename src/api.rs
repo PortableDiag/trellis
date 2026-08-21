@@ -29,6 +29,10 @@ pub struct ApiCommand {
     /// own key. The subtree half of a scope needs the document to resolve
     /// ancestry, so it is checked in the app loop rather than on this thread.
     pub scope: Option<crate::plugins::Scope>,
+    /// Who is making this request — the `X-Agent` header, or a scoped token's own
+    /// label. `None` means the instance key with nothing declared, which is read
+    /// as the operator.
+    pub agent: Option<String>,
 }
 
 /// A parsed, validated API request. Document access happens on the UI thread.
@@ -231,6 +235,14 @@ pub enum ApiRequest {
     /// why the **markdown** form carries YAML frontmatter while the whole-document
     /// export cannot: a file of many cards has no one set of fields to describe it.
     ExportCard { node: NodeId, card: u64, format: String },
+    /// Post a message to a channel card. `from` is filled in by the API thread
+    /// from the `X-Agent` header (or the token's label), never by the caller's
+    /// body — see [`request_agent`].
+    ChannelSay { node: NodeId, card: u64, from: String, text: String },
+    ChannelRead { node: NodeId, card: u64, since: u64 },
+    /// Every channel card in the document, optionally narrowed to the ones a
+    /// given agent is addressed in, or to one project.
+    ChannelList { agent: Option<String>, project: Option<NodeId> },
     ListAttachments { node: NodeId, card: u64 },
     GetAttachment { node: NodeId, card: u64, index: usize },
     AddAttachment { node: NodeId, card: u64, name: String, bytes: Vec<u8> },
@@ -441,6 +453,8 @@ pub enum CardOp {
     Sketch(SketchOpInput),
     Chart(Option<ChartInput>),
     Export { format: String },
+    Say { from: String, text: String },
+    ReadChannel { since: u64 },
     ListAttachments,
     AddAttachment { name: String, bytes: Vec<u8> },
     GetAttachment { index: usize },
@@ -482,6 +496,8 @@ pub fn resolve_by_card(node: NodeId, card: u64, op: CardOp) -> ApiRequest {
         CardOp::Sketch(op) => ApiRequest::SketchOp { node, card, op },
         CardOp::Chart(spec) => ApiRequest::SetChart { node, card, spec },
         CardOp::Export { format } => ApiRequest::ExportCard { node, card, format },
+        CardOp::Say { from, text } => ApiRequest::ChannelSay { node, card, from, text },
+        CardOp::ReadChannel { since } => ApiRequest::ChannelRead { node, card, since },
         CardOp::ListAttachments => ApiRequest::ListAttachments { node, card },
         CardOp::AddAttachment { name, bytes } => {
             ApiRequest::AddAttachment { node, card, name, bytes }
@@ -703,6 +719,8 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::RemoveImage { node, .. }
         | ApiRequest::GetImage { node, .. }
         | ApiRequest::ExportCard { node, .. }
+        | ApiRequest::ChannelSay { node, .. }
+        | ApiRequest::ChannelRead { node, .. }
         | ApiRequest::ListAttachments { node, .. }
         | ApiRequest::GetAttachment { node, .. }
         | ApiRequest::AddAttachment { node, .. }
@@ -863,6 +881,13 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
         }
         // The one entry that carries content, because "fire when a card gets
         // `status:: done`" is the whole point of on-change triggers.
+        // A message is an ordinary card update as far as the log is concerned,
+        // which is what makes `touched` stamp and the notify plugin fire with no
+        // new plumbing. The `field` says which kind of update it was.
+        ApiRequest::ChannelSay { node, card, .. } => ch(E::Card, Op::Updated, *card)
+            .in_node(*node)
+            .titled(card_title(node, card))
+            .field("channel.say"),
         ApiRequest::SetCardProperty { node, card, key, value } => {
             ch(E::Card, Op::Updated, *card)
                 .in_node(*node)
@@ -1409,6 +1434,12 @@ pub struct UpdateCardInput {
     /// ordinary card. The rows are never stored — see `GET /api/cards/{cid}/run`.
     #[serde(default, deserialize_with = "de_double_option")]
     view: Option<Option<crate::model::ViewSpec>>,
+    /// Make this card a **channel**, or (with `null`) an ordinary card again.
+    /// Double-`Option` for the same reason `view` is: a plain one collapses
+    /// "absent" and "null", so any patch that only touched a title would silently
+    /// un-channel the card and orphan every agent watching it.
+    #[serde(default, deserialize_with = "de_double_option")]
+    channel: Option<Option<crate::model::Channel>>,
     /// Header-row flag (table cards only).
     #[serde(default)]
     header: Option<bool>,
@@ -1456,6 +1487,17 @@ struct UpdateGroupInput {
     title: Option<String>,
     #[serde(default, deserialize_with = "de_color_opt")]
     color: Option<[u8; 3]>,
+}
+
+/// The body of `POST …/say`. **There is deliberately no `from`.** A sender the
+/// caller can choose is a sender the caller can forge, and the entire point of an
+/// agent-to-agent log is that the operator can read it later and know who said
+/// what. The name comes off the `X-Agent` header, which is one place instead of
+/// every route.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SayInput {
+    text: String,
 }
 
 #[derive(Deserialize)]
@@ -1722,6 +1764,9 @@ fn handle(
             || path.starts_with("/open/")
             || path.starts_with("/go/"));
     let mut scope: Option<crate::plugins::Scope> = None;
+    // The label a scoped token was minted under. `None` for the instance key,
+    // which is shared and therefore identifies nobody.
+    let mut grant_label: Option<String> = None;
     if !is_health {
         let configured = key.lock().map(|k| k.clone()).unwrap_or_default();
         if configured.is_empty() {
@@ -1750,6 +1795,7 @@ fn handle(
                             );
                         }
                         scope = Some(g.scope);
+                        grant_label = Some(g.plugin.clone());
                     }
                     None => return ApiResponse::err(401, "missing or invalid API key"),
                 }
@@ -1812,13 +1858,32 @@ fn handle(
     let mut body = String::new();
     let _ = request.as_reader().read_to_string(&mut body);
 
-    let req = match route(&method, &path, &query, &body) {
+    let mut req = match route(&method, &path, &query, &body) {
         Ok(r) => r,
         Err((code, msg)) => return ApiResponse::err(code, &msg),
     };
 
+    // A scoped token's own label wins over anything the caller declares: there,
+    // unlike with the shared instance key, the credential *does* identify the
+    // holder, so the stronger answer is available and should be used. The header
+    // is what covers the ordinary case of several agents sharing one key.
+    let agent = match (grant_label.as_deref(), request_agent(request)) {
+        (Some(label), _) => Some(label.to_string()),
+        (None, Some(declared)) => Some(declared),
+        (None, None) => None,
+    };
+    if let Some(name) = agent.as_deref() {
+        if !crate::model::valid_agent_name(name) {
+            return ApiResponse::err(
+                400,
+                "X-Agent must be 1–40 characters of letters, digits, '-', '_' or '.'",
+            );
+        }
+    }
+    stamp_sender(&mut req, agent.as_deref());
+
     let (rtx, rrx) = std::sync::mpsc::sync_channel::<ApiResponse>(1);
-    if tx.send(ApiCommand { req, resp: rtx, scope }).is_err() {
+    if tx.send(ApiCommand { req, resp: rtx, scope, agent }).is_err() {
         return ApiResponse::err(503, "app not accepting requests");
     }
     ctx.request_repaint(); // wake the UI thread to process the command
@@ -1826,6 +1891,28 @@ fn handle(
         Ok(r) => r,
         Err(_) => ApiResponse::err(504, "timed out waiting for the app"),
     }
+}
+
+/// Who is making this request, from `X-Agent: <name>`.
+///
+/// **Declared, not derived — on purpose.** The obvious design is to take the name
+/// off the credential, and for a basket-scoped `agent_…` token that is exactly
+/// what happens (see `handle`). But the normal deployment here is several agents
+/// all holding the **instance key** so they can work across every workspace and
+/// leave findings in each other's projects, and there is nothing in a shared key
+/// to derive a name from. Refusing to name them would have made the log useless
+/// in precisely the case it was built for.
+///
+/// Nor is it a security boundary: anything holding the instance key can already
+/// write any text under any name by editing the body directly. The header buys
+/// **disambiguation**, and it is validated ([`valid_agent_name`]) because the name
+/// is written into a message header line — a name containing ` · ` could forge a
+/// message boundary and fabricate an entry from somebody else.
+fn request_agent(request: &tiny_http::Request) -> Option<String> {
+    request.headers().iter().find_map(|h| {
+        (h.field.as_str().as_str().eq_ignore_ascii_case("x-agent"))
+            .then(|| h.value.as_str().trim().to_string())
+    })
 }
 
 fn request_key(request: &tiny_http::Request) -> Option<String> {
@@ -1841,6 +1928,21 @@ fn request_key(request: &tiny_http::Request) -> Option<String> {
         }
     }
     None
+}
+
+/// Fill a `say`'s sender in from the request's identity.
+///
+/// Done here rather than in `route` because a route sees only method, path, query
+/// and body — by design, so it stays a pure function that can be tested without a
+/// server. This is the one place a header reaches a parsed request, and it is one
+/// match rather than a `from` argument threaded through every route arm.
+fn stamp_sender(req: &mut ApiRequest, agent: Option<&str>) {
+    let who = agent.unwrap_or(crate::model::OPERATOR).to_string();
+    match req {
+        ApiRequest::ChannelSay { from, .. } => *from = who,
+        ApiRequest::ByCard { op: CardOp::Say { from, .. }, .. } => *from = who,
+        _ => {}
+    }
 }
 
 fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequest, (u16, String)> {
@@ -2025,6 +2127,19 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Delete, ["api", "cards", cid, "chart"]) => {
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Chart(None) })
         }
+        (Method::Post, ["api", "cards", cid, "say"]) => {
+            let i: SayInput = parse(body)?;
+            Ok(ApiRequest::ByCard {
+                card: pid(cid)?,
+                op: CardOp::Say { from: String::new(), text: i.text },
+            })
+        }
+        (Method::Get, ["api", "cards", cid, "channel"]) => Ok(ApiRequest::ByCard {
+            card: pid(cid)?,
+            op: CardOp::ReadChannel {
+                since: query_get(query, "since").and_then(|v| v.parse().ok()).unwrap_or(0),
+            },
+        }),
         (Method::Get, ["api", "cards", cid, "export"]) => Ok(ApiRequest::ByCard {
             card: pid(cid)?,
             op: CardOp::Export {
@@ -2228,6 +2343,26 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             let op: SketchOpInput = parse(body)?;
             Ok(ApiRequest::SketchOp { node: pid(nid)?, card: pid(cid)?, op })
         }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "say"]) => {
+            let i: SayInput = parse(body)?;
+            Ok(ApiRequest::ChannelSay {
+                node: pid(nid)?,
+                card: pid(cid)?,
+                from: String::new(), // filled from the header; see `handle`
+                text: i.text,
+            })
+        }
+        (Method::Get, ["api", "nodes", nid, "cards", cid, "channel"]) => {
+            Ok(ApiRequest::ChannelRead {
+                node: pid(nid)?,
+                card: pid(cid)?,
+                since: query_get(query, "since").and_then(|v| v.parse().ok()).unwrap_or(0),
+            })
+        }
+        (Method::Get, ["api", "channels"]) => Ok(ApiRequest::ChannelList {
+            agent: query_get(query, "agent"),
+            project: query_get(query, "project").and_then(|v| v.parse().ok()),
+        }),
         (Method::Get, ["api", "nodes", nid, "cards", cid, "export"]) => Ok(ApiRequest::ExportCard {
             node: pid(nid)?,
             card: pid(cid)?,
@@ -3033,7 +3168,44 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             }
             (true, ApiResponse::created(json!({ "created": ids.len(), "ids": ids })))
         }
-        ApiRequest::UpdateCard { node, card, patch } => match doc.card_mut(node, card) {
+        ApiRequest::UpdateCard { node, card, patch } => {
+            // **One primary channel per project**, checked before anything is
+            // written. `primary` marks the channel an agent drains when it was
+            // handed a project rather than a card, so a second one makes that
+            // question ambiguous — while an ordinary (non-primary) channel in the
+            // same workspace stays legal, because an agent-to-agent card *is* a
+            // second channel there and forbidding it would forbid half the
+            // feature. Refused with the card that already holds the flag, so the
+            // answer says what to go and look at.
+            if let Some(Some(ch)) = patch.channel.as_ref() {
+                if ch.primary {
+                    let root = doc.root_of(node);
+                    let clash = doc
+                        .nodes
+                        .iter()
+                        .filter(|(nid, _)| doc.is_under(**nid, root))
+                        .flat_map(|(nid, n)| n.cards.iter().map(move |c| (*nid, c)))
+                        .find(|(_, c)| {
+                            c.id != card
+                                && c.channel.as_ref().is_some_and(|existing| existing.primary)
+                        });
+                    if let Some((nid, other)) = clash {
+                        return (
+                            false,
+                            ApiResponse::err(
+                                400,
+                                &format!(
+                                    "'{}' already has a primary channel: card {} in {} —                                      clear its `primary` first, or leave this one non-primary",
+                                    doc.nodes.get(&root).map(|n| n.title.as_str()).unwrap_or("this project"),
+                                    other.id,
+                                    doc.node_path(nid)
+                                ),
+                            ),
+                        );
+                    }
+                }
+            }
+            match doc.card_mut(node, card) {
             Some(c) => {
                 // A mirrored body belongs to the file. Silently accepting an edit
                 // that the next refresh overwrites would look like data loss, so
@@ -3077,6 +3249,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 // saved view by not mentioning it.
                 if let Some(v) = patch.view {
                     c.view = v;
+                }
+                if let Some(ch) = patch.channel {
+                    c.channel = ch;
                 }
                 if let Some(t) = patch.title {
                     c.title = t;
@@ -3218,7 +3393,8 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 (true, ApiResponse::ok(card_json(c)))
             }
             None => (false, ApiResponse::err(404, "card not found")),
-        },
+            }
+        }
         ApiRequest::DeleteCard { node, card } => {
             let existed = doc
                 .nodes
@@ -3927,6 +4103,126 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             } else {
                 (false, ApiResponse::err(404, "card/image not found or not an image card"))
             }
+        }
+        ApiRequest::ChannelSay { node, card, from, text } => {
+            if text.trim().is_empty() {
+                return (false, ApiResponse::err(400, "text: the message cannot be empty"));
+            }
+            let Some(c) = doc.card_mut(node, card) else {
+                return (false, ApiResponse::err(404, "card not found"));
+            };
+            // A card is a channel because somebody said so, never because a
+            // message arrived. Auto-creating one would mean a typo'd id quietly
+            // turns an unrelated card into a conversation.
+            let Some(mut ch) = c.channel.clone() else {
+                return (
+                    false,
+                    ApiResponse::err(
+                        400,
+                        "this card is not a channel — PATCH it with a `channel` first",
+                    ),
+                );
+            };
+            ch.seq += 1;
+            let at = crate::model::rfc3339_now();
+            let header = crate::model::channel_header(&from, &at, ch.seq);
+            if !c.body.is_empty() && !c.body.ends_with('\n') {
+                c.body.push('\n');
+            }
+            if !c.body.is_empty() {
+                c.body.push('\n');
+            }
+            c.body.push_str(&header);
+            c.body.push('\n');
+            c.body.push_str(text.trim_end());
+            c.body.push('\n');
+            c.body.push_str(crate::model::CHANNEL_END);
+            c.body.push('\n');
+            let seq = ch.seq;
+            c.channel = Some(ch);
+            // Posted, then reported. A lone `---` in the text ends the message
+            // early and the remainder reads back as operator text — so the answer
+            // says so rather than leaving the caller to discover it in the log.
+            // Not a refusal: the text is the caller's, and a horizontal rule is a
+            // legitimate thing to write.
+            let split = !crate::model::channel_body_safe(&text);
+            let mut body = json!({
+                "card": card, "node": node, "seq": seq, "from": from, "at": at
+            });
+            if split {
+                body["split"] = json!(true);
+                body["warning"] = json!(
+                    "a line of only `---` ends a message: the text after it will read as                      the operator's, not yours"
+                );
+            }
+            (true, ApiResponse::ok(body))
+        }
+        ApiRequest::ChannelRead { node, card, since } => {
+            let Some(c) = doc.card(node, card) else {
+                return (false, ApiResponse::err(404, "card not found"));
+            };
+            let Some(ch) = c.channel.as_ref() else {
+                return (
+                    false,
+                    ApiResponse::err(400, "this card is not a channel — PATCH it with a `channel`"),
+                );
+            };
+            // `seq == 0` is text the operator typed straight into the card, which
+            // has no number and therefore no place in a `since` window. It is
+            // always returned: dropping it would silently swallow the one kind of
+            // message a person can leave from the phone.
+            let all = crate::model::parse_channel(&c.body);
+            let msgs: Vec<_> = all.iter().filter(|m| m.seq == 0 || m.seq > since).collect();
+            (
+                false,
+                ApiResponse::ok(json!({
+                    "card": card,
+                    "node": node,
+                    "title": c.title,
+                    "participants": ch.participants,
+                    "primary": ch.primary,
+                    "seq": ch.seq,
+                    "since": since,
+                    "count": msgs.len(),
+                    "messages": msgs,
+                })),
+            )
+        }
+        ApiRequest::ChannelList { agent, project } => {
+            let mut out = Vec::new();
+            for (nid, node) in doc.nodes.iter() {
+                if let Some(root) = project {
+                    if !doc.is_under(*nid, root) {
+                        continue;
+                    }
+                }
+                for c in node.cards.iter() {
+                    let Some(ch) = c.channel.as_ref() else { continue };
+                    if let Some(who) = agent.as_deref() {
+                        if !ch.participants.iter().any(|p| p.eq_ignore_ascii_case(who)) {
+                            continue;
+                        }
+                    }
+                    out.push(json!({
+                        "card": c.id,
+                        "node": nid,
+                        "node_path": doc.node_path(*nid),
+                        "title": c.title,
+                        "participants": ch.participants,
+                        "primary": ch.primary,
+                        "seq": ch.seq,
+                    }));
+                }
+            }
+            // Primary first, then by card id: an agent handed a project wants its
+            // workspace channel at the top, and everything else stable.
+            out.sort_by_key(|v| {
+                (
+                    !v["primary"].as_bool().unwrap_or(false),
+                    v["card"].as_u64().unwrap_or(0),
+                )
+            });
+            (false, ApiResponse::ok(json!({ "count": out.len(), "channels": out })))
         }
         ApiRequest::ExportCard { node, card, format } => {
             let content = match format.as_str() {
@@ -7020,6 +7316,8 @@ mod tests {
             (Method::Get, "/api/cards/9/images/0", "", ""),
             (Method::Delete, "/api/cards/9/images/0", "", ""),
             (Method::Get, "/api/cards/9/export", "format=markdown", ""),
+            (Method::Post, "/api/cards/9/say", "", r#"{"text":"hello"}"#),
+            (Method::Get, "/api/cards/9/channel", "since=3", ""),
         ];
         for (m, path, q, body) in cases {
             match route(&m, path, q, body) {
@@ -7153,6 +7451,104 @@ mod tests {
             resolve_by_card(3, 9, CardOp::RemoveImage { index: 0 }),
             ApiRequest::RemoveImage { node: 3, card: 9, index: 0 }
         ));
+    }
+
+    /// **The sender is stamped from the request, never taken from the body.**
+    ///
+    /// `SayInput` has no `from` field at all, so a caller trying to choose one gets
+    /// the v0.86.0 unknown-field 400 rather than a message signed by somebody else.
+    #[test]
+    fn a_say_cannot_name_its_own_sender() {
+        assert!(
+            route(&Method::Post, "/api/cards/9/say", "", r#"{"text":"hi","from":"bob"}"#).is_err(),
+            "a declared `from` in the body must be refused, not honoured"
+        );
+
+        // Routed, the sender is empty; stamped, it is whoever the request is.
+        let mut req = route(&Method::Post, "/api/cards/9/say", "", r#"{"text":"hi"}"#).unwrap();
+        match &req {
+            ApiRequest::ByCard { op: CardOp::Say { from, .. }, .. } => assert!(from.is_empty()),
+            _ => panic!("not a say"),
+        }
+        stamp_sender(&mut req, Some("alice"));
+        match &req {
+            ApiRequest::ByCard { op: CardOp::Say { from, .. }, .. } => assert_eq!(from, "alice"),
+            _ => panic!("not a say"),
+        }
+
+        // Nothing declared is the operator, not an empty name.
+        let mut node_form =
+            route(&Method::Post, "/api/nodes/3/cards/9/say", "", r#"{"text":"hi"}"#).unwrap();
+        stamp_sender(&mut node_form, None);
+        match &node_form {
+            ApiRequest::ChannelSay { from, .. } => {
+                assert_eq!(from, crate::model::OPERATOR)
+            }
+            _ => panic!("not a say"),
+        }
+
+        // And stamping leaves every other request alone.
+        let mut other = route(&Method::Delete, "/api/cards/9", "", "").unwrap();
+        stamp_sender(&mut other, Some("alice"));
+        assert!(matches!(other, ApiRequest::ByCard { op: CardOp::Delete, .. }));
+    }
+
+    /// **One primary channel per project, and a second is refused by name.**
+    ///
+    /// A non-primary channel in the same workspace stays legal — an
+    /// agent-to-agent card *is* a second channel there, and forbidding it would
+    /// forbid half of what this was built for.
+    #[test]
+    fn a_project_gets_only_one_primary_channel() {
+        let mut doc = Document::empty();
+        let root = doc.add_node(None, "Trellis".into());
+        let ws = doc.add_node(Some(root), "Workspace".into());
+        let a = doc.add_card(ws, egui::pos2(40.0, 40.0), CardKind::Text).unwrap();
+        let b = doc.add_card(ws, egui::pos2(40.0, 240.0), CardKind::Text).unwrap();
+
+        // Built from JSON so the test exercises the real deserialisation path,
+        // including the double-`Option` that keeps `null` distinct from absent.
+        let primary = |p: bool| -> UpdateCardInput {
+            serde_json::from_str(&format!(
+                r#"{{"channel":{{"participants":["alice"],"primary":{p}}}}}"#
+            ))
+            .unwrap()
+        };
+
+        let (ok, r) = process(&mut doc, ApiRequest::UpdateCard { node: ws, card: a, patch: primary(true) });
+        assert!(ok && r.status == 200, "the first primary is fine: {}", r.body);
+
+        let (ok, r) = process(&mut doc, ApiRequest::UpdateCard { node: ws, card: b, patch: primary(true) });
+        assert!(!ok);
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains(&a.to_string()), "names the card already holding it: {}", r.body);
+
+        // Non-primary in the same project is allowed — this is the A2A card.
+        let (ok, r) = process(&mut doc, ApiRequest::UpdateCard { node: ws, card: b, patch: primary(false) });
+        assert!(ok && r.status == 200, "a second, non-primary channel must be legal: {}", r.body);
+
+        // And re-patching the SAME card keeps working: it must not clash with itself.
+        let (ok, _) = process(&mut doc, ApiRequest::UpdateCard { node: ws, card: a, patch: primary(true) });
+        assert!(ok, "a card may keep its own primary flag");
+    }
+
+    /// A whole-document channel listing names no basket, so a confined token is
+    /// refused — the same rule `/api/tasks` and `/api/claims` already follow.
+    #[test]
+    fn listing_every_channel_is_refused_for_a_confined_token() {
+        let req = ApiRequest::ChannelList { agent: Some("alice".into()), project: None };
+        assert_eq!(target_node(&req), None);
+        assert!(!is_scope_neutral(&req));
+        // The per-card routes still name their basket, so a confined token keeps
+        // its own channel.
+        assert_eq!(
+            target_node(&ApiRequest::ChannelRead { node: 42, card: 9, since: 0 }),
+            Some(42)
+        );
+        assert_eq!(
+            target_node(&resolve_by_card(42, 9, CardOp::Say { from: "a".into(), text: "b".into() })),
+            Some(42)
+        );
     }
 
     /// **A card-addressed kind-specific op parses exactly as its twin does.**

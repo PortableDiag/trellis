@@ -233,9 +233,12 @@ Deliberately last, and only if phases 1–3 are genuinely pleasant to use.
   documented in `API.md`, the worked Examples, and the in-app Settings →
   Endpoints list, per the existing three-surface rule. That keeps the VR project
   from becoming a source of churn in a stable app.
-- **Do not add a `CardKind` for VR.** A new variant touches ~180 exhaustive match
-  sites across model/api/canvas/app. Everything VR needs is expressible with the
-  existing kinds.
+- **Do not add a `CardKind` for VR.** Measured 2026-08-21 by adding a seventh
+  variant and compiling: **14** sites fail to build, and about **58 more** —
+  `_ =>` catch-alls, `if let`, `matches!` — compile clean and silently do the
+  wrong thing, plus the Android app, which dispatches on kind *strings* in a
+  separate repo with no compiler involved. Everything VR needs is expressible
+  with the existing kinds.
 
 ## 7. Getting started (concrete first steps)
 

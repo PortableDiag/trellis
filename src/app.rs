@@ -2816,7 +2816,7 @@ impl TrellisApp {
                     continue;
                 }
             }
-            let change = api::change_of(&cmd.req, &self.doc);
+            let change = api::change_of(&cmd.req, &self.doc).map(|c| c.by(cmd.agent.clone()));
             let (changed, resp) = api::process(&mut self.doc, cmd.req);
             if needs_item_ids && changed {
                 self.doc.ensure_item_ids();
@@ -7913,6 +7913,17 @@ impl TrellisApp {
                                 ),
                             ),
                             (
+                                "Talk to an agent on a card (v0.143.0)",
+                                format!(
+                                    "curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                     -d '{{\"channel\":{{\"participants\":[\"alice\",\"operator\"],\"primary\":true}}}}' \\\n  \
+                                     -X PATCH {a}/cards/1391
+                                     # then say something, and read the thread back:
+                                     curl -H 'X-API-Key: {k}' -H 'X-Agent: alice' -d '{{\"text\":\"on it\"}}' {a}/cards/1391/say
+                                     curl -H 'X-API-Key: {k}' '{a}/cards/1391/channel?since=0'"
+                                ),
+                            ),
+                            (
                                 "Archive a basket's finished cards in one call (ids survive)",
                                 format!(
                                     "curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
@@ -7978,6 +7989,10 @@ impl TrellisApp {
                             "GET    /api/cards/{cid}/attachments/{idx}   ·  DELETE /api/cards/{cid}/attachments/{idx}",
                             "POST   /api/cards/{cid}/images {data_base64}  ·  GET /api/cards/{cid}/images/{idx}  ·  DELETE /api/cards/{cid}/images/{idx}",
                             "GET    /api/cards/{cid}/export?format=markdown|html|json     (ONE card as a note file; markdown writes YAML frontmatter)",
+                            "POST   /api/cards/{cid}/say {text}  ·  POST /api/nodes/{id}/cards/{cid}/say   (CHANNEL — post a message; send X-Agent: <name> to say who you are)",
+                            "GET    /api/cards/{cid}/channel[?since=<seq>]  ·  GET /api/nodes/{id}/cards/{cid}/channel   (the conversation, parsed; text you typed yourself comes back as 'operator')",
+                            "GET    /api/channels[?agent=<name>][&project=<id>]        (every channel card — how an agent finds the conversations meant for it)",
+                            "         make one with PATCH /api/cards/{cid} {channel:{participants:[…],primary:true}}; {channel:null} undoes it",
                             "         the SAME operations as the /nodes/{id}/cards/{cid}/… twins — no need to look the basket up first.",
                             "         Only the BATCH routes stay basket-addressed: a batch is validated against one basket, and an id list can span several.",
                             "GET    /api/groups/{gid}                  (find a group from its id alone → {node, node_path, group})",

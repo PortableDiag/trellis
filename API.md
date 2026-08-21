@@ -1631,6 +1631,107 @@ GET /api/kanban?project=<node id>   only cards under that node (same filter as /
   | 400 (bad id)   | 404 (node not found)
 ```
 
+### Channels — talking to an agent on a card
+
+A **channel** is an ordinary card whose body is a running conversation. You write
+into it from the desktop or the Android app; an agent reads it, replies into it,
+and its reply reaches your phone through the notification plugin you already have.
+Point two agents at one and it is an agent-to-agent log you can read in real time.
+
+```
+PATCH /api/cards/{cid}   {"channel": {"participants":["alice","operator"], "primary": true}}
+  → the card is now a channel        | {"channel": null} makes it an ordinary card again
+
+POST /api/nodes/{id}/cards/{cid}/say   {text}
+POST /api/cards/{cid}/say              (same, by card id alone)
+  → 200 {"card":<cid>,"node":<id>,"seq":<n>,"from":"alice","at":"<rfc3339>"}
+  | 400 (empty text, or the card is not a channel)
+
+GET /api/nodes/{id}/cards/{cid}/channel[?since=<seq>]
+GET /api/cards/{cid}/channel[?since=<seq>]
+  → 200 {card, node, title, participants, primary, seq, since, count,
+         messages:[{seq, from, at, text}]}
+
+GET /api/channels[?agent=<name>][&project=<id>]
+  → 200 {count, channels:[{card, node, node_path, title, participants, primary, seq}]}
+```
+
+**Say who you are with a header.** Every write may carry `X-Agent: <name>`, and
+that is what a message is attributed to:
+
+```sh
+curl -s -H "X-API-Key: $KEY" -H "X-Agent: alice" \
+  -d '{"text":"Found it — the 404 was an omission, not a rule."}' \
+  $API/cards/1391/say
+```
+
+The name also lands on `/api/changes`, so *which* agent made a change is now
+answerable. With no header the message is from **`operator`**.
+
+> **Keep the header ASCII.** A non-ASCII header *value* is rejected by the HTTP
+> layer before Trellis sees it, and the connection is closed with **no reply at
+> all** — `curl` reports *empty reply from server*, not a status code. That is not
+> specific to `X-Agent` (any header does it, on any route, and it predates this
+> feature), but it is the one an agent now sets from a name someone chose. The
+> validator only accepts letters, digits, `-`, `_` and `.` anyway; the difference
+> is that an ASCII violation answers **400** and a non-ASCII one answers nothing.
+
+`X-Agent` is **declared, not derived**, and that is deliberate. Deriving it from
+the credential is the obvious design and it fails the case this exists for: the
+normal setup is several agents all holding the **instance key**, so that one can
+leave a finding in another project's workspace — and a shared key names nobody. It
+is not a security boundary either, since anything holding that key can already
+write any text under any name by editing the body. Where a **scoped `agent_…`
+token** is used the token's own label is authoritative and overrides the header,
+so the confined case keeps the stronger guarantee for free. The name is validated
+(1–40 chars, letters/digits/`-`/`_`/`.`) because it is written into a message
+header line, and a name containing ` · ` could forge a message boundary.
+
+**The body is the log.** Messages are appended as blocks under a heading:
+
+```
+### @alice · 2026-08-21T14:03:22Z · #7
+Found it — the 404 was an omission, not a rule.
+---
+```
+
+The closing `---` is load-bearing. A message needs an **end**, not just a start:
+without one a block runs to the next header, so anything you type at the *bottom*
+of the card — the natural place to type — is swallowed into the last agent's
+message and attributed to it, which is the exact confusion a channel exists to
+remove. A horizontal rule is what a person separating a log by hand would have
+written anyway, and it renders as a divider everywhere. The cost: an agent whose
+own text contains a lone `---` splits its message, and the remainder reads as
+operator text. Visible, recoverable, and pinned by a test.
+
+That is a Markdown heading on purpose: it renders everywhere a card body already
+renders — the canvas, the exports, and the phone — so there is no new UI, and it
+is still one line a parser can key on exactly. **This is why a channel is a field
+and not a new `CardKind`**: it does not draw differently, which is the only thing
+that would justify a variant (see *Why new card kinds are avoided*). And not a
+`channel::` property, because a property fires on prose **about** channels.
+
+**Anything without a header is attributed to you.** Type into the card from the
+Android app and that text comes back as a message from `operator` with `seq: 0`.
+That is not leniency — it is what makes replying from the phone work with no
+feature at all, and it is why unheaded text is always returned regardless of
+`?since=`. A written message never has `seq: 0`.
+
+**`participants` is addressing, not an access list.** It is how an agent *finds*
+its conversations — `GET /api/channels?agent=alice` — without being told a card id.
+A message from a name that is not listed is recorded under that name rather than
+refused, because an agent dropping a bug report into another project's channel is
+the point of the design, not an intrusion.
+
+**`primary` marks the workspace's own channel**, the one an agent drains when it
+was given a project rather than a card. At most one per project — but an
+agent-to-agent channel is a *second* channel in the same workspace, which is why
+the constraint is a flag rather than "one channel per project".
+
+`seq` is stored on the channel, not counted from the body, because you can edit
+that body by hand; counting would renumber every earlier message the first time
+you did.
+
 ### Saved views — a query you can keep, as a card
 Every other view here is **fixed**: Find cards, the Agenda and the Kanban each
 answer one question someone else chose. A saved view is your question, kept.
@@ -1656,8 +1757,9 @@ GET /api/cards/{cid}/run
   | 403 for a scoped token
 ```
 
-**It is a field, not a `CardKind` and not a property.** A new kind costs ~180
-exhaustive match arms and buys nothing — a view is a text card that draws
+**It is a field, not a `CardKind` and not a property.** A new kind is expensive
+in a way the compiler mostly hides (see *Why new card kinds are avoided*) and buys
+nothing here — a view is a text card that draws
 something derived, exactly as a `source` mirror and a table's `chart` already are.
 And a magic `view::` *property* would fire on prose **about** views, which is the
 false-property class this project has already fixed twice. A switch that triggers

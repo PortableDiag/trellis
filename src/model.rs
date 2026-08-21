@@ -634,6 +634,38 @@ pub struct Stroke {
 
 /// What a card holds. `Text`/`Code` use the card's `body` string; the others
 /// carry their own data.
+///
+/// # Why a seventh variant is avoided — and what it actually costs
+///
+/// This project reaches for a **field on an ordinary card** (`source`, `chart`,
+/// `attachments`, `view`, `channel`) or a **panel** (Find cards, Agenda, Kanban,
+/// Link graph, Backlinks, the minimap) instead of a new kind. The reason was
+/// carried for months as *"~180 exhaustive match sites"*, quoted from card to
+/// card and prompt to prompt. **Nobody had ever run it.** Measured on
+/// 2026-08-21 by adding a variant and compiling:
+///
+/// - **14 sites fail to build** — `preview_text`, `searchable_body`,
+///   `card_body_html`, `card_body_md`, `card_lines`, `view_kind_name`,
+///   `kind_ui`, `copyable_text`, `card_kind_label`, `body_not_shown_by`,
+///   `export_response` and three more. A morning's work, and the compiler hands
+///   you the list.
+/// - **About 58 do not.** Of the 44 `match` blocks over `CardKind`, **26 carry a
+///   `_ =>` arm**; there are also ~20 `if let CardKind::…` and ~12 `matches!(…)`.
+///   Every one compiles clean and silently excludes the new kind.
+/// - **And the Android app is a separate repo** that dispatches on kind
+///   *strings*, with no compiler anywhere near it.
+///
+/// So the real argument is not the edit count — it is that **the compiler finds
+/// under a quarter of the work and the rest fails silently**: a card that renders
+/// blank, exports nothing, is invisible to search, has no preview, will not copy,
+/// and is an empty rectangle on the phone. That makes a new kind worth it only
+/// when the thing genuinely *renders* differently and you intend to teach all of
+/// those sites, Android included.
+///
+/// **Re-take the numbers rather than quoting these.** Add a variant, then:
+/// `cargo check --all-targets --message-format=short 2>&1 | grep -c 'E0004'`
+/// for the hard failures, and `grep -c 'CardKind::'` plus a scan for `_ =>` arms
+/// for the silent ones.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum CardKind {
     /// `body` is CommonMark markdown, rendered live.
@@ -753,10 +785,10 @@ pub struct Card {
     /// that file's contents, refreshed while the document is open.
     ///
     /// Deliberately a field on an ordinary text/code card rather than a new
-    /// `CardKind`: a new variant costs ~180 exhaustive match arms across the
-    /// model, API, canvas and app, and buys nothing here — a mirrored file is
-    /// still markdown or still code, and should render, search, export, and carry
-    /// `#tags` exactly like any other card.
+    /// `CardKind`. See [`CardKind`]'s own note for what a variant really costs;
+    /// it buys nothing here either way — a mirrored file is still markdown or
+    /// still code, and should render, search, export, and carry `#tags` exactly
+    /// like any other card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Modification time of `source` when it was last read, so a poll can tell
@@ -796,18 +828,18 @@ pub struct Card {
     pub inline_images: Vec<ImageEntry>,
     /// Files carried by this card, bytes and all.
     ///
-    /// **On the card rather than in a card kind of its own.** A seventh `CardKind`
-    /// touches ~180 exhaustive match sites, and the thing people actually want is
-    /// to drop a spec *onto the task card about it* — which a separate file card
-    /// cannot express. Any card can carry files, exactly as any text card can carry
-    /// inline images.
+    /// **On the card rather than in a card kind of its own.** See [`CardKind`]
+    /// for what a seventh variant costs. The thing people actually want is to drop
+    /// a spec *onto the task card about it* — which a separate file card could not
+    /// express at any price. Any card can carry files, exactly as any text card can
+    /// carry inline images.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<FileEntry>,
     /// A **saved view**: this card shows the cards a query selects, instead of a
     /// body it holds.
     ///
-    /// Deliberately a field, not a `CardKind` and **not a property**. A new
-    /// variant costs ~180 exhaustive match arms and buys nothing — a view is a
+    /// Deliberately a field, not a `CardKind` and **not a property**. See
+    /// [`CardKind`] for what a variant costs; it buys nothing here — a view is a
     /// text card that draws something derived, exactly as a `source` mirror and a
     /// table's `chart` already are. And a magic `view::` property would fire on
     /// *prose about views*, which is the false-property class this project has
@@ -816,6 +848,18 @@ pub struct Card {
     /// bug generator; this one is set explicitly or not at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<ViewSpec>,
+    /// A **channel**: this card is a conversation between the operator and one or
+    /// more agents, its `body` the running log.
+    ///
+    /// A field for the same reasons `view` is one — see [`CardKind`] for what a
+    /// variant really costs, and note that a channel does not *render*
+    /// differently, which is the only thing that would justify a kind. And not a
+    /// `channel::` property, because a property fires on prose *about* channels:
+    /// the false-property class this project has now fixed three times, most
+    /// recently on 2026-08-21 when the Release Log table turned its own
+    /// description of `alias::` into an 8,271-character alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<Channel>,
     /// Runtime-only: whether the card is in edit mode. Never persisted.
     #[serde(skip)]
     pub editing: bool,
@@ -825,6 +869,193 @@ pub struct Card {
 ///
 /// **The results are never stored here.** They are computed on read, like a
 /// chart from its table — storing rows would be a copy that goes stale, which is
+/// A conversation carried on one card.
+///
+/// The **body is the log** and messages are appended to it as blocks, so the card
+/// reads as an ordinary note everywhere it already renders — the desktop canvas,
+/// the exports, and the Android app — with no new rendering anywhere. That is the
+/// whole reason this is not a card kind.
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Channel {
+    /// Who this channel is addressed to: agent names, and `operator` for the
+    /// person. **Addressing, not an access list.** Agents here normally hold the
+    /// instance key and work across every workspace — leaving a bug report in
+    /// another project's channel is the point of it, not an intrusion — so a
+    /// message from a name that is not listed is recorded under that name rather
+    /// than refused. What the list buys is discovery: `GET /api/channels?agent=`
+    /// is how an agent finds the conversations meant for it without being told a
+    /// card id.
+    #[serde(default)]
+    pub participants: Vec<String>,
+    /// The last message number written. Monotonic per card, never reused, and the
+    /// cursor a reader passes back as `?since=`.
+    ///
+    /// Stored rather than counted from the body, because the operator can edit the
+    /// body by hand — on the phone, which is the point — and a count would then
+    /// renumber every message that came before.
+    #[serde(default)]
+    pub seq: u64,
+    /// The workspace's own channel: the one an agent drains by default when it
+    /// was given a project rather than a card.
+    ///
+    /// **At most one per project**, which is the operator's constraint, and the
+    /// reason the constraint is a flag rather than "one channel per project": an
+    /// agent-to-agent channel is a second channel in the same workspace, and
+    /// forbidding that would forbid the second half of the feature.
+    #[serde(default)]
+    pub primary: bool,
+}
+
+/// One message in a channel, parsed back out of the body.
+#[derive(Clone, Serialize, PartialEq, Debug)]
+pub struct ChannelMessage {
+    /// `0` for text that carries no header — see [`parse_channel`].
+    pub seq: u64,
+    pub from: String,
+    /// RFC-3339 UTC, or empty for an unheaded block.
+    pub at: String,
+    pub text: String,
+}
+
+/// The one line that separates one message from the next.
+///
+/// `### @alice · 2026-08-21T14:03:22Z · #7`
+///
+/// A Markdown heading on purpose: it renders as a heading in every surface that
+/// already draws a card body, so the log is readable on the phone with no work,
+/// and it is still a single line a parser can key on exactly.
+pub fn channel_header(from: &str, at: &str, seq: u64) -> String {
+    format!("### @{from} · {at} · #{seq}")
+}
+
+/// Split a header line back into its parts, or `None` if it is not one.
+fn parse_channel_header(line: &str) -> Option<(String, String, u64)> {
+    let rest = line.strip_prefix("### @")?;
+    let mut parts = rest.split(" · ");
+    let from = parts.next()?.trim();
+    let at = parts.next()?.trim();
+    let seq = parts.next()?.trim().strip_prefix('#')?.parse::<u64>().ok()?;
+    if parts.next().is_some() || from.is_empty() {
+        return None;
+    }
+    Some((from.to_string(), at.to_string(), seq))
+}
+
+/// The line that closes a message.
+///
+/// A message needs an **end**, not just a start. Without one, a block runs to the
+/// next header — so anything the operator types at the *bottom* of the card, which
+/// is the natural place to type, is swallowed into the last agent's message and
+/// attributed to it. That is precisely the confusion a channel exists to remove.
+///
+/// A Markdown horizontal rule, because a log separated by rules is what a person
+/// would have written by hand anyway; it renders as a divider on the canvas, in
+/// the exports and on the phone. If an agent's own text contains a lone `---`, the
+/// remainder of that message reads as operator text — a visible mis-split, and the
+/// reason [`channel_body_safe`] exists for a caller that cares.
+pub const CHANNEL_END: &str = "---";
+
+/// Whether `text` would be split by the terminator if posted as a message.
+pub fn channel_body_safe(text: &str) -> bool {
+    !text.lines().any(|l| l.trim() == CHANNEL_END)
+}
+
+/// Read a channel card's body back as messages.
+///
+/// **Anything outside a message block is attributed to the operator**, rather than
+/// dropped or reported as corrupt. That is not leniency for its own sake: the
+/// operator is expected to type into this card from the Android app, where there
+/// is no "post a message" affordance and never will be one worth building. Text
+/// that appears on its own *is* the person talking, so reading it that way makes
+/// the phone case work by construction instead of needing a feature.
+///
+/// Such a message has `seq: 0`, which no written message ever has, so a reader
+/// polling with `?since=` still sees it — unheaded text is always returned.
+pub fn parse_channel(body: &str) -> Vec<ChannelMessage> {
+    let mut out: Vec<ChannelMessage> = Vec::new();
+    let mut cur: Option<ChannelMessage> = None;
+    let mut loose: Vec<&str> = Vec::new();
+
+    fn flush_loose(loose: &mut Vec<&str>, out: &mut Vec<ChannelMessage>) {
+        let text = loose.join("\n");
+        loose.clear();
+        if !text.trim().is_empty() {
+            out.push(ChannelMessage {
+                seq: 0,
+                from: OPERATOR.to_string(),
+                at: String::new(),
+                text: text.trim().to_string(),
+            });
+        }
+    }
+
+    for line in body.lines() {
+        if let Some((from, at, seq)) = parse_channel_header(line) {
+            if let Some(m) = cur.take() {
+                out.push(m);
+            } else {
+                flush_loose(&mut loose, &mut out);
+            }
+            cur = Some(ChannelMessage { seq, from, at, text: String::new() });
+            continue;
+        }
+        if line.trim() == CHANNEL_END {
+            if let Some(m) = cur.take() {
+                out.push(m);
+                continue;
+            }
+            // A rule outside a message is just a rule the operator typed.
+        }
+        match cur.as_mut() {
+            Some(m) => {
+                if !m.text.is_empty() {
+                    m.text.push('\n');
+                }
+                m.text.push_str(line);
+            }
+            None => loose.push(line),
+        }
+    }
+    if let Some(m) = cur.take() {
+        out.push(m);
+    } else {
+        flush_loose(&mut loose, &mut out);
+    }
+    for m in out.iter_mut() {
+        m.text = m.text.trim().to_string();
+    }
+    out.retain(|m| !(m.seq == 0 && m.text.is_empty()));
+    out
+}
+
+/// What a message with no credential behind it is called.
+pub const OPERATOR: &str = "operator";
+
+/// Now, as RFC-3339 UTC — the timestamp written into a message header.
+///
+/// **UTC, not local.** The other end of a channel can be a phone in another
+/// timezone or an agent on another machine, and a log whose ordering depends on
+/// where each line was written is not a log. (The Agenda is deliberately the
+/// opposite: "today" there is the reader's own calendar day, because a due date is
+/// a human commitment rather than an instant.)
+pub fn rfc3339_now() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// Whether a name may be used as a message sender.
+///
+/// The name is written into a header line and into the change log, so a newline
+/// or a `·` in it would forge a message boundary — a sender called
+/// `x · 2026-01-01Z · #1` could otherwise fabricate an entry from anyone. Kept
+/// deliberately narrow rather than escaped: an agent's name is a label someone
+/// chooses once, and there is no reason for it to contain punctuation.
+pub fn valid_agent_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 40
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 /// the duplication this whole app is built to prevent.
 #[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -1029,6 +1260,7 @@ impl Card {
             emphasis_until: None,
             // A brand-new card has never been *changed*; the first edit stamps it.
             touched: None,
+            channel: None,
             source: None,
             source_mtime: None,
             source_tail: None,
@@ -6764,6 +6996,145 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}\
 @media(prefers-color-scheme:dark){body{background:#17181a;color:#e6e6e6}\
 section.node{border-left-color:#333}article.card{background:#202225;border-color:#333}\
 article.card h4{color:#aaa}:not(pre)>code{background:#333}}";
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+
+    fn log(msgs: &[(&str, u64, &str)]) -> String {
+        let mut b = String::new();
+        for (from, seq, text) in msgs {
+            if !b.is_empty() {
+                b.push('\n');
+            }
+            b.push_str(&channel_header(from, "2026-08-21T12:00:00Z", *seq));
+            b.push('\n');
+            b.push_str(text);
+            b.push('\n');
+            b.push_str(CHANNEL_END);
+            b.push('\n');
+        }
+        b
+    }
+
+    #[test]
+    fn a_written_message_round_trips() {
+        let body = log(&[("alice", 1, "first"), ("bob", 2, "second\nline two")]);
+        let m = parse_channel(&body);
+        assert_eq!(m.len(), 2);
+        assert_eq!((m[0].seq, m[0].from.as_str(), m[0].text.as_str()), (1, "alice", "first"));
+        assert_eq!(m[1].from, "bob");
+        assert_eq!(m[1].text, "second\nline two", "a multi-line message stays one message");
+    }
+
+    /// **The phone case, which is the whole reason for the rule.**
+    ///
+    /// There is no "post a message" affordance in the Android app and there is no
+    /// plan to build one — the operator just types into the card. Text with no
+    /// header is therefore the person talking, and reading it that way is what
+    /// makes replying from the phone work without a feature.
+    #[test]
+    fn text_with_no_header_is_the_operator_talking() {
+        let mut body = String::from("what happened to the 404?\n\n");
+        body.push_str(&log(&[("alice", 1, "an omission, not a rule")]));
+        body.push_str("\nand the tests?\n");
+        let m = parse_channel(&body);
+        assert_eq!(m.len(), 3);
+        assert_eq!((m[0].from.as_str(), m[0].seq), (OPERATOR, 0));
+        assert_eq!(m[0].text, "what happened to the 404?");
+        assert_eq!(m[1].from, "alice");
+        assert_eq!((m[2].from.as_str(), m[2].text.as_str()), (OPERATOR, "and the tests?"));
+    }
+
+    /// `seq: 0` is what an unheaded message gets, and no written message ever has
+    /// it — so a reader polling with `?since=` still sees what the operator typed.
+    #[test]
+    fn an_operator_line_is_never_hidden_by_a_since_cursor() {
+        let mut body = log(&[("alice", 1, "a"), ("alice", 2, "b")]);
+        body.push_str("\ntyped on the phone\n");
+        let m = parse_channel(&body);
+        let after_2: Vec<_> = m.iter().filter(|m| m.seq == 0 || m.seq > 2).collect();
+        assert_eq!(after_2.len(), 1);
+        assert_eq!(after_2[0].from, OPERATOR);
+    }
+
+    #[test]
+    fn an_empty_or_blank_body_has_no_messages() {
+        assert!(parse_channel("").is_empty());
+        assert!(parse_channel("\n\n   \n").is_empty(), "whitespace is not a message");
+    }
+
+    /// A header the parser will not accept is content, not a message boundary —
+    /// so a stray `###` in prose cannot silently split someone's message off.
+    #[test]
+    fn a_near_miss_header_is_just_text() {
+        for near in [
+            "### alice · 2026-08-21T12:00:00Z · #1", // no @
+            "### @alice · 2026-08-21T12:00:00Z · 1", // no #
+            "### @alice · 2026-08-21T12:00:00Z",     // no seq at all
+            "## @alice · 2026-08-21T12:00:00Z · #1", // wrong level
+            "### @alice · 2026-08-21T12:00:00Z · #x", // seq is not a number
+        ] {
+            let m = parse_channel(&format!("{near}\nbody"));
+            assert_eq!(m.len(), 1, "{near}");
+            assert_eq!(m[0].from, OPERATOR, "{near}");
+            assert!(m[0].text.contains(near), "{near} — kept verbatim, not eaten");
+        }
+    }
+
+    /// **A name is validated because it is written into the header line.**
+    ///
+    /// Without this, an agent calling itself `x · 2026-01-01T00:00:00Z · #99` could
+    /// fabricate a message boundary and put words in another agent's mouth.
+    #[test]
+    fn a_name_that_could_forge_a_message_boundary_is_refused() {
+        assert!(valid_agent_name("alice"));
+        assert!(valid_agent_name("build-bot_2.1"));
+        assert!(!valid_agent_name(""));
+        assert!(!valid_agent_name("a · b"), "the separator itself");
+        assert!(!valid_agent_name("a\nb"), "a newline");
+        assert!(!valid_agent_name("#1"));
+        assert!(!valid_agent_name(&"x".repeat(41)));
+
+        // And the forged header does not parse even if it somehow got written.
+        let forged = "### @x · 2026-01-01T00:00:00Z · #99 · 2026-01-01T00:00:00Z · #1";
+        assert_eq!(parse_channel(&format!("{forged}\nhi"))[0].from, OPERATOR);
+    }
+
+    /// The cost of choosing a visible separator: an agent whose own text contains
+    /// a lone `---` splits its message. Pinned so the behaviour is known rather
+    /// than discovered, and `channel_body_safe` lets a caller check first.
+    #[test]
+    fn a_rule_inside_a_message_ends_it_and_the_rest_reads_as_the_operator() {
+        assert!(channel_body_safe("no rules here\nsecond line"));
+        assert!(!channel_body_safe("before\n---\nafter"));
+
+        let body = log(&[("alice", 1, "before\n---\nafter")]);
+        let m = parse_channel(&body);
+        assert_eq!(m.len(), 2);
+        assert_eq!((m[0].from.as_str(), m[0].text.as_str()), ("alice", "before"));
+        // The trailing `---` here is the fixture's own terminator, now outside any
+        // message and therefore ordinary text — which is the rule below.
+        assert_eq!(m[1].from, OPERATOR);
+        assert!(m[1].text.starts_with("after"));
+    }
+
+    /// A rule the operator types outside any message is a rule, not a stray
+    /// terminator that swallows the next thing they write.
+    #[test]
+    fn a_rule_outside_a_message_is_just_text() {
+        let m = parse_channel("first\n---\nsecond");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].from, OPERATOR);
+        assert!(m[0].text.contains("first") && m[0].text.contains("second"));
+    }
+
+    #[test]
+    fn a_channel_is_a_field_so_an_ordinary_card_has_none() {
+        let c = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Text);
+        assert!(c.channel.is_none());
+    }
+}
 
 #[cfg(test)]
 mod tests {
