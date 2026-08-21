@@ -564,8 +564,12 @@ the reply reaches you through the notification plugin you already have. Point tw
 agents at one card and it is an agent-to-agent log you can read — and interrupt —
 in real time. Messages are appended as `### @name · <time> · #<seq>` blocks, so
 the card renders as an ordinary note everywhere it already renders, phone
-included; **anything you type without a header is attributed to you**, which is
-what makes replying from Android work with no extra feature. Writers say who they
+included on the **card reader**; **anything you type without a header is
+attributed to you**, which is what makes replying from Android work with no extra
+feature. (The *basket canvas* preview on Android draws card bodies straight onto a
+`Canvas`, where Markwon's replacement spans have misbehaved before — the message
+dividers there are **unverified**, so treat that one as untested until somebody
+looks at it on a device.) Writers say who they
 are with an `X-Agent:` header, which also answers *which* agent made a change in
 `GET /api/changes`.
 

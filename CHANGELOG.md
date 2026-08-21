@@ -6,6 +6,18 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+### Known-unverified
+- **A channel card has not been looked at on a phone.** v0.143.0 said it "renders
+  as an ordinary note on the canvas, in the exports and on the phone". The first
+  two were verified by rendering one and looking (and that is how the setext-rule
+  defect in v0.144.0 was found). The **phone** was reasoned, not checked, and the
+  reasoning only covers the *card reader*: headings and thematic breaks are core
+  CommonMark, which Markwon core handles. The **basket canvas** is the specific
+  unknown — it draws a body onto a bare `Canvas` with no TextView, which is
+  exactly where Markwon's `TableRowSpan` failed before and needed `flattenTables`
+  as a workaround. A `ThematicBreakSpan` is the same kind of object. Recorded
+  rather than assumed; needs a device.
+
 ## [0.144.0]
 
 ### Added
