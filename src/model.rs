@@ -4217,6 +4217,95 @@ impl Document {
     /// The wiki-link graph: the nodes that participate in at least one link
     /// (as source or target) and the de-duplicated directed edges between them.
     /// Day-to-day nodes with no links are left out so the graph stays legible.
+    /// The neighbourhood of one **card**, out to `depth` hops, in both directions.
+    ///
+    /// [`link_graph`] is whole-document and **basket**-level: it answers "how do
+    /// the projects connect". This answers "what is around *this*", which is the
+    /// question you have while reading one card — and in a journal-shaped document
+    /// the basket is a day, so a basket-level edge says almost nothing.
+    ///
+    /// **Both directions.** A card you link to and a card that links to you are
+    /// equally its neighbours; following only out-links would make the answer
+    /// depend on which end you happened to write the link from.
+    ///
+    /// Each returned card carries the depth it was first reached at, so a caller
+    /// can group by distance instead of drawing a hairball. Breadth-first, so that
+    /// depth is the **shortest** path, not whichever was walked first.
+    ///
+    /// `cap` bounds the walk: a hub card links to everything, and a "local" graph
+    /// that returns the whole document is not local. Hitting it is reported rather
+    /// than silently truncating.
+    pub fn local_graph(
+        &self,
+        card: CardId,
+        depth: u32,
+        cap: usize,
+    ) -> (Vec<(CardId, NodeId, u32)>, Vec<(CardId, CardId)>, bool) {
+        let Some(seed_node) = self.locate_card(card) else {
+            return (Vec::new(), Vec::new(), false);
+        };
+        // card -> the cards it links to, built once; the reverse is read off it.
+        let mut out: std::collections::HashMap<CardId, Vec<CardId>> = Default::default();
+        let mut back: std::collections::HashMap<CardId, Vec<CardId>> = Default::default();
+        for n in self.nodes.values() {
+            for c in &n.cards {
+                let hay = format!("{}\n{}", c.title, searchable_body(c));
+                for t in extract_wikilinks(&hay) {
+                    if let Some(LinkTarget::Card { card: tc, .. }) =
+                        self.resolve_link_target_from(&t, n.id)
+                    {
+                        if tc != c.id {
+                            out.entry(c.id).or_default().push(tc);
+                            back.entry(tc).or_default().push(c.id);
+                        }
+                    }
+                }
+            }
+        }
+        let mut seen: std::collections::HashMap<CardId, u32> = Default::default();
+        seen.insert(card, 0);
+        let mut order: Vec<(CardId, NodeId, u32)> = vec![(card, seed_node, 0)];
+        let mut edges: Vec<(CardId, CardId)> = Vec::new();
+        let mut frontier = vec![card];
+        let mut capped = false;
+        for d in 1..=depth {
+            let mut next = Vec::new();
+            for cur in frontier.drain(..) {
+                let neighbours = out
+                    .get(&cur)
+                    .into_iter()
+                    .flatten()
+                    .map(|t| (cur, *t))
+                    .chain(back.get(&cur).into_iter().flatten().map(|f| (*f, cur)));
+                for (a, b) in neighbours {
+                    edges.push((a, b));
+                    let other = if a == cur { b } else { a };
+                    if seen.contains_key(&other) {
+                        continue;
+                    }
+                    if order.len() >= cap {
+                        capped = true;
+                        continue;
+                    }
+                    if let Some(nid) = self.locate_card(other) {
+                        seen.insert(other, d);
+                        order.push((other, nid, d));
+                        next.push(other);
+                    }
+                }
+            }
+            frontier = next;
+            if frontier.is_empty() {
+                break;
+            }
+        }
+        // Only edges between cards that made it into the neighbourhood.
+        edges.retain(|(a, b)| seen.contains_key(a) && seen.contains_key(b));
+        edges.sort();
+        edges.dedup();
+        (order, edges, capped)
+    }
+
     pub fn link_graph(&self) -> (Vec<NodeId>, Vec<(NodeId, NodeId)>) {
         let mut edges: Vec<(NodeId, NodeId)> = Vec::new();
         let mut involved = std::collections::BTreeSet::new();
@@ -6711,6 +6800,53 @@ mod tests {
         });
         assert_eq!(preview_text(&table).lines().count(), 2);
         assert_eq!(searchable_body(&table).lines().count(), 1);
+    }
+
+    /// **A neighbourhood is both directions and shortest-path.** Following only
+    /// out-links would make the answer depend on which end the link was written
+    /// from, and depth-first would report a distance that is merely the one the
+    /// walk happened to take.
+    #[test]
+    fn a_local_graph_is_bidirectional_breadth_first_and_bounded() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "b".into());
+        let mut mk = |title: &str| {
+            let id = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+            doc.card_mut(n, id).unwrap().title = title.to_string();
+            id
+        };
+        let (seed, out1, in1, far, island) = (mk("seed"), mk("out1"), mk("in1"), mk("far"), mk("island"));
+        // seed -> out1 -> far, and in1 -> seed. `island` is connected to nothing.
+        doc.card_mut(n, seed).unwrap().body = format!("[[#{out1}]]");
+        doc.card_mut(n, out1).unwrap().body = format!("[[#{far}]]");
+        doc.card_mut(n, in1).unwrap().body = format!("[[#{seed}]]");
+        let _ = island;
+
+        // Depth 1: the seed plus its immediate neighbours, in BOTH directions.
+        let (cards, _, capped) = doc.local_graph(seed, 1, 100);
+        let at = |id: CardId| cards.iter().find(|(c, _, _)| *c == id).map(|(_, _, d)| *d);
+        assert_eq!(at(seed), Some(0));
+        assert_eq!(at(out1), Some(1), "a card we link TO is a neighbour");
+        assert_eq!(at(in1), Some(1), "and so is one that links to US");
+        assert_eq!(at(far), None, "two hops away is not depth 1");
+        assert_eq!(at(island), None, "an unconnected card is never in a neighbourhood");
+        assert!(!capped);
+
+        // Depth 2 reaches `far`, at its SHORTEST distance.
+        let (cards, edges, _) = doc.local_graph(seed, 2, 100);
+        let at = |id: CardId| cards.iter().find(|(c, _, _)| *c == id).map(|(_, _, d)| *d);
+        assert_eq!(at(far), Some(2));
+        // Every edge names two cards that are actually in the neighbourhood.
+        let ids: Vec<CardId> = cards.iter().map(|(c, _, _)| *c).collect();
+        assert!(edges.iter().all(|(a, b)| ids.contains(a) && ids.contains(b)));
+
+        // The cap is REPORTED, not silently applied.
+        let (small, _, capped) = doc.local_graph(seed, 2, 2);
+        assert!(capped, "hitting the bound is said out loud");
+        assert!(small.len() <= 2);
+
+        // A card that does not exist is an empty neighbourhood, not a panic.
+        assert_eq!(doc.local_graph(999_999, 2, 100).0.len(), 0);
     }
 
     /// **Backlinks answer what points here; mentions answer what should.** The

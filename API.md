@@ -1025,6 +1025,33 @@ the document, and a list that long is not read at all, which is worse than not
 offering one. A card that already links here is a backlink, not a mention, so it is
 left out — every row is something you might actually want to turn into a link.
 
+#### The local graph — what is around *this* card
+
+```
+GET /api/cards/{cid}/graph?depth=2
+  → 200 {card, depth, cards:[{card,node,node_path,depth,title}],
+         edges:[{from,to}], capped, cap}
+  | 404 (card not found)
+```
+
+`GET /api/graph` is whole-document and **basket**-level: it answers *how do the
+projects connect*. This answers *what is around this*, which is the question you
+have while reading one card — and in a journal-shaped document a basket is a **day**,
+so a basket-level edge says almost nothing.
+
+**Both directions.** A card you link to and a card that links to you are equally
+its neighbours; following only out-links would make the answer depend on which end
+you happened to write the link from.
+
+Each card carries the `depth` it was first reached at, and the walk is
+**breadth-first**, so that depth is the *shortest* path rather than whichever the
+walk took first. `depth` defaults to **2** and is clamped to 1–5: two hops is a
+neighbourhood, more is a hairball with extra steps.
+
+`cap` bounds the walk at 200 cards — a hub card links to everything, and a "local"
+graph that returns the whole document is not local. **`capped: true` says the bound
+bit**, rather than truncating silently.
+
 #### Group links — `[[#g146]]`
 A group had an id and no way to address it: the only way to point anyone at one
 was to name a card **inside** it, which says "somewhere near here" rather than

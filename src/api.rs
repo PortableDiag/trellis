@@ -59,6 +59,8 @@ pub enum ApiRequest {
     CardBacklinks(u64),
     /// Cards that NAME this card without linking to it.
     CardMentions(u64),
+    /// The card-level neighbourhood of one card, to a depth.
+    CardGraph { card: u64, depth: u32 },
     /// One card from its id alone, without already knowing its basket. Ids are
     /// unique per document, so an id *is* an address — but every other card route
     /// is `/nodes/{node}/cards/{card}`, so an id quoted in a note or read out of
@@ -1841,6 +1843,11 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Get, ["api", "cards", cid, "backlinks"]) => Ok(ApiRequest::CardBacklinks(pid(cid)?)),
         (Method::Get, ["api", "cards", cid, "mentions"]) => Ok(ApiRequest::CardMentions(pid(cid)?)),
+        (Method::Get, ["api", "cards", cid, "graph"]) => Ok(ApiRequest::CardGraph {
+            card: pid(cid)?,
+            // Two hops is a neighbourhood; more is a hairball with extra steps.
+            depth: query_get(query, "depth").and_then(|d| d.parse::<u32>().ok()).unwrap_or(2).clamp(1, 5),
+        }),
         (Method::Get, ["api", "cards", cid]) => Ok(ApiRequest::LocateCard(pid(cid)?)),
         // Whole-document card routes. Literal arms first: `property` sits exactly
         // where a card id would.
@@ -2653,6 +2660,31 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let removed = doc.clear_card_property(node, card, &key);
             (removed, ApiResponse::ok(json!({ "cleared": removed, "key": key })))
         }
+        ApiRequest::CardGraph { card, depth } => match doc.locate_card(card) {
+            Some(_) => {
+                const CAP: usize = 200;
+                let (cards, edges, capped) = doc.local_graph(card, depth, CAP);
+                let nodes: Vec<Value> = cards
+                    .into_iter()
+                    .map(|(cid, nid, d)| json!({
+                        "card": cid,
+                        "node": nid,
+                        "node_path": doc.node_path(nid),
+                        "depth": d,
+                        "title": doc.card(nid, cid).map(|c| if c.title.trim().is_empty() { format!("card #{cid}") } else { c.title.clone() }).unwrap_or_default(),
+                    }))
+                    .collect();
+                let links: Vec<Value> =
+                    edges.into_iter().map(|(a, b)| json!({ "from": a, "to": b })).collect();
+                (false, ApiResponse::ok(json!({
+                    "card": card, "depth": depth, "cards": nodes, "edges": links,
+                    // A "local" graph that returned the whole document would not be
+                    // local; say when the bound bit rather than truncating silently.
+                    "capped": capped, "cap": CAP,
+                })))
+            }
+            None => (false, ApiResponse::err(404, "card not found")),
+        },
         ApiRequest::CardMentions(card) => match doc.locate_card(card) {
             Some(node) => {
                 let hits: Vec<Value> = doc

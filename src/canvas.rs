@@ -212,6 +212,8 @@ pub enum CanvasAction {
     CopyCard(CardId),
     /// Open the Backlinks panel showing what NAMES this card without linking.
     ShowMentions(CardId),
+    /// Open a window showing this card's link neighbourhood.
+    ShowLocalGraph(CardId),
     PasteCard(egui::Pos2),
     Remove(CardId),
     ResetView,
@@ -3524,6 +3526,18 @@ fn card_menu(
     }
     // Copy the card's id or its breadcrumb path so you can point an agent at
     // this exact card (`/api/nodes/{node}/cards/{id}`).
+    if ui
+        .button("Local graph…")
+        .on_hover_text(
+            "The cards around this one, by how many links away they are.\n\n\
+             The Link graph window is whole-document and basket-level; this is \
+             the neighbourhood of this card.",
+        )
+        .clicked()
+    {
+        actions.push(CanvasAction::ShowLocalGraph(card.id));
+        ui.close_menu();
+    }
     if ui
         .button("Unlinked mentions…")
         .on_hover_text(

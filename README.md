@@ -153,6 +153,8 @@ from the main cluster, and click or drag on it to jump there without zooming out
   another card is left where it is, and only an axis no card claimed is
   quantised, so both can be on at once. Resize quantises the resulting *corner*,
   not the size, so a card on the grid has both corners on it.
+- **Local graph** — one card's neighbourhood, grouped by how many links away each
+  card is, in both directions. The Link graph window stays whole-document.
 - **Unlinked mentions** — cards that *name* this one, by title or alias, without
   linking to it. Backlinks say what points here; this says what should.
 - **Zoom to fit** — frame every card in the basket. **Hold Ctrl** while dragging a

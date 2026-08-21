@@ -6,6 +6,33 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.141.0]
+
+### Added
+- **The local graph** — card menu → *Local graph…*, and
+  `GET /api/cards/{cid}/graph?depth=2`. One card's neighbourhood, grouped by how
+  many links away each card is.
+
+  `GET /api/graph` is whole-document and **basket**-level: it answers *how do the
+  projects connect*. This answers *what is around **this***, which is the question
+  you have while reading one card — and in a journal-shaped document a basket is a
+  **day**, so a basket-level edge says almost nothing.
+
+  - **Both directions.** A card you link to and a card that links to you are
+    equally its neighbours; following only out-links would make the answer depend
+    on which end you happened to write the link from.
+  - **Breadth-first**, so the depth reported is the *shortest* path rather than
+    whichever the walk took first.
+  - **Bounded at 200 cards, and it says when the bound bit.** A hub card links to
+    everything, and a "local" graph that returns the whole document is not local.
+  - Depth defaults to 2 and is clamped to 1–5: two hops is a neighbourhood, more
+    is a hairball with extra steps.
+
+  **A list, not a hairball.** The Link graph window already draws the
+  whole-document picture; at card level the useful question is *what is one link
+  away, what is two*, and a ranked list answers it at a glance where a
+  force-directed blob does not.
+
 ## [0.140.0]
 
 ### Added

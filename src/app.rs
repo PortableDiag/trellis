@@ -1083,6 +1083,9 @@ pub struct TrellisApp {
     switcher_purpose: SwitcherPurpose,
     /// A card whose unlinked mentions the Backlinks panel is showing, if any.
     mentions_for: Option<(NodeId, CardId)>,
+    /// A card whose link neighbourhood is on screen, and how far out.
+    local_graph_for: Option<CardId>,
+    local_graph_depth: u32,
     /// A node the tree should scroll into view next frame (set by the switcher).
     scroll_to: Option<NodeId>,
     /// A card the canvas should recenter on next frame (agenda/Kanban row click).
@@ -1599,6 +1602,8 @@ impl TrellisApp {
             switcher_index: 0,
             switcher_purpose: SwitcherPurpose::Jump,
             mentions_for: None,
+            local_graph_for: None,
+            local_graph_depth: 2,
             scroll_to: None,
             focus_card: None,
             pending_reveal: None,
@@ -4380,6 +4385,7 @@ impl TrellisApp {
             | CanvasAction::ResetView
             | CanvasAction::CopyCard(_)
             | CanvasAction::ShowMentions(_)
+            | CanvasAction::ShowLocalGraph(_)
             // Launching a plugin changes nothing by itself. Anything it does to
             // the document arrives over the API and is logged there, as `api`
             // rather than `ui` — which is the honest actor.
@@ -5181,6 +5187,10 @@ impl TrellisApp {
                 }
                 CanvasAction::Duplicate(cid) => {
                     self.doc.duplicate_card(node, cid);
+                }
+                CanvasAction::ShowLocalGraph(cid) => {
+                    self.local_graph_for = Some(cid);
+                    self.local_graph_depth = 2;
                 }
                 CanvasAction::ShowMentions(cid) => {
                     self.mentions_for = Some((node, cid));
@@ -9152,6 +9162,100 @@ impl TrellisApp {
     }
 
     /// Right-side panel: cards elsewhere that `[[link]]` to the selected node.
+    /// One card's link neighbourhood, grouped by how many hops away it is.
+    ///
+    /// **A list, not a hairball.** The Link graph window already draws the
+    /// whole-document, basket-level picture; at card level the useful question is
+    /// "what is one link away, what is two", and a ranked list answers it in a
+    /// glance where a force-directed blob does not. Both directions count: a card
+    /// you link to and a card that links to you are equally neighbours.
+    fn local_graph_window(&mut self, ctx: &egui::Context) {
+        let Some(seed) = self.local_graph_for else { return };
+        let mut open = true;
+        let mut jump: Option<(NodeId, CardId)> = None;
+        let mut depth = self.local_graph_depth;
+        let title = self
+            .doc
+            .locate_card(seed)
+            .and_then(|n| self.doc.card(n, seed))
+            .map(|c| if c.title.trim().is_empty() { format!("card #{seed}") } else { c.title.clone() })
+            .unwrap_or_else(|| format!("card #{seed}"));
+        let (cards, edges, capped) = self.doc.local_graph(seed, depth, 200);
+        egui::Window::new(format!("Around: {title}"))
+            .open(&mut open)
+            .default_width(420.0)
+            .max_height(520.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Depth");
+                    for d in 1..=4u32 {
+                        if ui.selectable_label(depth == d, d.to_string()).clicked() {
+                            depth = d;
+                        }
+                    }
+                    ui.separator();
+                    ui.weak(format!("{} cards, {} links", cards.len().saturating_sub(1), edges.len()));
+                });
+                if capped {
+                    // A "local" graph that returned the whole document would not be
+                    // local; say when the bound bit rather than truncating quietly.
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "Stopped at 200 cards — this one is a hub.",
+                    );
+                }
+                ui.separator();
+                if cards.len() <= 1 {
+                    ui.weak("Nothing links to or from this card yet.");
+                }
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for d in 1..=depth {
+                        let at: Vec<_> = cards.iter().filter(|(_, _, dd)| *dd == d).collect();
+                        if at.is_empty() {
+                            continue;
+                        }
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{d} link{} away  ({})",
+                                if d == 1 { "" } else { "s" },
+                                at.len()
+                            ))
+                            .strong(),
+                        );
+                        for (cid, nid, _) in at {
+                            let label = self
+                                .doc
+                                .card(*nid, *cid)
+                                .map(|c| {
+                                    if c.title.trim().is_empty() {
+                                        format!("card #{cid}")
+                                    } else {
+                                        c.title.clone()
+                                    }
+                                })
+                                .unwrap_or_else(|| format!("card #{cid}"));
+                            let path = crate::tree::node_path(&self.doc, *nid);
+                            if ui
+                                .add(egui::Label::new(format!("  {label}")).sense(egui::Sense::click()))
+                                .on_hover_text(format!("{path} · #{cid}"))
+                                .clicked()
+                            {
+                                jump = Some((*nid, *cid));
+                            }
+                        }
+                        ui.separator();
+                    }
+                });
+            });
+        self.local_graph_depth = depth;
+        if !open {
+            self.local_graph_for = None;
+        }
+        if let Some((n, c)) = jump {
+            self.reveal_hit(ctx, n, Some(c));
+        }
+    }
+
     fn backlinks_panel(&mut self, ctx: &egui::Context) {
         let mut jump: Option<(NodeId, Option<CardId>)> = None;
         egui::SidePanel::right("backlinks").resizable(true).default_width(260.0).show(ctx, |ui| {
@@ -10489,6 +10593,9 @@ impl eframe::App for TrellisApp {
         }
         if self.backlinks_open {
             self.backlinks_panel(ctx);
+        }
+        if self.local_graph_for.is_some() {
+            self.local_graph_window(ctx);
         }
         if self.graph_open {
             self.graph_window(ctx);
