@@ -39,6 +39,10 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   `-`/`1.`/`- [ ]` marker; empty item ends the list). **Drag an image onto a
   text card** (or right-click in edit mode) to embed it **inline** in the body;
   it exports as a data URI in HTML/Markdown and shows on the card's PDF page.
+  **Click an inline `code span` to copy it** — one click puts exactly that value
+  on the clipboard, which is what you want for an address, a hash, an id or a
+  path, and works inside markdown tables. (A code *block* keeps its own copy
+  button.)
   **HTML in the body renders** — a block of HTML (a table pasted from a page,
   anything the clipper couldn't translate) is converted to Markdown for display
   instead of being silently dropped. What you typed is left untouched on disk.

@@ -951,7 +951,11 @@ fn parse_channel_header(line: &str) -> Option<(String, String, u64)> {
 ///
 /// A Markdown horizontal rule, because a log separated by rules is what a person
 /// would have written by hand anyway; it renders as a divider on the canvas, in
-/// the exports and on the phone. If an agent's own text contains a lone `---`, the
+/// the exports and on the phone — **provided a blank line precedes it**. Text
+/// immediately above `---` is a *setext heading underline*, so without the blank
+/// line the last line of every message is promoted to an H2 and no rule is ever
+/// drawn. The parser here does not care either way, which is exactly why that shipped
+/// unnoticed until a card was rendered and looked at. If an agent's own text contains a lone `---`, the
 /// remainder of that message reads as operator text — a visible mis-split, and the
 /// reason [`channel_body_safe`] exists for a caller that cares.
 pub const CHANNEL_END: &str = "---";
@@ -7010,7 +7014,7 @@ mod channel_tests {
             b.push_str(&channel_header(from, "2026-08-21T12:00:00Z", *seq));
             b.push('\n');
             b.push_str(text);
-            b.push('\n');
+            b.push_str("\n\n");
             b.push_str(CHANNEL_END);
             b.push('\n');
         }

@@ -4135,7 +4135,13 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             c.body.push_str(&header);
             c.body.push('\n');
             c.body.push_str(text.trim_end());
-            c.body.push('\n');
+            // **A blank line before the terminator, or it is not a terminator.**
+            // `text` immediately followed by `---` is a *setext heading underline*
+            // in CommonMark: the last line of every message would be promoted to an
+            // H2 and the rule would never be drawn. Invisible to the parser here —
+            // which only cares that the line is `---` — and obvious the moment a
+            // real card is rendered, which is how it was caught.
+            c.body.push_str("\n\n");
             c.body.push_str(crate::model::CHANNEL_END);
             c.body.push('\n');
             let seq = ch.seq;
@@ -7491,6 +7497,49 @@ mod tests {
         let mut other = route(&Method::Delete, "/api/cards/9", "", "").unwrap();
         stamp_sender(&mut other, Some("alice"));
         assert!(matches!(other, ApiRequest::ByCard { op: CardOp::Delete, .. }));
+    }
+
+    /// **A message is separated from its terminator by a blank line.**
+    ///
+    /// Not a style point, and not something [`parse_channel`] can see: it only
+    /// asks whether a line is `---`. But in CommonMark `text` immediately above
+    /// `---` is a **setext heading underline**, so without the blank line the last
+    /// line of every message is silently promoted to an H2 and the rule is never
+    /// drawn. Every parser test passed while the card rendered wrongly; this
+    /// asserts the bytes, because the bytes are what the renderer reads.
+    #[test]
+    fn a_message_is_separated_from_its_terminator_by_a_blank_line() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"channel":{"participants":["alice"]}}"#).unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        for text in ["a paragraph", "two\nlines"] {
+            process(
+                &mut doc,
+                ApiRequest::ChannelSay {
+                    node: n,
+                    card: c,
+                    from: "alice".into(),
+                    text: text.into(),
+                },
+            );
+        }
+        let body = &doc.card(n, c).unwrap().body;
+        for (i, line) in body.lines().enumerate() {
+            if line.trim() == crate::model::CHANNEL_END {
+                let above = body.lines().nth(i - 1).unwrap_or("x");
+                assert!(
+                    above.trim().is_empty(),
+                    "line {i} is `---` directly under {above:?} — CommonMark reads that as a \
+                     setext heading underline, so the message's last line becomes an H2 and no \
+                     rule is drawn:\n{body}"
+                );
+            }
+        }
+        // And it still parses as two messages, so the fix did not cost the format.
+        assert_eq!(crate::model::parse_channel(body).len(), 2);
     }
 
     /// **One primary channel per project, and a second is refused by name.**

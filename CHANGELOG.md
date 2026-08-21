@@ -6,6 +6,44 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.144.0]
+
+### Added
+- **Click an inline `code span` to copy it.** Reported from real use in the
+  sharpest possible form: getting a wallet address out of a card meant selecting
+  it by hand out of a rendered **table cell**, and coming away with the whole line.
+
+  There was nothing to click. The renderer draws a span with `ui.label`, which is
+  not a hit target at all, so the only copy affordances a text card had were the
+  **whole body** button and the **code-block** button — neither of which is the
+  thing you wanted. A span is exactly where the un-typeable values live: an
+  address, a hash, an id, a service name, a path. Those are the things you need
+  *exactly*, and precisely what a hand-drag gets wrong by a character.
+
+  Hovering shows a pointer cursor and **Click to copy**; clicking copies just that
+  span and the tooltip says **Copied** for a moment, because a copy that gives no
+  sign is indistinguishable from a click that missed — which is the complaint being
+  answered, and it would be perverse to reproduce it in the fix.
+
+  Only in the plain path: inside a link the click belongs to the link, inside an
+  image it is alt text, and a code *block* keeps its own copy button. Works inside
+  markdown tables, which is where this was reported.
+
+  In the vendored renderer, so the fix is durable — the same reasoning as the
+  earlier vendored patches.
+
+### Fixed
+- **A channel message ended in a heading instead of a rule.** `say` wrote the
+  closing `---` directly under the message text, and in CommonMark text
+  immediately above `---` is a **setext heading underline** — so the last line of
+  every message was silently promoted to an H2 and the divider was never drawn.
+
+  Invisible to every test, and they all passed: `parse_channel` only asks whether a
+  line is `---`, which it was. It took **rendering a real card and looking at it**.
+  There is now a test that asserts the *bytes* — a blank line above every
+  terminator — because the bytes are what the renderer reads and the parser cannot
+  tell the difference.
+
 ## [0.143.1]
 
 ### Changed

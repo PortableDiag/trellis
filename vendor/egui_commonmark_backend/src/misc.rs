@@ -397,6 +397,14 @@ pub struct CommonMarkCache {
 
     scroll: HashMap<egui::Id, ScrollableCache>,
     pub(self) has_installed_loaders: bool,
+
+    /// Trellis patch: the inline code span most recently click-copied, and when.
+    ///
+    /// Only so the tooltip can say **Copied** for a moment. A copy that gives no
+    /// sign is indistinguishable from a click that missed — which is exactly the
+    /// complaint this feature answers, and it would be perverse to reproduce it
+    /// in the fix.
+    copied: Option<(String, f64)>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -410,11 +418,22 @@ impl Default for CommonMarkCache {
             link_hooks: HashMap::new(),
             scroll: Default::default(),
             has_installed_loaders: false,
+            copied: None,
         }
     }
 }
 
 impl CommonMarkCache {
+    /// Trellis patch: remember a click-copied span so the tooltip can confirm it.
+    pub fn note_copied(&mut self, text: &str, now: f64) {
+        self.copied = Some((text.to_owned(), now));
+    }
+
+    /// Was `text` copied within the last `secs`?
+    pub fn was_just_copied(&self, text: &str, now: f64, secs: f64) -> bool {
+        self.copied.as_ref().is_some_and(|(t, at)| t == text && now - at < secs)
+    }
+
     #[cfg(feature = "better_syntax_highlighting")]
     pub fn add_syntax_from_folder(&mut self, path: &str) {
         let mut builder = self.ps.clone().into_builder();

@@ -526,7 +526,42 @@ impl CommonMarkViewerInternal {
             }
             pulldown_cmark::Event::Code(text) => {
                 self.text_style.code = true;
-                self.event_text(text, ui);
+                // **Trellis patch: an inline code span is click-to-copy.**
+                //
+                // Reported from real use, in the sharpest possible form: getting a
+                // wallet address out of a card meant selecting it by hand out of a
+                // rendered table cell, and ending up with the whole line. Upstream
+                // renders a span with `ui.label`, which is not a hit target at all,
+                // so there was nothing to click — the only copy affordances were
+                // the whole card body and the code-*block* button.
+                //
+                // A span is where the un-typeable things live: an address, a hash,
+                // an id, a key, a path. Those are exactly what someone wants
+                // exactly, and exactly what a hand-drag gets wrong.
+                //
+                // Only in the plain path: inside a link the click belongs to the
+                // link, inside an image it is alt text, and a code *block*
+                // accumulates into its own copy button.
+                if self.image.is_none() && self.code_block.is_none() && self.link.is_none() {
+                    let now = ui.input(|i| i.time);
+                    let copied = cache.was_just_copied(&text, now, 1.2);
+                    let rich = self.text_style.to_richtext(ui, &text);
+                    let resp = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    let resp = resp.on_hover_text(if copied { "Copied" } else { "Click to copy" });
+                    if resp.clicked() {
+                        ui.ctx().copy_text(text.to_string());
+                        cache.note_copied(&text, now);
+                    }
+                    // The tooltip has to stop saying "Copied" on its own.
+                    if copied {
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+                    }
+                } else {
+                    self.event_text(text, ui);
+                }
                 self.text_style.code = false;
             }
             pulldown_cmark::Event::InlineHtml(html) => {
