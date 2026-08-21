@@ -284,6 +284,8 @@ pub enum CanvasAction {
     GroupSelected,
     /// Open the Ctrl+O palette as a destination picker for the selection.
     MoveSelectionTo,
+    /// Fold the selected cards into the first of them, rewriting links.
+    MergeSelection,
     Ungroup(GroupId),
     RaiseGroup(GroupId),
     MoveGroup(GroupId, egui::Vec2),
@@ -1233,6 +1235,20 @@ pub fn ui(
                         .clicked()
                 {
                     actions.push(CanvasAction::MoveSelectionTo);
+                }
+                if selection.len() >= 2
+                    && ui
+                        .button("Merge")
+                        .on_hover_text(
+                            "Fold the selected cards into one \u{2014} the topmost, \
+                             then leftmost, survives.\n\nEvery [[#id]] pointing at \
+                             an absorbed card is repointed at the survivor, so \
+                             nothing is left dangling. The cards must be the same \
+                             kind.\n\nThis is extract's other half.",
+                        )
+                        .clicked()
+                {
+                    actions.push(CanvasAction::MergeSelection);
                 }
                 if selection.len() >= 2 {
                     ui.menu_button("Arrange", |ui| {

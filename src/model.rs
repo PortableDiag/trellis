@@ -4051,6 +4051,52 @@ impl Document {
     /// basket-level answer is useless in a document whose baskets are days: every
     /// card written on the 11th shares one basket, so "what links here" would
     /// return the day, not the thing.
+    /// Repoint every `[[#from]]` and `![[#from]]` in the document at `to`.
+    ///
+    /// **A merge must not silently break a link.** Merging folds one card into
+    /// another and the absorbed card stops existing, so anything pointing at it
+    /// would dangle — and a dangling `[[#id]]` is worse here than elsewhere,
+    /// because an id carries no name to guess from. Rewriting is the only answer
+    /// that keeps the document true.
+    ///
+    /// Only the **id** forms are touched: `[[#12]]`, `![[#12]]`, and either with a
+    /// `|display` half, whose display text is left exactly as written. A title
+    /// link is not rewritten because it never named the absorbed card by id, and a
+    /// group link (`[[#g12]]`) shares the `#` but not the id space.
+    ///
+    /// Returns how many links moved, so the caller can say.
+    pub fn retarget_card_links(&mut self, from: CardId, to: CardId) -> usize {
+        if from == to {
+            return 0;
+        }
+        let mut n = 0usize;
+        for node in self.nodes.values_mut() {
+            for c in node.cards.iter_mut() {
+                let (t, a) = (retarget_in(&c.title, from, to), retarget_in(&c.body, from, to));
+                n += t.1 + a.1;
+                c.title = t.0;
+                c.body = a.0;
+                if let CardKind::Checklist { items } = &mut c.kind {
+                    for it in items.iter_mut() {
+                        let r = retarget_in(&it.text, from, to);
+                        n += r.1;
+                        it.text = r.0;
+                    }
+                }
+                if let CardKind::Table { table } = &mut c.kind {
+                    for row in table.rows.iter_mut() {
+                        for cell in row.iter_mut() {
+                            let r = retarget_in(&cell.text, from, to);
+                            n += r.1;
+                            cell.text = r.0;
+                        }
+                    }
+                }
+            }
+        }
+        n
+    }
+
     pub fn backlinks_card(&self, node: NodeId, card: CardId) -> Vec<SearchHit> {
         let mut hits = Vec::new();
         for n in self.nodes.values() {
@@ -4585,6 +4631,50 @@ fn wikilinks_in_line(line: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+/// Rewrite `[[#from]]` / `![[#from]]` to `to` in one string, returning the new
+/// text and how many links changed. A `|display` half is preserved untouched.
+fn retarget_in(text: &str, from: CardId, to: CardId) -> (String, usize) {
+    if !text.contains("[[") {
+        return (text.to_string(), 0);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut count = 0usize;
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'[' && i + 1 < b.len() && b[i + 1] == b'[' {
+            if let Some(end) = text[i + 2..].find("]]") {
+                let inner = &text[i + 2..i + 2 + end];
+                let (target, display) = match inner.split_once('|') {
+                    Some((t, d)) => (t.trim(), Some(d)),
+                    None => (inner.trim(), None),
+                };
+                // `#12` only — not `#g12` (a different id space) and not a title.
+                let hit = target
+                    .strip_prefix('#')
+                    .and_then(|r| r.parse::<CardId>().ok())
+                    .is_some_and(|id| id == from);
+                if hit {
+                    out.push_str("[[#");
+                    out.push_str(&to.to_string());
+                    if let Some(d) = display {
+                        out.push('|');
+                        out.push_str(d);
+                    }
+                    out.push_str("]]");
+                    count += 1;
+                    i = i + 2 + end + 2;
+                    continue;
+                }
+            }
+        }
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    (out, count)
 }
 
 /// Percent-encode the bytes that would break a Markdown link URL (spaces,
@@ -6501,6 +6591,59 @@ mod tests {
         });
         assert_eq!(preview_text(&table).lines().count(), 2);
         assert_eq!(searchable_body(&table).lines().count(), 1);
+    }
+
+    /// **A merge must not leave a dangling link.** The absorbed card stops
+    /// existing, and a dangling `[[#id]]` is worse than a dangling title link
+    /// because an id carries no name to guess from.
+    #[test]
+    fn retargeting_moves_id_links_and_leaves_everything_else_alone() {
+        // Plain, embed, and a |display half whose text must survive verbatim.
+        assert_eq!(retarget_in("see [[#12]] here", 12, 7), ("see [[#7]] here".into(), 1));
+        assert_eq!(retarget_in("![[#12]]", 12, 7), ("![[#7]]".into(), 1));
+        assert_eq!(
+            retarget_in("[[#12|the old name]]", 12, 7),
+            ("[[#7|the old name]]".into(), 1)
+        );
+        // A different card, a GROUP (different id space, same `#`), and a title
+        // link are all left exactly as they were.
+        assert_eq!(retarget_in("[[#120]]", 12, 7), ("[[#120]]".into(), 0));
+        assert_eq!(retarget_in("[[#g12]]", 12, 7), ("[[#g12]]".into(), 0));
+        assert_eq!(retarget_in("[[Some Basket]]", 12, 7), ("[[Some Basket]]".into(), 0));
+        // Several in one string, and text with no links at all.
+        assert_eq!(retarget_in("[[#12]] x [[#12]]", 12, 7), ("[[#7]] x [[#7]]".into(), 2));
+        assert_eq!(retarget_in("nothing here", 12, 7), ("nothing here".into(), 0));
+    }
+
+    /// Retargeting reaches a checklist's items and a table's cells, because
+    /// **neither keeps its content in `body`** — the rule that has caught this
+    /// project out before.
+    #[test]
+    fn retargeting_reaches_items_and_cells_not_just_bodies() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "b".into());
+        let t = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, t).unwrap().body = "see [[#99]]".into();
+        let cl = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, cl).unwrap().kind = CardKind::Checklist {
+            items: vec![ChecklistItem { id: 1, text: "do [[#99]]".into(), done: false }],
+        };
+        let tb = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, tb).unwrap().kind =
+            CardKind::Table { table: TableData::from_values(vec![vec!["[[#99]]".into()]]) };
+
+        assert_eq!(doc.retarget_card_links(99, 5), 3, "body, item and cell all move");
+        assert_eq!(doc.card(n, t).unwrap().body, "see [[#5]]");
+        match &doc.card(n, cl).unwrap().kind {
+            CardKind::Checklist { items } => assert_eq!(items[0].text, "do [[#5]]"),
+            _ => panic!("still a checklist"),
+        }
+        match &doc.card(n, tb).unwrap().kind {
+            CardKind::Table { table } => assert_eq!(table.rows[0][0].text, "[[#5]]"),
+            _ => panic!("still a table"),
+        }
+        // Merging a card into itself is a no-op, not a rewrite storm.
+        assert_eq!(doc.retarget_card_links(5, 5), 0);
     }
 
     /// **A tail is bounded by the lines asked for, not by the file.** That is the

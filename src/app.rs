@@ -550,6 +550,7 @@ fn undo_kind(a: &CanvasAction) -> UndoKind {
         | A::RemoveImage(..)
         | A::GroupSelected
         | A::MoveSelectionTo
+        | A::MergeSelection
         | A::Ungroup(_)
         | A::DockCard(..)
         | A::DetachCard(_)
@@ -4472,6 +4473,7 @@ impl TrellisApp {
             CanvasAction::GroupSelected => group(Op::Created, 0).field("group"),
             // The move itself is logged when it happens; opening a picker is not a change.
             CanvasAction::MoveSelectionTo => return None,
+            CanvasAction::MergeSelection => card(Op::Deleted, 0).field("merge"),
             CanvasAction::Ungroup(g) => group(Op::Deleted, *g),
             CanvasAction::RaiseGroup(g) => group(Op::Moved, *g).field("order"),
             CanvasAction::MoveGroup(g, _) => group(Op::Moved, *g).field("pos"),
@@ -5073,6 +5075,9 @@ impl TrellisApp {
                         // Moves the card plus anything docked to it.
                         self.doc.move_card_tree(node, cid, delta);
                     }
+                }
+                CanvasAction::MergeSelection => {
+                    self.merge_selection(node);
                 }
                 CanvasAction::MoveSelectionTo => {
                     // The palette is the basket picker; it already fuzzy-matches
@@ -9687,6 +9692,120 @@ impl TrellisApp {
         self.mark_dirty();
         self.focus_card = Some(new_id);
         self.status = format!("Extracted to card #{new_id}, embedded here");
+    }
+
+    /// Fold the selected cards into one, and repoint every link at the survivor.
+    ///
+    /// **This is extract's other half** (v0.135.0). Extract moves text out and
+    /// leaves a view of it; merge brings cards back together. Both exist so that
+    /// splitting and joining notes never means *copying* them.
+    ///
+    /// The survivor is the **topmost, then leftmost** card — a rule that does not
+    /// depend on the order you happened to click, so the same selection always
+    /// merges the same way. Content is appended in that same reading order.
+    ///
+    /// **Every `[[#id]]` pointing at an absorbed card is repointed at the
+    /// survivor** before it is deleted. An absorbed card stops existing, and a
+    /// dangling id-link is worse here than a dangling title-link because an id
+    /// carries no name to guess from.
+    ///
+    /// **Mixed kinds are refused by name** rather than coerced: joining a table
+    /// to a checklist has no meaning that is not an invention, and inventing one
+    /// silently is how content goes missing.
+    fn merge_selection(&mut self, node: NodeId) {
+        let Some(n) = self.doc.nodes.get(&node) else { return };
+        let mut chosen: Vec<&crate::model::Card> =
+            n.cards.iter().filter(|c| self.card_sel.contains(&c.id)).collect();
+        if chosen.len() < 2 {
+            return;
+        }
+        // Reading order, so the outcome does not depend on click order.
+        chosen.sort_by(|a, b| {
+            a.pos
+                .y
+                .partial_cmp(&b.pos.y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.pos.x.partial_cmp(&b.pos.x).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        let kind_label = |c: &crate::model::Card| c.kind.label();
+        let first = kind_label(chosen[0]);
+        if let Some(odd) = chosen.iter().find(|c| kind_label(c) != first) {
+            self.status = format!(
+                "Merge needs one kind: #{} is a {} and #{} is a {}",
+                chosen[0].id, first, odd.id, kind_label(odd)
+            );
+            return;
+        }
+        if !matches!(
+            chosen[0].kind,
+            CardKind::Text | CardKind::Code { .. } | CardKind::Checklist { .. }
+        ) {
+            self.status = format!("A {first} card cannot be merged \u{2014} only text, code and checklists");
+            return;
+        }
+        let keep = chosen[0].id;
+        let absorbed: Vec<CardId> = chosen[1..].iter().map(|c| c.id).collect();
+        // Gather content before mutating anything.
+        let bodies: Vec<String> = chosen.iter().map(|c| c.body.clone()).collect();
+        let titles: Vec<String> = chosen.iter().map(|c| c.title.clone()).collect();
+        let items: Vec<Vec<crate::model::ChecklistItem>> = chosen
+            .iter()
+            .map(|c| match &c.kind {
+                CardKind::Checklist { items } => items.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let is_checklist = matches!(chosen[0].kind, CardKind::Checklist { .. });
+        self.push_undo(node);
+
+        if is_checklist {
+            let mut all: Vec<crate::model::ChecklistItem> = Vec::new();
+            for v in items {
+                all.extend(v);
+            }
+            // Ids are per-card, so a merged list can collide; renumber from the
+            // survivor's next free id. A checklist item id addresses a task.
+            let mut next = all.iter().map(|i| i.id).max().unwrap_or(0) + 1;
+            let mut seen = std::collections::HashSet::new();
+            for it in all.iter_mut() {
+                if !seen.insert(it.id) {
+                    it.id = next;
+                    next += 1;
+                }
+            }
+            if let Some(c) = self.doc.card_mut(node, keep) {
+                c.kind = CardKind::Checklist { items: all };
+            }
+        } else {
+            // A merged card keeps its own title; the others' become headings, so
+            // nothing a card was called is lost by joining it to another.
+            let mut out = bodies[0].trim_end().to_string();
+            for (i, b) in bodies.iter().enumerate().skip(1) {
+                out.push_str("\n\n");
+                if !titles[i].trim().is_empty() {
+                    out.push_str(&format!("## {}\n\n", titles[i].trim()));
+                }
+                out.push_str(b.trim());
+            }
+            if let Some(c) = self.doc.card_mut(node, keep) {
+                c.body = out;
+            }
+        }
+
+        let mut moved = 0usize;
+        for cid in &absorbed {
+            moved += self.doc.retarget_card_links(*cid, keep);
+            self.doc.remove_card(node, *cid);
+        }
+        self.card_sel.clear();
+        self.card_sel.insert(keep);
+        self.mark_dirty();
+        self.focus_card = Some(keep);
+        self.status = format!(
+            "Merged {} cards into #{keep}{}",
+            absorbed.len() + 1,
+            if moved > 0 { format!(", repointed {moved} link(s)") } else { String::new() }
+        );
     }
 
     /// Move every selected card into `target`, keeping their arrangement.

@@ -6,6 +6,35 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.138.0]
+
+### Added
+- **Merge cards** — select two or more and press **Merge**. This is **extract's
+  other half** (v0.135.0): extract moves text out and leaves a view of it, merge
+  brings cards back together, and between them splitting and joining a note never
+  means *copying* it.
+
+  **Every `[[#id]]` pointing at an absorbed card is repointed at the survivor**
+  before it is deleted. An absorbed card stops existing, and a dangling id-link is
+  worse than a dangling title-link because an id carries no name to guess from.
+  The rewrite reaches a checklist's `items` and a table's `rows`, not just bodies
+  — neither keeps its content in `body`. `![[#id]]` embeds move too; a `|display`
+  half is preserved exactly as written, and a group link (`[[#g12]]`) is left
+  alone because it shares the `#` but not the id space.
+
+  **The survivor is the topmost, then leftmost card**, so the same selection always
+  merges the same way regardless of the order you clicked. Content is appended in
+  that same reading order, and **each absorbed card's title becomes a `##`
+  heading**, so nothing a card was called is lost by joining it.
+
+  **A merged checklist renumbers colliding item ids.** Item ids are per-card, so
+  two lists can both have an item 1 — and since v0.90.0 a dated item id *addresses
+  a task*, so leaving a collision would point two tasks at one id.
+
+  **Mixed kinds are refused by name**, and so are tables, images and sketches:
+  joining a table to a checklist has no meaning that is not an invention, and
+  inventing one silently is how content goes missing.
+
 ## [0.137.0]
 
 ### Added
