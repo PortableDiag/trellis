@@ -2922,8 +2922,11 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             }
         }
         ApiRequest::ClearCardProperty { node, card, key } => {
-            if doc.card(node, card).is_none() {
+            let Some(c) = doc.card(node, card) else {
                 return (false, ApiResponse::err(404, "card not found"));
+            };
+            if let Some(why) = property_not_read_by(&c.kind) {
+                return (false, ApiResponse::err(400, why));
             }
             let removed = doc.clear_card_property(node, card, &key);
             (removed, ApiResponse::ok(json!({ "cleared": removed, "key": key })))
@@ -3457,6 +3460,11 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             (true, ApiResponse::ok(json!({ "card": card, "index": idx })))
         }
         ApiRequest::SetCardProperty { node, card, key, value } => {
+            if let Some(c) = doc.card(node, card) {
+                if let Some(why) = property_not_read_by(&c.kind) {
+                    return (false, ApiResponse::err(400, why));
+                }
+            }
             if doc.set_card_property(node, card, &key, &value) {
                 (true, ApiResponse::ok(json!({ "card": card, "key": key.to_lowercase(), "value": value })))
             } else {
@@ -3600,6 +3608,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         ApiRequest::CardsProperty { cards, key, value } => {
             if cards.is_empty() {
                 return (false, ApiResponse::err(400, "cards must name at least one card"));
+            }
+            if let Some((code, why)) = property_refusal(doc, &cards) {
+                return (false, ApiResponse::err(code, &why));
             }
             // Resolve every id before touching any of them — the batch rule, and
             // here it also means the caller learns which id was wrong rather than
@@ -3808,6 +3819,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             if cards.is_empty() {
                 return (false, ApiResponse::err(400, "cards must name at least one card"));
             }
+            if let Some((code, why)) = property_refusal(doc, &cards) {
+                return (false, ApiResponse::err(code, &why));
+            }
             for cid in &cards {
                 if doc.card(node, *cid).is_none() {
                     return (
@@ -3841,6 +3855,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             }
             if cards.is_empty() {
                 return (false, ApiResponse::err(400, "cards must name at least one card"));
+            }
+            if let Some((code, why)) = property_refusal(doc, &cards) {
+                return (false, ApiResponse::err(code, &why));
             }
             for cid in &cards {
                 if doc.card(node, *cid).is_none() {
@@ -4681,6 +4698,58 @@ fn body_not_shown_by(kind: &CardKind) -> Option<&'static str> {
         }
         CardKind::Text | CardKind::Code { .. } => None,
     }
+}
+
+/// Why a `key:: value` written on this card could never be read back, or `None`
+/// when it can.
+///
+/// **A card's properties are parsed from its title and its *content*** — and
+/// `searchable_body` says what content is: the body for text and code, the
+/// **items** for a checklist, the **cells** for a table, names and OCR for an
+/// image, nothing at all for a sketch. But `set_card_property` writes into
+/// `body`, which four of the six kinds never read. The result was a **200 that
+/// echoed the value back and stored nothing** — reported from use on 2026-08-21
+/// by an agent that had been setting `status::` on a table and believing it.
+///
+/// The same reasoning as the `append` guard, and worse in effect: append at least
+/// stored text somewhere. Here the write is accepted, confirmed, and gone. A
+/// checklist is the sharpest case, because that is the task-carrying kind — an
+/// agent marking a working list `status:: done` was told it had.
+///
+/// Refusing rather than silently redirecting into the title: a property appended
+/// to a card's *title* is visible clutter on the canvas, and inventing that is not
+/// something a caller asked for. The message names where it can go instead.
+fn property_not_read_by(kind: &CardKind) -> Option<&'static str> {
+    match kind {
+        CardKind::Checklist { .. } => Some(
+            "a checklist card's properties come from its title and its items, never its              body — put it on a line with POST …/cards/{cid}/items/{item}/property (a dated              line is its own task), or in the card's title",
+        ),
+        CardKind::Table { .. } => Some(
+            "a table card's properties come from its title and its cells, never its body —              put `key:: value` in the title with PATCH …/cards/{cid}",
+        ),
+        CardKind::Image { .. } | CardKind::Sketch { .. } => Some(
+            "this kind of card has no body that is read as a property — put `key:: value`              in the title with PATCH …/cards/{cid}",
+        ),
+        CardKind::Text | CardKind::Code { .. } => None,
+    }
+}
+
+/// The refusal for the first card in `cards` that cannot carry a property.
+///
+/// A batch is validated in full before anything changes, so one card of the wrong
+/// kind refuses the whole call rather than half-applying — the same rule every
+/// other batch here follows.
+fn property_refusal(doc: &Document, cards: &[u64]) -> Option<(u16, String)> {
+    for cid in cards {
+        if let Some(node) = doc.locate_card(*cid) {
+            if let Some(c) = doc.card(node, *cid) {
+                if let Some(why) = property_not_read_by(&c.kind) {
+                    return Some((400, format!("card {cid}: {why}")));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// An empty card of the kind this name means, for asking questions *about* the
@@ -7520,6 +7589,76 @@ mod tests {
         let mut other = route(&Method::Delete, "/api/cards/9", "", "").unwrap();
         stamp_sender(&mut other, Some("alice"));
         assert!(matches!(other, ApiRequest::ByCard { op: CardOp::Delete, .. }));
+    }
+
+    /// **A property that could never be read back is refused, not accepted.**
+    ///
+    /// Reported from use on 2026-08-21: an agent set `status::` on a table, got a
+    /// **200 echoing the value**, and the card carried nothing. `set_card_property`
+    /// writes into `body`; a card's properties are parsed from its title and its
+    /// *content*, and for four of the six kinds the body is not content. Checklist
+    /// is the sharpest case — that is the task-carrying kind.
+    #[test]
+    fn a_property_the_card_cannot_carry_is_refused() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let mk = |doc: &mut Document, kind| doc.add_card(n, egui::pos2(0.0, 0.0), kind).unwrap();
+
+        // The two that genuinely carry one still do.
+        for kind in [CardKind::Text, CardKind::Code { lang: "rust".into() }] {
+            let c = mk(&mut doc, kind);
+            let (dirty, r) = process(
+                &mut doc,
+                ApiRequest::SetCardProperty { node: n, card: c, key: "status".into(), value: "done".into() },
+            );
+            assert!(dirty && r.status == 200, "{}", r.body);
+            assert!(
+                doc.card(n, c).unwrap().properties().iter().any(|(k, v)| k == "status" && v == "done"),
+                "a text/code card must actually carry it"
+            );
+        }
+
+        // The four that cannot are refused, and the message says where it can go.
+        for kind in [
+            CardKind::Checklist { items: vec![] },
+            CardKind::Table { table: crate::model::TableData::empty(2, 2) },
+            CardKind::Image { data: vec![], name: String::new(), extra: vec![], ocr: String::new() },
+            CardKind::Sketch { strokes: vec![] },
+        ] {
+            let c = mk(&mut doc, kind);
+            let (dirty, r) = process(
+                &mut doc,
+                ApiRequest::SetCardProperty { node: n, card: c, key: "status".into(), value: "done".into() },
+            );
+            assert!(!dirty, "nothing may change");
+            assert_eq!(r.status, 400, "{}", r.body);
+            assert!(r.body.contains("title"), "must name where it CAN go: {}", r.body);
+            assert!(
+                doc.card(n, c).unwrap().properties().is_empty(),
+                "and the card is left alone"
+            );
+
+            // Clearing is refused too: "cleared" on something that could never
+            // have been set is the same lie in the other direction.
+            let (_, r) = process(
+                &mut doc,
+                ApiRequest::ClearCardProperty { node: n, card: c, key: "status".into() },
+            );
+            assert_eq!(r.status, 400, "{}", r.body);
+
+            // And the batch refuses wholesale rather than half-applying.
+            let (dirty, r) = process(
+                &mut doc,
+                ApiRequest::CardsProperty {
+                    cards: vec![c],
+                    key: "status".into(),
+                    value: Some("done".into()),
+                },
+            );
+            assert!(!dirty);
+            assert_eq!(r.status, 400, "{}", r.body);
+            assert!(r.body.contains(&c.to_string()), "names which card: {}", r.body);
+        }
     }
 
     /// **A channel card says that it is one.**

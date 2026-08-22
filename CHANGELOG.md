@@ -6,6 +6,39 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.146.1]
+
+### Fixed
+- **Setting a property on a card that cannot carry one is refused, not
+  confirmed.** Reported from use by an agent working through the API: `POST
+  …/cards/{cid}/property` on a **table** answered **200**, echoed the value back,
+  and stored nothing.
+
+  `set_card_property` writes into `body`. A card's properties are parsed from its
+  title and its **content**, and `searchable_body` decides what content is — the
+  body for text and code, the **items** for a checklist, the **cells** for a
+  table, names and OCR for an image, nothing for a sketch. So on four of the six
+  kinds the write went somewhere nothing reads.
+
+  **It was broader than reported.** Measured across every kind before touching
+  anything: text and code work; **checklist, table, image and sketch** all
+  accepted, echoed and discarded. Checklist is the sharpest — that is the
+  task-carrying kind, so an agent marking a working list `status:: done` was told
+  it had. Every route was affected: the node-addressed one, its card-addressed
+  twin, the basket batch and the whole-document batch, and `DELETE` reported
+  `cleared` on a property that could never have been there.
+
+  All of them now answer **400** naming where the property *can* go — the item
+  route for a checklist (a dated line is its own task), the title otherwise. The
+  batch refuses wholesale and names the offending card, the same rule every other
+  batch here follows. Refused rather than silently redirected into the title:
+  appending `status:: done` to a card's visible title is clutter nobody asked for.
+
+  The same class as the `append` guard (v0.118.0) and worse in effect — append at
+  least stored the text somewhere. *"A 200 that changed nothing anyone can see is
+  the worst answer available"* was already written down; this route had not been
+  held to it.
+
 ## [0.146.0]
 
 ### Added

@@ -330,7 +330,7 @@ address for doing something and not only for looking it up:
 
 PATCH  /api/cards/{cid}                    {…}      same body as the node form
 DELETE /api/cards/{cid}
-POST   /api/cards/{cid}/property           {key, value}
+POST   /api/cards/{cid}/property           {key, value}   (400 on checklist/table/image/sketch)
 DELETE /api/cards/{cid}/property?key=due
 POST   /api/cards/{cid}/move               {node, pos?} or {before|after|index|to}
 POST   /api/cards/{cid}/items/{item}/done  {done}
@@ -1822,6 +1822,18 @@ are a small expression language needing an infinite-loop guard; filter + columns
 sort + limit is the useful part. The Agenda, Kanban and Find panels are also
 **not** re-expressed on top of this — rewriting three working panels onto a new
 engine is how three working panels break.
+
+**A property has to land somewhere the card is read from.** A card's properties
+come from its **title** and its **content** — and content means the body only for
+`text` and `code`. A checklist's content is its **items**, a table's is its
+**cells**, an image's is its name and OCR, a sketch has none. So
+`POST …/cards/{cid}/property` answers **400** on those four rather than writing
+into a body nothing reads: until v0.146.1 it answered 200, echoed the value and
+stored nothing, which an agent reported after setting `status::` on a table and
+believing it. The message names where it can go instead — the **item** route for a
+checklist (`POST …/items/{item}/property`, and a dated line is its own task), the
+**title** otherwise. `DELETE` and both batch forms follow the same rule; a batch
+refuses wholesale and names the card.
 
 ### Properties the app cannot read
 ```
