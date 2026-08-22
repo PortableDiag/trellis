@@ -6,6 +6,51 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.146.0]
+
+### Added
+- **Something answers the channel now** — the `claude` plugin, and it is the half
+  that makes channels worth having. The operator put it plainly: *"I have to tell
+  you I replied? why wouldn't I just write one message in the terminal?"* Exactly
+  right. A card that only an already-summoned agent ever reads is **strictly worse
+  than a terminal**, because summoning the agent is the thing you were trying to
+  avoid. v0.143.0 shipped the transport and called the feature done.
+
+  Trellis already runs plugins **on-change**, mints them a scoped token and gates
+  them behind approval — so the waker is a plugin, not a new daemon nobody
+  remembers to start. It asks `GET /api/channels?agent=claude` what is addressed
+  to it, reads each conversation past a stored per-card cursor, and for anything
+  that is not its own runs `claude -p` and posts the answer with `say`. The card
+  can now **start a turn**.
+
+  Guards, because each answer is a real model call: it never answers its own
+  words; a channel seen for the first time adopts its current position rather than
+  working through a backlog; at most three answers per run; a failure is reported
+  and **nothing is posted**, with the cursor left where it was so the message is
+  answered next time rather than lost.
+
+### Fixed
+- **`seq: 0` was permanent, so `?since=` could never advance past it.** Unheaded
+  operator text is returned on every read regardless of the cursor — deliberately,
+  so a message typed on the phone is never missed. Left unnumbered for ever, that
+  makes the cursor useless: **the plugin answered the same question on four
+  consecutive runs**, an unbounded sequence of model calls, and only stopped
+  because it was being run by hand.
+
+  `say` now gives unheaded text at the **end** of the body a header on its way
+  past, stamped `operator` and numbered. `seq: 0` becomes the brief state between
+  typing and being answered rather than a place a message stays, and `?since=` is
+  a real cursor for **every** client rather than one each has to special-case.
+  Text wedged *between* two messages is left exactly as written — renumbering
+  somebody's words to tidy the file is worse than the untidiness.
+
+- **The plugin's replies were attributed to `operator`.** A scoped token carries
+  its own label and the server rightly prefers it, but run under the instance key
+  there is no label — so the reply came back as the operator's, and the loop guard
+  read the plugin's own words as something to answer. It sends `X-Agent` as well
+  now, which is correct under either credential. Both defects were found by
+  running it against a live channel, not by reading it.
+
 ## [0.145.1]
 
 ### Fixed

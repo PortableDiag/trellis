@@ -4119,8 +4119,26 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     ),
                 );
             };
-            ch.seq += 1;
             let at = crate::model::rfc3339_now();
+            // **Seal what the operator typed before answering it.**
+            //
+            // Text with no header is the person talking, and it is returned on
+            // every read *regardless of `?since=`* — deliberately, so a message
+            // typed on the phone is never missed. But that makes it uncursorable:
+            // a client using `since` as its position reads the same loose text
+            // for ever. Measured, not imagined — the channel plugin answered the
+            // same question on four consecutive runs.
+            //
+            // So a reply gives that text a number on its way past. `seq: 0` stops
+            // being a permanent state and becomes the brief one between typing and
+            // being answered, and `?since=` becomes a real cursor for every client
+            // rather than one that has to special-case this.
+            let sealed = crate::model::seal_loose_tail(&c.body, ch.seq + 1, &at);
+            if let Some((body, used)) = sealed {
+                c.body = body;
+                ch.seq = used;
+            }
+            ch.seq += 1;
             let header = crate::model::channel_header(&from, &at, ch.seq);
             if !c.body.is_empty() && !c.body.ends_with('\n') {
                 c.body.push('\n');

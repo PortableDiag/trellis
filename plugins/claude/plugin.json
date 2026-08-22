@@ -1,0 +1,33 @@
+{
+  "name": "claude",
+  "title": "Claude — answer in channels",
+  "description": "Answers channel cards. When you type a message into a card addressed to 'claude', this runs `claude -p` with the conversation and posts the reply back into the card — so the card can start a turn instead of only being read by an agent you already summoned. Without something that can wake an agent, a channel is strictly worse than a terminal, which is the whole reason this exists. With no `claude` on PATH it says so and posts nothing.",
+  "version": "1.0.0",
+  "command": "python3",
+  "args": ["channel_agent.py"],
+  "triggers": ["manual", "on-change"],
+  "debounce_secs": 8,
+  "scope": {},
+  "config": [
+    {
+      "key": "enabled",
+      "label": "Answer automatically (yes/no)",
+      "help": "Default yes. Set to no to stop it running on change while leaving it installed — the Run button still works."
+    },
+    {
+      "key": "cwd",
+      "label": "Working directory for Claude",
+      "help": "Where `claude -p` runs, which decides what it can see. Blank uses the plugin's own folder. A project checkout is the useful answer."
+    },
+    {
+      "key": "timeout_secs",
+      "label": "Give up after (seconds)",
+      "help": "Default 240. A turn that runs longer is abandoned and reported; nothing is posted."
+    },
+    {
+      "key": "max_turns_per_run",
+      "label": "Most messages to answer in one run",
+      "help": "Default 3. A guard: an import or a paste can put many messages in a channel at once, and each answer is a real model call."
+    }
+  ]
+}

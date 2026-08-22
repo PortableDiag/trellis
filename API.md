@@ -1664,6 +1664,14 @@ card without a second request, exactly as `view` does for a saved view.
 **In the app:** card menu → **Make a channel…**, and on Android the card reader's
 **Channel…** — same fields, same rules. The API is not the only way in.
 
+**Something has to answer.** A channel that only an already-running agent ever
+reads is worse than a terminal — you would have to go and say *"I replied"* in
+order to be replied to. The **`claude` plugin** (`plugins/claude/`) is the waker:
+Trellis runs it **on-change**, it asks `GET /api/channels?agent=claude` what is
+addressed to it, and for anything that is not its own it runs `claude -p` and
+posts the answer with `say`. Install it, approve it, and the card can start a turn
+by itself.
+
 **Say who you are with a header.** Every write may carry `X-Agent: <name>`, and
 that is what a message is attributed to:
 
@@ -1724,6 +1732,15 @@ Android app and that text comes back as a message from `operator` with `seq: 0`.
 That is not leniency — it is what makes replying from the phone work with no
 feature at all, and it is why unheaded text is always returned regardless of
 `?since=`. A written message never has `seq: 0`.
+
+**A reply seals it.** `seq: 0` would otherwise be permanent, and a client using
+`?since=` as its cursor would read the same loose text for ever — the channel
+plugin answered one question on four consecutive runs before this was fixed. So
+`say` gives any unheaded text at the **end** of the body a header on its way past,
+numbered and stamped `operator`. `seq: 0` is the brief state between typing and
+being answered, not a place a message stays. Text wedged *between* two existing
+messages is left exactly as written: renumbering somebody's words to tidy the file
+is worse than the untidiness, and there is no honest timestamp for it.
 
 **`participants` is addressing, not an access list.** It is how an agent *finds*
 its conversations — `GET /api/channels?agent=alice` — without being told a card id.

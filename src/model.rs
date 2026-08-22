@@ -1036,6 +1036,50 @@ pub fn parse_channel(body: &str) -> Vec<ChannelMessage> {
 /// What a message with no credential behind it is called.
 pub const OPERATOR: &str = "operator";
 
+/// Give a header to unheaded text sitting at the end of a channel body.
+///
+/// Returns the rewritten body and the sequence number used, or `None` when there
+/// is nothing loose to seal.
+///
+/// Only the **tail** is sealed, which is where typing into a card puts it. Loose
+/// text wedged between two existing messages is left exactly as written: moving or
+/// renumbering somebody's words to tidy the file up is a worse failure than the
+/// untidiness, and there is no honest timestamp to give it.
+pub fn seal_loose_tail(body: &str, seq: u64, at: &str) -> Option<(String, u64)> {
+    let lines: Vec<&str> = body.lines().collect();
+    // Everything after the last terminator is the tail. With no terminator at all
+    // the whole body is loose — a card that was typed into before it ever had a
+    // message.
+    let start = lines
+        .iter()
+        .rposition(|l| l.trim() == CHANNEL_END)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let tail = lines[start..].join("\n");
+    if tail.trim().is_empty() {
+        return None;
+    }
+    // A header down there means the tail belongs to a written message, not to the
+    // operator — nothing to seal.
+    if lines[start..].iter().any(|l| parse_channel_header(l).is_some()) {
+        return None;
+    }
+    let mut out: String = lines[..start].join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    if !out.is_empty() && !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    out.push_str(&channel_header(OPERATOR, at, seq));
+    out.push('\n');
+    out.push_str(tail.trim());
+    out.push_str("\n\n");
+    out.push_str(CHANNEL_END);
+    out.push('\n');
+    Some((out, seq))
+}
+
 /// Now, as RFC-3339 UTC — the timestamp written into a message header.
 ///
 /// **UTC, not local.** The other end of a channel can be a phone in another
@@ -7150,6 +7194,46 @@ mod channel_tests {
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].from, OPERATOR);
         assert!(m[0].text.contains("first") && m[0].text.contains("second"));
+    }
+
+    /// **Replying seals what the operator typed, so `?since=` can advance.**
+    ///
+    /// Unheaded text is returned on every read regardless of the cursor — by
+    /// design, so a phone message is never missed. Left unnumbered for ever, that
+    /// makes the cursor useless: the channel plugin answered the same question on
+    /// four consecutive runs before this existed.
+    #[test]
+    fn a_reply_gives_the_operators_typing_a_number() {
+        let typed = "what does the terminator do?\n";
+        let (sealed, used) = seal_loose_tail(typed, 1, "2026-08-21T12:00:00Z").unwrap();
+        assert_eq!(used, 1);
+        let m = parse_channel(&sealed);
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].seq, m[0].from.as_str()), (1, OPERATOR));
+        assert_eq!(m[0].text, "what does the terminator do?");
+        // And it is now past a cursor of 0 rather than pinned at it for ever.
+        assert!(m.iter().all(|x| x.seq != 0));
+
+        // Typing after an existing exchange seals only the new tail.
+        let mut body = log(&[("alice", 1, "earlier")]);
+        body.push_str("\nand now this\n");
+        let (sealed, used) = seal_loose_tail(&body, 2, "2026-08-21T12:01:00Z").unwrap();
+        assert_eq!(used, 2);
+        let m = parse_channel(&sealed);
+        assert_eq!(m.len(), 2, "{sealed}");
+        assert_eq!((m[0].seq, m[0].from.as_str()), (1, "alice"));
+        assert_eq!((m[1].seq, m[1].from.as_str()), (2, OPERATOR));
+        assert_eq!(m[1].text, "and now this");
+    }
+
+    /// Nothing to seal must stay nothing: a body of only written messages is left
+    /// byte-for-byte alone, or every reply would rewrite the whole log.
+    #[test]
+    fn sealing_a_body_with_no_loose_text_is_a_no_op() {
+        let body = log(&[("alice", 1, "a"), ("bob", 2, "b")]);
+        assert!(seal_loose_tail(&body, 3, "2026-08-21T12:00:00Z").is_none());
+        assert!(seal_loose_tail("", 1, "2026-08-21T12:00:00Z").is_none());
+        assert!(seal_loose_tail("\n  \n", 1, "2026-08-21T12:00:00Z").is_none());
     }
 
     #[test]
