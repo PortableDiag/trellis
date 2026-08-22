@@ -124,6 +124,9 @@ pub enum ApiRequest {
     /// running log, a handoff — is exactly where both of them write. And it does
     /// not require shipping an 18 KB body over the wire to add a line to it.
     AppendCard { node: NodeId, card: u64, input: AppendInput },
+    /// Render a web-page card's body to a picture. Runs a browser, so it is
+    /// answered in the app loop where the settings gate lives.
+    RenderHtml { node: NodeId, card: u64 },
     /// Write a writable mirror's body **back** to its file. Refuses on a moved
     /// mtime rather than resolving the conflict; see [`CardOp::WriteSource`].
     WriteSource { node: NodeId, card: u64 },
@@ -446,6 +449,8 @@ pub enum CardOp {
     SetItemProperty { item: u64, key: String, value: String },
     ClearItemProperty { item: u64, key: String },
     Append(AppendInput),
+    /// Render this card's HTML body to a picture.
+    RenderHtml,
     /// Write the card back over its mirrored file. **Never continuous** — this is
     /// the explicit action, and it refuses on a moved mtime so that a conflict is
     /// reported rather than resolved by whoever wrote last.
@@ -500,6 +505,7 @@ pub fn resolve_by_card(node: NodeId, card: u64, op: CardOp) -> ApiRequest {
             ApiRequest::ClearItemProperty { node, card, item, key }
         }
         CardOp::Append(input) => ApiRequest::AppendCard { node, card, input },
+        CardOp::RenderHtml => ApiRequest::RenderHtml { node, card },
         CardOp::WriteSource => ApiRequest::WriteSource { node, card },
         CardOp::DiffSource => ApiRequest::DiffSource { node, card },
         CardOp::AddItem(input) => ApiRequest::AddItem { node, card, input },
@@ -751,6 +757,7 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::DeleteCards { node, .. }
         | ApiRequest::ClearCardsProperty { node, .. }
         | ApiRequest::AppendCard { node, .. }
+        | ApiRequest::RenderHtml { node, .. }
         | ApiRequest::WriteSource { node, .. }
         | ApiRequest::DiffSource { node, .. }
         | ApiRequest::AddItem { node, .. }
@@ -878,6 +885,7 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
                 (patch.source.is_some(), "source"),
                 (patch.source_tail.is_some(), "source_tail"),
                 (patch.source_write.is_some(), "source_write"),
+                (patch.html.is_some(), "html"),
             ] {
                 if present {
                     c = c.field(name);
@@ -1505,6 +1513,27 @@ pub struct UpdateCardInput {
     /// itself is still always an explicit action, never continuous sync.
     #[serde(default)]
     source_write: Option<bool>,
+    /// Make this card a **web page**: its body is HTML/CSS/JS and it carries a
+    /// rendering of itself. `{"html": null}` turns it back into an ordinary card
+    /// and drops the picture. A **double** `Option`, like `view`, so an absent
+    /// field leaves the setting alone while an explicit `null` clears it.
+    #[serde(default)]
+    html: Option<Option<HtmlInput>>,
+}
+
+/// What a caller may set on a web-page card. Deliberately **not** the stored
+/// struct: the PNG, its size and the render hash are produced by rendering, and
+/// letting a caller post arbitrary bytes into them would make "this is a picture
+/// of this body" a claim nobody checked.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HtmlInput {
+    /// `code`, `render` or `split`.
+    #[serde(default)]
+    view: Option<String>,
+    /// `none`, `network` or `scripts`.
+    #[serde(default)]
+    allow: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2125,6 +2154,9 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "cards", cid, "append"]) => {
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Append(parse(body)?) })
         }
+        (Method::Post, ["api", "cards", cid, "html", "render"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::RenderHtml })
+        }
         (Method::Post, ["api", "cards", cid, "source", "write"]) => {
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::WriteSource })
         }
@@ -2346,6 +2378,9 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "append"]) => {
             Ok(ApiRequest::AppendCard { node: pid(nid)?, card: pid(cid)?, input: parse(body)? })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "html", "render"]) => {
+            Ok(ApiRequest::RenderHtml { node: pid(nid)?, card: pid(cid)? })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "source", "write"]) => {
             Ok(ApiRequest::WriteSource { node: pid(nid)?, card: pid(cid)? })
@@ -3298,6 +3333,38 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 // sit after `title`, so a refused request had already renamed the
                 // card. A 409 that changed something is worse than either
                 // outcome, because the caller has no way to know what stuck.
+                // An unrecognised `view` or `allow` is refused, not stored. A
+                // typo'd permission that silently fell back to the safe default
+                // would be the good case; one that fell back to a *permissive*
+                // default is a security hole, and neither should be guessed at.
+                if let Some(Some(h)) = patch.html.as_ref() {
+                    if let Some(v) = h.view.as_deref() {
+                        if !matches!(v, "code" | "render" | "split") {
+                            return (
+                                false,
+                                ApiResponse::err(
+                                    400,
+                                    &format!("unknown html view `{v}` — use code, render or split"),
+                                ),
+                            );
+                        }
+                    }
+                    if let Some(a) = h.allow.as_deref() {
+                        if !matches!(a, "none" | "network" | "scripts") {
+                            return (
+                                false,
+                                ApiResponse::err(
+                                    400,
+                                    &format!(
+                                        "unknown html permission `{a}` — use none (no scripts, no \
+                                         requests), network (fetch images/styles/fonts, still no \
+                                         scripts) or scripts (everything)"
+                                    ),
+                                ),
+                            );
+                        }
+                    }
+                }
                 // A **writable** mirror is the exception, and only while it stays
                 // one: `source_write` turns the body from a view of the file into
                 // a draft of it. The edit is marked dirty so the refresh poll
@@ -3355,6 +3422,30 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         c.source_dirty = true;
                     }
                     c.body = b;
+                }
+                if let Some(h) = patch.html {
+                    match h {
+                        None => c.html = None,
+                        Some(input) => {
+                            let cur = c.html.take();
+                            let mut v = cur.unwrap_or_else(|| crate::model::HtmlView {
+                                view: "split".into(),
+                                allow: "none".into(),
+                                png: Vec::new(),
+                                width: 0,
+                                height: 0,
+                                rendered_from: 0,
+                                error: None,
+                            });
+                            if let Some(x) = input.view {
+                                v.view = x;
+                            }
+                            if let Some(x) = input.allow {
+                                v.allow = x;
+                            }
+                            c.html = Some(v);
+                        }
+                    }
                 }
                 if let Some(w) = patch.source_write {
                     c.source_write = w;
@@ -4745,6 +4836,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         // the backup config + document file). This is only reached if that
         // interception is ever missed — report it rather than silently no-op.
         ApiRequest::Instance
+        | ApiRequest::RenderHtml { .. }
         | ApiRequest::WriteSource { .. }
         | ApiRequest::DiffSource { .. }
         | ApiRequest::SettingsGet
@@ -5206,6 +5298,20 @@ pub(crate) fn card_json(c: &Card) -> Value {
     // participants of a channel someone was editing.
     if let Some(ch) = &c.channel {
         v["channel"] = serde_json::to_value(ch).unwrap_or(Value::Null);
+    }
+    // The page card reports everything except its bytes: a client needs to know
+    // it *is* one, how it is shown, what it may do and whether the picture still
+    // matches the body — and the PNG itself would be megabytes in every listing.
+    if let Some(h) = &c.html {
+        v["html"] = json!({
+            "view": h.view,
+            "allow": h.allow,
+            "width": h.width,
+            "height": h.height,
+            "rendered": !h.png.is_empty(),
+            "stale": h.is_stale(&c.body),
+            "error": h.error,
+        });
     }
     if let Some(s) = &c.source {
         v["source"] = json!(s);

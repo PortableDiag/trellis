@@ -2159,6 +2159,66 @@ isn't a number is a **gap**, not a zero: a line breaks across it and a bar is
 omitted, because plotting a blank status cell as 0 would invent a reading that
 was never taken. A lone value between two gaps still shows, as a dot.
 
+### A card that is a web page (`html`)
+
+The body is **HTML/CSS/JS** and the card shows it rendered — code, page, or both.
+Built for an agent to construct a view of your data: read whatever cards you need,
+bake the numbers into a self-contained page, write it into a card, render it.
+
+```
+PATCH /api/nodes/{id}/cards/{cid}  {"html": {"view":"split", "allow":"none"}}
+POST  /api/nodes/{id}/cards/{cid}/html/render
+POST  /api/cards/{cid}/html/render
+PATCH /api/nodes/{id}/cards/{cid}  {"html": null}     ordinary card again
+```
+
+| field | |
+|---|---|
+| `view` | `code`, `render` or `split` (default) — what the card draws |
+| `allow` | what the page may do when it renders. **`none` by default** |
+
+`GET /api/cards/{cid}` reports `view`, `allow`, `width`, `height`, `rendered`,
+`error`, and **`stale`** — true when the body has been edited since the picture
+was taken. The PNG itself is never in a listing; it would be megabytes.
+
+**`allow` is the security boundary, and it is enforced by a Content-Security-Policy
+written into the page** — not by a browser flag. `--disable-javascript` was
+measured against a page that reports whether its script ran: it made **no
+difference at all**, the screenshot was byte-identical to the ungated one. A gate
+that looks right and does nothing is worse than no gate, so the policy is one this
+app writes and you can read in `model::html_csp`.
+
+| `allow` | what runs |
+|---|---|
+| `none` | the page's own markup. **No scripts and not one outbound request** |
+| `network` | may fetch images, styles and fonts over https. Still no scripts |
+| `scripts` | everything — for a page you trust, chosen per card |
+
+An unrecognised `view` or `allow` is a **400 naming it**, never a silent fallback:
+a typo that quietly landed on a *permissive* default would be a hole.
+
+**Why a picture rather than a live view.** Trellis paints to a GL surface and has
+no DOM. An embedded webview is an OS surface that cannot composite inside the
+canvas — it would float above the app and refuse to scroll, zoom or export with
+the card. A PNG is just an image: it zooms, pans, projects through Depth, exports,
+and shows on the phone, which cannot run a browser at all. Rendering shells out to
+Chrome or Chromium; with neither installed the render fails and says so.
+
+**Agents are refused by default** — 403 until *Settings → Agent API → Let agents
+render web-page cards*. That gate is not about the HTML being dangerous to read:
+it is that rendering starts a browser process on this machine over content the
+caller wrote. The app's own *Render* in the card menu is never gated by it.
+
+```sh
+# an agent building a view of four cards
+curl -s -H "X-API-Key: $KEY" $API/nodes/1 | jq '.cards[]'      # read the data
+curl -s -H "X-API-Key: $KEY" -X POST $API/nodes/1/cards \
+  -d '[{"kind":"text","title":"Dashboard","body":"<!doctype html>…"}]'
+curl -s -H "X-API-Key: $KEY" -X PATCH $API/cards/42 \
+  -d '{"html":{"view":"render","allow":"none"}}'
+curl -s -H "X-API-Key: $KEY" -X POST $API/cards/42/html/render
+```
+
 ### Mirror a file (`source`)
 Point a **text**, **code** or **table** card at a file and it becomes a
 **read-only live copy**, re-read while the document is open (checked every ~3 s;

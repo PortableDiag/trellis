@@ -310,6 +310,12 @@ pub enum CanvasAction {
     ClearSource(CardId),
     /// Tail the mirrored file: `Some(lines)` on, `None` off.
     SetSourceTail(CardId, Option<u32>),
+    /// Show a web-page card as `code`, `split` or `render`.
+    SetHtmlView(CardId, String),
+    /// Change what a web-page card is allowed to do: `none`, `network`, `scripts`.
+    SetHtmlAllow(CardId, String),
+    /// Take a fresh picture of a web-page card.
+    RenderHtml(CardId),
     /// Post a message into a channel card, as the operator.
     SayInChannel(CardId, String),
     /// Turn two-way on or off for one mirrored card.
@@ -2350,7 +2356,111 @@ fn attachments_ui(ui: &mut egui::Ui, card: &Card, zoom: f32, actions: &mut Vec<C
     }
 }
 
+/// A card whose body is a web page: the source, the picture, or both.
+///
+/// The picture is a PNG rendered by a browser, so it composites with zoom, pan,
+/// Depth and export like any other image — an embedded webview could not, being
+/// an OS surface that floats above the canvas.
+fn html_ui(
+    ui: &mut egui::Ui,
+    card: &Card,
+    h: &crate::model::HtmlView,
+    env: &mut Env,
+    zoom: f32,
+    actions: &mut Vec<CanvasAction>,
+) {
+    let stale = h.is_stale(&card.body);
+    // Every pixel constant on this canvas is scaled: the card is drawn at its
+    // screen rect with no transform layer, so an unscaled gap stays the same
+    // size while its frame shrinks.
+    ui.add_space(2.0 * zoom);
+    ui.horizontal(|ui| {
+        for (key, label) in [("code", "Code"), ("split", "Split"), ("render", "Page")] {
+            if ui.selectable_label(h.view == key, label).clicked() {
+                actions.push(CanvasAction::SetHtmlView(card.id, key.into()));
+            }
+        }
+        ui.separator();
+        // The permission is *shown*, always, not hidden in a menu: what a page on
+        // this canvas is allowed to do should never be a thing you have to go
+        // looking for.
+        let (mark, tip) = match h.allow.as_str() {
+            "scripts" => ("scripts", "This page may run JavaScript and reach the network."),
+            "network" => ("network", "May fetch images, styles and fonts. No scripts."),
+            _ => ("sandboxed", "No scripts and no outbound requests at all."),
+        };
+        ui.label(egui::RichText::new(mark).small().weak()).on_hover_text(tip);
+        if stale {
+            ui.label(egui::RichText::new("· edited").small().color(ui.visuals().warn_fg_color))
+                .on_hover_text("The body has changed since this picture was taken.");
+        }
+        if ui.small_button(if h.png.is_empty() { "Render" } else { "Re-render" }).clicked() {
+            actions.push(CanvasAction::RenderHtml(card.id));
+        }
+    });
+    if let Some(e) = &h.error {
+        ui.colored_label(ui.visuals().error_fg_color, egui::RichText::new(e).small());
+    }
+
+    let show_code = h.view == "code" || h.view == "split";
+    let show_page = h.view == "render" || h.view == "split";
+    let avail = ui.available_height();
+    let code_h = if h.view == "split" { avail * 0.4 } else { avail };
+
+    if show_code {
+        egui::ScrollArea::both()
+            .id_salt(("html_code", card.id))
+            .max_height(code_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if card.editing {
+                    let mut text = card.body.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::multiline(&mut text)
+                                .code_editor()
+                                .desired_width(f32::INFINITY),
+                        )
+                        .changed()
+                    {
+                        actions.push(CanvasAction::SetBody(card.id, text));
+                    }
+                } else {
+                    ui.label(egui::RichText::new(&card.body).monospace());
+                }
+            });
+    }
+    if show_page {
+        if h.png.is_empty() {
+            ui.weak("Not rendered yet \u{2014} press Render.");
+            return;
+        }
+        // A very high index so a page's picture never collides with the card's
+        // own inline images in the texture cache.
+        match env.tex.get(ui.ctx(), card.id, usize::MAX, &h.png) {
+            Some(tex) => {
+                let w = ui.available_width();
+                let ratio = if h.width > 0 { h.height as f32 / h.width as f32 } else { 0.75 };
+                ui.add(
+                    egui::Image::new(&tex)
+                        .fit_to_exact_size(egui::vec2(w, (w * ratio).min(ui.available_height()))),
+                );
+            }
+            None => {
+                ui.colored_label(ui.visuals().error_fg_color, "the rendered image will not decode");
+            }
+        }
+    }
+}
+
 fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &mut Vec<CanvasAction>) {
+    // A web-page card takes over the body: its `kind` stays Text so the source
+    // is searchable and exportable like any other body, but what is *drawn* is
+    // the source, the picture, or both.
+    if let Some(h) = &card.html {
+        html_ui(ui, card, h, env, zoom, actions);
+        return;
+    }
     match &card.kind {
         CardKind::Text => {
             // `source.is_none()`: a mirrored body belongs to the file, so the
@@ -3447,6 +3557,65 @@ fn card_menu(
     {
         actions.push(CanvasAction::FitCard(card.id));
         ui.close_menu();
+    }
+    // A web page you write in the card. Offered on text cards because the body
+    // IS the page — that is what makes the source searchable, exportable and
+    // editable with everything that already edits a body.
+    if matches!(card.kind, CardKind::Text) && card.source.is_none() {
+        match card.html.is_some() {
+            false => {
+                if ui
+                    .button("Make it a web page\u{2026}")
+                    .on_hover_text(
+                        "The card's body becomes HTML/CSS/JS and the card shows the page \
+                         rendered beside it.\n\nSandboxed by default: no scripts and no \
+                         outbound requests until you say otherwise.",
+                    )
+                    .clicked()
+                {
+                    actions.push(CanvasAction::SetHtmlView(card.id, "split".into()));
+                    ui.close_menu();
+                }
+            }
+            true => {
+                ui.menu_button("Web page", |ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "What this page may do when it renders. Enforced by a policy \
+                             written into the page, not a browser flag \u{2014} the flag was \
+                             measured and did nothing.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    ui.separator();
+                    let cur = card.html.as_ref().map(|h| h.allow.clone()).unwrap_or_default();
+                    for (key, label, tip) in [
+                        ("none", "Sandboxed", "No scripts, and not one outbound request."),
+                        ("network", "May fetch images and styles", "Still no scripts."),
+                        ("scripts", "May run scripts", "Everything. Only for a page you trust."),
+                    ] {
+                        if ui.selectable_label(cur == key, label).on_hover_text(tip).clicked() {
+                            actions.push(CanvasAction::SetHtmlAllow(card.id, key.into()));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Render now").clicked() {
+                        actions.push(CanvasAction::RenderHtml(card.id));
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("Stop being a web page")
+                        .on_hover_text("Keeps the body; drops the picture.")
+                        .clicked()
+                    {
+                        actions.push(CanvasAction::SetHtmlView(card.id, String::new()));
+                        ui.close_menu();
+                    }
+                });
+            }
+        }
     }
     if matches!(card.kind, CardKind::Text | CardKind::Code { .. }) {
         match card.source.is_some() {

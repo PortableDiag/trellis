@@ -883,6 +883,22 @@ pub struct Card {
     /// description of `alias::` into an 8,271-character alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<Channel>,
+    /// This card is a **web page you are writing**: the body is HTML/CSS/JS and
+    /// this holds its rendering.
+    ///
+    /// A field on an ordinary text card, not a seventh `CardKind` — see
+    /// [`CardKind`]'s own note. The body stays a body, so the source is
+    /// searchable, exportable, diffable and editable with everything that
+    /// already edits a body; the render is a picture beside it.
+    ///
+    /// **Rendered to an image on purpose.** Trellis paints to a GL surface and
+    /// has no DOM; an embedded webview is an OS surface that cannot composite
+    /// inside the canvas, so it would float above the app and refuse to scroll,
+    /// zoom or export with the card. A PNG is just an image — it zooms, pans,
+    /// projects through Depth, exports, and shows on the phone, which cannot run
+    /// a browser at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<HtmlView>,
     /// Runtime-only: whether the card is in edit mode. Never persisted.
     #[serde(skip)]
     pub editing: bool,
@@ -928,6 +944,73 @@ pub struct Channel {
     /// forbidding that would forbid the second half of the feature.
     #[serde(default)]
     pub primary: bool,
+}
+
+/// A card whose body is a web page, and the picture of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HtmlView {
+    /// `code` (source only), `render` (picture only) or `split` (both).
+    #[serde(default = "default_html_view")]
+    pub view: String,
+    /// What the page is allowed to do when it renders. **`none` by default**,
+    /// and that is the whole security position:
+    ///
+    /// - `none` — no scripts, and **no outbound requests at all**. Static HTML
+    ///   and CSS, which is what most of a page is.
+    /// - `network` — may fetch images, styles and fonts over https. Still no
+    ///   scripts.
+    /// - `scripts` — everything, and the operator has said so for *this card*.
+    ///
+    /// Enforced by a **Content-Security-Policy injected into the page**, not by a
+    /// browser flag: `--disable-javascript` was measured against a page that
+    /// reports whether its script ran and it made **no difference at all** — the
+    /// screenshot was byte-identical to the ungated one. A gate that looks right
+    /// and does nothing is worse than no gate, so the policy is one this app
+    /// writes and can be read in the source.
+    ///
+    /// The reason a gate is needed for a card the operator typed: anything
+    /// holding the API key can write a card body, which is the same reasoning
+    /// that stops the currency plugin executing a `check::`.
+    #[serde(default = "default_html_allow")]
+    pub allow: String,
+    /// The last rendering, as PNG bytes stored in the document like an image
+    /// card's — so it survives on the phone and in a backup, where no browser
+    /// exists to regenerate it.
+    #[serde(default, with = "image_bytes", skip_serializing_if = "Vec::is_empty")]
+    pub png: Vec<u8>,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    /// Hash of the body when it was rendered, so the card can say *edited since
+    /// this picture was taken* rather than showing a stale render as current.
+    #[serde(default)]
+    pub rendered_from: u64,
+    /// Why the last render failed, or `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+fn default_html_view() -> String {
+    "split".into()
+}
+fn default_html_allow() -> String {
+    "none".into()
+}
+
+impl HtmlView {
+    /// Cheap content hash — only ever compared against itself.
+    pub fn hash_body(body: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        body.hash(&mut h);
+        h.finish()
+    }
+    /// Does the picture still show what the body says?
+    pub fn is_stale(&self, body: &str) -> bool {
+        self.png.is_empty() || self.rendered_from != Self::hash_body(body)
+    }
 }
 
 /// One message in a channel, parsed back out of the body.
@@ -1332,6 +1415,7 @@ impl Card {
             // A brand-new card has never been *changed*; the first edit stamps it.
             touched: None,
             channel: None,
+            html: None,
             source: None,
             source_mtime: None,
             source_tail: None,
@@ -2072,6 +2156,102 @@ pub fn write_source(path: &str, text: &str) -> Result<u64, String> {
         format!("cannot replace {path}: {e}")
     })?;
     source_mtime(path).ok_or_else(|| format!("{path} written but cannot be stat'd"))
+}
+
+/// The Content-Security-Policy for a permission level.
+///
+/// Written here rather than passed as a browser flag because a flag was measured
+/// and found not to work: `--disable-javascript` left the script running and the
+/// screenshot byte-identical. This policy goes *into the document*, so what is
+/// permitted can be read in this source and checked in the rendered page.
+fn html_csp(allow: &str) -> Option<&'static str> {
+    match allow {
+        // Everything, because the operator said so for this card.
+        "scripts" => None,
+        // Pictures, styles and fonts may be fetched; scripts still cannot run.
+        "network" => Some(
+            "default-src 'none'; img-src https: data:; style-src https: 'unsafe-inline'; \
+             font-src https: data:; script-src 'none'",
+        ),
+        // The default: the page's own markup and nothing else. No script, and
+        // not one outbound request.
+        _ => Some("default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'none'"),
+    }
+}
+
+/// Render a card's HTML body to a PNG with headless Chrome.
+///
+/// **Why a browser at all.** There is no HTML engine in this app and adding one
+/// is not a dependency decision anybody should take lightly; a browser is
+/// already on the machine, and the alternative — an embedded webview — is an OS
+/// surface that cannot composite inside a GL canvas.
+///
+/// The page is written to a temp file with the policy above prepended, then
+/// screenshotted. The temp file is removed afterwards whether or not it worked.
+pub fn render_html(body: &str, allow: &str, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let exe = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
+        .iter()
+        .find(|c| {
+            std::process::Command::new("which")
+                .arg(c)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            "no headless browser found. Install Chrome or Chromium — Trellis has no HTML \
+             engine of its own and renders a page by screenshotting one."
+                .to_string()
+        })?;
+
+    let dir = std::env::temp_dir().join(format!("trellis-html-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make a temp directory: {e}"))?;
+    let page = dir.join("page.html");
+    let shot = dir.join("shot.png");
+
+    let mut html = String::new();
+    if let Some(csp) = html_csp(allow) {
+        html.push_str(&format!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\n"
+        ));
+    }
+    html.push_str(body);
+    std::fs::write(&page, html.as_bytes()).map_err(|e| format!("cannot write the page: {e}"))?;
+
+    let out = std::process::Command::new(exe)
+        .args([
+            "--headless",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--hide-scrollbars",
+            "--no-first-run",
+            "--disable-extensions",
+            // No profile, no history, no cookies: a render must not reach
+            // anything a real browsing session has.
+            "--incognito",
+        ])
+        .arg(format!("--window-size={width},{height}"))
+        .arg(format!("--screenshot={}", shot.display()))
+        .arg(format!("file://{}", page.display()))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("cannot run {exe}: {e}"))?;
+
+    let png = std::fs::read(&shot).map_err(|_| {
+        // Chrome exits 0 having written nothing for some flag combinations, so
+        // the missing file is the real signal, not the status.
+        let err = String::from_utf8_lossy(&out.stderr);
+        let last = err
+            .lines()
+            .filter(|l| !l.contains("secret_portal") && !l.contains("object_proxy"))
+            .next_back()
+            .unwrap_or("no screenshot was produced");
+        format!("the browser produced no image: {last}")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    png
 }
 
 /// The modification time of a pointer's file, for deciding whether to re-read.
@@ -7570,6 +7750,53 @@ mod tests {
     /// **A tail is bounded by the lines asked for, not by the file.** That is the
     /// point: a mirror refuses a file over `SOURCE_MAX_BYTES` because it loads the
     /// whole thing, and a growing log is exactly the file the cap locked out.
+    /// **The sandbox default must actually forbid things.**
+    ///
+    /// This is the security boundary, and it lives in a string — so it is pinned
+    /// by what it must contain rather than by eyeballing it. The reason it is a
+    /// CSP at all: `--disable-javascript` was measured against a page reporting
+    /// whether its script ran and made no difference, screenshot byte-identical.
+    #[test]
+    fn the_page_sandbox_forbids_scripts_and_requests_by_default() {
+        let none = html_csp("none").expect("the default must HAVE a policy");
+        assert!(none.contains("default-src 'none'"), "{none}");
+        assert!(none.contains("script-src 'none'"), "{none}");
+        assert!(!none.contains("https:"), "the default must not permit any fetch: {none}");
+
+        // An unknown value falls back to the SAFE end, never the permissive one.
+        // (The API refuses unknown values outright; this is the second line.)
+        assert_eq!(html_csp("banana"), html_csp("none"));
+        assert_eq!(html_csp(""), html_csp("none"));
+
+        // Network may fetch, and still may not script.
+        let net = html_csp("network").expect("network is still gated");
+        assert!(net.contains("script-src 'none'"), "{net}");
+        assert!(net.contains("img-src https:"), "{net}");
+
+        // Only the explicit, operator-chosen level lifts the policy entirely.
+        assert!(html_csp("scripts").is_none());
+    }
+
+    /// A picture is stale the moment the body it was taken from changes.
+    #[test]
+    fn a_page_render_goes_stale_when_the_body_is_edited() {
+        let mut v = HtmlView {
+            view: "split".into(),
+            allow: "none".into(),
+            png: vec![1, 2, 3],
+            width: 100,
+            height: 100,
+            rendered_from: HtmlView::hash_body("<p>one</p>"),
+            error: None,
+        };
+        assert!(!v.is_stale("<p>one</p>"));
+        assert!(v.is_stale("<p>two</p>"), "an edited body must not read as rendered");
+
+        // Never rendered is always stale, whatever the hash says.
+        v.png.clear();
+        assert!(v.is_stale("<p>one</p>"));
+    }
+
     /// **The diff reads file-then-card, and that direction is the whole point.**
     /// `-` is what the file has, `+` is what you would write over it — which is
     /// the question the conflict window asks.

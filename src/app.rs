@@ -75,6 +75,7 @@ const GRANTS_KEY: &str = "plugin_grants";
 const MIRROR_MODE_KEY: &str = "mirror_policy";
 const MIRROR_DIRS_KEY: &str = "mirror_dirs";
 const MIRROR_WRITE_KEY: &str = "mirror_write";
+const HTML_RENDER_KEY: &str = "html_render_agents";
 pub(crate) const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
@@ -1282,6 +1283,14 @@ pub struct TrellisApp {
     /// already has the filesystem — the reason the app's own file picker is
     /// unrestricted — does not extend to a network caller at all.
     mirror_write: bool,
+    /// May an API caller render a web-page card?
+    ///
+    /// Rendering runs a **browser subprocess** on this machine over content the
+    /// caller may itself have written, so it is off by default for the same
+    /// reason mirror-writing is: the person at the keyboard already has a
+    /// browser; a network caller does not, and should not get one by writing a
+    /// card. The app's own *Render* is never gated by this.
+    html_render_agents: bool,
     /// Finished runs, newest last, for the Plugins window's log pane.
     plugin_log: Vec<crate::plugins::RunResult>,
     plugin_rx: Receiver<PluginEvent>,
@@ -1812,6 +1821,11 @@ impl TrellisApp {
             mirror_write: cc
                 .storage
                 .and_then(|s| s.get_string(MIRROR_WRITE_KEY))
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            html_render_agents: cc
+                .storage
+                .and_then(|s| s.get_string(HTML_RENDER_KEY))
                 .map(|v| v == "true")
                 .unwrap_or(false),
             plugin_log: Vec::new(),
@@ -2799,6 +2813,11 @@ impl TrellisApp {
             // answered here where the policy and the scope both exist — never in
             // `process`, which sees only the Document.
             if let Some(resp) = self.handle_api_source(&cmd.req, cmd.scope.as_ref()) {
+                let _ = cmd.resp.send(resp);
+                continue;
+            }
+            // Rendering runs a browser subprocess, so it belongs here too.
+            if let Some(resp) = self.handle_api_html(&cmd.req, cmd.scope.as_ref()) {
                 let _ = cmd.resp.send(resp);
                 continue;
             }
@@ -3879,6 +3898,106 @@ impl TrellisApp {
         }
     }
 
+    /// Render a web-page card, from the API.
+    ///
+    /// Off for agents by default. The gate is not about the HTML being dangerous
+    /// to *us* — it is that rendering starts a browser process on this machine
+    /// over content the caller wrote, and a card that runs its own scripts is
+    /// arbitrary code, which is the same reasoning that stops the currency plugin
+    /// executing a `check::`. What the page may actually do is the card's own
+    /// `allow`, enforced by a CSP written into the page.
+    fn handle_api_html(
+        &mut self,
+        req: &api::ApiRequest,
+        scope: Option<&crate::plugins::Scope>,
+    ) -> Option<api::ApiResponse> {
+        let api::ApiRequest::RenderHtml { node, card } = req else { return None };
+        let (node, card) = (*node, *card);
+        if !self.html_render_agents {
+            return Some(api::ApiResponse::err(
+                403,
+                "rendering web-page cards over the API is off. Tools → Settings → Agent API → \
+                 \"Let agents render web-page cards\". Rendering starts a browser on this machine \
+                 over content the caller wrote.",
+            ));
+        }
+        // A confined token may render inside its own basket; the scope check the
+        // app loop already ran covers that, so nothing extra is needed here
+        // beyond refusing what it cannot reach.
+        if let Some(sc) = scope {
+            if let Some(root) = sc.subtree {
+                if !self.doc.is_under(node, root) {
+                    return Some(api::ApiResponse::err(403, "outside this token's basket"));
+                }
+            }
+        }
+        Some(self.render_html_card(node, card))
+    }
+
+    /// Render a card's HTML body and store the picture on it.
+    ///
+    /// Shared by the menu action and the API so there is one place that decides
+    /// what a render means. Errors are stored on the card as well as returned:
+    /// a page that fails to render should say so on the card, not only in a
+    /// response nobody kept.
+    fn render_html_card(&mut self, node: NodeId, card: CardId) -> api::ApiResponse {
+        let Some(c) = self.doc.card(node, card) else {
+            return api::ApiResponse::err(404, "no such card");
+        };
+        let Some(h) = c.html.clone() else {
+            return api::ApiResponse::err(
+                400,
+                "this card is not a web page — PATCH it with {\"html\":{}} first",
+            );
+        };
+        let body = c.body.clone();
+        if body.trim().is_empty() {
+            return api::ApiResponse::err(400, "nothing to render: the body is empty");
+        }
+        // The viewport. Taken from the card so the picture matches the frame it
+        // will be drawn in, which is what stops a render looking letterboxed.
+        let w = (c.size.x.round() as u32).clamp(200, 2000);
+        let hgt = (c.size.y.round() as u32).clamp(150, 2000);
+
+        let started = std::time::Instant::now();
+        match crate::model::render_html(&body, &h.allow, w, hgt) {
+            Ok(png) => {
+                let bytes = png.len();
+                if let Some(c) = self.doc.card_mut(node, card) {
+                    if let Some(v) = c.html.as_mut() {
+                        v.png = png;
+                        v.width = w;
+                        v.height = hgt;
+                        v.rendered_from = crate::model::HtmlView::hash_body(&body);
+                        v.error = None;
+                    }
+                }
+                self.note_card(node, card, crate::changelog::Op::Updated, "html.render");
+                self.dirty = true;
+                self.status = format!("Rendered in {}ms", started.elapsed().as_millis());
+                api::ApiResponse::ok(serde_json::json!({
+                    "card": card,
+                    "rendered": true,
+                    "width": w,
+                    "height": hgt,
+                    "bytes": bytes,
+                    "allow": h.allow,
+                    "ms": started.elapsed().as_millis() as u64,
+                }))
+            }
+            Err(e) => {
+                if let Some(c) = self.doc.card_mut(node, card) {
+                    if let Some(v) = c.html.as_mut() {
+                        v.error = Some(e.clone());
+                    }
+                }
+                self.dirty = true;
+                self.status = format!("Render failed: {e}");
+                api::ApiResponse::err(500, &e)
+            }
+        }
+    }
+
     /// Write a mirrored card back to its file, or diff it against the file.
     ///
     /// **The conflict rule, and it is the whole feature:** if the file's mtime
@@ -4832,6 +4951,11 @@ impl TrellisApp {
             CanvasAction::ClearSource(c) => upd(c, "source"),
             CanvasAction::SetSourceTail(c, _) => upd(c, "source_tail"),
             CanvasAction::SetSourceWrite(c, _) => upd(c, "source_write"),
+            CanvasAction::SetHtmlView(c, _) => upd(c, "html.view"),
+            CanvasAction::SetHtmlAllow(c, _) => upd(c, "html.allow"),
+            // The render records itself where it happens: only there is it known
+            // whether a picture was actually produced.
+            CanvasAction::RenderHtml(_) => return None,
             // The say records itself where it happens, with the same field name
             // the API path uses, so `GET /api/changes` cannot tell the two apart.
             CanvasAction::SayInChannel(..) => return None,
@@ -5901,6 +6025,44 @@ impl TrellisApp {
                     } else {
                         self.status = format!("Not sent: {}", resp.body);
                     }
+                }
+                CanvasAction::SetHtmlView(cid, v) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        if v.is_empty() {
+                            c.html = None;
+                        } else {
+                            match c.html.as_mut() {
+                                Some(h) => h.view = v,
+                                None => {
+                                    c.html = Some(crate::model::HtmlView {
+                                        view: v,
+                                        allow: "none".into(),
+                                        png: Vec::new(),
+                                        width: 0,
+                                        height: 0,
+                                        rendered_from: 0,
+                                        error: None,
+                                    })
+                                }
+                            }
+                        }
+                    }
+                    self.dirty = true;
+                }
+                CanvasAction::SetHtmlAllow(cid, a) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        if let Some(h) = c.html.as_mut() {
+                            // The picture was taken under the old permission, so
+                            // it no longer shows what this card would render.
+                            h.allow = a;
+                            h.rendered_from = 0;
+                        }
+                    }
+                    self.dirty = true;
+                    self.status = "Render again to apply the new permission".into();
+                }
+                CanvasAction::RenderHtml(cid) => {
+                    let _ = self.render_html_card(node, cid);
                 }
                 CanvasAction::WriteSource(cid) => self.write_source_card(node, cid),
                 CanvasAction::DiffSource(cid) => self.open_source_diff(node, cid, false),
@@ -7939,6 +8101,26 @@ impl TrellisApp {
                         });
                         ui.end_row();
 
+                        ui.label("Let agents render web-page cards");
+                        ui.vertical(|ui| {
+                            ui.checkbox(
+                                &mut self.html_render_agents,
+                                "Allow POST …/html/render over the API",
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Off by default. Rendering starts a browser process on this \
+                                     machine over content the caller may have written itself. \
+                                     What a page may DO once it renders is the card's own \
+                                     setting — sandboxed (no scripts, no requests) unless you \
+                                     change it. Your own Render in the card menu never needs this.",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                        });
+                        ui.end_row();
+
                         ui.label("Port");
                         ui.horizontal(|ui| {
                             ui.add(egui::DragValue::new(&mut self.api_port).range(1024..=65535));
@@ -8428,6 +8610,7 @@ impl TrellisApp {
                             "POST   /api/cards/{cid}/items/{item}/property {key,value}  ·  DELETE /api/cards/{cid}/items/{item}/property?key=due",
                             "POST   /api/cards/{cid}/append {text, at?, separator?}        (add to a shared card without sending the body back)",
                             "POST   /api/cards/{cid}/source/write   ·  GET /api/cards/{cid}/source/diff   (MIRROR WRITE-BACK — write the card over its file, or just show the difference. 409 + the diff if the file moved since the card read it: it asks, it never merges)",
+                            "POST   /api/cards/{cid}/html/render  ·  POST /api/nodes/{id}/cards/{cid}/html/render   (WEB PAGE — the card's body is HTML/CSS/JS; render it to a picture. PATCH {html:{view,allow}} first. allow: none (no scripts, no requests) | network | scripts. Agents need Settings -> Agent API -> Let agents render web-page cards)",
                             "POST   /api/cards/{cid}/items  {text, done?, at?}  ·  DELETE /api/cards/{cid}/items/{item}   (one line; ids of the rest stay put)",
                             "POST   /api/cards/{cid}/table {op, …}   ·  /api/cards/{cid}/sketch {op, …}   (same bodies as the node-addressed twins)",
                             "POST   /api/cards/{cid}/chart {kind, …}  ·  DELETE /api/cards/{cid}/chart",
@@ -11680,6 +11863,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(MIRROR_MODE_KEY, self.mirror_policy.key().to_string());
         storage.set_string(MIRROR_DIRS_KEY, self.mirror_dirs.join("\n"));
         storage.set_string(MIRROR_WRITE_KEY, self.mirror_write.to_string());
+        storage.set_string(HTML_RENDER_KEY, self.html_render_agents.to_string());
         if let Ok(g) = self.grants.lock() {
             if let Ok(s) = serde_json::to_string(&*g) {
                 storage.set_string(GRANTS_KEY, s);

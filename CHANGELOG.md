@@ -6,6 +6,57 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.149.0]
+
+### Added
+- **A card can be a web page you write.** The body is HTML/CSS/JS and the card
+  shows it rendered — **Code**, **Page**, or both side by side. Built for the
+  thing it was asked for: an agent reading whatever cards it needs, baking the
+  numbers into a self-contained page, and writing that into a card as a view of
+  your data.
+
+  `PATCH {"html":{"view":"split","allow":"none"}}` then
+  `POST …/cards/{cid}/html/render`; *Make it a web page…* and a **Web page**
+  submenu in the card menu. `GET /api/cards/{cid}` reports it, including
+  **`stale`** — the body edited since the picture was taken.
+
+  **A field on an ordinary text card, not a seventh `CardKind`** — measured today
+  at 15 sites the compiler catches and ~3 more it does not, plus Android, which
+  has no compiler involved. The body stays a body, so the source is searchable,
+  exportable and editable by everything that already edits one.
+
+  **Rendered to a picture on purpose.** Trellis paints to a GL surface and has no
+  DOM; an embedded webview is an OS surface that cannot composite inside the
+  canvas, so it would float above the app and refuse to scroll, zoom or export
+  with the card. A PNG zooms, pans, projects through Depth, exports, and shows on
+  the phone, which cannot run a browser at all.
+
+### Security
+- **What a page may do is gated per card, and the gate was measured before it was
+  trusted.** `none` (the default) permits the page's own markup and **not one
+  outbound request**; `network` may fetch images, styles and fonts but still
+  cannot script; `scripts` is everything, chosen for that card. The level is
+  shown in the card header, not hidden in a menu.
+
+  Enforced by a **Content-Security-Policy written into the page**, because the
+  obvious alternative does not work: `--disable-javascript` was tested against a
+  page that reports whether its script ran and made **no difference at all** —
+  the screenshot was byte-identical to the ungated one. A gate that looks right
+  and does nothing is worse than no gate. Verified end to end through the app at
+  both levels: the same page renders *SCRIPTS BLOCKED* sandboxed and *SCRIPTS
+  RAN* when allowed.
+
+  An unrecognised `view` or `allow` is a **400 naming it** rather than a silent
+  fallback — a typo landing quietly on a permissive default is a hole — and
+  `html_csp` falls to the safe end as a second line.
+
+  **Agents are refused by default**, behind *Settings → Agent API → Let agents
+  render web-page cards*. Not because the HTML is dangerous to read, but because
+  rendering starts a browser process on this machine over content the caller
+  wrote — the same reasoning that stops the currency plugin executing a
+  `check::`. The app's own *Render* is never gated by it.
+
+
 ## [0.148.0]
 
 ### Added
