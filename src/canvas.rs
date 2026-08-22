@@ -3520,6 +3520,7 @@ fn card_menu(
     on_desktop: bool,
     actions: &mut Vec<CanvasAction>,
 ) {
+    // --- this card ---------------------------------------------------------
     if supports_edit(&card.kind) && card.source.is_none() {
         let label = if card.editing { "Preview" } else { "Edit" };
         if ui.button(label).clicked() {
@@ -3527,6 +3528,27 @@ fn card_menu(
             ui.close_menu();
         }
     }
+    if ui.button("Duplicate").clicked() {
+        actions.push(CanvasAction::Duplicate(card.id));
+        ui.close_menu();
+    }
+    if !matches!(card.kind, CardKind::Image { .. })
+        && ui
+            .button("Fit to content")
+            .on_hover_text("Resize this card so its content is fully readable")
+            .clicked()
+    {
+        actions.push(CanvasAction::FitCard(card.id));
+        ui.close_menu();
+    }
+    ui.separator();
+    // --- how it looks ------------------------------------------------------
+    ui.menu_button("Color", |ui| {
+        if let Some(col) = swatch_grid(ui) {
+            actions.push(CanvasAction::SetColor(card.id, col));
+            ui.close_menu();
+        }
+    });
     ui.menu_button("Emphasis", |ui| {
         ui.label(
             egui::RichText::new("A halo that says \"look here\" without taking the accent colour, which is how you organise the basket.")
@@ -3545,17 +3567,24 @@ fn card_menu(
             }
         }
     });
-    if ui.button("Duplicate").clicked() {
-        actions.push(CanvasAction::Duplicate(card.id));
-        ui.close_menu();
-    }
-    if !matches!(card.kind, CardKind::Image { .. })
-        && ui
-            .button("Fit to content")
-            .on_hover_text("Resize this card so its content is fully readable")
-            .clicked()
+    ui.separator();
+    // --- make it something ------------------------------------------------
+    // A channel, a web page and a file mirror are the three things an ordinary
+    // card can BECOME, so they sit together. They were scattered across the
+    // menu, which meant you had to already know each one existed to find it.
+    // A channel is a field on an ordinary card, so this is the only place the
+    // feature is discoverable — there is no card *kind* to pick from the New-card
+    // menu, and until v0.145.0 there was no way to make one without the API.
+    if ui
+        .button(if card.channel.is_some() { "Channel…" } else { "Make a channel…" })
+        .on_hover_text(
+            "Turn this card into a conversation: you type into it, an agent reads \
+             it and replies here, and the reply reaches your phone.\n\nTwo agent \
+             names instead of yours makes it an agent-to-agent log.",
+        )
+        .clicked()
     {
-        actions.push(CanvasAction::FitCard(card.id));
+        actions.push(CanvasAction::EditChannel(card.id));
         ui.close_menu();
     }
     // A web page you write in the card. Offered on text cards because the body
@@ -3723,163 +3752,18 @@ fn card_menu(
             }
         }
     }
-    if ui
-        .button("Save as template")
-        .on_hover_text("Reuse this card later via right-click canvas → Insert template")
-        .clicked()
-    {
-        actions.push(CanvasAction::SaveAsTemplate(card.id));
-        ui.close_menu();
-    }
-    // This card *is* a template's master. Offer its own slot directly, rather
-    // than making someone pick it out of a list of every template — and say so
-    // when it has been edited, which is the whole point of the marker.
-    if let Some((i, name, stale)) = masters.get(&card.id) {
-        let label = if *stale {
-            format!("✎ Update template “{name}” from this card")
-        } else {
-            format!("Update template “{name}” from this card")
-        };
-        let btn = ui.button(label).on_hover_text(if *stale {
-            "This master has been edited. Inserting the template still stamps the \
-             stored snapshot until you do this."
-        } else {
-            "Re-snapshot this template from its master card."
-        });
-        if btn.clicked() {
-            actions.push(CanvasAction::UpdateTemplate(*i, card.id));
-            ui.close_menu();
-        }
-    }
-    // Overwrite an existing template from this (edited) card — the "template
-    // editor" flow: keep a master in a Templates node, tweak it, then update.
-    if !templates.is_empty() {
-        ui.menu_button("Update template", |ui| {
-            ui.label("Replace which template with this card?");
-            for (i, name) in templates.iter().enumerate() {
-                let label = if name.trim().is_empty() { "(untitled)" } else { name.as_str() };
-                if ui.button(label).clicked() {
-                    actions.push(CanvasAction::UpdateTemplate(i, card.id));
-                    ui.close_menu();
-                }
-            }
-        });
-    }
-    if ui.button("Copy card").clicked() {
-        actions.push(CanvasAction::CopyCard(card.id));
-        ui.close_menu();
-    }
-    // Approved plugins that asked for the card menu. They receive the card's id
-    // and its basket's, not its contents — a plugin reads what it needs over the
-    // API under the scope it was approved for, so this trigger grants nothing
-    // new.
-    if !card_plugins.is_empty() {
-        ui.separator();
-        for (idx, title) in card_plugins {
-            if ui.button(title).clicked() {
-                actions.push(CanvasAction::RunCardPlugin(card.id, *idx));
-                ui.close_menu();
-            }
-        }
-    }
-    if matches!(card.kind, CardKind::Image { .. }) {
-        if ui
-            .button("Extract text (OCR)")
-            .on_hover_text("Read text from the image(s) with OCR so this card is searchable")
-            .clicked()
-        {
-            actions.push(CanvasAction::OcrCard(card.id));
-            ui.close_menu();
-        }
-    }
-    // Download the image(s) to disk so they can be shared/re-used outside Trellis.
-    if matches!(card.kind, CardKind::Image { .. }) {
-        let imgs = card.kind.images();
-        match imgs.len() {
-            0 => {}
-            1 => {
-                if ui.button("Download image…").clicked() {
-                    actions.push(CanvasAction::SaveImage(card.id, 0));
-                    ui.close_menu();
-                }
-            }
-            n => {
-                ui.menu_button("Download", |ui| {
-                    for (idx, (_, name)) in imgs.iter().enumerate() {
-                        let label = if name.is_empty() {
-                            format!("{}. image", idx + 1)
-                        } else {
-                            format!("{}. {}", idx + 1, name)
-                        };
-                        if ui.button(label).clicked() {
-                            actions.push(CanvasAction::SaveImage(card.id, idx));
-                            ui.close_menu();
-                        }
-                    }
-                    ui.separator();
-                    if ui.button(format!("All {n} images…")).clicked() {
-                        actions.push(CanvasAction::SaveAllImages(card.id));
-                        ui.close_menu();
-                    }
-                });
-            }
-        }
-    }
-    // Desktop mode: the card leaves the canvas and becomes a real OS window,
-    // interleaving with other applications instead of living inside Trellis.
-    if cfg!(target_os = "linux") {
-        if on_desktop {
-            if ui.button("Recall from desktop").clicked() {
-                actions.push(CanvasAction::RecallFromDesktop(card.id));
-                ui.close_menu();
-            }
-        } else if ui.button("Send to desktop").clicked() {
-            actions.push(CanvasAction::SendToDesktop(card.id));
-            ui.close_menu();
-        }
-    }
-    // Copy the card's id or its breadcrumb path so you can point an agent at
-    // this exact card (`/api/nodes/{node}/cards/{id}`).
-    if ui
-        .button("Local graph…")
-        .on_hover_text(
-            "The cards around this one, by how many links away they are.\n\n\
-             The Link graph window is whole-document and basket-level; this is \
-             the neighbourhood of this card.",
-        )
-        .clicked()
-    {
-        actions.push(CanvasAction::ShowLocalGraph(card.id));
-        ui.close_menu();
-    }
-    // A channel is a field on an ordinary card, so this is the only place the
-    // feature is discoverable — there is no card *kind* to pick from the New-card
-    // menu, and until v0.145.0 there was no way to make one without the API.
-    if ui
-        .button(if card.channel.is_some() { "Channel…" } else { "Make a channel…" })
-        .on_hover_text(
-            "Turn this card into a conversation: you type into it, an agent reads \
-             it and replies here, and the reply reaches your phone.\n\nTwo agent \
-             names instead of yours makes it an agent-to-agent log.",
-        )
-        .clicked()
-    {
-        actions.push(CanvasAction::EditChannel(card.id));
-        ui.close_menu();
-    }
-    if ui
-        .button("Unlinked mentions…")
-        .on_hover_text(
-            "Cards that NAME this one \u{2014} by its title or an alias \u{2014} \
-             without linking to it.\n\nBacklinks say what points here; this says \
-             what should.",
-        )
-        .clicked()
-    {
-        actions.push(CanvasAction::ShowMentions(card.id));
-        ui.close_menu();
-    }
+    ui.separator();
+    // --- take it elsewhere -------------------------------------------------
     ui.menu_button("Copy", |ui| {
+        // The card ITSELF, not a reference to it. This used to be a
+        // separate top-level "Copy card" a dozen entries away from the
+        // other three, so the menu asked you to know which of two
+        // unrelated places the word "copy" lived in.
+        if ui.button("The card").on_hover_text("Copy this card, to paste into any basket").clicked() {
+            actions.push(CanvasAction::CopyCard(card.id));
+            ui.close_menu();
+        }
+        ui.separator();
         if ui.button("Card link  [[#…]]").clicked() {
             copy_both(ui, &format!("[[#{}]]", card.id));
             ui.close_menu();
@@ -3946,12 +3830,92 @@ fn card_menu(
             _ => {}
         }
     });
-    ui.menu_button("Color", |ui| {
-        if let Some(col) = swatch_grid(ui) {
-            actions.push(CanvasAction::SetColor(card.id, col));
+    // Download the image(s) to disk so they can be shared/re-used outside Trellis.
+    if matches!(card.kind, CardKind::Image { .. }) {
+        let imgs = card.kind.images();
+        match imgs.len() {
+            0 => {}
+            1 => {
+                if ui.button("Download image…").clicked() {
+                    actions.push(CanvasAction::SaveImage(card.id, 0));
+                    ui.close_menu();
+                }
+            }
+            n => {
+                ui.menu_button("Download", |ui| {
+                    for (idx, (_, name)) in imgs.iter().enumerate() {
+                        let label = if name.is_empty() {
+                            format!("{}. image", idx + 1)
+                        } else {
+                            format!("{}. {}", idx + 1, name)
+                        };
+                        if ui.button(label).clicked() {
+                            actions.push(CanvasAction::SaveImage(card.id, idx));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button(format!("All {n} images…")).clicked() {
+                        actions.push(CanvasAction::SaveAllImages(card.id));
+                        ui.close_menu();
+                    }
+                });
+            }
+        }
+    }
+    if matches!(card.kind, CardKind::Image { .. }) {
+        if ui
+            .button("Extract text (OCR)")
+            .on_hover_text("Read text from the image(s) with OCR so this card is searchable")
+            .clicked()
+        {
+            actions.push(CanvasAction::OcrCard(card.id));
             ui.close_menu();
         }
-    });
+    }
+    ui.separator();
+    // --- what is around it -------------------------------------------------
+    // Copy the card's id or its breadcrumb path so you can point an agent at
+    // this exact card (`/api/nodes/{node}/cards/{id}`).
+    if ui
+        .button("Local graph…")
+        .on_hover_text(
+            "The cards around this one, by how many links away they are.\n\n\
+             The Link graph window is whole-document and basket-level; this is \
+             the neighbourhood of this card.",
+        )
+        .clicked()
+    {
+        actions.push(CanvasAction::ShowLocalGraph(card.id));
+        ui.close_menu();
+    }
+    if ui
+        .button("Unlinked mentions…")
+        .on_hover_text(
+            "Cards that NAME this one \u{2014} by its title or an alias \u{2014} \
+             without linking to it.\n\nBacklinks say what points here; this says \
+             what should.",
+        )
+        .clicked()
+    {
+        actions.push(CanvasAction::ShowMentions(card.id));
+        ui.close_menu();
+    }
+    ui.separator();
+    // --- where it sits -----------------------------------------------------
+    // Desktop mode: the card leaves the canvas and becomes a real OS window,
+    // interleaving with other applications instead of living inside Trellis.
+    if cfg!(target_os = "linux") {
+        if on_desktop {
+            if ui.button("Recall from desktop").clicked() {
+                actions.push(CanvasAction::RecallFromDesktop(card.id));
+                ui.close_menu();
+            }
+        } else if ui.button("Send to desktop").clicked() {
+            actions.push(CanvasAction::SendToDesktop(card.id));
+            ui.close_menu();
+        }
+    }
     if card.docked_to.is_some() && ui.button("Detach from dock").clicked() {
         actions.push(CanvasAction::DetachCard(card.id));
         ui.close_menu();
@@ -3960,6 +3924,63 @@ fn card_menu(
         if ui.button("Ungroup").clicked() {
             actions.push(CanvasAction::Ungroup(g));
             ui.close_menu();
+        }
+    }
+    ui.separator();
+    // --- templates and plugins ---------------------------------------------
+    if ui
+        .button("Save as template")
+        .on_hover_text("Reuse this card later via right-click canvas → Insert template")
+        .clicked()
+    {
+        actions.push(CanvasAction::SaveAsTemplate(card.id));
+        ui.close_menu();
+    }
+    // This card *is* a template's master. Offer its own slot directly, rather
+    // than making someone pick it out of a list of every template — and say so
+    // when it has been edited, which is the whole point of the marker.
+    if let Some((i, name, stale)) = masters.get(&card.id) {
+        let label = if *stale {
+            format!("✎ Update template “{name}” from this card")
+        } else {
+            format!("Update template “{name}” from this card")
+        };
+        let btn = ui.button(label).on_hover_text(if *stale {
+            "This master has been edited. Inserting the template still stamps the \
+             stored snapshot until you do this."
+        } else {
+            "Re-snapshot this template from its master card."
+        });
+        if btn.clicked() {
+            actions.push(CanvasAction::UpdateTemplate(*i, card.id));
+            ui.close_menu();
+        }
+    }
+    // Overwrite an existing template from this (edited) card — the "template
+    // editor" flow: keep a master in a Templates node, tweak it, then update.
+    if !templates.is_empty() {
+        ui.menu_button("Update template", |ui| {
+            ui.label("Replace which template with this card?");
+            for (i, name) in templates.iter().enumerate() {
+                let label = if name.trim().is_empty() { "(untitled)" } else { name.as_str() };
+                if ui.button(label).clicked() {
+                    actions.push(CanvasAction::UpdateTemplate(i, card.id));
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+    // Approved plugins that asked for the card menu. They receive the card's id
+    // and its basket's, not its contents — a plugin reads what it needs over the
+    // API under the scope it was approved for, so this trigger grants nothing
+    // new.
+    if !card_plugins.is_empty() {
+        ui.separator();
+        for (idx, title) in card_plugins {
+            if ui.button(title).clicked() {
+                actions.push(CanvasAction::RunCardPlugin(card.id, *idx));
+                ui.close_menu();
+            }
         }
     }
     ui.separator();

@@ -6,6 +6,28 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.150.1]
+
+### Changed
+- **The card menu is sorted into sections.** Same 39 entries, grouped by what
+  they are for: *this card* (Edit, Duplicate, Fit to content) · *how it looks*
+  (Color, Emphasis) · **make it something** (channel, web page, file mirror) ·
+  *take it elsewhere* (Copy, Export, Download, OCR) · *what is around it* (local
+  graph, unlinked mentions) · *where it sits* (desktop, dock, group) · *templates
+  and plugins* · Delete.
+
+  Reported as *"copy in 2 stops, and Make a channel and Make a web page both
+  spread out"*, and both were exactly that: **Copy card** sat a dozen entries
+  away from the **Copy** submenu holding card link / id / path, so the word
+  "copy" named two unrelated places; and the three things an ordinary card can
+  *become* were scattered across the whole menu, which meant you had to already
+  know each one existed to find it.
+
+  **Copy card** is now *Copy → The card*, so there is one Copy. Verified by
+  comparing the set of menu entries before and after — 39 either way, with that
+  single intended rename.
+
+
 ## [0.150.0]
 
 ### Added
