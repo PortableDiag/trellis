@@ -1672,6 +1672,17 @@ addressed to it, and for anything that is not its own it runs `claude -p` and
 posts the answer with `say`. Install it, approve it, and the card can start a turn
 by itself.
 
+**It answers in the channel's own project directory.** `node_path`'s first segment
+is the root basket, and the plugin's **`roots`** setting maps those names to
+checkouts, one `Project = /path` per line. A card in a NodeJS project saying *"add
+a log check to the boot sequence"* is then answered by an agent running in that
+project. **A channel whose project is not mapped is skipped**, and the log names
+the line to add — a reply worked out in the wrong repository is indistinguishable
+from a real one, which is worse than no reply. Give **each agent its own copy** of
+the plugin (`plugins/<agent>/`, with `name` changed in its `plugin.json`): the
+manifest name is what it answers as, and each copy carries its own approval,
+token, `roots` map and cursor, so twelve agents never share a working tree.
+
 **Say who you are with a header.** Every write may carry `X-Agent: <name>`, and
 that is what a message is attributed to:
 

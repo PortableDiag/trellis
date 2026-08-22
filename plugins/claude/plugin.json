@@ -1,8 +1,8 @@
 {
   "name": "claude",
   "title": "Claude — answer in channels",
-  "description": "Answers channel cards. When you type a message into a card addressed to 'claude', this runs `claude -p` with the conversation and posts the reply back into the card — so the card can start a turn instead of only being read by an agent you already summoned. Without something that can wake an agent, a channel is strictly worse than a terminal, which is the whole reason this exists. With no `claude` on PATH it says so and posts nothing.",
-  "version": "1.0.0",
+  "description": "Answers channel cards. Type a message into a card addressed to 'claude' and this runs `claude -p` with the conversation, posting the reply back into the card — so a card can start a turn instead of only being read by an agent you already summoned. Each channel is answered in its OWN project's directory, set in 'Project directories' below; a channel whose project is not listed there is skipped rather than answered from the wrong checkout. With no `claude` on PATH it says so and posts nothing.",
+  "version": "1.1.0",
   "command": "python3",
   "args": ["channel_agent.py"],
   "triggers": ["manual", "on-change"],
@@ -10,24 +10,29 @@
   "scope": {},
   "config": [
     {
+      "key": "roots",
+      "label": "Project directories — one per line, 'Project = /path'",
+      "help": "Which folder the agent works in when it answers a card, per project. The name on the left is the top-level basket the card lives under, exactly as it appears in the tree; the path on the right is that project's checkout. Example:\n\n  Trellis = /media/veracrypt1/Rust/trellis\n  Project5 = /home/null/NodeJS/project5\n\nA card in 'Project5' is then answered by an agent running in /home/null/NodeJS/project5, so 'add a log check to the boot sequence' means that project's boot sequence. Projects not listed here are left unanswered on purpose — a reply worked out in the wrong repository looks exactly like a real answer, which is worse than silence. Blank lines and lines starting with # are ignored."
+    },
+    {
       "key": "enabled",
       "label": "Answer automatically (yes/no)",
-      "help": "Default yes. Set to no to stop it running on change while leaving it installed — the Run button still works."
+      "help": "Default yes. Set to no to stop it running when the document changes while leaving it installed — the Run button in this window still works."
     },
     {
       "key": "cwd",
-      "label": "Working directory for Claude",
-      "help": "Where `claude -p` runs, which decides what it can see. Blank uses the plugin's own folder. A project checkout is the useful answer."
+      "label": "Fallback directory for unlisted projects (usually leave blank)",
+      "help": "Used only for a channel whose project has no line above. Blank — the default — means such a channel is skipped and says so in the log, which is normally what you want. Set this only if you have a single project and would rather not name it."
     },
     {
       "key": "timeout_secs",
-      "label": "Give up after (seconds)",
-      "help": "Default 240. A turn that runs longer is abandoned and reported; nothing is posted."
+      "label": "Give up on one reply after (seconds)",
+      "help": "Default 240. A turn running longer than this is abandoned and reported in the log; nothing is posted to the card, and the message is answered again on the next change."
     },
     {
       "key": "max_turns_per_run",
       "label": "Most messages to answer in one run",
-      "help": "Default 3. A guard: an import or a paste can put many messages in a channel at once, and each answer is a real model call."
+      "help": "Default 3. A guard: an import or a paste can put many messages into channels at once, and every answer is a real model call that costs money. The rest wait for the next change."
     }
   ]
 }

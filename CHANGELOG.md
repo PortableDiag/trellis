@@ -6,6 +6,55 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.146.2]
+
+### Fixed
+- **The channel agent works in the project's directory, not in one directory for
+  the whole document** (`claude` plugin 1.0.0 → 1.1.0). Reported by the operator,
+  and the criticism was exact: a card in a NodeJS project saying *"add a log check
+  to the boot sequence"* was answered by `claude -p` running in whatever single
+  folder the plugin's `cwd` setting named — for them, the Trellis repo. The reply
+  would have been confident, well-formed, and about the wrong codebase. Twelve
+  projects would have shared one working tree.
+
+  The information was already there and thrown away: `GET /api/channels` returns
+  `node_path`, whose first segment is the channel's root basket. A **`roots`**
+  setting now maps those names to directories, one `Project = /path` per line, and
+  each channel is answered in its own.
+
+  **A channel whose project is not mapped is skipped, and says which line to add.**
+  Not answered from a fallback — a reply computed in the wrong repository looks
+  exactly like a real answer, which is worse than silence, and the cursor is left
+  alone so the message is answered as soon as the map names its project. The old
+  global `cwd` survives only as an explicit opt-in fallback and now defaults to
+  **blank**; it previously defaulted to the plugin's own folder, so an
+  unconfigured install answered everything from a directory containing nothing but
+  the plugin script, which reads as the model being useless rather than as the
+  plugin being unconfigured.
+
+  **The agent name comes from the manifest**, so the plugin is copyable per agent:
+  copy the folder to `plugins/<agent>/`, change `name` in its `plugin.json`, and
+  that install answers `?agent=<agent>` and posts under that name — with its own
+  approval, token, `roots` map and cursor, which is what keeps two agents out of
+  one working tree. Verified with a second install: it selected only its own
+  channel and kept a separate cursor.
+
+  **One project's failure no longer abandons the rest.** The run used to exit on
+  the first error; with a single global directory that was invisible, because
+  there was only ever one thing to fail. Every answerable channel is now answered
+  and the failures are reported together at the end.
+
+  Verified on a scratch instance with three projects and two real checkouts: each
+  channel's reply quoted the marker file from *its own* directory, and the
+  unmapped project got no reply at all.
+
+### Changed
+- The plugin's settings are relabelled. The operator's words were *"you have a
+  bunch of input boxes for settings, even I don't know what most do"* — each now
+  says what it decides and what happens if it is left alone, with a worked example
+  on the one that matters.
+
+
 ## [0.146.1]
 
 ### Fixed

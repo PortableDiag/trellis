@@ -16,6 +16,23 @@ conversations addressed to it, read each one past a stored per-card cursor, and
 for any message that is *not its own* run `claude -p` with the thread and post the
 answer back with `POST …/say`.
 
+**The working directory belongs to the PROJECT, not to this plugin.** v1.0.0 had
+one `cwd` for every channel in the document, which meant a card in a NodeJS
+project was answered by an agent sitting in the Trellis repo — the answer would be
+confidently about the wrong codebase, and twelve projects would all share one
+working tree. The operator said so; they were right.
+
+A channel knows its project: `GET /api/channels` returns `node_path`, whose first
+segment is the root basket. `roots` maps those names to directories, one per line,
+and each channel is answered in its own. **A channel whose project is not mapped
+is skipped, never answered from somewhere else** — a reply computed in the wrong
+repository is worse than no reply, and unlike no reply it looks like an answer.
+
+The map lives here rather than on the card because a filesystem path belongs to
+one machine. That is the same call Trellis already made for desktop-mode window
+placement: a coordinate — or a path — must not ride in a document that syncs to
+the phone and into every backup.
+
 **Why the cursor is per card and stored here.** The change log rotates, and its
 sequence counts something else entirely. A channel's own `seq` is the durable
 position, and keeping it in the plugin's state is what makes a restart resume
@@ -34,12 +51,35 @@ import sys
 import urllib.error
 import urllib.request
 
-# The name this plugin posts under. It is the plugin's manifest name because the
-# server takes a scoped token's own label as authoritative and ignores any
-# `X-Agent` a caller declares — the credential wins, which is the right rule and
-# means the answering identity is decided by what the operator approved.
-ME = "claude"
-UA = "TrellisChannelAgent/1.0"
+def me():
+    """The agent name this install answers as — its own manifest `name`.
+
+    Read rather than hardcoded so the plugin can be **copied per agent**. A
+    channel is addressed to a name, and an operator with twelve agents needs
+    twelve answerers, not one that grabs everything: copy this folder to
+    `plugins/<agent>/`, change `name` and `title` in its `plugin.json`, and that
+    install answers `GET /api/channels?agent=<agent>` and posts under that name.
+    Each gets its own approval, its own token, its own `roots` map and its own
+    cursor, which is what keeps two agents out of one working tree.
+
+    The manifest name is the right source because the server takes a scoped
+    token's own label as authoritative and ignores any `X-Agent` a caller
+    declares — the credential wins, and the credential is minted per plugin name.
+    Guessing anything else here would post under a name the server then overrides.
+    """
+    try:
+        path = os.path.join(os.environ.get("TRELLIS_PLUGIN_DIR", "."), "plugin.json")
+        with open(path) as fh:
+            name = (json.load(fh).get("name") or "").strip()
+        if name:
+            return name
+    except Exception:  # noqa: BLE001
+        pass
+    return "claude"
+
+
+ME = me()
+UA = "TrellisChannelAgent/1.1"
 
 
 def out(msg):
@@ -125,6 +165,30 @@ def num(c, key, default):
         return default
 
 
+def roots(c):
+    """`Project = /path` per line, folded for case-insensitive lookup.
+
+    Keyed on the ROOT basket name rather than the full `node_path` so that every
+    channel anywhere under a project inherits it — a project's A2A card sits in
+    the same tree as its workspace channel and wants the same checkout.
+    """
+    out = {}
+    for line in (c.get("roots") or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, path = line.partition("=")
+        name, path = name.strip(), path.strip()
+        if name and path:
+            out[name.casefold()] = path
+    return out
+
+
+def project_of(ch):
+    """The root basket a channel lives under — the first segment of node_path."""
+    return (ch.get("node_path") or "").split(" › ")[0].strip()
+
+
 def transcript(messages, limit=24):
     """The thread, as plain text, newest last.
 
@@ -171,11 +235,14 @@ def main():
         out("Automatic answering is off")
         return
 
-    cwd = (c.get("cwd") or "").strip() or os.environ.get("TRELLIS_PLUGIN_DIR", ".")
-    if not os.path.isdir(cwd):
-        die(f"working directory does not exist: {cwd}")
     timeout = num(c, "timeout_secs", 240)
     budget = num(c, "max_turns_per_run", 3)
+    where = roots(c)
+    # Deliberately no default. v1.0.0 fell back to the plugin's own folder, so an
+    # unconfigured install answered every channel from a directory containing
+    # nothing but this script — which reads as the model being useless rather than
+    # as the plugin being unconfigured.
+    fallback = (c.get("cwd") or "").strip()
 
     channels = api("GET", f"/channels?agent={ME}").get("channels") or []
     if not channels:
@@ -186,6 +253,7 @@ def main():
     seen = state.setdefault("cursor", {})
     answered = 0
     looked = 0
+    problems = []
 
     for ch in channels:
         if answered >= budget:
@@ -212,7 +280,25 @@ def main():
             seen[key] = data.get("seq", since)
             continue
 
-        out(f"#{cid} {ch.get('title','')}: {len(fresh)} to answer")
+        # Where this project's agent works. Unmapped is a SKIP, not a guess: the
+        # cursor is left alone so the message is answered as soon as the map
+        # names its project, rather than being burned on a wrong-directory reply.
+        project = project_of(ch)
+        cwd = where.get(project.casefold()) or fallback
+        if not cwd:
+            out(
+                f"#{cid}: no working directory for project '{project}' — add "
+                f"'{project} = /path/to/checkout' to this plugin's `roots` setting. "
+                f"Not answering from somewhere else."
+            )
+            problems.append(f"#{cid}: project '{project}' is not mapped")
+            continue
+        if not os.path.isdir(cwd):
+            out(f"#{cid}: '{project}' maps to {cwd}, which is not a directory")
+            problems.append(f"#{cid}: {cwd} is not a directory")
+            continue
+
+        out(f"#{cid} {ch.get('title','')}: {len(fresh)} to answer, in {cwd}")
         prompt = (
             "You are answering inside a Trellis channel card — a conversation the "
             "operator reads on their desktop and phone. Reply to the most recent "
@@ -230,9 +316,15 @@ def main():
             # channel that stayed quiet, and the plugin log is where a failure
             # belongs. The cursor is deliberately not advanced, so the message is
             # answered on the next change rather than lost.
+            #
+            # And it moves on. v1.0.0 exited here, so one project's failure
+            # abandoned every channel after it in the list — with a single global
+            # directory that was invisible, because there was only ever one thing
+            # to fail.
             out(f"#{cid}: {e}")
+            problems.append(f"#{cid}: {e}")
             save_state(state)
-            die(str(e))
+            continue
 
         api("POST", f"/cards/{cid}/say", {"text": reply})
         # Re-read rather than assume: the answer's own seq is what must be stored,
@@ -244,8 +336,12 @@ def main():
     save_state(state)
     if answered:
         out(f"Answered {answered} message(s)")
-    elif looked:
+    elif looked and not problems:
         out("Nothing new in any channel")
+    if problems:
+        # Non-zero so the Plugins window shows it failed. Every channel that could
+        # be answered already has been by this point.
+        die("; ".join(problems))
 
 if __name__ == "__main__":
     main()
