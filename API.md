@@ -149,7 +149,8 @@ GET /api/instance
   → 200 {"app":"trellis","version":"0.65.1","document":"work.ron",
          "path":"/home/you/work.ron","port":7373,"lan":false,
          "lan_host":"192.168.0.101","lan_hosts":["192.168.0.101","100.64.100.6"],
-         "nodes":42,"unsaved_changes":false,"stale_claims":0}
+         "nodes":42,"unsaved_changes":false,"stale_claims":0,
+         "channels":2,"channels_waiting":1}
 ```
 `document` is the file name (`"untitled"` for a never-saved document) and `path`
 is its full path, or `null` when untitled. `nodes` is the document's node count.
@@ -180,6 +181,25 @@ zero means part of this workspace is telling you something that was last
 confirmed too long ago — read `GET /api/claims?expired=true` before you quote it
 back to anyone. It rides on this endpoint because this is the call you already
 make first.
+
+**`channels_waiting` is somebody asking you a question.** `channels` counts the
+[channel cards](#channels--a-card-that-is-a-conversation) in this document, and
+`channels_waiting` counts those whose **last message came from the operator** —
+somebody typed into a card and no agent has come back to it. Above zero, call
+`GET /api/channels?agent=<your name>` and read them.
+
+It is here for the same reason `stale_claims` is: **a channel only works if the
+agent looks**, and until this shipped the only thing that made an agent look was
+being told to in a prompt. A message sat unread for a day while the card it was
+typed into worked perfectly — the transport was fine and the *noticing* was not.
+No configuration, no plugin, and nothing to install: the count is on the call you
+already make, so an agent that knows nothing about channels still finds out that
+one is waiting.
+
+Waiting is deliberately **identity-free** — "the operator spoke last", not "you
+have not replied". This endpoint is scope-neutral and the instance key identifies
+nobody, so there is no reliable *you* to compare against; and the case worth
+catching is the one where nobody at all has answered.
 
 ### Settings
 

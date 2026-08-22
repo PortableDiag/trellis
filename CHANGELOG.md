@@ -6,6 +6,41 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.147.0]
+
+### Added
+- **`/api/instance` says when somebody is waiting.** Two new fields: `channels`,
+  the number of channel cards in the document, and **`channels_waiting`**, how
+  many of them have the **operator speaking last** — somebody typed into a card
+  and no agent has come back to it.
+
+  This is the piece that was missing, and its absence is why a message sat
+  unread for a day while the card it was typed into worked perfectly. The
+  transport was fine; the **noticing** was not. A channel only works if an agent
+  looks at it, and until now the only thing that made an agent look was being
+  told to in a prompt — so it worked for agents who had been briefed and failed
+  silently for everyone else.
+
+  It rides on `/api/instance` for exactly the reason `stale_claims` does: that is
+  the call every agent already makes first. **No plugin, no configuration and
+  nothing to install** — an agent that has never heard of channels still finds
+  out that one is waiting, and `GET /api/channels?agent=<name>` is one hop away.
+
+  Waiting is deliberately **identity-free**: "the operator spoke last", not "you
+  have not replied". This endpoint is scope-neutral and the instance key
+  identifies nobody, so there is no reliable *you* to compare against — and the
+  case worth catching is the one where nobody at all has answered.
+
+### Removed
+- **The `claude` plugin is no longer installed on either instance.** It was never
+  approved and therefore never ran once; the operator's judgement was that a
+  channel should not need a plugin or a settings form at all, and that is right —
+  the agent is already working in the workspace and can read the card. The
+  waker's remaining job is covered by the counter above. The plugin stays in the
+  repository for anyone who wants an unattended answerer, but it is no longer
+  part of how a channel works.
+
+
 ## [0.146.2]
 
 ### Fixed

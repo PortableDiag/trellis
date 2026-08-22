@@ -3677,7 +3677,9 @@ impl TrellisApp {
                 Ok(()) => api::ApiResponse::ok(self.settings_json()),
                 Err(e) => api::ApiResponse::err(400, &e),
             }),
-            api::ApiRequest::Instance => Some(api::ApiResponse::ok(serde_json::json!({
+            api::ApiRequest::Instance => {
+                let (channel_total, channels_waiting) = api::channel_counts(&self.doc);
+                Some(api::ApiResponse::ok(serde_json::json!({
                 "app": "trellis",
                 "version": env!("CARGO_PKG_VERSION"),
                 "document": doc_display_name(self.doc_path.as_deref()),
@@ -3708,7 +3710,15 @@ impl TrellisApp {
                 // agent already makes first — a workspace that has gone stale
                 // should say so before it is read, not after it is believed.
                 "stale_claims": api::stale_claim_count(&self.doc),
-            }))),
+                // Channel cards, and how many are waiting on an answer. Here for
+                // the same reason as `stale_claims`: this is the call every agent
+                // makes first, and a channel is only worth having if the agent
+                // looks at it. `channels_waiting` above zero means go and read
+                // `GET /api/channels`.
+                "channels": channel_total,
+                "channels_waiting": channels_waiting,
+            })))
+            }
             _ => None,
         }
     }

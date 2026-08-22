@@ -2660,6 +2660,42 @@ pub fn stale_claim_count(doc: &crate::model::Document) -> usize {
         .count()
 }
 
+/// Channel cards, and how many of them are waiting on somebody.
+///
+/// **Waiting means the operator spoke last.** Identity-free on purpose:
+/// `/api/instance` is scope-neutral and the instance key identifies nobody, so
+/// "unanswered" cannot mean "not answered by *me*". "Somebody typed into a card
+/// and no agent has come back to it" is true whoever is asking, and it is the
+/// case that actually goes unnoticed.
+///
+/// It rides on `/api/instance` for the same reason `stale_claims` does: that is
+/// the call every agent already makes first. A channel only works if the agent
+/// looks at it, and before this the only thing that made an agent look was being
+/// told to in a prompt — so a message sat unread for a day while the card it was
+/// typed into worked perfectly.
+pub fn channel_counts(doc: &crate::model::Document) -> (usize, usize) {
+    let mut total = 0;
+    let mut waiting = 0;
+    for node in doc.nodes.values() {
+        for c in node.cards.iter() {
+            if c.channel.is_none() {
+                continue;
+            }
+            total += 1;
+            // `parse_channel` appends unheaded text as an OPERATOR message, so
+            // the last entry is the last thing said however it was written —
+            // typed straight into the card on the phone, or posted with `say`.
+            if crate::model::parse_channel(&c.body)
+                .last()
+                .is_some_and(|m| m.from == crate::model::OPERATOR)
+            {
+                waiting += 1;
+            }
+        }
+    }
+    (total, waiting)
+}
+
 /// Content fields: legal on a single card, refused in a batch.
 ///
 /// Each of these *is* the card — writing one across a list means every card in
@@ -7688,6 +7724,59 @@ mod tests {
         assert_eq!(ch["primary"], true, "{body}");
         assert_eq!(ch["participants"][0], "alice", "{body}");
         assert_eq!(ch["seq"], 0, "{body}");
+    }
+
+    /// **A waiting channel is one the operator spoke into last.**
+    ///
+    /// The whole point of the count on `/api/instance`: before it, the only thing
+    /// that made an agent look at a channel was being told to in a prompt, and a
+    /// message sat unread for a day while the card it was typed into worked
+    /// perfectly. An agent already calls `/api/instance` first, so that is where
+    /// the workspace gets to say "somebody is waiting".
+    #[test]
+    fn a_channel_is_waiting_when_the_operator_spoke_last() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+
+        // An ordinary card is not a channel and is never counted.
+        doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        assert_eq!(channel_counts(&doc), (0, 0));
+
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let patch: UpdateCardInput = serde_json::from_str(
+            r#"{"channel":{"participants":["claude","operator"],"primary":true}}"#,
+        )
+        .unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+
+        // An empty channel is not waiting: nobody has said anything.
+        assert_eq!(channel_counts(&doc), (1, 0), "an empty channel waits on nobody");
+
+        // The operator types straight into the card — no header, which is the
+        // whole point of the phone path.
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"body":"is anyone there?"}"#).unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        assert_eq!(channel_counts(&doc), (1, 1), "loose text is the operator talking");
+
+        // An agent answers: no longer waiting.
+        process(
+            &mut doc,
+            ApiRequest::ChannelSay { node: n, card: c, from: "claude".into(), text: "here".into() },
+        );
+        assert_eq!(channel_counts(&doc), (1, 0), "answered, so not waiting");
+
+        // And they come back. The agent spoke last in seq terms, but the operator
+        // spoke last in the card, which is what a reader has to notice.
+        let body = doc.nodes[&n].cards.iter()
+            .find(|x| x.id == c).unwrap().body.clone();
+        let patch: UpdateCardInput = serde_json::from_str(
+            &serde_json::to_string(&serde_json::json!({"body": format!("{body}\n\nand again?")}))
+                .unwrap(),
+        )
+        .unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        assert_eq!(channel_counts(&doc), (1, 1), "a reply after an answer waits again");
     }
 
     /// **A message is separated from its terminator by a blank line.**
