@@ -6,6 +6,23 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.145.1]
+
+### Fixed
+- **A channel card did not say it was one.** `card_json` emitted `view` but never
+  `channel`, so `GET /api/cards/{cid}` and every basket listing described a
+  conversation as an ordinary card.
+
+  Not cosmetic: the **Android** Channel dialog shipped an hour earlier reads that
+  field to decide whether it is *creating* or *editing*. With it missing the phone
+  would always have offered "Make it a channel", never *Stop being a channel*, and
+  tapping Update on an existing channel would have **reset its participants** to
+  the defaults and cleared `primary`.
+
+  Found by auditing the day's work for exactly this class after the operator asked
+  whether the API/UI split had been half-done anywhere else — not by a test, and
+  not by using it.
+
 ## [0.145.0]
 
 ### Added

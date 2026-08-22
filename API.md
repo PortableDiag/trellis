@@ -1656,6 +1656,11 @@ GET /api/channels[?agent=<name>][&project=<id>]
   → 200 {count, channels:[{card, node, node_path, title, participants, primary, seq}]}
 ```
 
+A channel card carries **`channel`** in its own JSON — on `GET /api/cards/{cid}`
+and in every basket listing — so a client can tell a conversation from an ordinary
+card without a second request, exactly as `view` does for a saved view.
+
+
 **In the app:** card menu → **Make a channel…**, and on Android the card reader's
 **Channel…** — same fields, same rules. The API is not the only way in.
 

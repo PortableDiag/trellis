@@ -4993,6 +4993,15 @@ pub(crate) fn card_json(c: &Card) -> Value {
     if let Some(view) = &c.view {
         v["view"] = serde_json::to_value(view).unwrap_or(Value::Null);
     }
+    // A channel reports itself for the same reason a view does: so a caller can
+    // tell a conversation from an ordinary card without a second request. Its
+    // absence was a real defect — the Android Channel dialog reads this field to
+    // decide whether it is creating or editing, so with the field missing it
+    // could never offer *Stop being a channel* and would have reset the
+    // participants of a channel someone was editing.
+    if let Some(ch) = &c.channel {
+        v["channel"] = serde_json::to_value(ch).unwrap_or(Value::Null);
+    }
     if let Some(s) = &c.source {
         v["source"] = json!(s);
         v["source_error"] = json!(c.source_error);
@@ -7493,6 +7502,35 @@ mod tests {
         let mut other = route(&Method::Delete, "/api/cards/9", "", "").unwrap();
         stamp_sender(&mut other, Some("alice"));
         assert!(matches!(other, ApiRequest::ByCard { op: CardOp::Delete, .. }));
+    }
+
+    /// **A channel card says that it is one.**
+    ///
+    /// `GET /api/cards/{cid}` is how a client decides whether it is *creating* a
+    /// channel or *editing* one. Shipped without this, the Android dialog read a
+    /// missing field, concluded "not a channel", and would have offered no way to
+    /// stop being one — and reset the participants of a channel being edited.
+    #[test]
+    fn a_card_reports_its_channel() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        let plain = process(&mut doc, ApiRequest::LocateCard(c)).1.body;
+        assert!(!plain.contains("\"channel\""), "an ordinary card carries no channel field");
+
+        let patch: UpdateCardInput = serde_json::from_str(
+            r#"{"channel":{"participants":["alice","operator"],"primary":true}}"#,
+        )
+        .unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+
+        let body = process(&mut doc, ApiRequest::LocateCard(c)).1.body;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let ch = &v["card"]["channel"];
+        assert_eq!(ch["primary"], true, "{body}");
+        assert_eq!(ch["participants"][0], "alice", "{body}");
+        assert_eq!(ch["seq"], 0, "{body}");
     }
 
     /// **A message is separated from its terminator by a blank line.**
