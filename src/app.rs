@@ -8611,6 +8611,7 @@ impl TrellisApp {
                             "POST   /api/cards/{cid}/append {text, at?, separator?}        (add to a shared card without sending the body back)",
                             "POST   /api/cards/{cid}/source/write   ·  GET /api/cards/{cid}/source/diff   (MIRROR WRITE-BACK — write the card over its file, or just show the difference. 409 + the diff if the file moved since the card read it: it asks, it never merges)",
                             "POST   /api/cards/{cid}/html/render  ·  POST /api/nodes/{id}/cards/{cid}/html/render   (WEB PAGE — the card's body is HTML/CSS/JS; render it to a picture. PATCH {html:{view,allow}} first. allow: none (no scripts, no requests) | network | scripts. Agents need Settings -> Agent API -> Let agents render web-page cards)",
+                            "GET    /api/cards/{cid}/html/png  ·  GET /api/nodes/{id}/cards/{cid}/html/png   (the rendered picture, base64 — the bytes are not in the card JSON. 404 if never rendered. This is how the phone shows a page it cannot render itself)",
                             "POST   /api/cards/{cid}/items  {text, done?, at?}  ·  DELETE /api/cards/{cid}/items/{item}   (one line; ids of the rest stay put)",
                             "POST   /api/cards/{cid}/table {op, …}   ·  /api/cards/{cid}/sketch {op, …}   (same bodies as the node-addressed twins)",
                             "POST   /api/cards/{cid}/chart {kind, …}  ·  DELETE /api/cards/{cid}/chart",

@@ -6,6 +6,18 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.150.0]
+
+### Added
+- **`GET …/cards/{cid}/html/png`** — the rendered picture of a web-page card, as
+  base64. The bytes are deliberately absent from the card JSON (megabytes in
+  every basket listing), and the phone cannot render a page itself: it has no
+  browser and no business running one. So it shows what the desktop produced.
+  404 when the card has never been rendered, which is a state rather than a
+  failure. Rendering is the gated action; reading back what was already rendered
+  is an ordinary document read, answered in `process` with no browser involved.
+
+
 ## [0.149.1]
 
 ### Fixed

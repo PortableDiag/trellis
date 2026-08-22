@@ -127,6 +127,9 @@ pub enum ApiRequest {
     /// Render a web-page card's body to a picture. Runs a browser, so it is
     /// answered in the app loop where the settings gate lives.
     RenderHtml { node: NodeId, card: u64 },
+    /// The rendered picture of a web-page card, base64, for a client that cannot
+    /// render one itself — which is every phone.
+    GetHtmlPng { node: NodeId, card: u64 },
     /// Write a writable mirror's body **back** to its file. Refuses on a moved
     /// mtime rather than resolving the conflict; see [`CardOp::WriteSource`].
     WriteSource { node: NodeId, card: u64 },
@@ -451,6 +454,8 @@ pub enum CardOp {
     Append(AppendInput),
     /// Render this card's HTML body to a picture.
     RenderHtml,
+    /// Fetch the rendered picture.
+    GetHtmlPng,
     /// Write the card back over its mirrored file. **Never continuous** — this is
     /// the explicit action, and it refuses on a moved mtime so that a conflict is
     /// reported rather than resolved by whoever wrote last.
@@ -506,6 +511,7 @@ pub fn resolve_by_card(node: NodeId, card: u64, op: CardOp) -> ApiRequest {
         }
         CardOp::Append(input) => ApiRequest::AppendCard { node, card, input },
         CardOp::RenderHtml => ApiRequest::RenderHtml { node, card },
+        CardOp::GetHtmlPng => ApiRequest::GetHtmlPng { node, card },
         CardOp::WriteSource => ApiRequest::WriteSource { node, card },
         CardOp::DiffSource => ApiRequest::DiffSource { node, card },
         CardOp::AddItem(input) => ApiRequest::AddItem { node, card, input },
@@ -758,6 +764,7 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::ClearCardsProperty { node, .. }
         | ApiRequest::AppendCard { node, .. }
         | ApiRequest::RenderHtml { node, .. }
+        | ApiRequest::GetHtmlPng { node, .. }
         | ApiRequest::WriteSource { node, .. }
         | ApiRequest::DiffSource { node, .. }
         | ApiRequest::AddItem { node, .. }
@@ -2154,6 +2161,9 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "cards", cid, "append"]) => {
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Append(parse(body)?) })
         }
+        (Method::Get, ["api", "cards", cid, "html", "png"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::GetHtmlPng })
+        }
         (Method::Post, ["api", "cards", cid, "html", "render"]) => {
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::RenderHtml })
         }
@@ -2378,6 +2388,9 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "append"]) => {
             Ok(ApiRequest::AppendCard { node: pid(nid)?, card: pid(cid)?, input: parse(body)? })
+        }
+        (Method::Get, ["api", "nodes", nid, "cards", cid, "html", "png"]) => {
+            Ok(ApiRequest::GetHtmlPng { node: pid(nid)?, card: pid(cid)? })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "html", "render"]) => {
             Ok(ApiRequest::RenderHtml { node: pid(nid)?, card: pid(cid)? })
@@ -4600,6 +4613,34 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     })))
                 }
                 None => (false, ApiResponse::err(404, "card/image not found or not an image card")),
+            }
+        }
+        ApiRequest::GetHtmlPng { node, card } => {
+            // A plain read of bytes already in the document, so it is answered
+            // here rather than in the app loop: nothing about it needs a browser
+            // or a setting. Rendering is the gated part; looking at what was
+            // already rendered is not.
+            let png = doc
+                .nodes
+                .get(&node)
+                .and_then(|n| n.cards.iter().find(|c| c.id == card))
+                .and_then(|c| c.html.as_ref())
+                .filter(|h| !h.png.is_empty())
+                .map(|h| (h.png.clone(), h.width, h.height));
+            match png {
+                Some((bytes, w, hgt)) => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    (false, ApiResponse::ok(json!({
+                        "card": card,
+                        "width": w,
+                        "height": hgt,
+                        "base64": b64,
+                    })))
+                }
+                None => (
+                    false,
+                    ApiResponse::err(404, "this card has no rendered page — render it first"),
+                ),
             }
         }
         ApiRequest::Overlaps(node) => {

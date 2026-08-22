@@ -2169,8 +2169,17 @@ bake the numbers into a self-contained page, write it into a card, render it.
 PATCH /api/nodes/{id}/cards/{cid}  {"html": {"view":"split", "allow":"none"}}
 POST  /api/nodes/{id}/cards/{cid}/html/render
 POST  /api/cards/{cid}/html/render
+GET   /api/nodes/{id}/cards/{cid}/html/png            the rendered picture, base64
+GET   /api/cards/{cid}/html/png
 PATCH /api/nodes/{id}/cards/{cid}  {"html": null}     ordinary card again
 ```
+
+`html/png` returns `{card, width, height, base64}`, or **404** when the card has
+never been rendered. It exists because the bytes are deliberately *not* in the
+card JSON — they would be megabytes in every basket listing — and because the
+**phone cannot render a page itself**: it has no browser and no business running
+one, so it shows what the desktop produced. Rendering is the gated action;
+reading back what was already rendered is an ordinary document read.
 
 | field | |
 |---|---|
