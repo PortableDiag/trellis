@@ -2743,6 +2743,45 @@ pub fn stale_claim_count(doc: &crate::model::Document) -> usize {
         .count()
 }
 
+/// Is this trailing operator text actually **something said**, or just the card's
+/// own metadata?
+///
+/// A channel card carries `verify::` / `check::` lines like any other card that
+/// asserts state, and they sit in the body as unheaded text — which
+/// `parse_channel` reports as the operator talking. Without this, a channel card
+/// with a claim on it reads as *waiting for an answer* for ever, and the count
+/// that exists to say "somebody asked you something" cries wolf permanently.
+/// Found within an hour of shipping the count, on the operator's own A2A card.
+///
+/// The rule: if every non-blank line is a bare `key:: value`, it is metadata.
+/// One line of prose anywhere in the block and it is a message again — a person
+/// writing "look at this, `due:: tomorrow`" is talking.
+fn is_something_said(text: &str) -> bool {
+    let mut any = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        any = true;
+        // A property line is `key:: value` and nothing before the key.
+        let is_prop = t
+            .split_once(":: ")
+            .map(|(k, v)| {
+                !k.is_empty()
+                    && !v.trim().is_empty()
+                    && k.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            })
+            .unwrap_or(false);
+        if !is_prop {
+            return true;
+        }
+    }
+    // An empty block says nothing either.
+    let _ = any;
+    false
+}
+
 /// Channel cards, and how many of them are waiting on somebody.
 ///
 /// **Waiting means the operator spoke last.** Identity-free on purpose:
@@ -2770,7 +2809,7 @@ pub fn channel_counts(doc: &crate::model::Document) -> (usize, usize) {
             // typed straight into the card on the phone, or posted with `say`.
             if crate::model::parse_channel(&c.body)
                 .last()
-                .is_some_and(|m| m.from == crate::model::OPERATOR)
+                .is_some_and(|m| m.from == crate::model::OPERATOR && is_something_said(&m.text))
             {
                 waiting += 1;
             }
@@ -7962,6 +8001,44 @@ mod tests {
         assert_eq!(ch["primary"], true, "{body}");
         assert_eq!(ch["participants"][0], "alice", "{body}");
         assert_eq!(ch["seq"], 0, "{body}");
+    }
+
+    /// **A card's own `verify::` lines are not a question.**
+    ///
+    /// A channel card carries claim metadata like any other card, and it lands in
+    /// the body as unheaded text — which reads as the operator talking. Shipped
+    /// without this, the operator's A2A card reported itself as waiting for an
+    /// answer permanently, an hour after the count went in.
+    #[test]
+    fn a_channel_carrying_only_metadata_is_not_waiting() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "n".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let patch: UpdateCardInput = serde_json::from_str(
+            r#"{"channel":{"participants":["claude","alice"],"primary":false}}"#,
+        )
+        .unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        process(
+            &mut doc,
+            ApiRequest::ChannelSay { node: n, card: c, from: "claude".into(), text: "ack".into() },
+        );
+
+        // Claim lines appended to the card: metadata, not speech.
+        let body = doc.nodes[&n].cards.iter().find(|x| x.id == c).unwrap().body.clone();
+        let meta = format!("{body}\n\nverify:: 2026-11-21\ncheck:: GET /api/cards/1/channel — 200");
+        let patch: UpdateCardInput =
+            serde_json::from_str(&serde_json::to_string(&json!({"body": meta})).unwrap()).unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        assert_eq!(channel_counts(&doc), (1, 0), "a claim on the card is not a question");
+
+        // One line of prose in the same block and it IS a message again.
+        let body = doc.nodes[&n].cards.iter().find(|x| x.id == c).unwrap().body.clone();
+        let said = format!("{body}\nany news?");
+        let patch: UpdateCardInput =
+            serde_json::from_str(&serde_json::to_string(&json!({"body": said})).unwrap()).unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        assert_eq!(channel_counts(&doc), (1, 1), "prose beside metadata is still speech");
     }
 
     /// **A waiting channel is one the operator spoke into last.**

@@ -6,6 +6,23 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.149.1]
+
+### Fixed
+- **A channel card's own `verify::` lines were counted as a question.** An hour
+  after `channels_waiting` shipped it was reporting **1** on the operator's
+  restarted instance, and the "message" was the A2A card's own claim metadata —
+  `verify::` and `check::` sit in the body as unheaded text, which
+  `parse_channel` reports as the operator speaking. Any channel card carrying a
+  claim would have read as *waiting for an answer* for ever, which is a counter
+  that cries wolf permanently and therefore stops being read at all — the exact
+  failure the count exists to prevent.
+
+  A trailing operator block whose non-blank lines are **all** bare `key:: value`
+  is metadata, not speech. One line of prose anywhere in it and it is a message
+  again, because somebody writing *"look at this, `due:: tomorrow`"* is talking.
+
+
 ## [0.149.0]
 
 ### Added
