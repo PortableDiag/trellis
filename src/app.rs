@@ -74,6 +74,7 @@ const DESKTOP_CARDS_KEY: &str = "desktop_cards";
 const GRANTS_KEY: &str = "plugin_grants";
 const MIRROR_MODE_KEY: &str = "mirror_policy";
 const MIRROR_DIRS_KEY: &str = "mirror_dirs";
+const MIRROR_WRITE_KEY: &str = "mirror_write";
 pub(crate) const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
@@ -1085,6 +1086,12 @@ pub struct TrellisApp {
     mentions_for: Option<(NodeId, CardId)>,
     /// The Channel window: which card, and the fields being edited.
     channel_edit: Option<ChannelEdit>,
+    /// The open *Compare with the file* / write-conflict window, if any.
+    source_diff: Option<SourceDiff>,
+    /// Unsent channel messages, per card. Not in the document: a draft is not a
+    /// message, and writing one into the body per keystroke is the two-writer
+    /// problem `say` exists to avoid.
+    channel_drafts: HashMap<CardId, String>,
     /// A card whose link neighbourhood is on screen, and how far out.
     local_graph_for: Option<CardId>,
     local_graph_depth: u32,
@@ -1267,6 +1274,14 @@ pub struct TrellisApp {
     /// file picker is never restricted by this — see `model::MirrorPolicy`.
     mirror_policy: crate::model::MirrorPolicy,
     mirror_dirs: Vec<String>,
+    /// May an API caller write a mirrored file **back** to disk?
+    ///
+    /// Off by default, and a **separate** permission from `mirror_policy`, which
+    /// governs reading. Reading a file the agent should not see leaks it; writing
+    /// to one destroys it, and the argument that whoever is sitting at the machine
+    /// already has the filesystem — the reason the app's own file picker is
+    /// unrestricted — does not extend to a network caller at all.
+    mirror_write: bool,
     /// Finished runs, newest last, for the Plugins window's log pane.
     plugin_log: Vec<crate::plugins::RunResult>,
     plugin_rx: Receiver<PluginEvent>,
@@ -1337,6 +1352,27 @@ pub struct TrellisApp {
 /// Held apart from the card so an in-progress edit is not applied keystroke by
 /// keystroke — turning a card into a conversation, or changing who it is addressed
 /// to, is a decision, not a drag.
+/// A card and its file, side by side.
+///
+/// Opened either deliberately (*Compare with the file*) or because a write-back
+/// was refused. The refusal is the important case: the assessment's five
+/// data-loss paths are all versions of resolving a conflict silently, so the app
+/// resolves nothing — it shows the difference and makes the person choose.
+struct SourceDiff {
+    node: NodeId,
+    card: CardId,
+    path: String,
+    diff: Vec<crate::model::DiffLine>,
+    /// True when this opened because the file moved under a write-back, which is
+    /// what turns an informational window into a decision.
+    conflict: bool,
+    /// The file's text as read for this diff, so *keep the file* does not have to
+    /// read it a second time and risk reading a third version.
+    disk: String,
+    /// The file's mtime as read for this diff — what a forced overwrite records.
+    mtime: u64,
+}
+
 struct ChannelEdit {
     node: NodeId,
     card: CardId,
@@ -1624,6 +1660,8 @@ impl TrellisApp {
             switcher_purpose: SwitcherPurpose::Jump,
             mentions_for: None,
             channel_edit: None,
+            source_diff: None,
+            channel_drafts: HashMap::new(),
             local_graph_for: None,
             local_graph_depth: 2,
             scroll_to: None,
@@ -1771,6 +1809,11 @@ impl TrellisApp {
                 .and_then(|s| s.get_string(MIRROR_DIRS_KEY))
                 .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
                 .unwrap_or_default(),
+            mirror_write: cc
+                .storage
+                .and_then(|s| s.get_string(MIRROR_WRITE_KEY))
+                .map(|v| v == "true")
+                .unwrap_or(false),
             plugin_log: Vec::new(),
             plugin_rx,
             plugin_tx,
@@ -2181,6 +2224,27 @@ impl TrellisApp {
                     (Some(a), Some(b)) => a != b,
                     _ => true,
                 };
+                // **A card with unwritten edits is never overwritten by its
+                // file.** This is failure mode 2 of the assessment — the refresh
+                // firing while you are typing and replacing the body under the
+                // cursor. Suppressed rather than merged: the two sides are
+                // allowed to diverge, and the conflict surfaces when the write
+                // is attempted, where a human is present to decide.
+                //
+                // It does *not* hide a real external change. `source_mtime` is
+                // deliberately left where it was, so the moment anything tries to
+                // write this card back the mtime check sees the file has moved
+                // and refuses with the diff.
+                //
+                // Only once it has actually been read, though. A card whose first
+                // read has not landed yet has `source_mtime` unset and nothing to
+                // lose: suppressing that one strands it — permanently empty, and
+                // permanently in conflict, because "never read" also reads as
+                // "the file moved". Found by writing back against a card edited
+                // in the second before its first poll.
+                if card.source_dirty && card.source_mtime.is_some() {
+                    continue;
+                }
                 if force || changed || card.source_error.is_some() {
                     stale.push((*nid, card.id, path.clone(), card.source_tail));
                 }
@@ -2728,6 +2792,13 @@ impl TrellisApp {
                 continue;
             }
             if let Some(resp) = self.handle_api_instance(&cmd.req) {
+                let _ = cmd.resp.send(resp);
+                continue;
+            }
+            // Writing a mirrored file reaches outside the document, so it is
+            // answered here where the policy and the scope both exist — never in
+            // `process`, which sees only the Document.
+            if let Some(resp) = self.handle_api_source(&cmd.req, cmd.scope.as_ref()) {
                 let _ = cmd.resp.send(resp);
                 continue;
             }
@@ -3725,6 +3796,254 @@ impl TrellisApp {
 
     /// Answer the backup API endpoints from app state. Returns `None` for any
     /// other request so the normal `api::process` path handles it.
+    /// *Write back to file* from the card menu.
+    ///
+    /// The same rule the API route enforces, and deliberately the same code path
+    /// for the check: read the file, compare its mtime with what the card last
+    /// read, and **refuse on a mismatch** by opening the diff instead of writing.
+    /// The desktop is allowed to write without the `mirror_write` opt-in — that
+    /// gate is about a *network caller*, not about the person sitting here, which
+    /// is the same distinction that leaves the app's own file picker unrestricted.
+    fn write_source_card(&mut self, node: NodeId, cid: CardId) {
+        let Some(c) = self.doc.card(node, cid) else { return };
+        let (Some(path), body, stored, tail) =
+            (c.source.clone(), c.body.clone(), c.source_mtime, c.source_tail)
+        else {
+            return;
+        };
+        if !matches!(c.kind, CardKind::Text | CardKind::Code { .. }) {
+            self.status = "Only text and code cards can be written back".into();
+            return;
+        }
+        if tail.is_some() {
+            self.status =
+                "This card shows only the tail of its file — turn tail mode off first".into();
+            return;
+        }
+        match crate::model::read_source(&path) {
+            Err(e) => self.status = format!("Cannot read {path}: {e}"),
+            Ok((disk, mtime)) => {
+                if stored != Some(mtime) {
+                    // The conflict. Nothing is written, and the window that opens
+                    // asks rather than decides.
+                    self.source_diff = Some(SourceDiff {
+                        node,
+                        card: cid,
+                        path,
+                        diff: crate::model::line_diff(&disk, &body),
+                        conflict: true,
+                        disk,
+                        mtime,
+                    });
+                    return;
+                }
+                self.commit_source_write(node, cid, &path, &body);
+            }
+        }
+    }
+
+    /// Actually replace the file, and record that the card and it now agree.
+    fn commit_source_write(&mut self, node: NodeId, cid: CardId, path: &str, body: &str) {
+        match crate::model::write_source(path, body) {
+            Ok(mtime) => {
+                if let Some(c) = self.doc.card_mut(node, cid) {
+                    c.source_mtime = Some(mtime);
+                    c.source_dirty = false;
+                    c.source_error = None;
+                }
+                self.note_card(node, cid, crate::changelog::Op::Updated, "source_write");
+                self.dirty = true;
+                self.status = format!("Wrote {path}");
+            }
+            Err(e) => self.status = format!("Not written: {e}"),
+        }
+    }
+
+    /// Open the card-versus-file window without writing anything.
+    fn open_source_diff(&mut self, node: NodeId, cid: CardId, conflict: bool) {
+        let Some(c) = self.doc.card(node, cid) else { return };
+        let (Some(path), body) = (c.source.clone(), c.body.clone()) else { return };
+        match crate::model::read_source(&path) {
+            Err(e) => self.status = format!("Cannot read {path}: {e}"),
+            Ok((disk, mtime)) => {
+                self.source_diff = Some(SourceDiff {
+                    node,
+                    card: cid,
+                    path,
+                    diff: crate::model::line_diff(&disk, &body),
+                    conflict,
+                    disk,
+                    mtime,
+                });
+            }
+        }
+    }
+
+    /// Write a mirrored card back to its file, or diff it against the file.
+    ///
+    /// **The conflict rule, and it is the whole feature:** if the file's mtime
+    /// has moved since we last read it, the write is **refused** and the diff is
+    /// returned with it. Nothing is merged and nothing is overwritten — the two
+    /// sides are allowed to disagree and a human decides. Every one of the five
+    /// data-loss paths this was assessed against is a version of resolving
+    /// silently, so the safe answer is to not resolve at all.
+    ///
+    /// **Writing is a separate permission from reading.** `MirrorPolicy` governs
+    /// what an agent may *read* into a card; reading a credential file leaks it,
+    /// writing to one destroys it, and the "whoever is at the machine already has
+    /// the filesystem" argument that makes the user's own file picker
+    /// unrestricted does not extend to the API at all. So agents are refused by
+    /// default and need `mirror_write` turned on deliberately.
+    fn handle_api_source(
+        &mut self,
+        req: &api::ApiRequest,
+        scope: Option<&crate::plugins::Scope>,
+    ) -> Option<api::ApiResponse> {
+        let (node, card, writing) = match req {
+            api::ApiRequest::WriteSource { node, card } => (*node, *card, true),
+            api::ApiRequest::DiffSource { node, card } => (*node, *card, false),
+            _ => return None,
+        };
+        // A confined token cannot reach the filesystem at all, exactly as it
+        // cannot mirror one in the first place.
+        if scope.and_then(|s| s.subtree).is_some() {
+            return Some(api::ApiResponse::err(
+                403,
+                "a token confined to a basket cannot read or write mirrored files",
+            ));
+        }
+        let Some(c) = self.doc.card(node, card) else {
+            return Some(api::ApiResponse::err(404, "no such card"));
+        };
+        let Some(path) = c.source.clone() else {
+            return Some(api::ApiResponse::err(
+                400,
+                "this card does not mirror a file — set \"source\" first",
+            ));
+        };
+        // The diff reads the file, so it answers to the read policy; without this
+        // a caller could read any permitted-by-nothing file as a pile of `-`
+        // lines. Same check the mirror itself passes.
+        if let Err(e) =
+            crate::model::mirror_allowed(&path, self.mirror_policy, &self.mirror_dirs)
+        {
+            return Some(api::ApiResponse::err(403, &e));
+        }
+        let body = c.body.clone();
+        let stored = c.source_mtime;
+        let writable = c.source_write;
+        let tail = c.source_tail;
+        let kind_ok = matches!(c.kind, CardKind::Text | CardKind::Code { .. });
+
+        let on_disk = match crate::model::read_source(&path) {
+            Ok((text, mtime)) => Some((text, mtime)),
+            Err(e) => {
+                if !writing {
+                    return Some(api::ApiResponse::err(400, &e));
+                }
+                // Writing to a path that cannot be read yet is legitimate — the
+                // file may have been deleted out from under us — but it is not
+                // something to do silently over a conflict check that cannot run.
+                return Some(api::ApiResponse::err(
+                    409,
+                    &format!("cannot read {path} to check it before writing: {e}"),
+                ));
+            }
+        };
+        let (disk_text, disk_mtime) = on_disk.expect("checked above");
+        let diff = crate::model::line_diff(&disk_text, &body);
+        let differs = diff.iter().any(|d| d.tag != " ");
+        let moved = stored != Some(disk_mtime);
+
+        if !writing {
+            return Some(api::ApiResponse::ok(serde_json::json!({
+                "card": card,
+                "source": path,
+                "differs": differs,
+                "file_changed_since_read": moved,
+                "source_write": writable,
+                "source_dirty": self.doc.card(node, card).is_some_and(|c| c.source_dirty),
+                "diff": diff,
+            })));
+        }
+
+        // ---- writing from here ----
+        if !self.mirror_write {
+            return Some(api::ApiResponse::err(
+                403,
+                "writing mirrored files over the API is off. Tools → Settings → \
+                 Agent API → \"Let agents write mirrored files back\". This is a \
+                 separate permission from the mirror read policy on purpose: \
+                 reading a file leaks it, writing to one destroys it.",
+            ));
+        }
+        if !writable {
+            return Some(api::ApiResponse::err(
+                409,
+                "this mirror is read-only. PATCH the card with \"source_write\": true \
+                 first — a mirror is a view of a file until somebody says otherwise.",
+            ));
+        }
+        if !kind_ok {
+            // Reason 4 of the assessment, and the one with no cure: a table
+            // mirroring a CSV would be written back through the inverse of the
+            // parser, so quoting, delimiter, trailing newline and number format
+            // all get re-decided by us and the file "changes" on every save even
+            // when nothing was edited.
+            return Some(api::ApiResponse::err(
+                400,
+                "only text and code cards can be written back. A table mirroring a \
+                 CSV would be re-serialised by us — quoting, delimiter and number \
+                 format all re-decided — so the file would change on every save \
+                 even with no edit.",
+            ));
+        }
+        if tail.is_some() {
+            return Some(api::ApiResponse::err(
+                400,
+                "this card shows only the tail of its file. Writing it back would \
+                 replace the whole file with the last few lines. Send \
+                 \"source_tail\": 0 first.",
+            ));
+        }
+        if moved {
+            return Some(api::ApiResponse::err_json(
+                409,
+                serde_json::json!({
+                    "error": format!(
+                        "{path} changed on disk since this card last read it. Nothing \
+                         was written. The diff below is the file (-) against the card (+); \
+                         decide which one is right."
+                    ),
+                    "card": card,
+                    "source": path,
+                    "file_changed_since_read": true,
+                    "diff": diff,
+                }),
+            ));
+        }
+        match crate::model::write_source(&path, &body) {
+            Ok(mtime) => {
+                if let Some(c) = self.doc.card_mut(node, card) {
+                    c.source_mtime = Some(mtime);
+                    c.source_dirty = false;
+                    c.source_error = None;
+                }
+                self.note_card(node, card, crate::changelog::Op::Updated, "source_write");
+                self.dirty = true;
+                self.status = format!("Wrote {path}");
+                Some(api::ApiResponse::ok(serde_json::json!({
+                    "card": card,
+                    "source": path,
+                    "written": true,
+                    "bytes": body.len(),
+                    "mtime": mtime,
+                })))
+            }
+            Err(e) => Some(api::ApiResponse::err(500, &e)),
+        }
+    }
+
     fn handle_api_backup(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
         match req {
             api::ApiRequest::BackupStatus => {
@@ -4512,6 +4831,14 @@ impl TrellisApp {
             CanvasAction::PickSource(c) => upd(c, "source"),
             CanvasAction::ClearSource(c) => upd(c, "source"),
             CanvasAction::SetSourceTail(c, _) => upd(c, "source_tail"),
+            CanvasAction::SetSourceWrite(c, _) => upd(c, "source_write"),
+            // The say records itself where it happens, with the same field name
+            // the API path uses, so `GET /api/changes` cannot tell the two apart.
+            CanvasAction::SayInChannel(..) => return None,
+            // The write itself records where it happens, because only there is it
+            // known whether the file was actually replaced or the attempt hit a
+            // conflict and changed nothing. Comparing changes nothing at all.
+            CanvasAction::WriteSource(_) | CanvasAction::DiffSource(_) => return None,
             CanvasAction::DockCard(c, _) => upd(c, "dock"),
             CanvasAction::DetachCard(c) => upd(c, "dock"),
 
@@ -5529,8 +5856,54 @@ impl TrellisApp {
                         c.source = None;
                         c.source_mtime = None;
                         c.source_error = None;
+                        c.source_write = false;
+                        c.source_dirty = false;
                     }
                 }
+                CanvasAction::SetSourceWrite(cid, on) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        c.source_write = on;
+                        if !on {
+                            // Read-only again, so the poll owns the body again and
+                            // "unwritten edits" is a promise nothing can keep.
+                            c.source_dirty = false;
+                        }
+                    }
+                    self.dirty = true;
+                    self.status = if on {
+                        "This card can be edited and written back".into()
+                    } else {
+                        "This card is a read-only view of its file again".into()
+                    };
+                    if !on {
+                        self.pump_sources(true);
+                    }
+                }
+                CanvasAction::SayInChannel(cid, text) => {
+                    // Straight through the API's own handler, so the header, the
+                    // timestamp and the sequence number are written by the one
+                    // implementation both surfaces share. A second copy here is
+                    // how the two would drift.
+                    let (changed, resp) = api::process(
+                        &mut self.doc,
+                        api::ApiRequest::ChannelSay {
+                            node,
+                            card: cid,
+                            from: crate::model::OPERATOR.to_string(),
+                            text,
+                        },
+                    );
+                    if changed {
+                        self.channel_drafts.remove(&cid);
+                        self.note_card(node, cid, crate::changelog::Op::Updated, "channel.say");
+                        self.dirty = true;
+                        self.status = "Message posted".into();
+                    } else {
+                        self.status = format!("Not sent: {}", resp.body);
+                    }
+                }
+                CanvasAction::WriteSource(cid) => self.write_source_card(node, cid),
+                CanvasAction::DiffSource(cid) => self.open_source_diff(node, cid, false),
                 CanvasAction::DockCard(child, anchor) => self.doc.dock_card(node, child, anchor),
                 CanvasAction::DetachCard(cid) => self.doc.detach_card(node, cid),
                 CanvasAction::ResetView => {
@@ -7544,6 +7917,28 @@ impl TrellisApp {
                         });
                         ui.end_row();
 
+                        ui.label("Let agents write mirrored files back");
+                        ui.vertical(|ui| {
+                            ui.checkbox(
+                                &mut self.mirror_write,
+                                "Allow POST …/source/write over the API",
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Off by default, and a SEPARATE permission from the read \
+                                     policy above. Reading a file an agent should not see leaks \
+                                     it; writing to one destroys it — and \"whoever is at this \
+                                     machine already has the filesystem\", which is why your own \
+                                     File → Mirror a file… is unrestricted, does not apply to a \
+                                     network caller. Your own Write back to file… in the card \
+                                     menu never needs this.",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                        });
+                        ui.end_row();
+
                         ui.label("Port");
                         ui.horizontal(|ui| {
                             ui.add(egui::DragValue::new(&mut self.api_port).range(1024..=65535));
@@ -8032,6 +8427,7 @@ impl TrellisApp {
                             "POST   /api/cards/{cid}/items/{item}/done {done}",
                             "POST   /api/cards/{cid}/items/{item}/property {key,value}  ·  DELETE /api/cards/{cid}/items/{item}/property?key=due",
                             "POST   /api/cards/{cid}/append {text, at?, separator?}        (add to a shared card without sending the body back)",
+                            "POST   /api/cards/{cid}/source/write   ·  GET /api/cards/{cid}/source/diff   (MIRROR WRITE-BACK — write the card over its file, or just show the difference. 409 + the diff if the file moved since the card read it: it asks, it never merges)",
                             "POST   /api/cards/{cid}/items  {text, done?, at?}  ·  DELETE /api/cards/{cid}/items/{item}   (one line; ids of the rest stay put)",
                             "POST   /api/cards/{cid}/table {op, …}   ·  /api/cards/{cid}/sketch {op, …}   (same bodies as the node-addressed twins)",
                             "POST   /api/cards/{cid}/chart {kind, …}  ·  DELETE /api/cards/{cid}/chart",
@@ -8087,6 +8483,7 @@ impl TrellisApp {
                             "POST   /api/nodes/{id}/cards/{cid}/attachments {name, data_base64}   (the document is written WHOLE on every save, so size costs every autosave, snapshot and backup — attachment_bytes on /api/instance is the running total)",
                             "GET    /api/nodes/{id}/cards/{cid}/attachments/{idx}  ·  DELETE /api/nodes/{id}/cards/{cid}/attachments/{idx}",
                             "POST   /api/nodes/{id}/cards/{cid}/append {text, at?, separator?}   (add to a card without sending its body back)",
+                            "POST   /api/nodes/{id}/cards/{cid}/source/write  ·  GET /api/nodes/{id}/cards/{cid}/source/diff   (write a mirrored card back to its file, or diff it. Needs source_write on the card, and agents need Settings -> Agent API -> Let agents write mirrored files back)",
                             "GET    /api/nodes/{id}/cards/{cid}/export?format=markdown|html|json  (ONE card as a note file — markdown writes YAML frontmatter from its properties and tags, so it lands in Obsidian intact)",
                             "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",
                             "POST   /api/nodes/{id}/groups/{gid}/move  {node, pos?}     (the whole group — container, members and id)",
@@ -8133,6 +8530,99 @@ impl TrellisApp {
     /// v0.143.0 shipped channels with no way to create one except the HTTP API,
     /// which meant the operator's own feature was reachable only by an agent or a
     /// `curl`. This is that missing half.
+    /// The card against its file — and, when a write was refused, the decision.
+    ///
+    /// **Nothing here merges.** The three ways out are *overwrite the file*,
+    /// *discard my edits and take the file*, and *leave both alone*. That is the
+    /// whole conflict rule: a merge would be this app inventing a third version
+    /// nobody wrote, which is precisely the silent resolution every one of the
+    /// assessed data-loss paths turns out to be.
+    fn source_diff_window(&mut self, ctx: &egui::Context) {
+        let Some(d) = self.source_diff.take() else { return };
+        let mut open = true;
+        let mut keep = true;
+        let title = if d.conflict { "The file changed" } else { "Card vs file" };
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(640.0)
+            .default_height(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(&d.path).monospace().small().weak());
+                ui.add_space(4.0);
+                if d.conflict {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "This file changed on disk since the card last read it. \
+                         Nothing has been written.",
+                    );
+                } else if d.diff.iter().all(|l| l.tag == " ") {
+                    ui.label("The card and the file are identical.");
+                }
+                ui.small("\u{2212} the file  \u{00b7}  + this card");
+                ui.separator();
+
+                egui::ScrollArea::both().auto_shrink([false, false]).max_height(300.0).show(
+                    ui,
+                    |ui| {
+                        for line in &d.diff {
+                            let (col, prefix) = match line.tag {
+                                "-" => (egui::Color32::from_rgb(229, 115, 115), "\u{2212} "),
+                                "+" => (egui::Color32::from_rgb(102, 187, 106), "+ "),
+                                _ => (ui.visuals().weak_text_color(), "  "),
+                            };
+                            ui.label(
+                                egui::RichText::new(format!("{prefix}{}", line.text))
+                                    .monospace()
+                                    .color(col),
+                            );
+                        }
+                    },
+                );
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if d.conflict {
+                        if ui
+                            .button("Overwrite the file")
+                            .on_hover_text("Replace the file with this card. The file's own changes are lost.")
+                            .clicked()
+                        {
+                            let body =
+                                self.doc.card(d.node, d.card).map(|c| c.body.clone()).unwrap_or_default();
+                            self.commit_source_write(d.node, d.card, &d.path, &body);
+                            keep = false;
+                        }
+                        if ui
+                            .button("Discard my edits, take the file")
+                            .on_hover_text("Replace this card with the file as it is now. Your edits are lost.")
+                            .clicked()
+                        {
+                            if let Some(c) = self.doc.card_mut(d.node, d.card) {
+                                c.body = d.disk.clone();
+                                c.source_mtime = Some(d.mtime);
+                                c.source_dirty = false;
+                                c.source_error = None;
+                            }
+                            self.note_card(d.node, d.card, crate::changelog::Op::Updated, "source");
+                            self.dirty = true;
+                            self.status = "Took the file; card edits discarded".into();
+                            keep = false;
+                        }
+                        if ui.button("Leave both alone").clicked() {
+                            keep = false;
+                        }
+                    } else if ui.button("Close").clicked() {
+                        keep = false;
+                    }
+                });
+            });
+        if open && keep {
+            self.source_diff = Some(d);
+        }
+    }
+
     fn channel_window(&mut self, ctx: &egui::Context) {
         let Some(mut ed) = self.channel_edit.take() else { return };
         let mut open = true;
@@ -10468,6 +10958,7 @@ impl TrellisApp {
             let doc = &self.doc;
 
             ctx.show_viewport_immediate(vid, builder, |vctx, _| {
+                let mut drafts = std::mem::take(&mut self.channel_drafts);
                 let mut env = Env {
                     doc,
                     node,
@@ -10482,6 +10973,7 @@ impl TrellisApp {
                     highlight_until: 0.0,
                     focus_group: None,
                     highlight_group: None,
+                    channel_drafts: &mut drafts,
                     minimap,
                     style: match theme {
                         Theme::StickyNotes => canvas::CardStyle::Sticky,
@@ -10520,6 +11012,9 @@ impl TrellisApp {
                             recall.push(cid);
                         }
                     });
+                // Hand the drafts back: the map was moved out so the closure could
+                // borrow it mutably while `self` is also borrowed.
+                self.channel_drafts = drafts;
 
                 // Note where the window manager actually put it, for persistence
                 // only. **Never** fed back into the builder: that is what made
@@ -10909,6 +11404,7 @@ impl eframe::App for TrellisApp {
                         highlight_group: self.highlight_group,
                         on_desktop: &desktop_ids,
                         as_window: false,
+                        channel_drafts: &mut self.channel_drafts,
                         minimap: self.minimap_enabled,
                         style: match self.theme {
                             Theme::StickyNotes => canvas::CardStyle::Sticky,
@@ -11044,6 +11540,7 @@ impl eframe::App for TrellisApp {
         // being edited. Nesting it under another window's flag is how it shipped
         // drawing only while Backup happened to be open.
         self.channel_window(ctx);
+        self.source_diff_window(ctx);
         if self.show_backup {
             self.backup_window(ctx);
         }
@@ -11182,6 +11679,7 @@ impl eframe::App for TrellisApp {
         }
         storage.set_string(MIRROR_MODE_KEY, self.mirror_policy.key().to_string());
         storage.set_string(MIRROR_DIRS_KEY, self.mirror_dirs.join("\n"));
+        storage.set_string(MIRROR_WRITE_KEY, self.mirror_write.to_string());
         if let Ok(g) = self.grants.lock() {
             if let Ok(s) = serde_json::to_string(&*g) {
                 storage.set_string(GRANTS_KEY, s);

@@ -61,6 +61,11 @@ pub struct Env<'a> {
     /// Group container to flash-highlight, sharing `highlight_until` with the
     /// card flash — only one reveal is ever in flight.
     pub highlight_group: Option<GroupId>,
+    /// Unsent text per channel card, so a half-typed message survives the frame
+    /// and the pan. Held by the app rather than the card: a draft is not part of
+    /// the document, and writing one into the body on every keystroke is exactly
+    /// the two-writer problem the channel's own `say` exists to avoid.
+    pub channel_drafts: &'a mut HashMap<CardId, String>,
     /// Draw the bottom-right minimap (overview of the basket + a view reticle).
     pub minimap: bool,
     /// Theme-driven card look (Normal / Sticky / Futuristic).
@@ -305,6 +310,14 @@ pub enum CanvasAction {
     ClearSource(CardId),
     /// Tail the mirrored file: `Some(lines)` on, `None` off.
     SetSourceTail(CardId, Option<u32>),
+    /// Post a message into a channel card, as the operator.
+    SayInChannel(CardId, String),
+    /// Turn two-way on or off for one mirrored card.
+    SetSourceWrite(CardId, bool),
+    /// Write the card back over its file — refused, with a diff, if the file moved.
+    WriteSource(CardId),
+    /// Show the difference between the card and its file, changing nothing.
+    DiffSource(CardId),
     DockCard(CardId, CardId),
     DetachCard(CardId),
     ToggleDockMode,
@@ -2035,8 +2048,19 @@ fn card_ui(
             egui::Stroke::new(1.0, accent.gamma_multiply(0.5)),
         );
     } else if body_rect.height() > 6.0 {
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
-        child.set_clip_rect(body_rect.intersect(clip));
+        // A channel keeps its compose row pinned to the bottom of the frame,
+        // **outside** the scroll area. Inside it, the row sits after the
+        // conversation — and a conversation only ever grows, so the one control
+        // that makes the card usable would be permanently below the fold. That
+        // is exactly how it shipped, and exactly how it was reported.
+        let composing = card.channel.is_some() && !card.editing;
+        let compose_h = if composing { (28.0 * zoom).min(body_rect.height() * 0.5) } else { 0.0 };
+        let scroll_rect = egui::Rect::from_min_max(
+            body_rect.min,
+            egui::pos2(body_rect.max.x, body_rect.max.y - compose_h),
+        );
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(scroll_rect));
+        child.set_clip_rect(scroll_rect.intersect(clip));
         scale_fonts(&mut child, zoom);
         egui::ScrollArea::vertical()
             .id_salt(("card_body", card.id))
@@ -2044,10 +2068,22 @@ fn card_ui(
             // A tail is read at the bottom: without this the card shows the top
             // of the window it just fetched and you scroll down on every refresh,
             // which is the same complaint the whole feature exists to answer.
-            .stick_to_bottom(card.source_tail.is_some())
+            // A channel is read the same way, for the same reason: the newest
+            // message is the one you came for.
+            .stick_to_bottom(card.source_tail.is_some() || composing)
             .show(&mut child, |ui| {
                 body_ui(ui, card, env, zoom, actions);
             });
+        if compose_h > 0.0 {
+            let crect = egui::Rect::from_min_max(
+                egui::pos2(body_rect.min.x, body_rect.max.y - compose_h),
+                body_rect.max,
+            );
+            let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(crect));
+            cui.set_clip_rect(crect.intersect(clip));
+            scale_fonts(&mut cui, zoom);
+            channel_ui(&mut cui, card, env, zoom, actions);
+        }
     }
 
     // --- resize handle (bottom-right) --------------------------------------
@@ -2144,6 +2180,67 @@ fn body_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
     ui.set_width(ui.available_width());
     kind_ui(ui, card, env, zoom, actions);
     attachments_ui(ui, card, zoom, actions);
+}
+
+/// The compose row on a channel card.
+///
+/// **Why it exists.** The desktop could *make* a channel and *read* one, and had
+/// no way to say anything in it: the only path was double-clicking the handle and
+/// hand-appending below every `### @name` header without disturbing them. That is
+/// the same gap the phone had, reported the same way — *"I can't seem to edit the
+/// channel card or send messages, it just does nothing when I click on it"* — and
+/// clicking does nothing because a card is edited by double-clicking its handle,
+/// which is not a thing anyone should have to know to answer a question.
+///
+/// Send goes through the same `ChannelSay` the API uses, so the header, the
+/// timestamp and the sequence number are written once, in one place, for both.
+fn channel_ui(
+    ui: &mut egui::Ui,
+    card: &Card,
+    env: &mut Env,
+    zoom: f32,
+    actions: &mut Vec<CanvasAction>,
+) {
+    if card.channel.is_none() || card.editing {
+        return;
+    }
+    let draft = env.channel_drafts.entry(card.id).or_default();
+    let mut send = false;
+    // Ctrl+Enter sends; plain Enter is a newline, because a message here is often
+    // several lines and losing one to a stray Return is worse than needing a
+    // modifier.
+    //
+    // **Consumed before the field is drawn, not checked after.** A multiline
+    // TextEdit swallows Enter to insert a newline, so reading the key from
+    // `input()` after `ui.add` sees an event that is already gone — which is
+    // precisely how this shipped not working while the tooltip promised it did.
+    // `consume_key` takes the event away first, so the field never inserts the
+    // newline either.
+    let te_id = ui.make_persistent_id(("channel_compose", card.id));
+    if ui.memory(|m| m.has_focus(te_id))
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter))
+    {
+        send = true;
+    }
+    ui.horizontal(|ui| {
+        let te = egui::TextEdit::multiline(draft)
+            .id(te_id)
+            .desired_rows(1)
+            .desired_width(ui.available_width() - 56.0 * zoom)
+            .hint_text("Message\u{2026}")
+            .font(egui::TextStyle::Body);
+        ui.add(te);
+        if ui
+            .add_enabled(!draft.trim().is_empty(), egui::Button::new("Send"))
+            .on_hover_text("Post this as a message from you (Ctrl+Enter)")
+            .clicked()
+        {
+            send = true;
+        }
+    });
+    if send && !draft.trim().is_empty() {
+        actions.push(CanvasAction::SayInChannel(card.id, draft.trim().to_string()));
+    }
 }
 
 /// The strip of attached files under a card's content.
@@ -3401,6 +3498,51 @@ fn card_menu(
                         }
                     },
                 );
+                // Two-way. Off by default and per card: a mirror has always
+                // been a view of a file, and quietly making all 47 existing ones
+                // writable would turn a 3-second poll into a two-writer race.
+                let writable = card.source_write;
+                if ui
+                    .checkbox(&mut { writable }, "Edit and write back")
+                    .on_hover_text(
+                        "Let this card be edited and written over its file.\n\n\
+                         Never continuous: the write is an explicit action below. \
+                         While there are unwritten edits the file stops refreshing \
+                         the card, so nothing is replaced under your cursor.",
+                    )
+                    .clicked()
+                {
+                    actions.push(CanvasAction::SetSourceWrite(card.id, !writable));
+                    ui.close_menu();
+                }
+                if writable {
+                    let dirty = card.source_dirty;
+                    if ui
+                        .button(if dirty {
+                            "Write back to file\u{2026}  \u{2022}"
+                        } else {
+                            "Write back to file\u{2026}"
+                        })
+                        .on_hover_text(
+                            "Replace the file with this card's text.\n\n\
+                             If the file changed since the card last read it, nothing \
+                             is written and you are shown the difference instead \
+                             \u{2014} the two are never merged for you.",
+                        )
+                        .clicked()
+                    {
+                        actions.push(CanvasAction::WriteSource(card.id));
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("Compare with the file\u{2026}")
+                        .on_hover_text("Show the difference and change nothing.")
+                        .clicked()
+                    {
+                        actions.push(CanvasAction::DiffSource(card.id));
+                        ui.close_menu();
+                    }
+                }
                 if ui
                     .button("Stop mirroring")
                     .on_hover_text("Keep the text that's here and make the card editable again")

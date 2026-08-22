@@ -124,6 +124,13 @@ pub enum ApiRequest {
     /// running log, a handoff — is exactly where both of them write. And it does
     /// not require shipping an 18 KB body over the wire to add a line to it.
     AppendCard { node: NodeId, card: u64, input: AppendInput },
+    /// Write a writable mirror's body **back** to its file. Refuses on a moved
+    /// mtime rather than resolving the conflict; see [`CardOp::WriteSource`].
+    WriteSource { node: NodeId, card: u64 },
+    /// The diff between a mirrored card and its file on disk, changing nothing.
+    /// This is the unattended half of the conflict rule: show the difference and
+    /// do nothing else.
+    DiffSource { node: NodeId, card: u64 },
     /// Add one checklist line, and get its id back.
     ///
     /// The alternative was a wholesale `items` rewrite, which carries the existing
@@ -439,6 +446,12 @@ pub enum CardOp {
     SetItemProperty { item: u64, key: String, value: String },
     ClearItemProperty { item: u64, key: String },
     Append(AppendInput),
+    /// Write the card back over its mirrored file. **Never continuous** — this is
+    /// the explicit action, and it refuses on a moved mtime so that a conflict is
+    /// reported rather than resolved by whoever wrote last.
+    WriteSource,
+    /// Diff the card against its file without touching either.
+    DiffSource,
     AddItem(AddItemInput),
     DeleteItem { item: u64 },
     // The kind-specific ops (v0.142.0). They were left out of v0.117.0 for no
@@ -487,6 +500,8 @@ pub fn resolve_by_card(node: NodeId, card: u64, op: CardOp) -> ApiRequest {
             ApiRequest::ClearItemProperty { node, card, item, key }
         }
         CardOp::Append(input) => ApiRequest::AppendCard { node, card, input },
+        CardOp::WriteSource => ApiRequest::WriteSource { node, card },
+        CardOp::DiffSource => ApiRequest::DiffSource { node, card },
         CardOp::AddItem(input) => ApiRequest::AddItem { node, card, input },
         CardOp::DeleteItem { item } => ApiRequest::DeleteItem { node, card, item },
         CardOp::Dock { anchor } => ApiRequest::DockCard { node, card, anchor },
@@ -736,6 +751,8 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::DeleteCards { node, .. }
         | ApiRequest::ClearCardsProperty { node, .. }
         | ApiRequest::AppendCard { node, .. }
+        | ApiRequest::WriteSource { node, .. }
+        | ApiRequest::DiffSource { node, .. }
         | ApiRequest::AddItem { node, .. }
         | ApiRequest::DeleteItem { node, .. }
         | ApiRequest::DeleteGroup { node, .. } => Some(*node),
@@ -860,6 +877,7 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
                 (patch.inline_images.is_some(), "inline_images"),
                 (patch.source.is_some(), "source"),
                 (patch.source_tail.is_some(), "source_tail"),
+                (patch.source_write.is_some(), "source_write"),
             ] {
                 if present {
                     c = c.field(name);
@@ -1061,6 +1079,17 @@ impl ApiResponse {
     }
     pub fn err(status: u16, msg: &str) -> Self {
         Self::json(status, json!({ "error": msg }))
+    }
+    /// An error that carries evidence.
+    ///
+    /// A refused write-back has to hand back the **diff** that caused the
+    /// refusal: "the file changed, decide which is right" is not actionable
+    /// without seeing what changed, and making the caller issue a second request
+    /// to find out invites them to skip it. The payload must still carry
+    /// `error`, so every existing client that only reads that field is unaffected.
+    pub fn err_json(status: u16, v: Value) -> Self {
+        debug_assert!(v.get("error").is_some(), "an error response must carry `error`");
+        Self::json(status, v)
     }
     /// A page for a browser to render, rather than data for a program to parse.
     pub fn html(status: u16, body: String) -> Self {
@@ -1469,6 +1498,13 @@ pub struct UpdateCardInput {
     /// silently clearing it — the same shape `view` uses.
     #[serde(default)]
     source_tail: Option<u32>,
+    /// Let this mirror be written **back** to its file. Off by default: a mirror
+    /// has always been a read-only view, and flipping every existing one to
+    /// writable would turn a 3-second poll into a two-writer race. With it on the
+    /// body may be edited and `POST …/source/write` becomes available; the write
+    /// itself is still always an explicit action, never continuous sync.
+    #[serde(default)]
+    source_write: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2089,6 +2125,12 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Post, ["api", "cards", cid, "append"]) => {
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::Append(parse(body)?) })
         }
+        (Method::Post, ["api", "cards", cid, "source", "write"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::WriteSource })
+        }
+        (Method::Get, ["api", "cards", cid, "source", "diff"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::DiffSource })
+        }
         (Method::Post, ["api", "cards", cid, "items"]) => {
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::AddItem(parse(body)?) })
         }
@@ -2304,6 +2346,12 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "append"]) => {
             Ok(ApiRequest::AppendCard { node: pid(nid)?, card: pid(cid)?, input: parse(body)? })
+        }
+        (Method::Post, ["api", "nodes", nid, "cards", cid, "source", "write"]) => {
+            Ok(ApiRequest::WriteSource { node: pid(nid)?, card: pid(cid)? })
+        }
+        (Method::Get, ["api", "nodes", nid, "cards", cid, "source", "diff"]) => {
+            Ok(ApiRequest::DiffSource { node: pid(nid)?, card: pid(cid)? })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "items"]) => {
             Ok(ApiRequest::AddItem { node: pid(nid)?, card: pid(cid)?, input: parse(body)? })
@@ -3250,13 +3298,20 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 // sit after `title`, so a refused request had already renamed the
                 // card. A 409 that changed something is worse than either
                 // outcome, because the caller has no way to know what stuck.
-                if patch.body.is_some() && c.source.is_some() {
+                // A **writable** mirror is the exception, and only while it stays
+                // one: `source_write` turns the body from a view of the file into
+                // a draft of it. The edit is marked dirty so the refresh poll
+                // stops overwriting it, and nothing reaches the file until an
+                // explicit `POST …/source/write`.
+                let writable = c.source_write || patch.source_write == Some(true);
+                if patch.body.is_some() && c.source.is_some() && !writable {
                     return (
                         false,
                         ApiResponse::err(
                             409,
                             "this card mirrors a file — its body is read-only. \
-                             Send \"source\": \"\" to detach it first.",
+                             Send \"source_write\": true to edit it and write it back, \
+                             or \"source\": \"\" to detach it first.",
                         ),
                     );
                 }
@@ -3292,7 +3347,24 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     c.title = t;
                 }
                 if let Some(b) = patch.body {
+                    // A writable mirror's body now differs from the file until
+                    // somebody writes it back. Recorded on the card rather than
+                    // inferred, because the poll must know without re-reading the
+                    // file, and re-reading is the thing it is trying to avoid.
+                    if c.source.is_some() && b != c.body {
+                        c.source_dirty = true;
+                    }
                     c.body = b;
+                }
+                if let Some(w) = patch.source_write {
+                    c.source_write = w;
+                    if !w {
+                        // Turning write-back off drops the pending-edit flag with
+                        // it: the card is a read-only view again, so the poll is
+                        // free to refresh it and "unwritten edits" would be a
+                        // promise nothing can keep.
+                        c.source_dirty = false;
+                    }
                 }
                 if let Some(n) = patch.source_tail {
                     // 0 is "off": a tail of zero lines shows nothing, so the only
@@ -3708,14 +3780,17 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             if input.text.is_empty() {
                 return (false, ApiResponse::err(400, "nothing to append"));
             }
-            // A mirrored body belongs to the file, exactly as it does for PATCH.
-            if c.source.is_some() {
+            // A mirrored body belongs to the file, exactly as it does for PATCH —
+            // unless the mirror is writable, in which case appending is an edit to
+            // the draft like any other and is marked dirty for the poll.
+            if c.source.is_some() && !c.source_write {
                 return (
                     false,
                     ApiResponse::err(
                         409,
                         "this card mirrors a file — its body is read-only. \
-                         Send \"source\": \"\" to detach it first.",
+                         Send \"source_write\": true to edit it and write it back, \
+                         or \"source\": \"\" to detach it first.",
                     ),
                 );
             }
@@ -3739,6 +3814,11 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 c.body = format!("{}{}{}", input.text, sep, c.body);
             } else {
                 c.body = format!("{}{}{}", c.body, sep, input.text);
+            }
+            // Appending to a writable mirror is an edit like any other: the draft
+            // now differs from the file until it is written back.
+            if c.source.is_some() {
+                c.source_dirty = true;
             }
             let len = c.body.chars().count();
             (
@@ -4665,6 +4745,8 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         // the backup config + document file). This is only reached if that
         // interception is ever missed — report it rather than silently no-op.
         ApiRequest::Instance
+        | ApiRequest::WriteSource { .. }
+        | ApiRequest::DiffSource { .. }
         | ApiRequest::SettingsGet
         | ApiRequest::SettingsSet(_)
         | ApiRequest::BackupStatus
@@ -5128,6 +5210,11 @@ pub(crate) fn card_json(c: &Card) -> Value {
     if let Some(s) = &c.source {
         v["source"] = json!(s);
         v["source_error"] = json!(c.source_error);
+        // Reported always, not only when true: a client deciding whether to offer
+        // an editor has to be able to tell "read-only mirror" from "writable one",
+        // and an absent field reads as neither.
+        v["source_write"] = json!(c.source_write);
+        v["source_dirty"] = json!(c.source_dirty);
         if let Some(n) = c.source_tail {
             v["source_tail"] = json!(n);
         }
@@ -5407,6 +5494,51 @@ mod tests {
         assert_eq!(back.card(n, c).unwrap().touched, Some(1_785_950_176));
     }
 
+
+    /// **A writable mirror is the exception, and it marks itself dirty.**
+    ///
+    /// The dirty flag is not decoration: the refresh poll reads it to decide
+    /// whether it may replace the body, which is what stops the file overwriting
+    /// what you are typing. If setting it ever stopped working the symptom would
+    /// be an edit vanishing three seconds later.
+    #[test]
+    fn a_writable_mirror_takes_an_edit_and_records_that_it_diverged() {
+        let mut doc = Document::default();
+        let n = doc.add_node(None, "Basket".into());
+        let c = doc.add_card(n, emath::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        {
+            let card = doc.card_mut(n, c).unwrap();
+            card.source = Some("/tmp/whatever.md".into());
+            card.body = "from the file".into();
+        }
+
+        // Read-only still refuses, and changes nothing.
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"body":"my edit"}"#).unwrap();
+        let (changed, resp) = process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        assert_eq!(resp.status, 409, "{}", resp.body);
+        assert!(!changed);
+        assert_eq!(doc.card(n, c).unwrap().body, "from the file");
+        assert!(!doc.card(n, c).unwrap().source_dirty);
+
+        // Turning it on in the same request is enough — the guard reads the
+        // patch as well as the card, so "make it writable and edit it" is one
+        // call rather than a required two-step.
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"source_write":true,"body":"my edit"}"#).unwrap();
+        let (changed, resp) = process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        assert_eq!(resp.status, 200, "{}", resp.body);
+        assert!(changed);
+        let card = doc.card(n, c).unwrap();
+        assert_eq!(card.body, "my edit");
+        assert!(card.source_write);
+        assert!(card.source_dirty, "the poll must know not to overwrite this");
+
+        // Turning write-back off drops the pending-edit flag with it: the card is
+        // a view again, so "unwritten edits" is a promise nothing can keep.
+        let patch: UpdateCardInput = serde_json::from_str(r#"{"source_write":false}"#).unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch });
+        assert!(!doc.card(n, c).unwrap().source_dirty);
+    }
 
     /// A mirrored body belongs to the file. Accepting a body edit that the next
     /// refresh silently overwrites would look exactly like data loss, so it is

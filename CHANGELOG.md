@@ -6,6 +6,62 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.148.0]
+
+### Added
+- **A card can be written back to its file, and a conflict is shown rather than
+  resolved.** Mirroring has been one-way since it shipped; this is the writer.
+  Off per card (`source_write`), and **never continuous** — the write is an
+  explicit action, because continuous two-way is what the lost-update,
+  poll-overwrites-your-typing and save-by-rename failures all attack at once.
+
+  *Write back to file…* and *Compare with the file…* in the card menu;
+  `POST …/cards/{cid}/source/write` and `GET …/cards/{cid}/source/diff` over the
+  API, both addressable by card or by basket.
+
+  **The conflict rule, which is the whole feature: it asks, and shows a diff.**
+  If the file's mtime moved since the card last read it, nothing is written and
+  the refusal *carries the diff that caused it* — 409 over the API, and in the
+  app a window offering **overwrite the file**, **discard my edits and take the
+  file**, or **leave both alone**. There is deliberately no merge: a merge is a
+  third version nobody wrote, and every one of the five data-loss paths this was
+  assessed against turns out to be a version of resolving silently.
+
+  While a writable card has unwritten edits the **refresh poll leaves it alone**,
+  so the file cannot replace what you are typing — but `source_mtime` is left
+  where it was, so the conflict still surfaces the moment you try to write.
+
+  Refused, each for a stated reason: **tables, images, sketches and checklists**
+  (a table mirroring a CSV would be re-serialised by us, so the file would change
+  on every save with no edit), **tail mode** (it would replace the file with its
+  last few lines), and **agents by default** — a separate permission from the
+  mirror *read* policy, because reading a file leaks it and writing to one
+  destroys it. The write is temp-then-rename beside the target, carrying the
+  original's mode, and writes the body byte for byte with no tidying.
+
+- **A channel card has a compose box on the desktop.** Reported: *"I can't seem
+  to edit the channel card or send messages, it just does nothing when I click on
+  it."* Exactly right — the desktop could *make* a channel and *read* one, and
+  the only way to say anything was to double-click the handle and hand-append
+  below every `### @name` header. Clicking did nothing because a card is edited by
+  double-clicking its handle, which is not something anyone should have to know to
+  answer a question.
+
+  The row is **pinned to the bottom of the card frame, outside the scroll area** —
+  inside it, it sat after the conversation, and a conversation only grows, so the
+  one control that makes the card usable was permanently below the fold. Send, or
+  Ctrl+Enter; plain Enter is a newline. It goes through the same `ChannelSay` the
+  API uses, so the header, timestamp and sequence number are written once for both
+  surfaces. The card scrolls to the newest message, like a tail.
+
+### Fixed
+- **Ctrl+Enter in the compose box did nothing** while the tooltip promised it
+  worked. A multiline `TextEdit` swallows Enter to insert a newline, so reading
+  the key back from `input()` after the widget sees an event that is already gone.
+  It is `consume_key`-ed before the field is drawn, which also stops the stray
+  newline.
+
+
 ## [0.147.0]
 
 ### Added

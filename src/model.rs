@@ -810,6 +810,29 @@ pub struct Card {
     /// losing the cached text because a disk was unmounted would be worse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_error: Option<String>,
+    /// This mirror may be written **back** to its file.
+    ///
+    /// Off by default and opt-in per card, because a mirror has always been a
+    /// read-only view and silently making every one of them writable would turn
+    /// a poll into a two-writer race on 47 existing cards. With it on, the body
+    /// editor opens, `PATCH`/`append` are allowed, and *Write back to file* in
+    /// the card menu becomes available.
+    ///
+    /// **Never a continuous sync.** Writing is an explicit action the user takes
+    /// at a moment they chose — continuous bidirectional sync is what the
+    /// lost-update, poll-clobbers-typing and save-by-rename failures all attack
+    /// at once, and Trellis is not a CRDT.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_write: bool,
+    /// The card has edits that are not in the file yet.
+    ///
+    /// Set when a writable mirror's body is edited, cleared by a successful
+    /// write-back. Its real job is to stop the refresh poll replacing the body
+    /// under the cursor: a dirty card is never overwritten by the file, so the
+    /// two sides are allowed to diverge and the conflict is *reported* rather
+    /// than resolved by whoever happened to write last.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_dirty: bool,
     /// Membership in a labeled group container. `None` = ungrouped.
     #[serde(default)]
     pub group: Option<GroupId>,
@@ -1313,6 +1336,8 @@ impl Card {
             source_mtime: None,
             source_tail: None,
             source_error: None,
+            source_write: false,
+            source_dirty: false,
             size: egui::vec2(240.0, 160.0),
             title: String::new(),
             body: String::new(),
@@ -1934,6 +1959,119 @@ pub fn read_source_tail(path: &str, lines: u32) -> Result<(String, u64), String>
         out.drain(..cut);
     }
     Ok((out.join("\n"), mtime))
+}
+
+/// One line of a unified-style diff.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DiffLine {
+    /// `" "` context, `"-"` only in the file, `"+"` only in the card.
+    pub tag: &'static str,
+    pub text: String,
+}
+
+/// A line diff between the file on disk and the card, longest-common-subsequence.
+///
+/// Hand-rolled rather than a dependency: this is thirty lines, it runs on two
+/// texts a person is about to read, and the alternative is a crate on the
+/// document path for a feature whose whole job is to be looked at once.
+///
+/// `old` is the file, `new` is the card, so `-` reads as *what the file has* and
+/// `+` as *what you would write over it* — the direction the conflict dialog
+/// asks about.
+pub fn line_diff(old: &str, new: &str) -> Vec<DiffLine> {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    // LCS table. Bounded deliberately: a mirror is capped at SOURCE_MAX_BYTES,
+    // but a 1 MB file of short lines is still ~100k lines and the table is
+    // quadratic, so past a limit report the difference without locating it.
+    const MAX: usize = 4000;
+    if a.len() > MAX || b.len() > MAX {
+        return vec![DiffLine {
+            tag: " ",
+            text: format!(
+                "{} lines in the file, {} in the card — too large to diff line by line",
+                a.len(),
+                b.len()
+            ),
+        }];
+    }
+    let mut t = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            t[i][j] = if a[i] == b[j] { t[i + 1][j + 1] + 1 } else { t[i + 1][j].max(t[i][j + 1]) };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    let mut out = Vec::new();
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            out.push(DiffLine { tag: " ", text: a[i].to_string() });
+            i += 1;
+            j += 1;
+        } else if t[i + 1][j] >= t[i][j + 1] {
+            out.push(DiffLine { tag: "-", text: a[i].to_string() });
+            i += 1;
+        } else {
+            out.push(DiffLine { tag: "+", text: b[j].to_string() });
+            j += 1;
+        }
+    }
+    while i < a.len() {
+        out.push(DiffLine { tag: "-", text: a[i].to_string() });
+        i += 1;
+    }
+    while j < b.len() {
+        out.push(DiffLine { tag: "+", text: b[j].to_string() });
+        j += 1;
+    }
+    out
+}
+
+/// Write a card's text back to its mirrored file, returning the new mtime.
+///
+/// **Temp-then-rename**, the same shape the document save uses, so a crash or a
+/// full disk cannot leave a half-written file where a whole one was. The two
+/// details that matter and are easy to miss:
+///
+/// - **Rename replaces the inode**, so mode, owner and any hard link belong to
+///   the temp file unless carried across deliberately. The mode is copied from
+///   the original before the rename; a file that was `600` stays `600`.
+/// - **The temp file is written beside the target**, never in `/tmp`, because a
+///   rename across filesystems is not atomic and would silently degrade to a
+///   copy.
+/// - **Nothing is tidied.** The bytes given are the bytes written: no trailing
+///   newline is added, because `read_source` is faithful and a file deliberately
+///   without one must not grow one every time it is saved.
+pub fn write_source(path: &str, text: &str) -> Result<u64, String> {
+    let p = std::path::Path::new(path);
+    let dir = p.parent().ok_or_else(|| format!("{path} has no parent directory"))?;
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("card");
+    let tmp = dir.join(format!(".{name}.trellis-tmp"));
+
+    // **Written byte for byte, with no tidying.** The tempting thing here is to
+    // ensure a trailing newline, and it is wrong: `read_source` is faithful (it
+    // is `read_source_TAIL` that drops one, via `lines()`, and a tail is refused
+    // for write-back anyway), so the body already carries whatever the file had.
+    // Appending one would silently add a byte the user did not type, and a file
+    // deliberately without a final newline would grow one on every save. Caught
+    // by the round-trip test, which asserted an unedited write leaves the file
+    // unchanged and failed against the "helpful" version.
+    std::fs::write(&tmp, text.as_bytes()).map_err(|e| format!("cannot write beside {path}: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(p) {
+            let mode = meta.permissions().mode();
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
+        }
+    }
+
+    std::fs::rename(&tmp, p).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot replace {path}: {e}")
+    })?;
+    source_mtime(path).ok_or_else(|| format!("{path} written but cannot be stat'd"))
 }
 
 /// The modification time of a pointer's file, for deciding whether to re-read.
@@ -7432,6 +7570,82 @@ mod tests {
     /// **A tail is bounded by the lines asked for, not by the file.** That is the
     /// point: a mirror refuses a file over `SOURCE_MAX_BYTES` because it loads the
     /// whole thing, and a growing log is exactly the file the cap locked out.
+    /// **The diff reads file-then-card, and that direction is the whole point.**
+    /// `-` is what the file has, `+` is what you would write over it — which is
+    /// the question the conflict window asks.
+    #[test]
+    fn a_diff_marks_the_file_minus_and_the_card_plus() {
+        let d = line_diff("one\ntwo\nthree\n", "one\nTWO\nthree\n");
+        let tags: Vec<&str> = d.iter().map(|l| l.tag).collect();
+        assert_eq!(tags, vec![" ", "-", "+", " "], "{d:?}");
+        assert_eq!(d[1].text, "two", "the minus line is the FILE's");
+        assert_eq!(d[2].text, "TWO", "the plus line is the CARD's");
+
+        // Identical texts produce no change markers at all, which is what the
+        // "differs" flag and the "they are identical" message both key on.
+        assert!(line_diff("same\n", "same\n").iter().all(|l| l.tag == " "));
+
+        // An empty card against a full file is all removals, not a crash.
+        assert!(line_diff("a\nb\n", "").iter().all(|l| l.tag == "-"));
+    }
+
+    /// **A write-back that only adds a trailing newline is not an edit.**
+    ///
+    /// `lines()` drops the final newline on read, so writing the body straight
+    /// back would strip it from every POSIX text file the first time anyone
+    /// pressed the button — a whole-file diff in git for no change. Also checks
+    /// the mode survives, because rename replaces the inode and the temp file's
+    /// permissions would otherwise become the file's.
+    #[test]
+    fn writing_back_restores_the_trailing_newline_and_keeps_the_mode() {
+        let dir = std::env::temp_dir().join(format!("trellis-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("note.md");
+        std::fs::write(&f, "hello\nworld\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let path = f.to_str().unwrap();
+
+        // Round-trip an unedited body: byte-identical, trailing newline and all.
+        let (text, _) = read_source(path).unwrap();
+        assert_eq!(text, "hello\nworld\n", "read_source is faithful; only a TAIL strips");
+        write_source(path, &text).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "hello\nworld\n",
+            "an unedited round-trip must leave the file byte-identical"
+        );
+
+        // And a file with no final newline keeps not having one — writing back
+        // must not add a byte nobody typed.
+        std::fs::write(&f, "no final newline").unwrap();
+        let (t2, _) = read_source(path).unwrap();
+        write_source(path, &t2).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "no final newline");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&f).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "rename replaces the inode; the mode must be carried");
+        }
+
+        // And a real edit lands, exactly as given.
+        write_source(path, "hello\nthere\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "hello\nthere\n");
+        // No temp file left beside it.
+        let strays: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("trellis-tmp"))
+            .collect();
+        assert!(strays.is_empty(), "temp file left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_tail_reads_the_last_n_whole_lines_however_big_the_file() {
         use std::io::Write;

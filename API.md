@@ -2201,13 +2201,62 @@ The mirrored text is stored in the document like any other body, so it is
 searchable, carries `#tags` and `key:: value`, and exports normally — the file
 stays authoritative and Trellis holds a cache of it.
 
-- **`body` is read-only while `source` is set.** `PATCH {"body":…}` returns
-  **409** rather than accepting an edit the next refresh would overwrite. Detach
-  first with `{"source":""}` — which keeps the text that was there.
+- **`body` is read-only while `source` is set** — unless you turn write-back on
+  (below). `PATCH {"body":…}` otherwise returns **409** rather than accepting an
+  edit the next refresh would overwrite. Detach with `{"source":""}`, which keeps
+  the text that was there.
 - **A failed read keeps the last good text** and reports why in `source_error`
   (missing file, unmounted disk, a directory, not UTF-8, or over the 1 MB limit).
   It recovers on its own when the file comes back.
-- Only text and code cards mirror. There is no write-back: edit the file.
+
+#### Writing a card back to its file
+
+Off by default, per card, and **never continuous**:
+
+```
+PATCH /api/nodes/{id}/cards/{cid}  {"source_write": true}   let this card be edited
+POST  /api/nodes/{id}/cards/{cid}/source/write              write it over the file
+GET   /api/nodes/{id}/cards/{cid}/source/diff               show the difference, change nothing
+POST  /api/cards/{cid}/source/write
+GET   /api/cards/{cid}/source/diff
+```
+
+With `source_write` on, the body may be edited and `source_dirty` becomes true;
+while it is true **the refresh poll leaves the card alone**, so nothing is
+replaced under the cursor. Both flags are reported on `GET /api/cards/{cid}`.
+
+**The conflict rule: it asks, and shows a diff.** If the file's mtime moved since
+the card last read it, `source/write` returns **409** carrying the `diff` that
+caused the refusal — nothing is written and nothing is merged. `source/diff`
+is the unattended half: it shows the difference and does nothing else, returning
+`differs`, `file_changed_since_read` and the diff. In the app the same refusal
+opens a window offering *overwrite the file*, *discard my edits and take the
+file*, or *leave both alone*. There is deliberately no merge: a merge would be a
+third version nobody wrote.
+
+The diff is a list of `{tag, text}` with `tag` `" "`, `"-"` (only in the file) or
+`"+"` (only in the card) — so `-` reads as *what the file has* and `+` as *what
+you would write over it*.
+
+**Refused, and why:**
+- **Not a table, image, sketch or checklist** — 400. A table mirroring a CSV
+  would be written back through the inverse of the parser, so quoting, delimiter,
+  trailing newline and number format all get re-decided by us and the file would
+  change on every save even with no edit.
+- **Not in tail mode** — 400, because writing back what the tail shows would
+  replace the whole file with its last few lines.
+- **Agents are refused by default** — 403 until *Settings → Agent API → Let
+  agents write mirrored files back*. This is a **separate permission** from the
+  mirror read policy on purpose: reading a file you should not see leaks it,
+  writing to one destroys it, and "whoever is at the machine already has the
+  filesystem" — the reason the app's own file picker is unrestricted — does not
+  extend to a network caller.
+- **A basket-confined token** — 403, exactly as it cannot mirror a file at all.
+
+The write is **temp-then-rename** beside the target (never across filesystems,
+where rename is not atomic), carrying the original's mode across, and restores a
+trailing newline so writing an unedited POSIX text file back is a no-op rather
+than a whole-file diff.
 
 > **What agents may mirror is limited.** By default a card can mirror any file
 > *except* credential paths (`.ssh`, `.aws`, `.gnupg`, `*.pem`, …); a refused
