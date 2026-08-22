@@ -3179,26 +3179,22 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             // answer says what to go and look at.
             if let Some(Some(ch)) = patch.channel.as_ref() {
                 if ch.primary {
-                    let root = doc.root_of(node);
-                    let clash = doc
-                        .nodes
-                        .iter()
-                        .filter(|(nid, _)| doc.is_under(**nid, root))
-                        .flat_map(|(nid, n)| n.cards.iter().map(move |c| (*nid, c)))
-                        .find(|(_, c)| {
-                            c.id != card
-                                && c.channel.as_ref().is_some_and(|existing| existing.primary)
-                        });
-                    if let Some((nid, other)) = clash {
+                    if let Some((nid, other)) = doc.other_primary_channel(node, card) {
+                        let root = doc.root_of(node);
+                        let where_ = doc.node_path(nid);
+                        let project = doc
+                            .nodes
+                            .get(&root)
+                            .map(|n| n.title.clone())
+                            .unwrap_or_else(|| "this project".into());
                         return (
                             false,
                             ApiResponse::err(
                                 400,
                                 &format!(
-                                    "'{}' already has a primary channel: card {} in {} —                                      clear its `primary` first, or leave this one non-primary",
-                                    doc.nodes.get(&root).map(|n| n.title.as_str()).unwrap_or("this project"),
-                                    other.id,
-                                    doc.node_path(nid)
+                                    "'{project}' already has a primary channel: card {other} \
+                                     in {where_} — clear its `primary` first, or leave this \
+                                     one non-primary"
                                 ),
                             ),
                         );

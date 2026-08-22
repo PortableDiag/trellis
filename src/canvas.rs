@@ -214,6 +214,9 @@ pub enum CanvasAction {
     ShowMentions(CardId),
     /// Open a window showing this card's link neighbourhood.
     ShowLocalGraph(CardId),
+    /// Open the Channel window for this card — make it a conversation, change who
+    /// it is addressed to, or turn it back into an ordinary card.
+    EditChannel(CardId),
     PasteCard(egui::Pos2),
     Remove(CardId),
     ResetView,
@@ -3536,6 +3539,21 @@ fn card_menu(
         .clicked()
     {
         actions.push(CanvasAction::ShowLocalGraph(card.id));
+        ui.close_menu();
+    }
+    // A channel is a field on an ordinary card, so this is the only place the
+    // feature is discoverable — there is no card *kind* to pick from the New-card
+    // menu, and until v0.145.0 there was no way to make one without the API.
+    if ui
+        .button(if card.channel.is_some() { "Channel…" } else { "Make a channel…" })
+        .on_hover_text(
+            "Turn this card into a conversation: you type into it, an agent reads \
+             it and replies here, and the reply reaches your phone.\n\nTwo agent \
+             names instead of yours makes it an agent-to-agent log.",
+        )
+        .clicked()
+    {
+        actions.push(CanvasAction::EditChannel(card.id));
         ui.close_menu();
     }
     if ui

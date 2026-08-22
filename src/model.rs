@@ -4045,6 +4045,25 @@ impl Document {
 
     /// Is `id` `ancestor`, or somewhere beneath it? Used to filter a view down to
     /// one project (or any sub-branch of one).
+    /// The project's existing **primary** channel, if one other than `except`
+    /// already claims the flag.
+    ///
+    /// One definition, called by both the API's `PATCH` and the UI's Channel
+    /// window. Two copies of a uniqueness rule is how the two surfaces end up
+    /// disagreeing about what is legal, and the operator finds out by way of a
+    /// document with two of something that should be one.
+    pub fn other_primary_channel(&self, node: NodeId, except: CardId) -> Option<(NodeId, CardId)> {
+        let root = self.root_of(node);
+        self.nodes
+            .iter()
+            .filter(|(nid, _)| self.is_under(**nid, root))
+            .flat_map(|(nid, n)| n.cards.iter().map(move |c| (*nid, c)))
+            .find(|(_, c)| {
+                c.id != except && c.channel.as_ref().is_some_and(|ch| ch.primary)
+            })
+            .map(|(nid, c)| (nid, c.id))
+    }
+
     pub fn is_under(&self, id: NodeId, ancestor: NodeId) -> bool {
         let mut cur = Some(id);
         while let Some(n) = cur {

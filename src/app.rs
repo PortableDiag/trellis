@@ -1083,6 +1083,8 @@ pub struct TrellisApp {
     switcher_purpose: SwitcherPurpose,
     /// A card whose unlinked mentions the Backlinks panel is showing, if any.
     mentions_for: Option<(NodeId, CardId)>,
+    /// The Channel window: which card, and the fields being edited.
+    channel_edit: Option<ChannelEdit>,
     /// A card whose link neighbourhood is on screen, and how far out.
     local_graph_for: Option<CardId>,
     local_graph_depth: u32,
@@ -1328,6 +1330,25 @@ pub struct TrellisApp {
     redo: Vec<(NodeId, crate::model::Node)>,
     /// Coalesce key for the in-progress gesture, so a drag is one undo step.
     undo_coalesce: Option<&'static str>,
+}
+
+/// The Channel window's working state.
+///
+/// Held apart from the card so an in-progress edit is not applied keystroke by
+/// keystroke — turning a card into a conversation, or changing who it is addressed
+/// to, is a decision, not a drag.
+struct ChannelEdit {
+    node: NodeId,
+    card: CardId,
+    /// Comma-separated, because that is how a person writes a short list. Parsed
+    /// on apply, never on every frame.
+    participants: String,
+    primary: bool,
+    /// Whether the card was already a channel when the window opened, which is the
+    /// difference between a *Create* and an *Update* button.
+    existing: bool,
+    /// Set when the one-primary-per-project rule refuses the apply.
+    error: Option<String>,
 }
 
 impl TrellisApp {
@@ -1602,6 +1623,7 @@ impl TrellisApp {
             switcher_index: 0,
             switcher_purpose: SwitcherPurpose::Jump,
             mentions_for: None,
+            channel_edit: None,
             local_graph_for: None,
             local_graph_depth: 2,
             scroll_to: None,
@@ -4386,6 +4408,9 @@ impl TrellisApp {
             | CanvasAction::CopyCard(_)
             | CanvasAction::ShowMentions(_)
             | CanvasAction::ShowLocalGraph(_)
+            // Opening the window changes nothing; applying it is logged where the
+            // card is actually written.
+            | CanvasAction::EditChannel(_)
             // Launching a plugin changes nothing by itself. Anything it does to
             // the document arrives over the API and is logged there, as `api`
             // rather than `ui` — which is the honest actor.
@@ -5191,6 +5216,23 @@ impl TrellisApp {
                 CanvasAction::ShowLocalGraph(cid) => {
                     self.local_graph_for = Some(cid);
                     self.local_graph_depth = 2;
+                }
+                CanvasAction::EditChannel(cid) => {
+                    let existing =
+                        self.doc.card(node, cid).and_then(|c| c.channel.clone());
+                    self.channel_edit = Some(ChannelEdit {
+                        node,
+                        card: cid,
+                        // A brand-new channel is pre-filled with the two names it
+                        // almost always has, so the common case is one click.
+                        participants: existing
+                            .as_ref()
+                            .map(|ch| ch.participants.join(", "))
+                            .unwrap_or_else(|| "claude, operator".into()),
+                        primary: existing.as_ref().is_some_and(|ch| ch.primary),
+                        existing: existing.is_some(),
+                        error: None,
+                    });
                 }
                 CanvasAction::ShowMentions(cid) => {
                     self.mentions_for = Some((node, cid));
@@ -8076,6 +8118,141 @@ impl TrellisApp {
         self.show_settings = open;
     }
 
+    /// **Make a card a conversation, from the app.**
+    ///
+    /// v0.143.0 shipped channels with no way to create one except the HTTP API,
+    /// which meant the operator's own feature was reachable only by an agent or a
+    /// `curl`. This is that missing half.
+    fn channel_window(&mut self, ctx: &egui::Context) {
+        let Some(mut ed) = self.channel_edit.take() else { return };
+        let mut open = true;
+        let mut apply = false;
+        let mut remove = false;
+        let title = self
+            .doc
+            .card(ed.node, ed.card)
+            .map(|c| {
+                if c.title.trim().is_empty() { format!("card {}", c.id) } else { c.title.clone() }
+            })
+            .unwrap_or_else(|| format!("card {}", ed.card));
+
+        egui::Window::new("Channel")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(&title).strong());
+                ui.add_space(4.0);
+                ui.label(
+                    "A channel card's body is a running conversation. Type into it and \
+                     that is a message from you; an agent replies here, and the reply \
+                     reaches your phone through the notification plugin.",
+                );
+                ui.add_space(8.0);
+
+                ui.label("Addressed to");
+                ui.add(
+                    egui::TextEdit::singleline(&mut ed.participants)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("claude, operator"),
+                );
+                ui.small(
+                    "Comma-separated names. This is addressing, not permission — it is how \
+                     an agent finds the conversations meant for it. Two agent names instead \
+                     of yours makes it an agent-to-agent log you can read and interrupt.",
+                );
+                ui.add_space(8.0);
+
+                ui.checkbox(&mut ed.primary, "The workspace's own channel");
+                ui.small(
+                    "The one an agent drains when it was pointed at this project rather \
+                     than at a card. At most one per project — a second is refused and \
+                     says which card already has it.",
+                );
+
+                if let Some(err) = &ed.error {
+                    ui.add_space(6.0);
+                    ui.colored_label(ui.visuals().error_fg_color, err);
+                }
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if ed.existing { "Update" } else { "Make it a channel" })
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    if ed.existing
+                        && ui
+                            .button("Stop being a channel")
+                            .on_hover_text(
+                                "The card and everything said in it stay exactly as they \
+                                 are — it just stops being addressed to anyone.",
+                            )
+                            .clicked()
+                    {
+                        remove = true;
+                    }
+                });
+            });
+
+        if apply {
+            let names: Vec<String> = ed
+                .participants
+                .split(',')
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .collect();
+            // The same validity rule the `X-Agent` header is held to, for the same
+            // reason: a name is written into a message header line, and one
+            // containing the separator could forge a message boundary.
+            if let Some(bad) = names.iter().find(|n| !crate::model::valid_agent_name(n)) {
+                ed.error = Some(format!(
+                    "{bad:?} is not a usable name — letters, digits, '-', '_' and '.', up to 40"
+                ));
+            } else if names.is_empty() {
+                ed.error = Some("Name at least one participant".into());
+            } else if ed.primary && self.doc.other_primary_channel(ed.node, ed.card).is_some() {
+                let (nid, other) = self.doc.other_primary_channel(ed.node, ed.card).unwrap();
+                ed.error = Some(format!(
+                    "This project already has a workspace channel: card {other} in {} — \
+                     clear its box first, or leave this one unticked.",
+                    self.doc.node_path(nid)
+                ));
+            } else {
+                let primary = ed.primary;
+                let (node, card) = (ed.node, ed.card);
+                if let Some(c) = self.doc.card_mut(node, card) {
+                    // Keep the running count: turning `primary` on and off must not
+                    // renumber a conversation that already exists.
+                    let seq = c.channel.as_ref().map(|ch| ch.seq).unwrap_or(0);
+                    c.channel =
+                        Some(crate::model::Channel { participants: names, seq, primary });
+                }
+                self.note_card(node, card, crate::changelog::Op::Updated, "channel");
+                self.status = format!("{title} is a channel");
+                self.dirty = true;
+                return; // window closes; the edit is done
+            }
+        }
+        if remove {
+            let (node, card) = (ed.node, ed.card);
+            if let Some(c) = self.doc.card_mut(node, card) {
+                c.channel = None;
+            }
+            self.note_card(node, card, crate::changelog::Op::Updated, "channel");
+            self.status = format!("{title} is an ordinary card again");
+            self.dirty = true;
+            return;
+        }
+        if open {
+            self.channel_edit = Some(ed);
+        }
+    }
+
     fn backup_window(&mut self, ctx: &egui::Context) {
         use crate::backup::{BackupDest, DestKind};
         let mut open = self.show_backup;
@@ -10852,6 +11029,11 @@ impl eframe::App for TrellisApp {
         if self.show_settings {
             self.settings_window(ctx);
         }
+        // Not inside any `show_*` guard: the Channel window opens itself from a
+        // card menu, and `channel_window` returns immediately when nothing is
+        // being edited. Nesting it under another window's flag is how it shipped
+        // drawing only while Backup happened to be open.
+        self.channel_window(ctx);
         if self.show_backup {
             self.backup_window(ctx);
         }

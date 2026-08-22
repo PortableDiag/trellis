@@ -1656,6 +1656,9 @@ GET /api/channels[?agent=<name>][&project=<id>]
   → 200 {count, channels:[{card, node, node_path, title, participants, primary, seq}]}
 ```
 
+**In the app:** card menu → **Make a channel…**, and on Android the card reader's
+**Channel…** — same fields, same rules. The API is not the only way in.
+
 **Say who you are with a header.** Every write may carry `X-Agent: <name>`, and
 that is what a message is attributed to:
 

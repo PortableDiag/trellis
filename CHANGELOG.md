@@ -6,6 +6,42 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.145.0]
+
+### Added
+- **Make a channel from the app** — card menu → **Make a channel…** (or
+  *Channel…* once it is one). v0.143.0 shipped channels with **no way to create
+  one except the HTTP API**, so the operator's own feature was reachable only by
+  an agent or a `curl`. That is the missing half, and it should not have shipped
+  without it.
+
+  The window names who the card is addressed to (comma-separated), offers the
+  **workspace's own channel** tick, and — once it is a channel — a *Stop being a
+  channel* button that leaves the card and everything said in it exactly as they
+  are. Names are validated against the same rule the `X-Agent` header is held to,
+  because a name is written into a message header line.
+
+  **The one-primary-per-project rule now has one implementation.** It moved to
+  `Document::other_primary_channel`, called by both the API's `PATCH` and this
+  window. Two copies of a uniqueness rule is how two surfaces end up disagreeing
+  about what is legal, and the operator finds out by way of a document with two of
+  something that should be one.
+
+- **Android can make one too** (viewer **v0.37.0**, versionCode 44) — card reader
+  menu → **Channel…**, with the same fields and the same name rule. The phone is
+  the half that matters most here: a channel exists so the operator can talk to an
+  agent from the sofa, and needing a terminal to create one defeats the point. The
+  card is re-read before the dialog opens, so the buttons reflect what the card
+  actually is now rather than what it was when the screen opened — an agent may
+  have changed it in between.
+
+### Fixed
+- **The Channel window drew only while the Backup window was open.** Its call had
+  been nested inside `if self.show_backup`. It compiled, the menu item worked, the
+  action fired and the state was set — and nothing appeared. Found by driving the
+  real UI: right-click, click the item, screenshot. Every part of that path was
+  correct except the one line no test looks at.
+
 ## [0.144.1]
 
 ### Fixed
