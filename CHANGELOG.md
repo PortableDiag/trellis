@@ -6,6 +6,17 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.151.1]
+
+### Changed
+- **README catches up with the day.** The web-page card and its permission model,
+  the mirror write-back and its conflict rule, `channels_waiting`, and the compose
+  box on both surfaces. Also corrects a claim it had been carrying: the Android
+  basket canvas render of a channel card was described as **unverified**, and it
+  has since been checked on a device — headings, code spans and the rules between
+  messages all draw.
+
+
 ## [0.151.0]
 
 ### Added

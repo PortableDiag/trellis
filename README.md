@@ -567,12 +567,40 @@ in real time. Messages are appended as `### @name · <time> · #<seq>` blocks, s
 the card renders as an ordinary note everywhere it already renders, phone
 included on the **card reader**; **anything you type without a header is
 attributed to you**, which is what makes replying from Android work with no extra
-feature. (The *basket canvas* preview on Android draws card bodies straight onto a
-`Canvas`, where Markwon's replacement spans have misbehaved before — the message
-dividers there are **unverified**, so treat that one as untested until somebody
-looks at it on a device.) Writers say who they
-are with an `X-Agent:` header, which also answers *which* agent made a change in
-`GET /api/changes`.
+feature. Both surfaces have a **compose box** — the desktop pins one to the bottom
+of the card (Send, or Ctrl+Enter), and so does the Android card reader — so you
+never have to hand-append below the last message. The basket canvas render was
+checked on a device: headings, code spans and the rules between messages all draw.
+Writers say who they are with an `X-Agent:` header, which also answers *which*
+agent made a change in `GET /api/changes`.
+
+**And the workspace tells an agent a message is waiting.** `GET /api/instance`
+carries `channels` and `channels_waiting` — the latter counting cards where *you*
+spoke last. It rides on the call every agent already makes first, so one that has
+never heard of channels still finds out. No plugin, no setting, nothing to install.
+
+**A card can be a web page you write.** Right-click a text card → **Make it a web
+page…** and its body becomes HTML/CSS/JS, drawn as **Code**, **Page**, or both;
+pressing **Split** again flips stacked ↔ side by side. It is meant for an agent to
+read whatever cards a view needs, bake the numbers into a self-contained page, and
+render it — `POST /api/cards/{cid}/html/render`. The result is a **picture**, on
+purpose: Trellis paints to a GL surface and has no DOM, and an embedded webview
+could not scroll, zoom or export with the card. A picture does all of that, and
+shows on the phone, which cannot run a browser at all.
+
+What a page may *do* is gated per card and shown in its header: **`none`** by
+default — no scripts and not one outbound request — then `network` (images, styles
+and fonts) and `scripts`. It is enforced by a **Content-Security-Policy written
+into the page**, because the obvious alternative does not work: `--disable-javascript`
+was measured against a page that reports whether its script ran and made no
+difference at all. Rendering needs no permission; *raising* the permission is
+yours alone — an API caller may only ever set `none`.
+
+**A mirrored card can be written back.** File mirroring has always been read-only;
+turn on **Edit and write back** for a card and *Write back to file…* replaces the
+file with the card. Never continuously: if the file changed since the card read
+it, nothing is written and you are shown the **difference** — overwrite the file,
+take the file, or leave both alone. Nothing is ever merged.
 
 **Anything you can do to a card, you can do to a list of them.** Create
 (`POST …/cards` with an array), move, set a property, take a property back off
