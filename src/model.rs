@@ -950,7 +950,13 @@ pub struct Channel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HtmlView {
-    /// `code` (source only), `render` (picture only) or `split` (both).
+    /// How the card is drawn: `code` (source only), `render` (picture only),
+    /// `split` (source **above** the page) or `vsplit` (side by side).
+    ///
+    /// Two split values rather than a separate orientation field, because the
+    /// **Split** button cycles them: pressing it while already split flips the
+    /// orientation, so the second press is the setting. A fourth button would
+    /// have been a control nobody goes looking for.
     #[serde(default = "default_html_view")]
     pub view: String,
     /// What the page is allowed to do when it renders. **`none` by default**,

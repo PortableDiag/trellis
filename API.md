@@ -2183,7 +2183,7 @@ reading back what was already rendered is an ordinary document read.
 
 | field | |
 |---|---|
-| `view` | `code`, `render` or `split` (default) — what the card draws |
+| `view` | `code`, `render`, `split` (default — source above the page) or `vsplit` (side by side). The **Split** button cycles the two: pressing it while already split flips the orientation |
 | `allow` | what the page may do when it renders. **`none` by default** |
 
 `GET /api/cards/{cid}` reports `view`, `allow`, `width`, `height`, `rendered`,
@@ -2213,10 +2213,14 @@ the card. A PNG is just an image: it zooms, pans, projects through Depth, export
 and shows on the phone, which cannot run a browser at all. Rendering shells out to
 Chrome or Chromium; with neither installed the render fails and says so.
 
-**Agents are refused by default** — 403 until *Settings → Agent API → Let agents
-render web-page cards*. That gate is not about the HTML being dangerous to read:
-it is that rendering starts a browser process on this machine over content the
-caller wrote. The app's own *Render* in the card menu is never gated by it.
+**Rendering needs no permission.** Building and rendering a page is the feature,
+and a sandboxed render produces a picture inside the document and nothing else.
+
+**Raising the permission does.** An API caller may only ever set `allow` to
+`none`; `network` and `scripts` are **403**, because those make *this machine*
+fetch or execute on the page's behalf, and granting yourself that by writing a
+card is not a thing a caller should be able to do. They are the operator's to
+grant from the card menu. Lowering to `none` is always allowed.
 
 ```sh
 # an agent building a view of four cards

@@ -75,7 +75,6 @@ const GRANTS_KEY: &str = "plugin_grants";
 const MIRROR_MODE_KEY: &str = "mirror_policy";
 const MIRROR_DIRS_KEY: &str = "mirror_dirs";
 const MIRROR_WRITE_KEY: &str = "mirror_write";
-const HTML_RENDER_KEY: &str = "html_render_agents";
 pub(crate) const DEFAULT_API_PORT: u16 = 7373;
 const ZOOM_ENABLED_KEY: &str = "zoom_enabled";
 const DOCK_MODE_KEY: &str = "dock_mode";
@@ -1283,14 +1282,6 @@ pub struct TrellisApp {
     /// already has the filesystem — the reason the app's own file picker is
     /// unrestricted — does not extend to a network caller at all.
     mirror_write: bool,
-    /// May an API caller render a web-page card?
-    ///
-    /// Rendering runs a **browser subprocess** on this machine over content the
-    /// caller may itself have written, so it is off by default for the same
-    /// reason mirror-writing is: the person at the keyboard already has a
-    /// browser; a network caller does not, and should not get one by writing a
-    /// card. The app's own *Render* is never gated by this.
-    html_render_agents: bool,
     /// Finished runs, newest last, for the Plugins window's log pane.
     plugin_log: Vec<crate::plugins::RunResult>,
     plugin_rx: Receiver<PluginEvent>,
@@ -1821,11 +1812,6 @@ impl TrellisApp {
             mirror_write: cc
                 .storage
                 .and_then(|s| s.get_string(MIRROR_WRITE_KEY))
-                .map(|v| v == "true")
-                .unwrap_or(false),
-            html_render_agents: cc
-                .storage
-                .and_then(|s| s.get_string(HTML_RENDER_KEY))
                 .map(|v| v == "true")
                 .unwrap_or(false),
             plugin_log: Vec::new(),
@@ -3900,12 +3886,16 @@ impl TrellisApp {
 
     /// Render a web-page card, from the API.
     ///
-    /// Off for agents by default. The gate is not about the HTML being dangerous
-    /// to *us* — it is that rendering starts a browser process on this machine
-    /// over content the caller wrote, and a card that runs its own scripts is
-    /// arbitrary code, which is the same reasoning that stops the currency plugin
-    /// executing a `check::`. What the page may actually do is the card's own
-    /// `allow`, enforced by a CSP written into the page.
+    /// **Not gated by a setting**, and that was a mistake worth undoing. The
+    /// operator's question was the right one: *why would a user not trust their
+    /// own agent to create a render-safe page?* They would — building a page IS
+    /// the feature, and a sandboxed render produces a picture inside the document
+    /// and nothing else.
+    ///
+    /// The thing that actually needed a human is not the render but the page's
+    /// **permission**: `network` and `scripts` make this machine fetch or execute
+    /// on the page's behalf. So that is where the gate moved — an API caller may
+    /// only ever set `allow: none` — and the confusing toggle is gone.
     fn handle_api_html(
         &mut self,
         req: &api::ApiRequest,
@@ -3913,14 +3903,6 @@ impl TrellisApp {
     ) -> Option<api::ApiResponse> {
         let api::ApiRequest::RenderHtml { node, card } = req else { return None };
         let (node, card) = (*node, *card);
-        if !self.html_render_agents {
-            return Some(api::ApiResponse::err(
-                403,
-                "rendering web-page cards over the API is off. Tools → Settings → Agent API → \
-                 \"Let agents render web-page cards\". Rendering starts a browser on this machine \
-                 over content the caller wrote.",
-            ));
-        }
         // A confined token may render inside its own basket; the scope check the
         // app loop already ran covers that, so nothing extra is needed here
         // beyond refusing what it cannot reach.
@@ -8079,21 +8061,24 @@ impl TrellisApp {
                         });
                         ui.end_row();
 
-                        ui.label("Let agents write mirrored files back");
+                        ui.label("Let agents overwrite files on this machine");
                         ui.vertical(|ui| {
                             ui.checkbox(
                                 &mut self.mirror_write,
-                                "Allow POST …/source/write over the API",
+                                "An agent may replace a mirrored file with the card's text",
                             );
                             ui.label(
                                 egui::RichText::new(
-                                    "Off by default, and a SEPARATE permission from the read \
-                                     policy above. Reading a file an agent should not see leaks \
-                                     it; writing to one destroys it — and \"whoever is at this \
-                                     machine already has the filesystem\", which is why your own \
-                                     File → Mirror a file… is unrestricted, does not apply to a \
-                                     network caller. Your own Write back to file… in the card \
-                                     menu never needs this.",
+                                    "A card can mirror a file (card menu → Mirror a file…). \
+                                     Normally that is read-only. Tick this and an agent can push \
+                                     the card's text back OVER that file, replacing what is on \
+                                     disk.\n\n                                     This is not about trusting the agent's judgement — it is \
+                                     that the damage lands OUTSIDE Trellis. A wrong card can be \
+                                     undone from version history; a wrong file cannot, because \
+                                     Trellis has no history for files it does not own. Leave it \
+                                     off unless you specifically want agents editing files.\n\n                                     Your own Write back to file… in the card menu never needs \
+                                     this, and no file is ever written without you having turned \
+                                     that card's write-back on first.",
                                 )
                                 .weak()
                                 .small(),
@@ -8101,25 +8086,6 @@ impl TrellisApp {
                         });
                         ui.end_row();
 
-                        ui.label("Let agents render web-page cards");
-                        ui.vertical(|ui| {
-                            ui.checkbox(
-                                &mut self.html_render_agents,
-                                "Allow POST …/html/render over the API",
-                            );
-                            ui.label(
-                                egui::RichText::new(
-                                    "Off by default. Rendering starts a browser process on this \
-                                     machine over content the caller may have written itself. \
-                                     What a page may DO once it renders is the card's own \
-                                     setting — sandboxed (no scripts, no requests) unless you \
-                                     change it. Your own Render in the card menu never needs this.",
-                                )
-                                .weak()
-                                .small(),
-                            );
-                        });
-                        ui.end_row();
 
                         ui.label("Port");
                         ui.horizontal(|ui| {
@@ -8553,6 +8519,45 @@ impl TrellisApp {
                                 ),
                             ),
                             (
+                                "Build a page from your data and render it (v0.149.0)",
+                                format!(
+                                    "# read whatever cards the page is about, bake the numbers IN,\n\
+                                     # so the page is self-contained and needs no network at all:\n\
+                                     curl -H 'X-API-Key: {k}' {a}/nodes/1 | jq '.cards[]'\n\
+                                     curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                     -d '[{{\"kind\":\"text\",\"title\":\"Dashboard\",\"body\":\"<!doctype html>…\"}}]' \\\n  \
+                                     {a}/nodes/1/cards\n\
+                                     # view: code | split | vsplit | render. Rendering needs no permission;\n\
+                                     # allow stays `none` for an API caller — network/scripts are yours to grant.\n\
+                                     curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                     -d '{{\"html\":{{\"view\":\"vsplit\"}}}}' -X PATCH {a}/cards/1391\n\
+                                     curl -H 'X-API-Key: {k}' -X POST {a}/cards/1391/html/render\n\
+                                     # the picture, for a client that cannot render one (every phone):\n\
+                                     curl -H 'X-API-Key: {k}' {a}/cards/1391/html/png"
+                                ),
+                            ),
+                            (
+                                "Edit a mirrored file and write it back (v0.148.0)",
+                                format!(
+                                    "# a mirror is read-only until you say otherwise, per card:\n\
+                                     curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
+                                     -d '{{\"source_write\":true,\"body\":\"# edited\"}}' -X PATCH {a}/cards/1391\n\
+                                     # see the difference before writing — file is (-), card is (+):\n\
+                                     curl -H 'X-API-Key: {k}' {a}/cards/1391/source/diff\n\
+                                     # 409 + the diff if the file moved since the card read it. It never merges.\n\
+                                     curl -H 'X-API-Key: {k}' -X POST {a}/cards/1391/source/write"
+                                ),
+                            ),
+                            (
+                                "Find out somebody is waiting for you (v0.147.0)",
+                                format!(
+                                    "# the call you already make first now says so:\n\
+                                     curl -H 'X-API-Key: {k}' {a}/instance   # channels, channels_waiting\n\
+                                     # above zero → go and read them:\n\
+                                     curl -H 'X-API-Key: {k}' '{a}/channels?agent=alice'"
+                                ),
+                            ),
+                            (
                                 "Archive a basket's finished cards in one call (ids survive)",
                                 format!(
                                     "curl -H 'X-API-Key: {k}' -H 'Content-Type: application/json' \\\n  \
@@ -8610,7 +8615,7 @@ impl TrellisApp {
                             "POST   /api/cards/{cid}/items/{item}/property {key,value}  ·  DELETE /api/cards/{cid}/items/{item}/property?key=due",
                             "POST   /api/cards/{cid}/append {text, at?, separator?}        (add to a shared card without sending the body back)",
                             "POST   /api/cards/{cid}/source/write   ·  GET /api/cards/{cid}/source/diff   (MIRROR WRITE-BACK — write the card over its file, or just show the difference. 409 + the diff if the file moved since the card read it: it asks, it never merges)",
-                            "POST   /api/cards/{cid}/html/render  ·  POST /api/nodes/{id}/cards/{cid}/html/render   (WEB PAGE — the card's body is HTML/CSS/JS; render it to a picture. PATCH {html:{view,allow}} first. allow: none (no scripts, no requests) | network | scripts. Agents need Settings -> Agent API -> Let agents render web-page cards)",
+                            "POST   /api/cards/{cid}/html/render  ·  POST /api/nodes/{id}/cards/{cid}/html/render   (WEB PAGE — the card's body is HTML/CSS/JS; render it to a picture. PATCH {html:{view,allow}} first. view: code | split | vsplit | render. Rendering needs NO permission; an API caller may only set allow:none — network and scripts are 403, because they make this machine fetch or execute, and are yours to grant from the card menu)",
                             "GET    /api/cards/{cid}/html/png  ·  GET /api/nodes/{id}/cards/{cid}/html/png   (the rendered picture, base64 — the bytes are not in the card JSON. 404 if never rendered. This is how the phone shows a page it cannot render itself)",
                             "POST   /api/cards/{cid}/items  {text, done?, at?}  ·  DELETE /api/cards/{cid}/items/{item}   (one line; ids of the rest stay put)",
                             "POST   /api/cards/{cid}/table {op, …}   ·  /api/cards/{cid}/sketch {op, …}   (same bodies as the node-addressed twins)",
@@ -11864,7 +11869,6 @@ impl eframe::App for TrellisApp {
         storage.set_string(MIRROR_MODE_KEY, self.mirror_policy.key().to_string());
         storage.set_string(MIRROR_DIRS_KEY, self.mirror_dirs.join("\n"));
         storage.set_string(MIRROR_WRITE_KEY, self.mirror_write.to_string());
-        storage.set_string(HTML_RENDER_KEY, self.html_render_agents.to_string());
         if let Ok(g) = self.grants.lock() {
             if let Ok(s) = serde_json::to_string(&*g) {
                 storage.set_string(GRANTS_KEY, s);

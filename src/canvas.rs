@@ -2356,6 +2356,71 @@ fn attachments_ui(ui: &mut egui::Ui, card: &Card, zoom: f32, actions: &mut Vec<C
     }
 }
 
+/// The source half of a web-page card: the HTML, verbatim and monospace.
+///
+/// Never through the Markdown renderer — it *consumes* HTML, so the source would
+/// come out blank. Shared by both split orientations so the two cannot drift.
+fn html_code_pane(
+    ui: &mut egui::Ui,
+    card: &Card,
+    max_h: f32,
+    actions: &mut Vec<CanvasAction>,
+) {
+    egui::ScrollArea::both()
+        .id_salt(("html_code", card.id))
+        .max_height(max_h)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if card.editing {
+                let mut text = card.body.clone();
+                if ui
+                    .add(
+                        egui::TextEdit::multiline(&mut text)
+                            .code_editor()
+                            .desired_width(f32::INFINITY),
+                    )
+                    .changed()
+                {
+                    actions.push(CanvasAction::SetBody(card.id, text));
+                }
+            } else {
+                ui.label(egui::RichText::new(&card.body).monospace());
+            }
+        });
+}
+
+/// The rendered half: the picture the browser produced, fitted to the pane.
+fn html_page_pane(ui: &mut egui::Ui, card: &Card, h: &crate::model::HtmlView, env: &mut Env) {
+    if h.png.is_empty() {
+        ui.weak("Not rendered yet \u{2014} press Render.");
+        return;
+    }
+    // A very high index so a page's picture never collides with the card's own
+    // inline images in the texture cache.
+    match env.tex.get(ui.ctx(), card.id, usize::MAX, &h.png) {
+        Some(tex) => {
+            // **Centred in the pane, not parked in a corner.** Laid out the
+            // ordinary way the image takes the cursor position and its aspect
+            // leaves the rest of the pane empty on one side, so a page in a split
+            // sat against an edge with all the slack on the other. Take the whole
+            // pane, fit the picture inside it, and paint it in the middle.
+            let avail = ui.available_size();
+            let ratio = if h.width > 0 { h.height as f32 / h.width as f32 } else { 0.75 };
+            let (dw, dh) = if avail.x * ratio <= avail.y {
+                (avail.x, avail.x * ratio) // width-limited
+            } else {
+                (avail.y / ratio, avail.y) // height-limited
+            };
+            let (rect, _) = ui.allocate_exact_size(avail, egui::Sense::hover());
+            let at = egui::Rect::from_center_size(rect.center(), egui::vec2(dw, dh));
+            egui::Image::new(&tex).paint_at(ui, at);
+        }
+        None => {
+            ui.colored_label(ui.visuals().error_fg_color, "the rendered image will not decode");
+        }
+    }
+}
+
 /// A card whose body is a web page: the source, the picture, or both.
 ///
 /// The picture is a PNG rendered by a browser, so it composites with zoom, pan,
@@ -2375,9 +2440,45 @@ fn html_ui(
     // size while its frame shrinks.
     ui.add_space(2.0 * zoom);
     ui.horizontal(|ui| {
+        // **Split cycles its own orientation.** Clicking it while already split
+        // flips stacked ↔ side-by-side, so the second press is the setting rather
+        // than a fourth button nobody would look for. The arrow says which you
+        // will get, which is what makes the second press discoverable at all.
+        let in_split = h.view == "split" || h.view == "vsplit";
         for (key, label) in [("code", "Code"), ("split", "Split"), ("render", "Page")] {
-            if ui.selectable_label(h.view == key, label).clicked() {
-                actions.push(CanvasAction::SetHtmlView(card.id, key.into()));
+            let (active, text, next) = if key == "split" {
+                let vs = h.view == "vsplit";
+                (
+                    in_split,
+                    // The arrow is what the NEXT press gives, not what you are
+                    // looking at — the orientation is already obvious from the
+                    // card, and on a cycling button the useful thing to show is
+                    // where it goes. ⬍ stacked, ⬌ side by side.
+                    if !in_split {
+                        "Split".to_string()
+                    } else if vs {
+                        "Split \u{2b0d}".to_string()
+                    } else {
+                        "Split \u{2b0c}".to_string()
+                    },
+                    // Not split yet → stacked. Already split → the other one.
+                    if !in_split || vs { "split" } else { "vsplit" },
+                )
+            } else {
+                (h.view == key, label.to_string(), key)
+            };
+            let r = ui.selectable_label(active, text);
+            let r = if key == "split" {
+                r.on_hover_text(if in_split {
+                    "Click again to flip the split between stacked and side by side"
+                } else {
+                    "Show the source and the page together"
+                })
+            } else {
+                r
+            };
+            if r.clicked() {
+                actions.push(CanvasAction::SetHtmlView(card.id, next.into()));
             }
         }
         ui.separator();
@@ -2402,54 +2503,37 @@ fn html_ui(
         ui.colored_label(ui.visuals().error_fg_color, egui::RichText::new(e).small());
     }
 
-    let show_code = h.view == "code" || h.view == "split";
-    let show_page = h.view == "render" || h.view == "split";
+    let vsplit = h.view == "vsplit";
+    let split = vsplit || h.view == "split";
+    let show_code = split || h.view == "code";
+    let show_page = split || h.view == "render";
+
+    if vsplit {
+        // Side by side. Each half gets an explicit rect rather than being left to
+        // wrap, because both panes scroll and a pane sized by its content would
+        // push the other one off the card.
+        let full = ui.available_size();
+        let half = ((full.x - 8.0 * zoom) * 0.5).max(24.0);
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui(egui::vec2(half, full.y), |ui| {
+                html_code_pane(ui, card, full.y, actions);
+            });
+            ui.separator();
+            ui.allocate_ui(egui::vec2(half, full.y), |ui| {
+                html_page_pane(ui, card, h, env);
+            });
+        });
+        return;
+    }
+
     let avail = ui.available_height();
-    let code_h = if h.view == "split" { avail * 0.4 } else { avail };
+    let code_h = if split { avail * 0.4 } else { avail };
 
     if show_code {
-        egui::ScrollArea::both()
-            .id_salt(("html_code", card.id))
-            .max_height(code_h)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if card.editing {
-                    let mut text = card.body.clone();
-                    if ui
-                        .add(
-                            egui::TextEdit::multiline(&mut text)
-                                .code_editor()
-                                .desired_width(f32::INFINITY),
-                        )
-                        .changed()
-                    {
-                        actions.push(CanvasAction::SetBody(card.id, text));
-                    }
-                } else {
-                    ui.label(egui::RichText::new(&card.body).monospace());
-                }
-            });
+        html_code_pane(ui, card, code_h, actions);
     }
     if show_page {
-        if h.png.is_empty() {
-            ui.weak("Not rendered yet \u{2014} press Render.");
-            return;
-        }
-        // A very high index so a page's picture never collides with the card's
-        // own inline images in the texture cache.
-        match env.tex.get(ui.ctx(), card.id, usize::MAX, &h.png) {
-            Some(tex) => {
-                let w = ui.available_width();
-                let ratio = if h.width > 0 { h.height as f32 / h.width as f32 } else { 0.75 };
-                ui.add(
-                    egui::Image::new(&tex)
-                        .fit_to_exact_size(egui::vec2(w, (w * ratio).min(ui.available_height()))),
-                );
-            }
-            None => {
-                ui.colored_label(ui.visuals().error_fg_color, "the rendered image will not decode");
-            }
-        }
+        html_page_pane(ui, card, h, env);
     }
 }
 

@@ -6,6 +6,43 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.151.0]
+
+### Added
+- **Split cycles its own orientation.** Pressing **Split** while already split
+  flips stacked ↔ side by side, so the second press is the setting rather than a
+  fourth button nobody would go looking for. The arrow on the button says what
+  the *next* press gives. `view` gains **`vsplit`**; `split` is unchanged.
+
+### Changed
+- **Rendering a web page needs no permission; raising the page's permission
+  does.** The operator's question was the right one — *why would a user not trust
+  their own agent to create a render-safe page?* They would. Building and
+  rendering a page **is** the feature, and a sandboxed render produces a picture
+  inside the document and nothing else.
+
+  What actually needed a human was never the render: it was `network` and
+  `scripts`, which make **this machine** fetch or execute on the page's behalf.
+  So the gate moved to where the risk is — an API caller may only ever set
+  `allow: none`, and `network`/`scripts` are **403** with the card menu named as
+  where a person grants them. Lowering to `none` is always allowed. The
+  *Let agents render web-page cards* setting is **gone**.
+
+- **The rendered page is centred in its pane**, instead of sitting against a
+  corner with all the slack on one side.
+
+- **The file-mirroring setting says what it does.** It was reported as unclear,
+  and it was: *"Let agents write mirrored files back"* named a mechanism, not a
+  consequence. It now reads **"Let agents overwrite files on this machine"** and
+  explains that this one is *not* about trusting the agent's judgement — it is
+  that the damage lands **outside** Trellis, where version history cannot undo
+  it. That is exactly why it survives while the render gate did not.
+
+- **The in-app API Examples cover today's features** — building a page from your
+  data and rendering it, editing a mirrored file and writing it back, and finding
+  out somebody is waiting for you.
+
+
 ## [0.150.1]
 
 ### Changed

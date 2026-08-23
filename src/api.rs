@@ -3391,17 +3391,44 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 // default is a security hole, and neither should be guessed at.
                 if let Some(Some(h)) = patch.html.as_ref() {
                     if let Some(v) = h.view.as_deref() {
-                        if !matches!(v, "code" | "render" | "split") {
+                        if !matches!(v, "code" | "render" | "split" | "vsplit") {
                             return (
                                 false,
                                 ApiResponse::err(
                                     400,
-                                    &format!("unknown html view `{v}` — use code, render or split"),
+                                    &format!(
+                                        "unknown html view `{v}` — use code, render, split \
+                                         (source above the page) or vsplit (side by side)"
+                                    ),
                                 ),
                             );
                         }
                     }
+                    // **An API caller may only ever set `none`.** Not because
+                    // building a page is untrusted — it plainly is not, that is
+                    // the whole feature — but because `network` and `scripts` make
+                    // *this machine* do something beyond drawing the caller's own
+                    // markup: fetch from the network, or execute code. Granting
+                    // yourself that is not a thing a caller should be able to do
+                    // by writing a card, and the card menu is where a person says
+                    // yes to it.
+                    //
+                    // Lowering it is always fine, so `none` is accepted even on a
+                    // card the operator raised.
                     if let Some(a) = h.allow.as_deref() {
+                        if matches!(a, "network" | "scripts") {
+                            return (
+                                false,
+                                ApiResponse::err(
+                                    403,
+                                    "an API caller may only set html allow to `none`. \
+                                     `network` and `scripts` make this machine fetch or execute \
+                                     on the page's behalf, so they are the operator's to grant \
+                                     from the card menu (Web page → May fetch… / May run scripts). \
+                                     Rendering a sandboxed page needs no permission at all.",
+                                ),
+                            );
+                        }
                         if !matches!(a, "none" | "network" | "scripts") {
                             return (
                                 false,
