@@ -6,6 +6,28 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.152.0]
+
+### Added
+- **Card hotkeys.** The context menu's verbs, without the trip to the menu,
+  acting on the selection (Ctrl+click a card, or drag a box): **Ctrl+A** selects
+  every card in the basket, **Ctrl+C** copies the selected card, **Ctrl+V**
+  pastes it where the pointer is (centre of the view when the pointer is
+  elsewhere), **Ctrl+D** duplicates the selection, and **Del** deletes it —
+  however many cards that was, one **Ctrl+Z** brings them all back, because the
+  frame's batch snapshots once. All of them are silent while a text field has
+  the keyboard, so Ctrl+C stays "copy the selected text" and Delete stays
+  "delete a character" while you type.
+
+### Changed
+- **Every action with a hotkey now says so.** The card menu shows the key beside
+  Duplicate, Copy → The card and Delete card, and their tooltips explain that
+  the key acts on the *selection*; Paste card shows Ctrl+V. The menu bar shows
+  New Ctrl+N, Save Ctrl+S, Undo Ctrl+Z, Redo Ctrl+Y, Today's note Ctrl+T,
+  Go to node… Ctrl+O, and Search/Find Ctrl+F beside their entries instead of
+  (or in addition to) burying them in a tooltip. The canvas hint line gains
+  `ctrl+a` / `ctrl+c/v/d` / `del`.
+
 ## [0.151.1]
 
 ### Changed

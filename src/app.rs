@@ -6758,7 +6758,11 @@ impl TrellisApp {
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New").clicked() {
+                    if ui
+                        .add(egui::Button::new("New").shortcut_text("Ctrl+N"))
+                        .on_hover_text("Ctrl+N — start a new document")
+                        .clicked()
+                    {
                         self.new_document();
                         ui.close_menu();
                     }
@@ -6766,7 +6770,11 @@ impl TrellisApp {
                         self.open_document();
                         ui.close_menu();
                     }
-                    if ui.button("Save").clicked() {
+                    if ui
+                        .add(egui::Button::new("Save").shortcut_text("Ctrl+S"))
+                        .on_hover_text("Ctrl+S — save the document now")
+                        .clicked()
+                    {
                         self.save();
                         ui.close_menu();
                     }
@@ -6851,7 +6859,10 @@ impl TrellisApp {
                 });
                 ui.menu_button("Edit", |ui| {
                     if ui
-                        .add_enabled(!self.undo.is_empty(), egui::Button::new("Undo"))
+                        .add_enabled(
+                            !self.undo.is_empty(),
+                            egui::Button::new("Undo").shortcut_text("Ctrl+Z"),
+                        )
                         .on_hover_text("Ctrl+Z — undo card moves, autosort, add/remove, etc.")
                         .clicked()
                     {
@@ -6859,7 +6870,10 @@ impl TrellisApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(!self.redo.is_empty(), egui::Button::new("Redo"))
+                        .add_enabled(
+                            !self.redo.is_empty(),
+                            egui::Button::new("Redo").shortcut_text("Ctrl+Y"),
+                        )
                         .on_hover_text("Ctrl+Shift+Z / Ctrl+Y")
                         .clicked()
                     {
@@ -6883,7 +6897,7 @@ impl TrellisApp {
                     // that silently does nothing is worse than an absent one.
                     if self.daily_root.is_some() {
                         if ui
-                            .button("Today's note")
+                            .add(egui::Button::new("Today's note").shortcut_text("Ctrl+T"))
                             .on_hover_text("Ctrl+T — open today's journal node, creating it if needed")
                             .clicked()
                         {
@@ -6893,8 +6907,8 @@ impl TrellisApp {
                         ui.separator();
                     }
                     if ui
-                        .button("Go to node…")
-                        .on_hover_text("Ctrl+O — fuzzy-jump to any node by title or path")
+                        .add(egui::Button::new("Go to node…").shortcut_text("Ctrl+O"))
+                        .on_hover_text("Ctrl+O — fuzzy-jump to any node or card by title or path")
                         .clicked()
                     {
                         self.switcher_open = true;
@@ -6904,7 +6918,7 @@ impl TrellisApp {
                         ui.close_menu();
                     }
                     if ui
-                        .button("Search…")
+                        .add(egui::Button::new("Search…").shortcut_text("Ctrl+F"))
                         .on_hover_text("Ctrl+F — full-text search across titles and cards")
                         .clicked()
                     {
@@ -7102,7 +7116,11 @@ impl TrellisApp {
                         }
                     }
                     ui.separator();
-                    if ui.button("Find… (Ctrl+F)").clicked() {
+                    if ui
+                        .add(egui::Button::new("Find…").shortcut_text("Ctrl+F"))
+                        .on_hover_text("Ctrl+F — full-text search across titles and cards")
+                        .clicked()
+                    {
                         self.search_open = !self.search_open;
                         ui.close_menu();
                     }

@@ -393,6 +393,14 @@ from the main cluster, and click or drag on it to jump there without zooming out
   what it *touches* rather than only what it fully encloses, because a selection
   box is drawn roughly and the card you clipped by three pixels is exactly the
   one you meant. Plain drag still pans the canvas.
+- **Card hotkeys** — the context menu's verbs without the trip to the menu, acting
+  on the selection: **Ctrl+A** selects every card in the basket, **Ctrl+C** copies
+  the selected card, **Ctrl+V** pastes it where the pointer is, **Ctrl+D**
+  duplicates the selection, **Del** deletes it (one **Ctrl+Z** brings the whole
+  set back). Silent while you are typing in a card, where Ctrl+C and Delete keep
+  their text meanings. Each menu entry shows its key, and the menu bar shows the
+  global ones (Ctrl+O go to node/card, Ctrl+F find, Ctrl+S save, Ctrl+T today,
+  Ctrl+N new, Ctrl+Z/Ctrl+Y undo/redo).
 - **Notifications** (Settings → Canvas → Notifications, both off by default) —
   a desktop notification when the document opens carrying what is **overdue or
   due today**, and one when an **agent changes something** while you are in

@@ -609,6 +609,50 @@ pub fn ui(
     // world → screen for this canvas.
     let to_screen = TSTransform::from_translation(canvas_rect.min.to_vec2()) * *view;
 
+    // Card hotkeys — the context menu's verbs without the trip to the menu.
+    // They act on the SELECTION (Ctrl+click a card, or drag a box), because a
+    // hotkey has no right-clicked card to aim at. Silent while any text field
+    // has the keyboard: Ctrl+C there must stay "copy the selected text" and
+    // Delete must stay "delete a character". Each menu entry names its key.
+    if !ui.ctx().wants_keyboard_input() {
+        if cmd && ui.input(|i| i.key_pressed(egui::Key::A)) {
+            actions.push(CanvasAction::SelectCards(node.cards.iter().map(|c| c.id).collect()));
+        }
+        // Ctrl+C / Ctrl+V never arrive as key presses: the winit integration
+        // translates them into `Event::Copy` / `Event::Paste` INSTEAD of a key
+        // event (measured — `key_pressed(Key::C)` simply never fires). Listen
+        // for the events themselves.
+        let (copy_evt, paste_evt) = ui.input(|i| {
+            (
+                i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+            )
+        });
+        if copy_evt && selection.len() == 1 {
+            actions.push(CanvasAction::CopyCard(*selection.iter().next().unwrap()));
+        }
+        if paste_evt && can_paste {
+            // Where the pointer is; the centre of the view when it is elsewhere.
+            let screen = ui
+                .input(|i| i.pointer.hover_pos())
+                .filter(|p| canvas_rect.contains(*p))
+                .unwrap_or_else(|| canvas_rect.center());
+            actions.push(CanvasAction::PasteCard(to_screen.inverse() * screen));
+        }
+        if cmd && ui.input(|i| i.key_pressed(egui::Key::D)) {
+            for &cid in selection {
+                actions.push(CanvasAction::Duplicate(cid));
+            }
+        }
+        // One undo step however many cards were selected — the frame's action
+        // batch snapshots once.
+        if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+            for &cid in selection {
+                actions.push(CanvasAction::Remove(cid));
+            }
+        }
+    }
+
     // Double-click empty canvas → drop a text card at that world position.
     if canvas_resp.double_clicked() && !minimap_over {
         if let Some(p) = canvas_resp.interact_pointer_pos() {
@@ -708,7 +752,8 @@ pub fn ui(
             ui.close_menu();
         }
         if ui
-            .add_enabled(can_paste, egui::Button::new("Paste card"))
+            .add_enabled(can_paste, egui::Button::new("Paste card").shortcut_text("Ctrl+V"))
+            .on_hover_text("Ctrl+V pastes the copied card where the pointer is")
             .clicked()
         {
             actions.push(CanvasAction::PasteCard(cp));
@@ -1405,7 +1450,7 @@ pub fn ui(
         if depth_mode {
             "drag title: move · ctrl+scroll: zoom · shift+scroll over a card: slide it in Z · alt+drag: look around (parallax) · Reset view: straight on"
         } else {
-            "double-click: text card · right-click: any card · drag title: move · ctrl+click: select · drag group header: move group · ctrl+scroll: zoom"
+            "double-click: text card · right-click: any card · drag title: move · ctrl+click: select · ctrl+a: select all · ctrl+c/v/d: copy/paste/duplicate · del: delete · drag group header: move group · ctrl+scroll: zoom"
         },
         egui::FontId::proportional(11.0),
         ui.visuals().weak_text_color(),
@@ -3612,7 +3657,11 @@ fn card_menu(
             ui.close_menu();
         }
     }
-    if ui.button("Duplicate").clicked() {
+    if ui
+        .add(egui::Button::new("Duplicate").shortcut_text("Ctrl+D"))
+        .on_hover_text("Ctrl+D duplicates every selected card (Ctrl+click selects one)")
+        .clicked()
+    {
         actions.push(CanvasAction::Duplicate(card.id));
         ui.close_menu();
     }
@@ -3843,7 +3892,15 @@ fn card_menu(
         // separate top-level "Copy card" a dozen entries away from the
         // other three, so the menu asked you to know which of two
         // unrelated places the word "copy" lived in.
-        if ui.button("The card").on_hover_text("Copy this card, to paste into any basket").clicked() {
+        if ui
+            .add(egui::Button::new("The card").shortcut_text("Ctrl+C"))
+            .on_hover_text(
+                "Copy this card, to paste into any basket.\n\nCtrl+C copies the \
+                 selected card (Ctrl+click selects one); Ctrl+V pastes where the \
+                 pointer is.",
+            )
+            .clicked()
+        {
             actions.push(CanvasAction::CopyCard(card.id));
             ui.close_menu();
         }
@@ -4068,7 +4125,11 @@ fn card_menu(
         }
     }
     ui.separator();
-    if ui.button("Delete card").clicked() {
+    if ui
+        .add(egui::Button::new("Delete card").shortcut_text("Del"))
+        .on_hover_text("Del deletes every selected card. Ctrl+Z brings them back.")
+        .clicked()
+    {
         actions.push(CanvasAction::Remove(card.id));
         ui.close_menu();
     }
