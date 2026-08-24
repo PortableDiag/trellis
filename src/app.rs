@@ -1185,6 +1185,11 @@ pub struct TrellisApp {
     graph_built: bool,
     graph_layout: HashMap<NodeId, egui::Pos2>,
     graph_edges: Vec<(NodeId, NodeId)>,
+    /// Link-graph view: zoom on top of the fit-to-window scale, rotation about
+    /// the layout centre, and pan in screen pixels. Reset when the window opens.
+    graph_zoom: f32,
+    graph_rot: f32,
+    graph_pan: egui::Vec2,
     show_about: bool,
     theme: Theme,
     /// Whether Ctrl+scroll / Ctrl +/- zoom the canvas (Settings; on by default).
@@ -1757,6 +1762,9 @@ impl TrellisApp {
             graph_built: false,
             graph_layout: HashMap::new(),
             graph_edges: Vec::new(),
+            graph_zoom: 1.0,
+            graph_rot: 0.0,
+            graph_pan: egui::Vec2::ZERO,
             show_about: false,
             theme,
             zoom_enabled,
@@ -10266,6 +10274,9 @@ impl TrellisApp {
         let (ids, edges) = self.doc.link_graph();
         self.graph_edges = edges;
         self.graph_layout.clear();
+        self.graph_zoom = 1.0;
+        self.graph_rot = 0.0;
+        self.graph_pan = egui::Vec2::ZERO;
         let n = ids.len();
         if n == 0 {
             self.graph_built = true;
@@ -10275,8 +10286,11 @@ impl TrellisApp {
             let a = std::f32::consts::TAU * i as f32 / n as f32;
             self.graph_layout.insert(id, egui::pos2(a.cos() * 200.0, a.sin() * 200.0));
         }
-        let k = (250.0 / (n as f32).sqrt()).max(30.0); // ideal separation
-        for _ in 0..300 {
+        // Ideal separation. The old floor was 30px, which a 364-node document
+        // actually hit — and with attraction growing as len²/k, every linked
+        // cluster then crushed itself into a ~30px pile of overprinted labels.
+        let k = (250.0 / (n as f32).sqrt()).max(60.0);
+        for it in 0..300 {
             let mut disp: HashMap<NodeId, egui::Vec2> =
                 ids.iter().map(|&id| (id, egui::Vec2::ZERO)).collect();
             for i in 0..ids.len() {
@@ -10286,6 +10300,13 @@ impl TrellisApp {
                     if len < 0.01 {
                         d = egui::vec2(0.1 * (i as f32 + 1.0), 0.1);
                         len = d.length();
+                    }
+                    // Short-range only. Unbounded repulsion makes every cluster
+                    // push every other cluster forever, so the spacing WITHIN a
+                    // cluster ends up microscopic next to the spacing BETWEEN
+                    // them and each cluster fits on screen as a single pile.
+                    if len > 3.0 * k {
+                        continue;
                     }
                     let f = k * k / len;
                     let dir = d / len;
@@ -10301,11 +10322,23 @@ impl TrellisApp {
                 *disp.get_mut(&u).unwrap() -= dir * f;
                 *disp.get_mut(&v).unwrap() += dir * f;
             }
+            // Gravity toward the centre. Without it, disconnected clusters
+            // repel each other forever (repulsion is all-pairs), drift to the
+            // movement cap for 300 steps, and the fit-to-window scale then
+            // shrinks every cluster to confetti. Linear in distance, so it is
+            // gentle inside a cluster and firm on a runaway.
+            for &id in &ids {
+                let p = self.graph_layout[&id];
+                *disp.get_mut(&id).unwrap() -= p.to_vec2() * 0.05;
+            }
+            // Cooling: start loose so the circle can untangle, finish fine so
+            // the layout settles instead of oscillating against a fixed cap.
+            let cap = 2.0 + 38.0 * (1.0 - it as f32 / 300.0);
             for &id in &ids {
                 let mut dv = disp[&id];
                 let l = dv.length();
-                if l > 20.0 {
-                    dv = dv / l * 20.0; // cap movement per step
+                if l > cap {
+                    dv = dv / l * cap;
                 }
                 *self.graph_layout.get_mut(&id).unwrap() += dv;
             }
@@ -10330,8 +10363,13 @@ impl TrellisApp {
                     ui.weak("No links yet. Write [[Node Title]] in a card to connect nodes here.");
                     return;
                 }
-                ui.small(format!("{} linked nodes · {} links · click a node to open it", self.graph_layout.len(), self.graph_edges.len()));
-                let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+                ui.small(format!(
+                    "{} linked nodes · {} links · click a node to open it · drag: pan · scroll / ctrl+scroll: zoom · alt+drag: rotate · double-click: reset view",
+                    self.graph_layout.len(),
+                    self.graph_edges.len()
+                ));
+                let (rect, resp) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
                 let painter = ui.painter_at(rect);
                 // Fit the layout's bounding box into the paint area.
                 let mut min = egui::pos2(f32::MAX, f32::MAX);
@@ -10344,11 +10382,53 @@ impl TrellisApp {
                 }
                 let span = (max - min).max(egui::vec2(1.0, 1.0));
                 let margin = 40.0;
-                let scale = ((rect.width() - 2.0 * margin) / span.x)
+                let fit = ((rect.width() - 2.0 * margin) / span.x)
                     .min((rect.height() - 2.0 * margin) / span.y)
                     .clamp(0.05, 2.5);
                 let lcenter = egui::pos2((min.x + max.x) * 0.5, (min.y + max.y) * 0.5);
-                let map = |p: egui::Pos2| rect.center() + (p - lcenter) * scale;
+
+                // View input, before drawing so the frame you see is the frame
+                // you steered. Alt+drag rotates about the view centre (the
+                // canvas's "look around" gesture); plain drag pans; the wheel
+                // zooms at the pointer, plain or with Ctrl — egui routes
+                // Ctrl+scroll and pinch into zoom_delta, a bare wheel into
+                // scroll_delta, and a graph window has nothing else to scroll.
+                if resp.dragged() {
+                    if ui.input(|i| i.modifiers.alt) {
+                        self.graph_rot += resp.drag_delta().x * 0.01;
+                    } else {
+                        self.graph_pan += resp.drag_delta();
+                    }
+                }
+                if resp.hovered() {
+                    let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+                    let zd = ui.input(|i| i.zoom_delta()) * (1.0 + wheel * 0.002);
+                    if (zd - 1.0).abs() > f32::EPSILON {
+                        let old = self.graph_zoom;
+                        self.graph_zoom = (old * zd).clamp(0.2, 8.0);
+                        let applied = self.graph_zoom / old;
+                        // Keep the point under the pointer fixed while zooming.
+                        if let Some(p) = resp.hover_pos() {
+                            let c = rect.center().to_vec2();
+                            self.graph_pan =
+                                (p.to_vec2() - c) - (p.to_vec2() - c - self.graph_pan) * applied;
+                        }
+                    }
+                }
+                if resp.double_clicked() {
+                    self.graph_zoom = 1.0;
+                    self.graph_rot = 0.0;
+                    self.graph_pan = egui::Vec2::ZERO;
+                }
+
+                let scale = fit * self.graph_zoom;
+                let (sin, cos) = self.graph_rot.sin_cos();
+                let pan = self.graph_pan;
+                let map = |p: egui::Pos2| {
+                    let d = p - lcenter;
+                    let r = egui::vec2(d.x * cos - d.y * sin, d.x * sin + d.y * cos);
+                    rect.center() + pan + r * scale
+                };
 
                 let edge_stroke = egui::Stroke::new(1.0, ui.visuals().weak_text_color());
                 for &(u, v) in &self.graph_edges {
@@ -10358,8 +10438,24 @@ impl TrellisApp {
                 }
                 let hover = resp.hover_pos();
                 let mut hit: Option<NodeId> = None;
-                for (&id, p) in &self.graph_layout {
-                    let sp = map(*p);
+                // Hubs first: when two labels want the same pixels, the
+                // better-connected node keeps its name. Ranked rather than
+                // HashMap order, which is per-process random and would also
+                // reshuffle which of two piled labels wins between runs.
+                let mut degree: HashMap<NodeId, u32> = HashMap::new();
+                for &(u, v) in &self.graph_edges {
+                    *degree.entry(u).or_default() += 1;
+                    *degree.entry(v).or_default() += 1;
+                }
+                let mut order: Vec<NodeId> = self.graph_layout.keys().copied().collect();
+                order.sort_by_key(|id| (std::cmp::Reverse(degree.get(id).copied().unwrap_or(0)), *id));
+                // A label draws only where no already-placed label sits — 364
+                // of them painted unconditionally is a grey smear, not a map.
+                // The circles always draw; a suppressed name comes back on hover.
+                let mut placed: Vec<egui::Rect> = Vec::new();
+                let mut hover_label: Option<(egui::Pos2, std::sync::Arc<egui::Galley>)> = None;
+                for &id in &order {
+                    let sp = map(self.graph_layout[&id]);
                     let is_sel = self.selected == Some(id);
                     let near = hover.map_or(false, |h| h.distance(sp) <= 10.0);
                     if near {
@@ -10372,13 +10468,25 @@ impl TrellisApp {
                     painter.circle_filled(sp, if near || is_sel { 8.0 } else { 5.0 }, col);
                     let title = self.doc.nodes.get(&id).map(|n| n.title.clone()).unwrap_or_default();
                     let short: String = title.chars().take(24).collect();
-                    painter.text(
-                        sp + egui::vec2(8.0, -8.0),
-                        egui::Align2::LEFT_BOTTOM,
+                    let galley = painter.layout_no_wrap(
                         short,
                         egui::FontId::proportional(11.0),
                         ui.visuals().text_color(),
                     );
+                    let lpos = egui::pos2(sp.x + 8.0, sp.y - 8.0 - galley.size().y);
+                    let lrect = egui::Rect::from_min_size(lpos, galley.size());
+                    if near {
+                        // Repainted after the loop, over everything, on a plate.
+                        hover_label = Some((lpos, galley));
+                    } else if !placed.iter().any(|r| r.intersects(lrect.expand(2.0))) {
+                        painter.galley(lpos, galley, ui.visuals().text_color());
+                        placed.push(lrect);
+                    }
+                }
+                if let Some((lpos, galley)) = hover_label {
+                    let lrect = egui::Rect::from_min_size(lpos, galley.size());
+                    painter.rect_filled(lrect.expand(3.0), 3.0, ui.visuals().extreme_bg_color);
+                    painter.galley(lpos, galley, ui.visuals().strong_text_color());
                 }
                 if resp.clicked() {
                     if let Some(id) = hit {

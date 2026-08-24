@@ -332,7 +332,10 @@ from the main cluster, and click or drag on it to jump there without zooming out
   Backlinks panel; **View → Backlinks** shows everything that links to the
   current node ("linked here").
 - **Link graph** (View → Link graph) — a force-directed picture of the wiki-link
-  web across the tree; click a node to open it.
+  web across the tree; click a node to open it. Drag pans, the wheel (plain or
+  Ctrl) zooms at the pointer, **Alt+drag rotates**, double-click resets the view.
+  Labels only draw where they fit — hubs win the pixels, and a suppressed name
+  comes back on hover.
 - **Kanban board** (View → Kanban board) — cards with a `status::` property shown
   as columns (To do / Doing / Done, plus any custom status) that divide the window
   width and each scroll their own cards. Every card shows its accent color, its

@@ -6,6 +6,31 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.153.0]
+
+### Added
+- **The Link graph can be steered.** Drag pans, the wheel zooms at the pointer
+  (plain or Ctrl — pinch works too), **Alt+drag rotates** about the centre (the
+  canvas's "look around" gesture), and double-click resets the view. The header
+  line names every gesture. Labels stay horizontal while the layout turns.
+
+### Fixed
+- **The Link graph is a map again at 364 nodes, not piles of confetti.** Three
+  defects, all scale-dependent, so the window looked fine on small documents:
+  the layout's ideal-separation floor (30px) was actually being hit at this
+  node count, and with attraction growing as distance² every linked cluster
+  crushed itself into a ~30px pile; disconnected clusters repel each other
+  forever (repulsion is all-pairs, and nothing pulled back), so they drifted
+  to the movement cap for 300 steps and the fit-to-window scale shrank every
+  cluster to a dot — fixed with a gentle linear gravity toward the centre,
+  plus cooling so the layout settles instead of oscillating; and all labels
+  painted unconditionally, overprinting into grey smears — now a label draws
+  only where no better-connected node's label already sits (hubs win the
+  pixels), and a suppressed name comes back on hover, on a plate, over
+  everything. Draw order was also HashMap iteration — per-process random —
+  and is now degree-ranked, so which label wins no longer changes between
+  runs.
+
 ## [0.152.1]
 
 ### Changed
