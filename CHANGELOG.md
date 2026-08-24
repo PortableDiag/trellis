@@ -6,6 +6,15 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.152.1]
+
+### Changed
+- **The View menu asks for the search window once, not twice.** "Search…" (beside
+  Go to node…) and "Find…" (at the bottom) had always been the same operation —
+  both open the full-text search window, whose own heading is **Search**. The
+  duplicate was only noticed when v0.152.0 stamped **Ctrl+F** beside both.
+  "Find…" is gone; "Search…" stays where it was, key and tooltip intact.
+
 ## [0.152.0]
 
 ### Added

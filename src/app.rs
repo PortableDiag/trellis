@@ -7115,15 +7115,6 @@ impl TrellisApp {
                             self.views.insert(sel, TSTransform::IDENTITY);
                         }
                     }
-                    ui.separator();
-                    if ui
-                        .add(egui::Button::new("Find…").shortcut_text("Ctrl+F"))
-                        .on_hover_text("Ctrl+F — full-text search across titles and cards")
-                        .clicked()
-                    {
-                        self.search_open = !self.search_open;
-                        ui.close_menu();
-                    }
                 });
                 ui.menu_button("Tools", |ui| {
                     if ui
