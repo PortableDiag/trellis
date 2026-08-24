@@ -3650,6 +3650,15 @@ fn card_menu(
     actions: &mut Vec<CanvasAction>,
 ) {
     // --- this card ---------------------------------------------------------
+    // The id, readable in place — before this, seeing it meant copying it out
+    // through Copy → Card id and pasting somewhere to look.
+    ui.label(
+        egui::RichText::new(format!("#{}", card.id))
+            .weak()
+            .monospace()
+            .small(),
+    );
+    ui.separator();
     if supports_edit(&card.kind) && card.source.is_none() {
         let label = if card.editing { "Preview" } else { "Edit" };
         if ui.button(label).clicked() {

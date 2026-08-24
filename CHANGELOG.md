@@ -6,6 +6,14 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.153.1]
+
+### Changed
+- **A card's context menu says which card it is.** `#id` sits at the top of the
+  right-click menu, readable in place — before this, seeing an id meant
+  Copy → Card id and pasting it somewhere to look. The Copy entries are
+  unchanged for when you need it on the clipboard.
+
 ## [0.153.0]
 
 ### Added
