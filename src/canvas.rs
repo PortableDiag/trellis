@@ -3652,11 +3652,12 @@ fn card_menu(
     // --- this card ---------------------------------------------------------
     // The id, readable in place — before this, seeing it meant copying it out
     // through Copy → Card id and pasting somewhere to look.
+    // Full-size and full-contrast: the first cut was weak+small and the
+    // operator could not read the one thing the line exists to show.
     ui.label(
         egui::RichText::new(format!("#{}", card.id))
-            .weak()
             .monospace()
-            .small(),
+            .strong(),
     );
     ui.separator();
     if supports_edit(&card.kind) && card.source.is_none() {

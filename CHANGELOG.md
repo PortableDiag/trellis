@@ -6,6 +6,14 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.153.2]
+
+### Fixed
+- **The menu's `#id` is readable now.** v0.153.1 drew it weak and small — dim
+  grey at reduced size, on the theme's dark menu — and the operator could not
+  read the one thing the line exists to show. Full size, full contrast, still
+  monospace.
+
 ## [0.153.1]
 
 ### Changed
