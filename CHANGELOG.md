@@ -6,6 +6,18 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.155.2]
+
+### Fixed
+- **A same-node card move says what to do instead.** `POST …/cards/{cid}/move`
+  with a `node` equal to the card's current basket answered a bare
+  `400 "card is already in that node"` — correct (a move drops group/dock
+  membership, so letting it "reposition" would quietly ungroup the card) but
+  unhelpful: an API user reasonably tried it for an in-place reposition and had
+  to discover `PATCH {"pos"}` on their own. Both the single and batch refusals
+  now name the tool that works, and API.md documents the refusal and the
+  reason at the move route.
+
 ## [0.155.1]
 
 ### Fixed

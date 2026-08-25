@@ -609,7 +609,10 @@ POST /api/nodes/{id}/cards/{cid}/move  {to:"front"|"back"}     front = on top / 
     → 200 {"card":<cid>, "index":<n>}    | 400 (bad/empty placement) | 404 (card not found)
 ```
 Move a card to a **different** basket with `node` (and optionally `pos`), which
-takes precedence over the ordering fields above:
+takes precedence over the ordering fields above. A `node` naming the basket the
+card is already in is a **400, not a no-op reposition**: this op drops group and
+dock membership (they are basket-local), so a same-place "move" would quietly
+ungroup the card. To reposition a card on its own canvas, `PATCH` its `pos`.
 ```
 POST /api/nodes/{id}/cards/move  {cards:[ids], node:<target>, pos?:[x,y], gap?:20}
   → 200 {"moved":N,"node":<target>,"cards":[ids]}

@@ -3697,7 +3697,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             // node entirely, so the within-basket ordering fields don't apply.
             if let Some(target) = mv.node {
                 if target == node {
-                    return (false, ApiResponse::err(400, "card is already in that node"));
+                    // Not a no-op reposition: this op drops group and dock
+                    // membership (basket-local), so a same-place "move" would
+                    // quietly ungroup the card. Refuse and name the right tool.
+                    return (false, ApiResponse::err(400,
+                        "card is already in that node — move is the cross-basket op; \
+                         to reposition it in place, PATCH {\"pos\":[x,y]}"));
                 }
                 if !doc.nodes.contains_key(&target) {
                     return (false, ApiResponse::err(404, "target node not found"));
@@ -3833,7 +3838,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 return (false, ApiResponse::err(404, "destination node not found"));
             }
             if node == to {
-                return (false, ApiResponse::err(400, "those cards are already in that node"));
+                return (false, ApiResponse::err(400,
+                    "those cards are already in that node — move is the cross-basket op; \
+                     to reposition in place, PATCH each card's pos"));
             }
             if cards.is_empty() {
                 return (false, ApiResponse::err(400, "cards must name at least one card"));
@@ -7295,6 +7302,22 @@ mod tests {
         assert_eq!(hits[0]["card"], p);
         let (_d, resp) = process(&mut doc, ApiRequest::GroupBacklinks(999));
         assert_eq!(resp.status, 404);
+    }
+
+    /// A same-node target is a 400 that names the right tool, not a no-op
+    /// reposition — the move op drops group/dock membership (basket-local), so
+    /// letting it "reposition" would quietly ungroup the card. Reported by an
+    /// API user who reasonably tried `{node: <current>, pos}`.
+    #[test]
+    fn a_same_node_move_is_refused_and_names_patch() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let mv: MoveCardInput = serde_json::from_str(&format!(r#"{{"node":{n},"pos":[50,60]}}"#)).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::MoveCard { node: n, card: c, mv });
+        assert!(!dirty);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("PATCH"), "the refusal must name the tool that works: {}", resp.body);
     }
 
     /// A subtree-scoped token is checked against the node a request *names*,
