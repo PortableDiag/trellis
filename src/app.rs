@@ -27,6 +27,35 @@ struct DialogParent {
     display: raw_window_handle::RawDisplayHandle,
 }
 
+/// A destructive step waiting for an in-app yes/no.
+///
+/// **In-app, never `rfd::MessageDialog`.** With rfd's default features the
+/// Linux backend is the xdg-desktop-portal, and the portal has no message
+/// dialog at all — `show()` returns immediately, drawing nothing. Measured
+/// live on 2026-08-24 against the template-delete gate: the click landed, no
+/// dialog appeared, and the answer came back as the non-Yes default. Every
+/// yes/no this app asks therefore goes through [`App::confirm_window`], which
+/// draws with the same machinery as every other window and cannot silently
+/// no-op. (`rfd::FileDialog` is unaffected — file choosing is what the portal
+/// exists for.)
+enum ConfirmRequest {
+    /// Delete template at this index, and its master card with it.
+    DeleteTemplate(usize),
+    /// The document has unsaved changes; discard them and then do this.
+    Discard(DiscardThen),
+    /// A dropped file above `App::ATTACH_WARN_BYTES`, held until the operator
+    /// accepts the storage cost.
+    AttachLarge { node: NodeId, bytes: Vec<u8>, name: String, pos: egui::Pos2, at: egui::Pos2 },
+}
+
+/// What a confirmed discard proceeds to.
+enum DiscardThen {
+    New,
+    Open,
+    ImportJson,
+    Restore(std::path::PathBuf),
+}
+
 impl raw_window_handle::HasWindowHandle for DialogParent {
     fn window_handle(
         &self,
@@ -1190,8 +1219,10 @@ pub struct TrellisApp {
     graph_zoom: f32,
     graph_rot: f32,
     graph_pan: egui::Vec2,
-    /// Template index awaiting delete confirmation (the in-app ask the ✕ opens).
-    confirm_template_delete: Option<usize>,
+    /// Destructive steps awaiting an in-app yes/no, shown front-first. A queue
+    /// rather than an `Option` so a multi-file drop cannot silently displace an
+    /// unanswered ask.
+    confirms: std::collections::VecDeque<ConfirmRequest>,
     show_about: bool,
     theme: Theme,
     /// Whether Ctrl+scroll / Ctrl +/- zoom the canvas (Settings; on by default).
@@ -1767,7 +1798,7 @@ impl TrellisApp {
             graph_zoom: 1.0,
             graph_rot: 0.0,
             graph_pan: egui::Vec2::ZERO,
-            confirm_template_delete: None,
+            confirms: std::collections::VecDeque::new(),
             show_about: false,
             theme,
             zoom_enabled,
@@ -4392,14 +4423,6 @@ impl TrellisApp {
     }
 
     /// A message dialog parented to the app window (falls back to unparented).
-    fn message_dialog(&self) -> rfd::MessageDialog {
-        let d = rfd::MessageDialog::new();
-        match &self.dialog_parent {
-            Some(p) => d.set_parent(p),
-            None => d,
-        }
-    }
-
     // --- persistence --------------------------------------------------------
 
     fn target_path(&self) -> PathBuf {
@@ -4573,18 +4596,15 @@ impl TrellisApp {
         }
     }
 
-    fn confirm_discard(&self) -> bool {
+    /// Gate a document-replacing action on unsaved changes: proceed at once
+    /// when clean, queue the in-app ask when dirty. Returns whether the caller
+    /// may proceed NOW — a queued ask proceeds later, from `confirm_window`.
+    fn discard_gate(&mut self, then: DiscardThen) -> bool {
         if !self.dirty {
             return true;
         }
-        matches!(
-            self.message_dialog()
-                .set_title("Unsaved changes")
-                .set_description("Discard the current document?")
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show(),
-            rfd::MessageDialogResult::Yes
-        )
+        self.confirms.push_back(ConfirmRequest::Discard(then));
+        false
     }
 
     /// Reset per-session inline-image registration when the document changes, so
@@ -4596,9 +4616,13 @@ impl TrellisApp {
     }
 
     fn new_document(&mut self) {
-        if !self.confirm_discard() {
+        if !self.discard_gate(DiscardThen::New) {
             return;
         }
+        self.new_document_now();
+    }
+
+    fn new_document_now(&mut self) {
         self.reset_inline_images();
         self.doc = Document::default();
         self.selected = self.doc.roots.first().copied();
@@ -4610,9 +4634,13 @@ impl TrellisApp {
     }
 
     fn open_document(&mut self) {
-        if !self.confirm_discard() {
+        if !self.discard_gate(DiscardThen::Open) {
             return;
         }
+        self.open_document_now();
+    }
+
+    fn open_document_now(&mut self) {
         if let Some(path) = self.file_dialog()
             .add_filter("Trellis document", &["ron"])
             .pick_file()
@@ -4732,9 +4760,13 @@ impl TrellisApp {
     /// Load a JSON-exported document, replacing the current one. JSON isn't the
     /// native save format, so the result is treated as an unsaved document.
     fn import_json(&mut self) {
-        if !self.confirm_discard() {
+        if !self.discard_gate(DiscardThen::ImportJson) {
             return;
         }
+        self.import_json_now();
+    }
+
+    fn import_json_now(&mut self) {
         if let Some(path) = self.file_dialog().add_filter("JSON", &["json"]).pick_file() {
             match std::fs::read_to_string(&path).map(|s| serde_json::from_str::<Document>(&s)) {
                 Ok(Ok(doc)) => {
@@ -5254,25 +5286,23 @@ impl TrellisApp {
         at: egui::Pos2,
     ) -> bool {
         if bytes.len() > Self::ATTACH_WARN_BYTES {
-            let mb = bytes.len() as f64 / (1024.0 * 1024.0);
-            let ok = matches!(
-                self.message_dialog()
-                    .set_title("Large attachment")
-                    .set_description(&format!(
-                        "{name} is {mb:.1} MB.\n\nThe bytes are stored inside the \
-                         document, which is written whole on every save — so this is \
-                         re-written on each autosave and copied into every snapshot \
-                         and backup.\n\nAttach it anyway?"
-                    ))
-                    .set_buttons(rfd::MessageButtons::YesNo)
-                    .show(),
-                rfd::MessageDialogResult::Yes
-            );
-            if !ok {
-                self.status = format!("Did not attach {name}");
-                return false;
-            }
+            // Held, not refused: the in-app ask in `confirm_window` attaches on
+            // accept with exactly these arguments.
+            self.confirms.push_back(ConfirmRequest::AttachLarge { node, bytes, name, pos, at });
+            return false;
         }
+        self.attach_now(node, bytes, name, pos, at)
+    }
+
+    /// The attach itself, past the size gate.
+    fn attach_now(
+        &mut self,
+        node: NodeId,
+        bytes: Vec<u8>,
+        name: String,
+        pos: egui::Pos2,
+        at: egui::Pos2,
+    ) -> bool {
         // Onto the card you dropped it on, if there is one — "the spec belongs to
         // this task" is the case worth serving. Otherwise a card of its own.
         let target = self.any_card_at(node, pos).or_else(|| {
@@ -5627,12 +5657,8 @@ impl TrellisApp {
                     // Asked first, always: the ✕ sits beside every row of the
                     // Insert-template list, one slip from the row you meant to
                     // click, and deleting removes the master card too — which
-                    // is document content, not just a config entry. The ask is
-                    // an IN-APP window, not a native rfd dialog: a live probe
-                    // of the rfd version showed the click landing and no
-                    // dialog ever appearing — an inert gate, failing safe but
-                    // leaving a ✕ that seems dead.
-                    self.confirm_template_delete = Some(idx);
+                    // is document content, not just a config entry.
+                    self.confirms.push_back(ConfirmRequest::DeleteTemplate(idx));
                 }
                 CanvasAction::RaiseCard(cid) => self.doc.raise_card(node, cid),
                 CanvasAction::SetTitle(cid, t) => {
@@ -9149,21 +9175,28 @@ impl TrellisApp {
             });
         self.show_history = open;
         if let Some(p) = restore {
-            if self.confirm_discard() {
-                match read_document(&p) {
-                    Ok(doc) => {
-                        self.reset_inline_images();
-                        self.doc = doc;
-                        self.selected = self.doc.roots.first().copied();
-                        self.views.clear();
-                        self.reset_history();
-                        self.mark_dirty(); // restored content isn't saved until the user saves
-                        self.show_history = false;
-                        self.status = format!("Restored snapshot {}", format_stamp(&p.file_name().unwrap_or_default().to_string_lossy()));
-                    }
-                    Err(e) => self.status = format!("Restore failed: {e}"),
-                }
+            if self.discard_gate(DiscardThen::Restore(p.clone())) {
+                self.restore_snapshot_now(&p);
             }
+        }
+    }
+
+    fn restore_snapshot_now(&mut self, p: &std::path::Path) {
+        match read_document(p) {
+            Ok(doc) => {
+                self.reset_inline_images();
+                self.doc = doc;
+                self.selected = self.doc.roots.first().copied();
+                self.views.clear();
+                self.reset_history();
+                self.mark_dirty(); // restored content isn't saved until the user saves
+                self.show_history = false;
+                self.status = format!(
+                    "Restored snapshot {}",
+                    format_stamp(&p.file_name().unwrap_or_default().to_string_lossy())
+                );
+            }
+            Err(e) => self.status = format!("Restore failed: {e}"),
         }
     }
 
@@ -10276,41 +10309,75 @@ impl TrellisApp {
         }
     }
 
-    /// The in-app "delete this template?" ask, opened by the ✕ in the
-    /// Insert-template list. An egui window rather than a native dialog,
-    /// because the rfd version was probed live and never appeared — the click
-    /// landed, nothing showed, and the ✕ read as dead. This one draws with the
-    /// same machinery as every other window in the app.
-    fn template_delete_confirm_window(&mut self, ctx: &egui::Context) {
-        let Some(idx) = self.confirm_template_delete else { return };
-        let name = match self.templates.get(idx) {
-            // The index went stale (template list changed under it): drop the ask.
-            None => {
-                self.confirm_template_delete = None;
-                return;
-            }
-            Some(t) => {
+    /// The one in-app yes/no window, serving `self.confirms` front-first. See
+    /// [`ConfirmRequest`] for why this is never a native `rfd::MessageDialog`:
+    /// that backend was probed live and never rendered.
+    fn confirm_window(&mut self, ctx: &egui::Context) {
+        let Some(req) = self.confirms.front() else { return };
+        // Everything the closure shows, owned up front, so the queue itself is
+        // free to be popped after the buttons resolve.
+        let (title, message, detail, yes, no) = match req {
+            ConfirmRequest::DeleteTemplate(idx) => {
+                let Some(t) = self.templates.get(*idx) else {
+                    // The index went stale (the list changed under it): drop the ask.
+                    self.confirms.pop_front();
+                    return;
+                };
                 let n = t.card.title.trim();
-                if n.is_empty() { "(untitled)".to_string() } else { n.to_string() }
+                let n = if n.is_empty() { "(untitled)" } else { n };
+                (
+                    "Delete template",
+                    format!("Delete the template “{n}”?"),
+                    "Its master card is removed with it. Cards already stamped \
+                     from it stay."
+                        .to_string(),
+                    "Delete",
+                    "Keep",
+                )
+            }
+            ConfirmRequest::Discard(then) => {
+                let doing = match then {
+                    DiscardThen::New => "Starting a new document",
+                    DiscardThen::Open => "Opening another document",
+                    DiscardThen::ImportJson => "Importing a JSON document",
+                    DiscardThen::Restore(_) => "Restoring this snapshot",
+                };
+                (
+                    "Unsaved changes",
+                    format!("{doing} discards the current document's unsaved changes."),
+                    "Save first (Ctrl+S) if you want to keep them.".to_string(),
+                    "Discard and continue",
+                    "Keep editing",
+                )
+            }
+            ConfirmRequest::AttachLarge { bytes, name, .. } => {
+                let mb = bytes.len() as f64 / (1024.0 * 1024.0);
+                (
+                    "Large attachment",
+                    format!("{name} is {mb:.1} MB. Attach it anyway?"),
+                    "The bytes are stored inside the document, which is written \
+                     whole on every save — so this is re-written on each autosave \
+                     and copied into every snapshot and backup."
+                        .to_string(),
+                    "Attach",
+                    "Don't attach",
+                )
             }
         };
         let mut decided: Option<bool> = None;
-        egui::Window::new("Delete template")
+        egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(format!("Delete the template “{name}”?"));
-                ui.small(
-                    "Its master card is removed with it. Cards already stamped \
-                     from it stay.",
-                );
+                ui.label(message);
+                ui.small(detail);
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() {
+                    if ui.button(yes).clicked() {
                         decided = Some(true);
                     }
-                    if ui.button("Keep").clicked() {
+                    if ui.button(no).clicked() {
                         decided = Some(false);
                     }
                 });
@@ -10318,13 +10385,31 @@ impl TrellisApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             decided = Some(false);
         }
-        if let Some(yes) = decided {
-            if yes {
+        let Some(accepted) = decided else { return };
+        let Some(req) = self.confirms.pop_front() else { return };
+        match (accepted, req) {
+            (true, ConfirmRequest::DeleteTemplate(idx)) => {
                 if let Some(n) = self.delete_template(idx) {
                     self.status = format!("Deleted template \"{n}\" and its master card");
                 }
             }
-            self.confirm_template_delete = None;
+            (true, ConfirmRequest::Discard(then)) => match then {
+                DiscardThen::New => self.new_document_now(),
+                DiscardThen::Open => self.open_document_now(),
+                DiscardThen::ImportJson => self.import_json_now(),
+                DiscardThen::Restore(p) => self.restore_snapshot_now(&p),
+            },
+            (true, ConfirmRequest::AttachLarge { node, bytes, name, pos, at }) => {
+                let label = name.clone();
+                if self.attach_now(node, bytes, name, pos, at) {
+                    self.mark_dirty();
+                    self.status = format!("Attached {label}");
+                }
+            }
+            (false, ConfirmRequest::AttachLarge { name, .. }) => {
+                self.status = format!("Did not attach {name}");
+            }
+            (false, _) => {}
         }
     }
 
@@ -11663,7 +11748,7 @@ impl eframe::App for TrellisApp {
             });
         });
 
-        self.template_delete_confirm_window(ctx);
+        self.confirm_window(ctx);
         if self.search_open {
             self.search_panel(ctx);
         }

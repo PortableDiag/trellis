@@ -6,6 +6,21 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.153.5]
+
+### Fixed
+- **Every yes/no the app asks is in-app now, because the native ones never
+  showed.** `rfd` 0.15's default Linux backend is the xdg-desktop-portal, and
+  the portal has no message-dialog API — `MessageDialog::show()` returns
+  immediately, drawing nothing. v0.153.4 found and fixed that for the template
+  ✕; this release fixes the two remaining users. The **unsaved-changes ask**
+  guarded File → New / Open… / Import JSON and version-history Restore — with
+  changes pending, all four **silently did nothing**. The **large-attachment
+  ask** meant a dropped file over 10 MB was **silently refused**. Both now go
+  through one in-app confirm window (queued, front-first, Esc declines), which
+  says what proceeding discards and what an attachment costs. File dialogs are
+  untouched — file choosing is what the portal exists for, and those work.
+
 ## [0.153.4]
 
 ### Fixed
