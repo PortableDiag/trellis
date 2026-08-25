@@ -1,0 +1,23 @@
+{
+  "name": "cloud-backup",
+  "title": "Off-site backup to CloudAPI",
+  "description": "Copies the newest local backup archive to a CloudAPI gateway (your own object storage in front of R2), then proves the copy by downloading it back and comparing bytes — an untested backup is a belief. Uploads only what the app's own backup module already wrote, so the archive is gpg-encrypted before it leaves this machine and the cloud prefix holds only ciphertext. Keeps a bounded number of archives per document and purges older ones by explicit name. With no gateway or key configured it does nothing at all.",
+  "version": "1.0.0",
+  "command": "python3",
+  "args": ["cloud_backup.py"],
+  "triggers": ["manual", "schedule"],
+  "interval_mins": 360,
+  "scope": { "read_only": true },
+  "config": [
+    { "key": "gateway", "label": "CloudAPI base URL", "required": true,
+      "help": "e.g. https://cloud.example.com — your own gateway. Nothing is sent anywhere until this and the key are set." },
+    { "key": "app_key", "label": "CloudAPI app key (sk_…)", "secret": true, "required": true,
+      "help": "The app's own key, minted by the gateway operator. Scoped to one prefix; shown once at onboarding." },
+    { "key": "backup_dir", "label": "Local backup folder", "required": true,
+      "help": "The disk destination this document's scheduled backups write to. The plugin uploads the newest trellis-backup-* file it finds there." },
+    { "key": "keep", "label": "Archives to keep in the cloud",
+      "help": "Older ones are purged (bytes actually removed). Default 14, matching the local retention." },
+    { "key": "cli", "label": "cloudapi-cli path",
+      "help": "Default: the cloudapi-cli binary beside this script. It handles the session, the upload (multipart when large) and the metadata call." }
+  ]
+}

@@ -477,7 +477,13 @@ from the main cluster, and click or drag on it to jump there without zooming out
   can **publish a single card at a public link** from its right-click menu — it
   fetches that link with no credentials before handing it to you, so a link that
   only works for you is an error rather than something you find out after
-  sending it to someone.
+  sending it to someone. And
+  [`plugins/cloud-backup/`](plugins/cloud-backup/README.md), which copies the
+  newest local backup archive to a self-hosted
+  [CloudAPI](plugins/cloud-backup/README.md) object-storage gateway on a
+  schedule, **proves the copy by downloading it back and comparing bytes**, and
+  keeps the cloud copy bounded — with no gateway configured it does nothing, so
+  the integration ships while the access stays personal.
 - **Web clipper** — a small Chrome/Edge extension (`web-clipper/`) clips the
   current page or your text selection into a Trellis basket over the LAN API.
 - **Companion mobile app** — a native Android viewer/capture app talks to the
@@ -778,6 +784,8 @@ to render inline text-color spans; edit it there, not the crates.io copy.
 - [web-clipper/README.md](web-clipper/README.md) — the Chrome/Edge clipper extension.
 - [plugins/dry-backup/README.md](plugins/dry-backup/README.md) — the Dry backup
   plugin, and the plugin contract it demonstrates.
+- [plugins/cloud-backup/README.md](plugins/cloud-backup/README.md) — scheduled
+  off-site backup to a CloudAPI gateway, restore-verified on every run.
 - [docs/VR-PROPOSAL.md](docs/VR-PROPOSAL.md) — proposal for a VR client (separate
   side project; talks to the agent API rather than embedding the desktop app).
 - [CHANGELOG.md](CHANGELOG.md) — version history.

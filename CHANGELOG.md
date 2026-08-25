@@ -6,6 +6,26 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.154.0]
+
+### Added
+- **`cloud-backup` plugin: scheduled off-site backup that proves itself.**
+  Copies the newest local backup archive to a self-hosted CloudAPI gateway (an
+  object-storage gateway that mints short-lived, prefix-scoped S3 credentials
+  in front of R2), on the plugin schedule (default 6 h) or on demand. Every
+  run **downloads the object back and compares SHA-256** — an untested backup
+  is a belief — and prunes the cloud copy beyond a configured count, oldest
+  first, each by explicit name, never a sweep. It uploads what the backup
+  module already wrote, so with backup encryption on the archive is gpg
+  ciphertext before it leaves the machine and the gateway prefix is
+  `encrypted: false` (its documented already-sealed case: a second layer would
+  put the key inside the thing being backed up). Object names are
+  `backups/<document>/<archive>`, because two instances write
+  identically-named archives. Credentials live in the plugin's own per-instance
+  `config.json`, outside the document and outside this repo — unconfigured, the
+  plugin does nothing, which is how the integration ships publicly while the
+  access stays personal.
+
 ## [0.153.5]
 
 ### Fixed
