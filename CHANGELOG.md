@@ -6,6 +6,29 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.153.4]
+
+### Fixed
+- **The template-delete confirmation actually appears.** v0.153.3's ask was a
+  native `rfd` dialog, and a live probe showed it never rendering on this
+  system — the ✕ click landed, no dialog appeared, and nothing was deleted: a
+  gate that fails safe but leaves a button that seems dead. The ask is now an
+  **in-app window** ("Delete the template …? Delete / Keep", Esc keeps), drawn
+  by the same machinery as every other window in the app, so it cannot
+  silently no-op. Same class as the `--disable-javascript` finding: a gate
+  that looks right and does nothing is worse than no gate.
+
+## [0.153.3]
+
+### Fixed
+- **Deleting a template asks first.** The ✕ beside each row of the
+  Insert-template list deleted immediately — and it does not only drop a config
+  entry: the template's **master card** is removed with it, which is document
+  content. It sits one slip from the row you meant to click, so it now asks
+  "Delete the template …?", naming what goes and that already-stamped cards
+  stay. The ✕'s tooltip says the same. Raised by the operator, who asked the
+  right question before clicking rather than after.
+
 ## [0.153.2]
 
 ### Fixed

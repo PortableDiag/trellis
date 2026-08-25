@@ -771,7 +771,14 @@ pub fn ui(
                         actions.push(CanvasAction::InsertTemplate(i, cp));
                         ui.close_menu();
                     }
-                    if ui.small_button("✕").on_hover_text("Delete this template").clicked() {
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text(
+                            "Delete this template and its master card.\n\nAsks for \
+                             confirmation first — cards already stamped from it stay.",
+                        )
+                        .clicked()
+                    {
                         actions.push(CanvasAction::DeleteTemplate(i));
                         ui.close_menu();
                     }

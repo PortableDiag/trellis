@@ -1190,6 +1190,8 @@ pub struct TrellisApp {
     graph_zoom: f32,
     graph_rot: f32,
     graph_pan: egui::Vec2,
+    /// Template index awaiting delete confirmation (the in-app ask the ✕ opens).
+    confirm_template_delete: Option<usize>,
     show_about: bool,
     theme: Theme,
     /// Whether Ctrl+scroll / Ctrl +/- zoom the canvas (Settings; on by default).
@@ -1765,6 +1767,7 @@ impl TrellisApp {
             graph_zoom: 1.0,
             graph_rot: 0.0,
             graph_pan: egui::Vec2::ZERO,
+            confirm_template_delete: None,
             show_about: false,
             theme,
             zoom_enabled,
@@ -5621,9 +5624,15 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::DeleteTemplate(idx) => {
-                    if let Some(name) = self.delete_template(idx) {
-                        self.status = format!("Deleted template \"{name}\" and its master card");
-                    }
+                    // Asked first, always: the ✕ sits beside every row of the
+                    // Insert-template list, one slip from the row you meant to
+                    // click, and deleting removes the master card too — which
+                    // is document content, not just a config entry. The ask is
+                    // an IN-APP window, not a native rfd dialog: a live probe
+                    // of the rfd version showed the click landing and no
+                    // dialog ever appearing — an inert gate, failing safe but
+                    // leaving a ✕ that seems dead.
+                    self.confirm_template_delete = Some(idx);
                 }
                 CanvasAction::RaiseCard(cid) => self.doc.raise_card(node, cid),
                 CanvasAction::SetTitle(cid, t) => {
@@ -10267,6 +10276,58 @@ impl TrellisApp {
         }
     }
 
+    /// The in-app "delete this template?" ask, opened by the ✕ in the
+    /// Insert-template list. An egui window rather than a native dialog,
+    /// because the rfd version was probed live and never appeared — the click
+    /// landed, nothing showed, and the ✕ read as dead. This one draws with the
+    /// same machinery as every other window in the app.
+    fn template_delete_confirm_window(&mut self, ctx: &egui::Context) {
+        let Some(idx) = self.confirm_template_delete else { return };
+        let name = match self.templates.get(idx) {
+            // The index went stale (template list changed under it): drop the ask.
+            None => {
+                self.confirm_template_delete = None;
+                return;
+            }
+            Some(t) => {
+                let n = t.card.title.trim();
+                if n.is_empty() { "(untitled)".to_string() } else { n.to_string() }
+            }
+        };
+        let mut decided: Option<bool> = None;
+        egui::Window::new("Delete template")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("Delete the template “{name}”?"));
+                ui.small(
+                    "Its master card is removed with it. Cards already stamped \
+                     from it stay.",
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        decided = Some(true);
+                    }
+                    if ui.button("Keep").clicked() {
+                        decided = Some(false);
+                    }
+                });
+            });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            decided = Some(false);
+        }
+        if let Some(yes) = decided {
+            if yes {
+                if let Some(n) = self.delete_template(idx) {
+                    self.status = format!("Deleted template \"{n}\" and its master card");
+                }
+            }
+            self.confirm_template_delete = None;
+        }
+    }
+
     /// Compute a force-directed layout of the wiki-link graph (once, when the
     /// window opens). Nodes start on a circle, then repel each other while edges
     /// pull linked nodes together — a few hundred cheap iterations settle it.
@@ -11602,6 +11663,7 @@ impl eframe::App for TrellisApp {
             });
         });
 
+        self.template_delete_confirm_window(ctx);
         if self.search_open {
             self.search_panel(ctx);
         }
