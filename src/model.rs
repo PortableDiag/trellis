@@ -4255,16 +4255,26 @@ impl Document {
     pub fn set_card_property(&mut self, node: NodeId, card: CardId, key: &str, value: &str) -> bool {
         let key = key.to_lowercase();
         let Some(c) = self.card_mut(node, card) else { return false };
-        let prefix = format!("{key}:: ");
         let mut lines: Vec<String> = c.body.lines().map(|l| l.to_string()).collect();
         let mut replaced = false;
-        for line in lines.iter_mut() {
-            let trimmed = line.trim_start();
-            if trimmed.to_lowercase().starts_with(&prefix) {
-                let indent = &line[..line.len() - trimmed.len()];
-                *line = format!("{indent}{key}:: {value}");
+        // Rewrite the value where the EXTRACTOR would read it — the first
+        // occurrence anywhere outside code, not only a line-initial one. A
+        // setter that recognises fewer places than the parser appends a
+        // duplicate the parser then ignores (first occurrence wins), so the
+        // write reports 200 and changes nothing the Kanban can see.
+        let mut in_fence = false;
+        'lines: for line in lines.iter_mut() {
+            if is_code_fence(line) {
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence {
+                continue;
+            }
+            if let Some((_, vs, ve)) = property_value_span(line, &key) {
+                *line = format!("{}{value}{}", &line[..vs], &line[ve..]);
                 replaced = true;
-                break;
+                break 'lines;
             }
         }
         if !replaced {
@@ -4343,20 +4353,41 @@ impl Document {
     pub fn clear_card_property(&mut self, node: NodeId, card: CardId, key: &str) -> bool {
         let key = key.to_lowercase();
         let Some(c) = self.card_mut(node, card) else { return false };
-        let prefix = format!("{key}:: ");
-        let before = c.body.lines().count();
-        let kept: Vec<&str> = c
-            .body
-            .lines()
-            .filter(|l| {
-                let t = l.trim_start().to_lowercase();
-                !(t.starts_with(&prefix) || t.trim_end() == format!("{key}::"))
-            })
-            .collect();
-        if kept.len() == before {
+        // EVERY occurrence goes, wherever the extractor would read one —
+        // clearing only a standalone line while an inline duplicate survives
+        // resurrects the old value, because the first occurrence wins.
+        let mut removed = false;
+        let mut out: Vec<String> = Vec::new();
+        let mut in_fence = false;
+        for line in c.body.lines() {
+            if is_code_fence(line) {
+                in_fence = !in_fence;
+                out.push(line.to_string());
+                continue;
+            }
+            if in_fence {
+                out.push(line.to_string());
+                continue;
+            }
+            // A bare `key::` with no value is still that property's line.
+            if line.trim().to_lowercase() == format!("{key}::") {
+                removed = true;
+                continue;
+            }
+            let mut cur = line.to_string();
+            while let Some((ks, _, ve)) = property_value_span(&cur, &key) {
+                cur = format!("{}{}", cur[..ks].trim_end(), &cur[ve..]);
+                removed = true;
+            }
+            if cur.trim().is_empty() && !line.trim().is_empty() {
+                continue; // the property was all the line held
+            }
+            out.push(cur);
+        }
+        if !removed {
             return false;
         }
-        c.body = kept.join("\n");
+        c.body = out.join("\n");
         true
     }
 
@@ -5617,6 +5648,79 @@ fn is_code_fence(line: &str) -> bool {
     t.starts_with("```") || t.starts_with("~~~")
 }
 
+/// Every `key:: value` marker on one (non-code) line, as
+/// `(key_start, colon_index, value_start, opener_byte)`.
+///
+/// Pass 1 of [`extract_properties`], and deliberately shared with
+/// [`Document::set_card_property`] / [`Document::clear_card_property`]: a
+/// write has to land exactly where the extractor reads, or a card ends up with
+/// two properties under one key — an API setter that only recognised
+/// line-initial properties appended a standalone `status:: done` while the
+/// Kanban kept counting the inline `status:: doing` it had missed.
+fn property_marks(line: &str) -> Vec<(usize, usize, usize, u8)> {
+    let b = line.as_bytes();
+    let mut marks: Vec<(usize, usize, usize, u8)> = Vec::new();
+    let mut i = 0;
+    while i + 2 < b.len() {
+        if b[i] == b':' && b[i + 1] == b':' && (b[i + 2] == b' ' || b[i + 2] == b'\t') {
+            let mut ks = i;
+            while ks > 0 {
+                let c = b[ks - 1];
+                if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
+                    ks -= 1;
+                } else {
+                    break;
+                }
+            }
+            if ks < i && !in_code_span(line, ks) {
+                let opener = if ks > 0 { b[ks - 1] } else { 0 };
+                let mut vs = i + 2;
+                while vs < b.len() && (b[vs] == b' ' || b[vs] == b'\t') {
+                    vs += 1;
+                }
+                marks.push((ks, i, vs, opener));
+                i = vs; // keep scanning the value so later fields are found too
+                continue;
+            }
+        }
+        i += 1;
+    }
+    marks
+}
+
+/// Where mark `mi`'s value ends: the next field, a closing bracket (when the
+/// key was opened with `[`/`(`), or the end of the line — pass 2's rule.
+fn property_value_end(line: &str, marks: &[(usize, usize, usize, u8)], mi: usize) -> usize {
+    let (_, _, vs, opener) = marks[mi];
+    if opener == b'[' || opener == b'(' {
+        let close = if opener == b'[' { ']' } else { ')' };
+        line[vs..].find(close).map(|p| vs + p).unwrap_or(line.len())
+    } else if mi + 1 < marks.len() {
+        marks[mi + 1].0
+    } else {
+        line.len()
+    }
+}
+
+/// The span a *write* to `key`'s value may touch on this line, or `None` if the
+/// key is not on it: `(key_start, value_start, value_end)`. For a date key
+/// (`due`/`start`/`date`) the value span is the first token only, mirroring
+/// [`extract_properties`]'s one-token rule — so rescheduling
+/// `due:: 2026-08-15 — notes after` replaces the date and leaves the sentence.
+fn property_value_span(line: &str, key: &str) -> Option<(usize, usize, usize)> {
+    let marks = property_marks(line);
+    let mi = marks.iter().position(|&(ks, ci, _, _)| line[ks..ci].to_lowercase() == key)?;
+    let (ks, _, vs, _) = marks[mi];
+    let mut ve = property_value_end(line, &marks, mi);
+    if matches!(key, "due" | "start" | "date") {
+        if let Some(tok) = line[vs..ve].split_whitespace().next() {
+            let ts = vs + line[vs..ve].find(tok).unwrap();
+            ve = ts + tok.len();
+        }
+    }
+    Some((ks, vs, ve))
+}
+
 pub(crate) fn extract_properties(text: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     // **Prose about a property is not a property.** A card that *documents* the
@@ -5640,47 +5744,10 @@ pub(crate) fn extract_properties(text: &str) -> Vec<(String, String)> {
         if in_fence {
             continue;
         }
-        let b = line.as_bytes();
-        // Pass 1: find every `key:: ` marker on the line.
-        // (key_start, colon_index, value_start, opener_byte)
-        let mut marks: Vec<(usize, usize, usize, u8)> = Vec::new();
-        let mut i = 0;
-        while i + 2 < b.len() {
-            if b[i] == b':' && b[i + 1] == b':' && (b[i + 2] == b' ' || b[i + 2] == b'\t') {
-                let mut ks = i;
-                while ks > 0 {
-                    let c = b[ks - 1];
-                    if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
-                        ks -= 1;
-                    } else {
-                        break;
-                    }
-                }
-                if ks < i && !in_code_span(line, ks) {
-                    let opener = if ks > 0 { b[ks - 1] } else { 0 };
-                    let mut vs = i + 2;
-                    while vs < b.len() && (b[vs] == b' ' || b[vs] == b'\t') {
-                        vs += 1;
-                    }
-                    marks.push((ks, i, vs, opener));
-                    i = vs; // keep scanning the value so later fields are found too
-                    continue;
-                }
-            }
-            i += 1;
-        }
-        // Pass 2: each field's value runs to the next field, a closing bracket
-        // (if it was opened with `[`/`(`), or the end of the line.
-        for (mi, &(ks, ci, vs, opener)) in marks.iter().enumerate() {
+        let marks = property_marks(line);
+        for (mi, &(ks, ci, vs, _)) in marks.iter().enumerate() {
             let key = line[ks..ci].to_lowercase();
-            let ve = if opener == b'[' || opener == b'(' {
-                let close = if opener == b'[' { ']' } else { ')' };
-                line[vs..].find(close).map(|p| vs + p).unwrap_or(line.len())
-            } else if mi + 1 < marks.len() {
-                marks[mi + 1].0
-            } else {
-                line.len()
-            };
+            let ve = property_value_end(line, &marks, mi);
             let mut value = line[vs..ve].trim().to_string();
             // **A date is one token.** `due`, `start` and `date` hold a calendar
             // date, so a value running to the end of the line is always a
@@ -8598,6 +8665,60 @@ mod tests {
         let board = doc.cards_by_status();
         assert_eq!(board.get("doing").map(|v| v.len()), Some(1));
         assert!(board.get("todo").is_none());
+    }
+
+    /// The setter writes where the extractor reads — anywhere on a line, not
+    /// only line-initial. Reported live: card 9913 carried `status:: doing`
+    /// at the end of a prose line; the API wrote a standalone `status:: done`
+    /// line and the Kanban kept counting the inline one, because the first
+    /// occurrence wins.
+    #[test]
+    fn set_card_property_rewrites_an_inline_occurrence() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().body = "shipping the exporter now, status:: doing".into();
+        assert!(doc.set_card_property(n, c, "status", "done"));
+        let body = doc.card_mut(n, c).unwrap().body.clone();
+        assert_eq!(body, "shipping the exporter now, status:: done");
+        assert_eq!(doc.card_property(n, c, "status").as_deref(), Some("done"));
+        // Exactly one occurrence — no appended duplicate for Kanban to miss.
+        assert_eq!(body.matches("status::").count(), 1);
+
+        // A date key replaces its one token and the sentence tail survives.
+        doc.card_mut(n, c).unwrap().body =
+            "Benchmark due:: 2026-08-15 — first pass done, 4/4".into();
+        assert!(doc.set_card_property(n, c, "due", "2026-09-01"));
+        assert_eq!(
+            doc.card_mut(n, c).unwrap().body,
+            "Benchmark due:: 2026-09-01 — first pass done, 4/4"
+        );
+
+        // A bracketed tag line is rewritten in place, not duplicated.
+        doc.card_mut(n, c).unwrap().body = "[status:: todo] the plan".into();
+        assert!(doc.set_card_property(n, c, "status", "doing"));
+        assert_eq!(doc.card_mut(n, c).unwrap().body, "[status:: doing] the plan");
+
+        // Code is not a property, so a fenced occurrence gets an append.
+        doc.card_mut(n, c).unwrap().body = "```\nstatus:: doing\n```".into();
+        assert!(doc.set_card_property(n, c, "status", "done"));
+        assert_eq!(doc.card_mut(n, c).unwrap().body, "```\nstatus:: doing\n```\nstatus:: done");
+    }
+
+    /// Clearing removes EVERY occurrence the extractor would read — leaving an
+    /// inline duplicate behind resurrects the old value.
+    #[test]
+    fn clear_card_property_reaches_inline_occurrences() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, c).unwrap().body =
+            "shipping now, status:: doing\nstatus:: done\nkeep this line".into();
+        assert!(doc.clear_card_property(n, c, "status"));
+        assert_eq!(doc.card_property(n, c, "status"), None);
+        assert_eq!(doc.card_mut(n, c).unwrap().body, "shipping now,\nkeep this line");
+        // Nothing left to clear.
+        assert!(!doc.clear_card_property(n, c, "status"));
     }
 
     #[test]

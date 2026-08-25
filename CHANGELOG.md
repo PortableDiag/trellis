@@ -6,6 +6,24 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.155.1]
+
+### Fixed
+- **A property write lands where the parser reads.** `POST …/property` only
+  recognised a property at the start of a line, while the extractor reads
+  `key:: value` anywhere outside code — so setting `status` on a card whose
+  `status:: doing` sat at the end of a prose line appended a standalone
+  `status:: done` and the Kanban kept counting the old inline one (first
+  occurrence wins). Reported live from card 9913, second sighting of the
+  class. The setter now rewrites the first occurrence in place — wherever it
+  is, bracketed tag lines included — using the extractor's own scanner
+  (factored out and shared, so the two cannot drift again). A date key
+  (`due`/`start`/`date`) replaces only its one-token value, so the sentence
+  after `due:: 2026-08-15 — notes` survives a reschedule. `DELETE …/property`
+  now removes **every** occurrence for the same reason: clearing only the
+  standalone line resurrected the inline value it left behind. Batch and
+  cross-basket property routes inherit both fixes.
+
 ## [0.155.0]
 
 ### Added
