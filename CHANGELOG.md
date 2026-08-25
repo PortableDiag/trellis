@@ -20,6 +20,10 @@ All notable changes to Trellis. Format loosely follows
 
 ## [0.153.3]
 
+*(Never tagged on its own — this entry shipped inside v0.153.4's commit, so
+there is no `v0.153.3` tag or release. Kept because the two fixes are worth
+recording separately.)*
+
 ### Fixed
 - **Deleting a template asks first.** The ✕ beside each row of the
   Insert-template list deleted immediately — and it does not only drop a config
