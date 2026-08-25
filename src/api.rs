@@ -101,7 +101,7 @@ pub enum ApiRequest {
     ClearCardProperty { node: NodeId, card: u64, key: String },
     // Grouping.
     ListGroups(NodeId),
-    CreateGroup { node: NodeId, cards: Vec<u64>, title: Option<String> },
+    CreateGroup { node: NodeId, cards: Vec<u64>, title: Option<String>, color: Option<[u8; 3]> },
     UpdateGroup { node: NodeId, group: GroupId, title: Option<String>, color: Option<[u8; 3]> },
     DeleteGroup { node: NodeId, group: GroupId },
     /// One group from its id alone, without already knowing its basket — the
@@ -1550,6 +1550,11 @@ struct CreateGroupInput {
     cards: Vec<u64>,
     #[serde(default)]
     title: Option<String>,
+    /// Same formats as everywhere else (`de_color_opt`). Accepted here as well
+    /// as on PATCH so a group arrives styled in one call — an API user was
+    /// titling groups with a colour legend because create refused the field.
+    #[serde(default, deserialize_with = "de_color_opt")]
+    color: Option<[u8; 3]>,
 }
 
 #[derive(Deserialize)]
@@ -2502,7 +2507,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "nodes", id, "groups"]) => Ok(ApiRequest::ListGroups(pid(id)?)),
         (Method::Post, ["api", "nodes", id, "groups"]) => {
             let i: CreateGroupInput = parse(body)?;
-            Ok(ApiRequest::CreateGroup { node: pid(id)?, cards: i.cards, title: i.title })
+            Ok(ApiRequest::CreateGroup { node: pid(id)?, cards: i.cards, title: i.title, color: i.color })
         }
         (Method::Patch, ["api", "nodes", nid, "groups", gid]) => {
             let i: UpdateGroupInput = parse(body)?;
@@ -4173,12 +4178,17 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             Some(n) => (false, ApiResponse::ok(json!({ "groups": groups_json(n) }))),
             None => (false, ApiResponse::err(404, "node not found")),
         },
-        ApiRequest::CreateGroup { node, cards, title } => {
+        ApiRequest::CreateGroup { node, cards, title, color } => {
             if !doc.nodes.contains_key(&node) {
                 return (false, ApiResponse::err(404, "node not found"));
             }
             match doc.group_cards(node, &cards, title.unwrap_or_else(|| "Group".into())) {
-                Some(gid) => (true, ApiResponse::created(json!({ "id": gid }))),
+                Some(gid) => {
+                    if let Some(c) = color {
+                        doc.set_group_color(node, gid, c);
+                    }
+                    (true, ApiResponse::created(json!({ "id": gid })))
+                }
                 None => (false, ApiResponse::err(400, "need at least two existing cards to group")),
             }
         }
@@ -7340,6 +7350,32 @@ mod tests {
         );
     }
 
+    /// `color` is accepted on group CREATE, not only on PATCH. An API user was
+    /// titling groups with a colour legend because create refused the field —
+    /// the route path is exercised so `de_color_opt` runs on the create input.
+    #[test]
+    fn group_create_takes_a_color() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let a = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let b = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let req = route(
+            &Method::Post,
+            &format!("/api/nodes/{nid}/groups"),
+            "",
+            &format!(r##"{{"cards":[{a},{b}],"title":"Legend","color":"#8a4fff"}}"##),
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(dirty);
+        assert_eq!(resp.status, 201, "{}", resp.body);
+        let gid = body_id(&resp);
+        assert_eq!(doc.card_mut(nid, a).unwrap().group, Some(gid));
+        let g = doc.nodes[&nid].groups.iter().find(|g| g.id == gid).unwrap();
+        assert_eq!(g.color, [0x8a, 0x4f, 0xff]);
+        assert_eq!(g.title, "Legend");
+    }
+
     #[test]
     fn card_joins_and_leaves_a_group_via_api() {
         let mut doc = Document::empty();
@@ -7374,7 +7410,7 @@ mod tests {
         // Group two cards.
         let (dirty, resp) = process(
             &mut doc,
-            ApiRequest::CreateGroup { node: nid, cards: vec![a, b], title: Some("Pair".into()) },
+            ApiRequest::CreateGroup { node: nid, cards: vec![a, b], title: Some("Pair".into()), color: None },
         );
         assert!(dirty);
         assert_eq!(resp.status, 201);

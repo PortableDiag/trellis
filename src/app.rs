@@ -8726,7 +8726,7 @@ impl TrellisApp {
                             "POST   /api/nodes/{id}/cards/{cid}/append {text, at?, separator?}   (add to a card without sending its body back)",
                             "POST   /api/nodes/{id}/cards/{cid}/source/write  ·  GET /api/nodes/{id}/cards/{cid}/source/diff   (write a mirrored card back to its file, or diff it. Needs source_write on the card, and agents need Settings -> Agent API -> Let agents write mirrored files back)",
                             "GET    /api/nodes/{id}/cards/{cid}/export?format=markdown|html|json  (ONE card as a note file — markdown writes YAML frontmatter from its properties and tags, so it lands in Obsidian intact)",
-                            "GET    /api/nodes/{id}/groups             (POST create {cards,title?} / PATCH / DELETE {gid})",
+                            "GET    /api/nodes/{id}/groups             (POST create {cards,title?,color?} / PATCH / DELETE {gid})",
                             "POST   /api/nodes/{id}/groups/{gid}/move  {node, pos?}     (the whole group — container, members and id)",
                             "POST   /api/nodes/{id}/autosort",
                             "GET    /api/nodes/{id}/overlaps           (which cards cover each other)",

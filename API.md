@@ -690,7 +690,7 @@ Bundle 2+ cards into a labeled container that moves as one.
 ```
 GET    /api/nodes/{id}/groups            → 200 {"groups":[ {id,title,color,cards:[ids]} ]}   | 404
 
-POST   /api/nodes/{id}/groups            {cards:[ids], title?}
+POST   /api/nodes/{id}/groups            {cards:[ids], title?, color?}
   → 201 {"id":<gid>}   | 400 (need ≥2 existing cards)  | 404
 
 PATCH  /api/nodes/{id}/groups/{gid}      {title?, color?}
@@ -2960,8 +2960,8 @@ curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"body":"updated text"}' $API/nodes/$N
 curl -s -X PATCH -H "X-API-Key: $KEY" \
   -d '{"pos":[360,40],"size":[300,220],"color":[34,197,94]}' $API/nodes/$NID/cards/1
 
-# Group cards 1 and 2 into a container
-curl -s -H "X-API-Key: $KEY" -d '{"cards":[1,2],"title":"Cluster"}' $API/nodes/$NID/groups
+# Group cards 1 and 2 into a container (color is optional, same formats as cards)
+curl -s -H "X-API-Key: $KEY" -d '{"cards":[1,2],"title":"Cluster","color":"#8a4fff"}' $API/nodes/$NID/groups
 
 # Dock card 2 onto card 1 (they now move together)
 curl -s -H "X-API-Key: $KEY" -d '{"anchor":1}' $API/nodes/$NID/cards/2/dock

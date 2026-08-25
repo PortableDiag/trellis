@@ -6,6 +6,16 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.155.0]
+
+### Added
+- **Group create takes `color`.** `POST /api/nodes/{id}/groups` accepts an
+  optional `color` (same formats as everywhere else: array, hex, or name), so
+  a group arrives styled in one call instead of create-then-PATCH. It was
+  already accepted on `PATCH …/groups/{gid}`; the asymmetry surfaced when an
+  API user, refused the field on create, resorted to titling the group with a
+  colour legend.
+
 ## [0.154.0]
 
 ### Added
