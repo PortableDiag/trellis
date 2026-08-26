@@ -1304,6 +1304,14 @@ pub struct TrellisApp {
     /// Plugins found on disk this session, and any manifests that wouldn't parse.
     plugins: Vec<crate::plugins::Plugin>,
     plugin_errors: Vec<String>,
+    /// The repo's release copy of each plugin (`name → version`), read from the
+    /// `plugins/` directory beside the running binary's checkout. A release
+    /// does not install itself, so this is what lets the app *say* an installed
+    /// copy is stale instead of silently executing it. Empty when the binary
+    /// does not run out of a checkout.
+    plugin_available: std::collections::BTreeMap<String, String>,
+    /// Where those release copies live, for the Update button's copy.
+    plugin_source: Option<PathBuf>,
     show_plugins: bool,
     /// The `--data-dir` this instance was launched with, so the plugins folder
     /// can be re-derived after startup.
@@ -1633,6 +1641,7 @@ impl TrellisApp {
             }
             None => (Vec::new(), Vec::new()),
         };
+        let (plugin_source, plugin_available) = crate::plugins::release_versions();
         let (plugin_tx, plugin_rx) = std::sync::mpsc::channel();
         let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
         let (snip_tx, snip_rx) = std::sync::mpsc::channel();
@@ -1841,6 +1850,8 @@ impl TrellisApp {
             grants,
             plugins,
             plugin_errors,
+            plugin_available,
+            plugin_source,
             show_plugins: false,
             startup_data_dir: startup.data_dir.clone(),
             mirror_policy: crate::model::MirrorPolicy::from_key(
@@ -3751,6 +3762,15 @@ impl TrellisApp {
         Ok(())
     }
 
+    /// The release version waiting for an installed plugin — `Some` only when
+    /// the repo's copy is strictly newer than what is running.
+    fn plugin_update_available(&self, p: &crate::plugins::Plugin) -> Option<&str> {
+        self.plugin_available
+            .get(&p.manifest.name)
+            .filter(|v| crate::plugins::version_newer(v, &p.manifest.version))
+            .map(String::as_str)
+    }
+
     fn handle_api_instance(&mut self, req: &api::ApiRequest) -> Option<api::ApiResponse> {
         match req {
             // Answered here rather than in `process` because it reads the
@@ -3835,7 +3855,46 @@ impl TrellisApp {
                 // `GET /api/channels`.
                 "channels": channel_total,
                 "channels_waiting": channels_waiting,
+                // Installed plugins whose release copy in the repo is newer.
+                // Same read-in contract as `stale_claims`: a plugin release
+                // does not install itself, and above zero means go and read
+                // `GET /api/plugins`. Updating is the operator's act
+                // (Tools → Plugins), never an API call — it replaces
+                // executable code.
+                "stale_plugins": self
+                    .plugins
+                    .iter()
+                    .filter(|p| self.plugin_update_available(p).is_some())
+                    .count(),
             })))
+            }
+            api::ApiRequest::Plugins => {
+                let list: Vec<serde_json::Value> = self
+                    .plugins
+                    .iter()
+                    .map(|p| {
+                        let available = self.plugin_available.get(&p.manifest.name);
+                        serde_json::json!({
+                            "name": p.manifest.name,
+                            "title": p.manifest.title,
+                            "version": p.manifest.version,
+                            // The release copy's version, when the repo beside
+                            // this binary carries one — equal means current.
+                            "available": available,
+                            "stale": self.plugin_update_available(p).is_some(),
+                            "approved": self.is_approved(&p.manifest.name),
+                        })
+                    })
+                    .collect();
+                Some(api::ApiResponse::ok(serde_json::json!({
+                    "count": list.len(),
+                    "stale": list.iter().filter(|p| p["stale"] == true).count(),
+                    // Where release copies are compared from; null when the
+                    // binary does not run out of a repo checkout, in which
+                    // case nothing is ever reported stale.
+                    "source": self.plugin_source.as_ref().map(|p| p.display().to_string()),
+                    "plugins": list,
+                })))
             }
             _ => None,
         }
@@ -7338,6 +7397,7 @@ impl TrellisApp {
         let mut to_revoke: Option<String> = None;
         let mut to_save: Option<usize> = None;
         let mut to_cancel: Option<String> = None;
+        let mut to_update: Option<usize> = None;
         let mut rescan = false;
 
         egui::Window::new("Plugins")
@@ -7375,6 +7435,29 @@ impl TrellisApp {
                         ui.strong(&p.manifest.title);
                         if !p.manifest.version.is_empty() {
                             ui.label(egui::RichText::new(format!("v{}", p.manifest.version)).weak());
+                        }
+                        // A plugin release does not install itself: the repo can
+                        // be several versions ahead while this copy keeps
+                        // running, with no symptom beyond a feature that
+                        // silently does nothing. Say so, where the plugin is.
+                        if let Some(avail) = self.plugin_update_available(p).map(str::to_string) {
+                            ui.label(
+                                egui::RichText::new(format!("v{avail} available"))
+                                    .color(egui::Color32::from_rgb(230, 160, 60)),
+                            );
+                            if ui
+                                .add_enabled(!running, egui::Button::new("Update"))
+                                .on_hover_text(
+                                    "Copy the newer code and manifest from the repo's \
+                                     plugins/ folder over this installed copy. Your \
+                                     settings (config.json) and its state (state.json) \
+                                     are kept, and approval survives — a grant is keyed \
+                                     by name.",
+                                )
+                                .clicked()
+                            {
+                                to_update = Some(i);
+                            }
                         }
                         if running {
                             ui.spinner();
@@ -7607,6 +7690,34 @@ impl TrellisApp {
         if let Some(name) = to_cancel {
             self.cancel_plugin(&name);
         }
+        if let Some(i) = to_update {
+            if let Some(p) = self.plugins.get(i).cloned() {
+                match self.plugin_source.as_ref().map(|s| s.join(&p.manifest.name)) {
+                    Some(src) if src.is_dir() => {
+                        match crate::plugins::update_from(&src, &p.dir) {
+                            Ok(files) => {
+                                self.status = format!(
+                                    "Updated {} — {} file(s) copied; settings and state kept",
+                                    p.manifest.title,
+                                    files.len()
+                                );
+                                rescan = true;
+                            }
+                            Err(e) => {
+                                self.status =
+                                    format!("Could not update {}: {e}", p.manifest.title);
+                            }
+                        }
+                    }
+                    _ => {
+                        // The button only shows when a release copy was seen,
+                        // so this is the copy vanishing between frames.
+                        self.status =
+                            format!("No release copy of {} to update from", p.manifest.title);
+                    }
+                }
+            }
+        }
         if rescan {
             if let Some(d) = crate::plugins::plugins_dir(self.startup_data_dir.as_deref()) {
                 let (p, e) = crate::plugins::scan(&d);
@@ -7614,6 +7725,9 @@ impl TrellisApp {
                 self.plugin_errors = e;
                 self.plugin_config.clear();
             }
+            let (src, avail) = crate::plugins::release_versions();
+            self.plugin_source = src;
+            self.plugin_available = avail;
         }
         self.show_plugins = open;
     }
@@ -8632,6 +8746,7 @@ impl TrellisApp {
                         for line in [
                             "GET    /api/health                        (no auth)",
                             "GET    /api/instance   → which document this port serves",
+                        "GET    /api/plugins    → installed plugins; 'stale' counts ones whose repo release copy is newer (stale_plugins on /api/instance is the same count; updating is Tools → Plugins → Update, never the API)",
                         "GET    /api/docs[?section=examples]   → THIS build's API.md, compiled in (any scope; ~100KB whole)",
                             "GET    /api/settings   → theme, canvas toggles, panels, notifications, retention",
                             "POST   /api/settings   {theme?, tree_sort?, minimap?, snap_mode?, grid_mode?, notify_digest?, …}",

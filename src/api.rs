@@ -292,6 +292,12 @@ pub enum ApiRequest {
     // Which document this instance has open (and on which port), so an agent
     // driving several instances can check it has the right one.
     Instance,
+    /// The installed plugins, each with the version the repo's release copy
+    /// carries when that differs — because a plugin release does not install
+    /// itself, and until this existed nothing anywhere said the running copy
+    /// was stale. Read-only: *reporting* the gap is an agent's job, replacing
+    /// executable code is the operator's (Tools → Plugins → Update).
+    Plugins,
     /// Read the app-level settings — the ones that live in the instance's config
     /// rather than in the document.
     SettingsGet,
@@ -788,6 +794,10 @@ pub fn is_scope_neutral(req: &ApiRequest) -> bool {
             // document content at all. A token confined to one basket still has
             // to be able to read how the API works.
             | ApiRequest::Docs { .. }
+            // App metadata, no document content — same footing as `Instance`,
+            // whose read-in role it shares: a stale plugin should be noticed by
+            // whichever agent looks first, however confined.
+            | ApiRequest::Plugins
     )
 }
 
@@ -2578,6 +2588,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             },
         }),
         (Method::Get, ["api", "instance"]) => Ok(ApiRequest::Instance),
+        (Method::Get, ["api", "plugins"]) => Ok(ApiRequest::Plugins),
         (Method::Get, ["api", "settings"]) => Ok(ApiRequest::SettingsGet),
         (Method::Post, ["api", "settings"]) => {
             let v: Value = serde_json::from_str(body)
@@ -4960,6 +4971,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         // the backup config + document file). This is only reached if that
         // interception is ever missed — report it rather than silently no-op.
         ApiRequest::Instance
+        | ApiRequest::Plugins
         | ApiRequest::RenderHtml { .. }
         | ApiRequest::WriteSource { .. }
         | ApiRequest::DiffSource { .. }
@@ -5927,6 +5939,7 @@ mod tests {
     #[test]
     fn only_structural_reads_are_scope_neutral() {
         assert!(is_scope_neutral(&ApiRequest::Instance));
+        assert!(is_scope_neutral(&ApiRequest::Plugins));
         assert!(is_scope_neutral(&ApiRequest::Tree));
         assert!(is_scope_neutral(&ApiRequest::ListNodes));
         // These read card *content* across the whole document, so a confined
@@ -6380,6 +6393,10 @@ mod tests {
         assert!(matches!(
             route(&Method::Get, "/api/instance", "", "").unwrap(),
             ApiRequest::Instance
+        ));
+        assert!(matches!(
+            route(&Method::Get, "/api/plugins", "", "").unwrap(),
+            ApiRequest::Plugins
         ));
         assert!(route(&Method::Get, "/api/bogus", "", "").is_err());
         assert!(route(&Method::Get, "/api/nodes/notanumber", "", "").is_err());

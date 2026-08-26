@@ -6,6 +6,43 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.156.0]
+
+### Added
+- **A stale plugin says so, where somebody will look.** A plugin release does
+  not install itself — plugins run from `<data-dir>/plugins/`, the repo only
+  ships them — so a release could be tagged, changelogged and documented while
+  every instance kept executing the old copy, with no symptom beyond a feature
+  that silently did nothing. That cost a day of link-less notifications once
+  and recurred twice in a week. Now the app compares each installed
+  `plugin.json` version against the release copy in the checkout beside the
+  running binary (found from the binary's own path; nothing is compared, and
+  nothing reported stale, when it runs from anywhere else):
+  - **Tools → Plugins** shows *"v1.2.0 available"* beside a stale plugin, with
+    an **Update** button that copies the release's code and manifest over the
+    installed copy and leaves its `config.json` and `state.json` alone —
+    exactly the update that was done by hand three times. Approval survives,
+    because a grant is keyed by plugin name. Nothing installed is ever deleted.
+  - **`GET /api/plugins`** lists installed plugins with `version`, `available`,
+    `stale` and `approved`; **`stale_plugins` on `/api/instance`** is the
+    count, riding on the call every agent makes first — the same read-in
+    contract as `stale_claims`. Both scope-neutral, read-only. There is
+    deliberately **no update endpoint**: updating replaces executable code,
+    which is exactly what the approval model keeps behind a human act, so the
+    API reports the gap and the operator closes it.
+  - Versions compare numerically per segment (`1.10` beats `1.9`), and stale
+    means strictly newer — an installed copy ahead of the repo is a build not
+    yet released, not a problem. Deliberately **no auto-copy on launch**, for
+    the same reason there is no endpoint.
+
+### Fixed
+- **API.md stopped teaching the channel-miss.** The `/api/instance` section
+  answered `channels_waiting` with `GET /api/channels?agent=<your name>` — the
+  exact name-guess filter that has now made a waiting message go unread twice
+  (nothing ever tells an agent the name a channel was created with). It now
+  says what the prompts already say: read `GET /api/channels` unfiltered; the
+  answering boundary is the document you were started on, never a name.
+
 ## [0.155.2]
 
 ### Fixed

@@ -150,7 +150,7 @@ GET /api/instance
          "path":"/home/you/work.ron","port":7373,"lan":false,
          "lan_host":"192.168.0.101","lan_hosts":["192.168.0.101","100.64.100.6"],
          "nodes":42,"unsaved_changes":false,"stale_claims":0,
-         "channels":2,"channels_waiting":1}
+         "channels":2,"channels_waiting":1,"stale_plugins":0}
 ```
 `document` is the file name (`"untitled"` for a never-saved document) and `path`
 is its full path, or `null` when untitled. `nodes` is the document's node count.
@@ -186,7 +186,10 @@ make first.
 [channel cards](#channels--a-card-that-is-a-conversation) in this document, and
 `channels_waiting` counts those whose **last message came from the operator** —
 somebody typed into a card and no agent has come back to it. Above zero, call
-`GET /api/channels?agent=<your name>` and read them.
+`GET /api/channels` — **unfiltered**: filtering by `?agent=<a name you guessed>`
+is how a waiting message goes unread, because nothing ever told you the name a
+channel was created with. A waiting channel in *this* document is yours to
+answer; the boundary is the port you were started on, never a name.
 
 It is here for the same reason `stale_claims` is: **a channel only works if the
 agent looks**, and until this shipped the only thing that made an agent look was
@@ -200,6 +203,46 @@ Waiting is deliberately **identity-free** — "the operator spoke last", not "yo
 have not replied". This endpoint is scope-neutral and the instance key identifies
 nobody, so there is no reliable *you* to compare against; and the case worth
 catching is the one where nobody at all has answered.
+
+**`stale_plugins` counts installed plugins whose release copy is newer.** A
+plugin release does not install itself: plugins run from `<data-dir>/plugins/`,
+the repo only *ships* them, so a release can be tagged and documented while
+every instance keeps executing the old copy — with no symptom beyond a feature
+that silently does nothing. Above zero, read [`GET /api/plugins`](#plugins) for
+which ones. It rides here for the same reason `stale_claims` does: staleness
+should be noticed at read-in, not after a feature quietly fails.
+
+### Plugins
+
+The installed plugins, each compared against the release copy in the `plugins/`
+directory of the checkout the running binary was built in (found from the
+binary's own path; `source` is `null` — and nothing is ever stale — when the
+binary does not run out of a checkout).
+
+```
+GET /api/plugins
+  → 200 {"count":2,"stale":1,"source":"/path/to/repo/plugins","plugins":[
+         {"name":"notify","title":"Notifications","version":"1.1.0",
+          "available":"1.2.0","stale":true,"approved":true}, …]}
+```
+
+`available` is the release copy's version whenever the repo carries a plugin of
+the same name — equal means current — and `null` for a plugin the repo does not
+ship. `stale` is true only when the release copy is strictly *newer* (numeric,
+per segment: `1.10` beats `1.9`); an installed copy ahead of the repo is a build
+not yet released, not a problem. Only **installed** plugins are listed — a
+release the operator never installed is a choice, not a gap.
+
+**Reading the gap is an agent's job; closing it is the operator's.** There is
+deliberately no update endpoint: updating replaces executable code, which is
+exactly what the approval model exists to keep behind a human act. The operator
+updates from **Tools → Plugins → Update**, which copies the release's code and
+manifest over the installed copy and leaves its `config.json` and `state.json`
+— credentials and state belong to the instance, not the release. Approval
+survives an update, because a grant is keyed by plugin *name*, not file hash.
+
+Scope-neutral, like `/api/instance`: app metadata with no document content, and
+a confined agent should still be able to notice a stale plugin at read-in.
 
 ### Settings
 

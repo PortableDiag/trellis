@@ -276,6 +276,103 @@ pub fn scan(dir: &Path) -> (Vec<Plugin>, Vec<String>) {
     (found, errors)
 }
 
+/// Where plugin *releases* live: the repo's `plugins/` directory, found from the
+/// running binary's own path.
+///
+/// A plugin release does not install itself — plugins run from
+/// `<data-dir>/plugins/`, the repo only *ships* them — so a release can be
+/// tagged, changelogged and documented while every instance keeps executing the
+/// old copy, with no symptom beyond a feature that silently does nothing. That
+/// cost a day of link-less notifications once and recurred twice in a week. The
+/// fix is to *say so*: compare the installed manifest's version against the
+/// repo's and report the gap.
+///
+/// The launch scripts `exec <repo>/target/release/trellis`, so the repo is two
+/// directories above the executable's own. When the binary runs from anywhere
+/// else there is honestly no release copy to compare against, and the answer is
+/// `None` — the staleness report quietly says nothing rather than guessing.
+pub fn source_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // <repo>/target/release/trellis → pop the binary, `release`, `target`.
+    let repo = exe.parent()?.parent()?.parent()?;
+    let dir = repo.join("plugins");
+    dir.is_dir().then_some(dir)
+}
+
+/// The release copies beside this binary, as `name → version`, plus where they
+/// were found. Empty when the binary is not running out of a repo checkout —
+/// then there is nothing to compare against and nothing is reported stale.
+pub fn release_versions() -> (Option<PathBuf>, std::collections::BTreeMap<String, String>) {
+    let Some(dir) = source_dir() else {
+        return (None, Default::default());
+    };
+    let (plugins, _) = scan(&dir);
+    let map = plugins.into_iter().map(|p| (p.manifest.name, p.manifest.version)).collect();
+    (Some(dir), map)
+}
+
+/// Is `available` a newer version than `installed`?
+///
+/// Dotted segments compared numerically (`1.10` beats `1.9`, which a string
+/// compare gets wrong), non-numeric segments as strings, missing segments as
+/// zero. Strictly *newer* — an installed copy ahead of the repo (a build not
+/// yet released) is not stale, and equal is equal.
+pub fn version_newer(available: &str, installed: &str) -> bool {
+    let seg = |s: &str| -> Vec<String> { s.trim().split('.').map(|p| p.trim().to_string()).collect() };
+    let (a, b) = (seg(available), seg(installed));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).map(String::as_str).unwrap_or("0"), b.get(i).map(String::as_str).unwrap_or("0"));
+        match (x.parse::<u64>(), y.parse::<u64>()) {
+            (Ok(m), Ok(n)) if m != n => return m > n,
+            (Ok(_), Ok(_)) => {}
+            _ if x != y => return x > y,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Copy a plugin's code and manifest from `src` into `dst`, leaving the
+/// installed copy's `config.json` and `state.json` alone.
+///
+/// This is exactly the update that was done by hand three times: the release's
+/// files overwrite their installed counterparts, and everything the *instance*
+/// owns — credentials, state, logs, caches — stays. Nothing in `dst` is ever
+/// deleted, so a file the release dropped lingers harmlessly rather than a
+/// file the instance needs vanishing. Subdirectories shipped by the release are
+/// copied whole. Returns the paths written, relative to the plugin directory.
+pub fn update_from(src: &Path, dst: &Path) -> Result<Vec<String>, String> {
+    fn walk(src: &Path, dst: &Path, rel: &Path, out: &mut Vec<String>) -> Result<(), String> {
+        let entries = std::fs::read_dir(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let n = name.to_string_lossy();
+            // The instance's own files, never the release's to overwrite.
+            if rel.as_os_str().is_empty() && (n == "config.json" || n == "state.json") {
+                continue;
+            }
+            let from = e.path();
+            let to = dst.join(&name);
+            let rel_path = rel.join(&name);
+            if from.is_dir() {
+                std::fs::create_dir_all(&to).map_err(|e| format!("{}: {e}", to.display()))?;
+                walk(&from, &to, &rel_path, out)?;
+            } else {
+                std::fs::copy(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
+                // Forward slashes on every platform: these are report lines,
+                // not paths to reopen, and the report should read the same in a
+                // status bar on Windows as in a test on Linux.
+                out.push(rel_path.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        Ok(())
+    }
+    let mut written = Vec::new();
+    walk(src, dst, Path::new(""), &mut written)?;
+    written.sort();
+    Ok(written)
+}
+
 
 /// Read a plugin's `config.json`, or an empty map if it has none yet.
 pub fn read_config(dir: &Path) -> std::collections::BTreeMap<String, String> {
@@ -740,5 +837,58 @@ mod tests {
     fn plugins_live_beside_the_instances_settings() {
         let d = plugins_dir(Some(Path::new("/data/work"))).unwrap();
         assert_eq!(d, PathBuf::from("/data/work/trellis/plugins"));
+    }
+
+    /// Newer means numerically newer per segment — `1.10` beats `1.9`, which is
+    /// exactly what a string compare gets wrong — and the relation is strict:
+    /// equal is not stale, and an installed copy *ahead* of the repo (built,
+    /// not yet released) is not stale either.
+    #[test]
+    fn version_compare_is_numeric_and_strict() {
+        assert!(version_newer("1.1.0", "1.0.0"));
+        assert!(version_newer("1.10", "1.9"));
+        assert!(version_newer("2", "1.9.9"));
+        assert!(!version_newer("1.0.0", "1.0.0"));
+        assert!(!version_newer("1.0.0", "1.1.0"), "installed ahead is not stale");
+        assert!(!version_newer("1.0", "1.0.0"), "missing segments read as zero");
+        // Non-numeric segments fall back to string order rather than panicking.
+        assert!(version_newer("1.0.b", "1.0.a"));
+    }
+
+    /// The update is the hand-done one: release files overwrite their installed
+    /// counterparts, the instance's `config.json` and `state.json` survive, and
+    /// nothing installed is deleted.
+    #[test]
+    fn update_copies_code_and_manifest_but_never_config_or_state() {
+        let base = std::env::temp_dir().join(format!("trellis-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (src, dst) = (base.join("repo"), base.join("installed"));
+        std::fs::create_dir_all(src.join("lib")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("plugin.json"), r#"{"version":"1.1.0"}"#).unwrap();
+        std::fs::write(src.join("run.py"), "new code").unwrap();
+        std::fs::write(src.join("lib").join("util.py"), "helper").unwrap();
+        // A release must never ship these, but if one does, the installed
+        // copies still win: they are the instance's, not the release's.
+        std::fs::write(src.join("config.json"), "{\"leak\":true}").unwrap();
+        std::fs::write(dst.join("plugin.json"), r#"{"version":"1.0.0"}"#).unwrap();
+        std::fs::write(dst.join("run.py"), "old code").unwrap();
+        std::fs::write(dst.join("config.json"), "{\"api_key\":\"kept\"}").unwrap();
+        std::fs::write(dst.join("state.json"), "{\"last_run\":1}").unwrap();
+
+        let written = update_from(&src, &dst).unwrap();
+        assert_eq!(
+            written,
+            vec!["lib/util.py".to_string(), "plugin.json".into(), "run.py".into()]
+        );
+        assert_eq!(std::fs::read_to_string(dst.join("run.py")).unwrap(), "new code");
+        assert_eq!(std::fs::read_to_string(dst.join("lib/util.py")).unwrap(), "helper");
+        assert!(std::fs::read_to_string(dst.join("plugin.json")).unwrap().contains("1.1.0"));
+        assert_eq!(
+            std::fs::read_to_string(dst.join("config.json")).unwrap(),
+            "{\"api_key\":\"kept\"}"
+        );
+        assert_eq!(std::fs::read_to_string(dst.join("state.json")).unwrap(), "{\"last_run\":1}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
