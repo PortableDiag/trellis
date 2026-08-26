@@ -204,9 +204,14 @@ pub enum CanvasAction {
     /// and the card is where you edit it.
     RevealElsewhere(crate::model::NodeId, CardId),
     /// Leave the cube for the card's real workspace: resolve the clicked card's
-    /// `![[#id]]` embed target (a cube slice is an embed card), turn Depth off,
-    /// and reveal the target where it actually lives.
+    /// `![[#id]]` embed target (a cube slice is an embed card), turn Cube mode
+    /// off, and reveal the target where it actually lives.
     GotoCard(CardId),
+    /// Toggle Cube mode — the compressed-workspace-cube VIEWER. A separate
+    /// mode, deliberately not a change to Depth: Depth and Time were in daily
+    /// use, and Cube's reading gestures (plain-click isolate, z flight) would
+    /// take inputs those modes already spoke for.
+    ToggleCubeMode,
     ResizeCard(CardId, egui::Vec2),
     /// Resize a card to fit its content (right-click → Fit to content).
     FitCard(CardId),
@@ -409,17 +414,24 @@ pub fn ui(
     // Whether this basket is currently out on the desktop as real windows.
     desktop_mode: bool,
     depth_mode: bool,
+    // Cube mode: the compressed-workspace-cube VIEWER. Same projection as
+    // Depth, plus the reading gestures — plain-click isolate with its popup,
+    // z flight, culling past the camera. A separate mode on purpose: Depth and
+    // Time keep exactly their own behavior.
+    cube_mode: bool,
     // `eye`: camera offset from straight-on, in screen pixels — the orbit.
     // Alt+drag moves it; Reset view returns it to zero.
     eye: &mut egui::Vec2,
-    // `cam`: camera position along z, in world units — the dolly. Zero is the
-    // classic straight-on view; positive moves the camera toward the near
-    // cards, so flying forward walks through the slices of a cube.
+    // `cam`: camera position along z, in world units — Cube mode's dolly. Zero
+    // is the classic straight-on view; positive moves the camera toward the
+    // near cards, so flying forward walks through the slices of a cube.
     // Ctrl+Shift+scroll and PageUp/PageDown move it; Reset view zeroes it.
+    // Depth mode ignores it entirely.
     cam: &mut f32,
-    // The card click-to-isolate has singled out: it draws normally, every other
-    // card drops to a ghost so the volume can be read INTO without rearranging
-    // it. Click another card to switch, empty canvas or Esc to clear.
+    // The card Cube mode's click-to-isolate has singled out: it draws
+    // normally, every other card drops to a ghost so the volume can be read
+    // INTO without rearranging it. Click another card to switch, empty canvas
+    // or Esc to clear.
     isolate: &mut Option<CardId>,
     time_mode: bool,
     // `projected`: cards that live in another basket but are live on this day,
@@ -430,6 +442,11 @@ pub fn ui(
     selection: &HashSet<CardId>,
 ) -> Vec<CanvasAction> {
     let mut actions = Vec::new();
+    // The projection is shared: Cube draws through the same camera Depth does.
+    // The dolly is not — Depth must render exactly as it did before Cube
+    // existed, whatever camera position a Cube session left in this basket.
+    let volume = depth_mode || cube_mode;
+    let dolly = if cube_mode { *cam } else { 0.0 };
 
     let (canvas_rect, canvas_resp) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -495,7 +512,7 @@ pub fn ui(
     // claimed this drag.
     // Alt+drag is the camera orbit, so it must not pan as well — otherwise the
     // two cancel out into a plain pan and depth looks like it does nothing.
-    let orbiting = depth_mode && ui.input(|i| i.modifiers.alt);
+    let orbiting = volume && ui.input(|i| i.modifiers.alt);
     // **Shift+drag is a selection box, not a pan.** Asked for directly: draw a
     // rectangle round some cards, then drag them as one. Shift rather than a
     // mode, because a mode is a thing to remember to leave — and plain drag has
@@ -550,7 +567,7 @@ pub fn ui(
     // Alt+drag orbits the camera. It has to be read from raw input rather than
     // from `canvas_resp`, because the drag usually starts over a card — which is
     // exactly where you want to grab when you are trying to look *around* it.
-    if depth_mode {
+    if volume {
         let (alt, down, delta) = ui.input(|i| {
             (i.modifiers.alt, i.pointer.primary_down(), i.pointer.delta())
         });
@@ -560,6 +577,8 @@ pub fn ui(
             *eye = (*eye + delta).clamp(egui::vec2(-600.0, -600.0), egui::vec2(600.0, 600.0));
             ui.ctx().request_repaint();
         }
+    }
+    if cube_mode {
         // Fly through z. Ctrl+Shift+scroll is continuous travel; PageUp/PageDown
         // step one cube slice at a time. This is the camera moving, not a card:
         // every card's effective depth shifts together, so a far slice can be
@@ -605,8 +624,8 @@ pub fn ui(
     // otherwise pushing a card away drags the whole basket with it. And
     // Ctrl+Shift+scroll is the camera fly, which egui would otherwise hand to
     // zoom_delta — so the zoom path stands down whenever Shift rides along.
-    let depth_scroll = depth_mode && ui.input(|i| i.modifiers.shift_only());
-    let depth_fly = depth_mode && ui.input(|i| i.modifiers.command && i.modifiers.shift);
+    let depth_scroll = volume && ui.input(|i| i.modifiers.shift_only());
+    let depth_fly = cube_mode && ui.input(|i| i.modifiers.command && i.modifiers.shift);
     if canvas_resp.hovered() && !minimap_over && !depth_scroll && !depth_fly {
         view.translation += ui.input(|i| i.smooth_scroll_delta);
         if zoom_enabled {
@@ -981,7 +1000,7 @@ pub fn ui(
     // later widgets interaction priority, so a click lands on the *nearest* card
     // under the pointer rather than the last one in document order.
     let mut order: Vec<usize> = (0..node.cards.len()).collect();
-    if depth_mode {
+    if volume {
         order.sort_by(|&a, &b| {
             node.cards[a]
                 .z
@@ -1009,7 +1028,7 @@ pub fn ui(
             // Nearest first: reverse of the draw order.
             if let Some(&i) = order.iter().rev().find(|&&i| {
                 let c = &node.cards[i];
-                let t = depth_transform(to_screen, canvas_rect.center() + *eye, c.z, *cam, depth_mode);
+                let t = depth_transform(to_screen, canvas_rect.center() + *eye, c.z, dolly, volume);
                 t.mul_rect(world_rect(c)).contains(pp)
             }) {
                 let c = &node.cards[i];
@@ -1026,7 +1045,7 @@ pub fn ui(
     // *view* of a card, and offering an edit here would be the second place a
     // task can be changed — which is the exact thing this design exists to avoid.
     for (home, home_path, card) in projected {
-        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, *cam, depth_mode);
+        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, dolly, volume);
         let r = t.mul_rect(world_rect(card));
         if !canvas_rect.intersects(r) {
             continue;
@@ -1103,16 +1122,16 @@ pub fn ui(
         // Flying forward walks PAST a slice: a card between the cull plane and
         // the camera is skipped, not smeared across the viewport on its way
         // through the lens.
-        if depth_mode && card.z - *cam > CULL_NEAR * CAMERA_DIST {
+        if cube_mode && card.z - dolly > CULL_NEAR * CAMERA_DIST {
             env.card_rects.remove(&card.id);
             continue;
         }
-        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, *cam, depth_mode);
+        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, dolly, volume);
         env.card_rects.insert(card.id, t.mul_rect(world_rect(card)));
         // Every card but the isolated one drops to a ghost: present enough to
         // keep the volume's shape, faint enough to read the chosen card INTO
         // the volume — and still clickable, which is how isolation moves on.
-        let ghost = depth_mode && isolate.is_some() && *isolate != Some(card.id);
+        let ghost = cube_mode && isolate.is_some() && *isolate != Some(card.id);
         if ghost {
             ui.set_opacity(0.14);
         }
@@ -1442,6 +1461,25 @@ pub fn ui(
                         {
                             actions.push(CanvasAction::ToggleTimeMode);
                         }
+                        // Cube is a VIEWER, not another axis: same projection as
+                        // Depth, plus the reading gestures. Turning it on turns
+                        // Depth and Time off (and vice versa) — the reading
+                        // gestures claim inputs those modes use for editing, so
+                        // they cannot share a canvas.
+                        if ui
+                            .selectable_label(cube_mode, "Cube")
+                            .on_hover_text(
+                                "Cube: read a compressed-workspace cube. Click a card to \
+                                 isolate it (everything else ghosts) and choose Go to card / \
+                                 View only this; Ctrl+Shift+scroll or PageUp/PageDown fly \
+                                 through the slices; Esc steps back out.\n\nA separate mode \
+                                 from Depth — Depth and Time keep their own behavior, and \
+                                 turning Cube on turns them off.",
+                            )
+                            .clicked()
+                        {
+                            actions.push(CanvasAction::ToggleCubeMode);
+                        }
                     });
                 if selection.len() >= 2
                     && ui
@@ -1534,12 +1572,12 @@ pub fn ui(
             });
         });
 
-    // Click-to-isolate, and its two-way popup (Depth mode only). Clicking a
+    // Click-to-isolate, and its two-way popup (Cube mode only). Clicking a
     // card ghosts every other card so the volume can be read INTO without
     // rearranging it — the operator's fix for a cube whose overlaid day layouts
     // occlude each other. The popup offers the two exits: leave the cube for
     // the card's real workspace, or stay and frame just this card.
-    if depth_mode {
+    if cube_mode {
         // The popup is drawn (and its rect taken) BEFORE the hit-test, so a
         // click on its buttons never re-targets the isolation underneath it.
         let mut popup_rect: Option<egui::Rect> = None;
@@ -1601,8 +1639,10 @@ pub fn ui(
             }
         }
         // Plain click: isolate the nearest card under the pointer, clear on
-        // empty canvas. Modifier clicks keep their existing meanings
-        // (Ctrl+click selects), and a drag is not a click.
+        // empty canvas. A plain click is safe to claim HERE because Cube is a
+        // reading mode that exists for it — v0.157.0 hung this on Depth's
+        // plain click and broke a mode in daily use, which is why Cube is a
+        // separate mode at all. Modifier clicks keep their meanings.
         let (clicked, no_mods, pp) = ui.input(|i| {
             (i.pointer.primary_clicked(), i.modifiers.is_none(), i.pointer.latest_pos())
         });
@@ -1641,8 +1681,10 @@ pub fn ui(
     ui.painter().text(
         canvas_rect.left_bottom() + egui::vec2(8.0, -6.0),
         egui::Align2::LEFT_BOTTOM,
-        if depth_mode {
-            "click a card: isolate (read into the volume) · ctrl+shift+scroll / pgup·pgdn: fly through Z · drag title: move · ctrl+scroll: zoom · shift+scroll over a card: slide it in Z · alt+drag: look around · Reset view: straight on"
+        if cube_mode {
+            "click a card: isolate (read into the volume) · ctrl+shift+scroll / pgup·pgdn: fly through Z · ctrl+scroll: zoom · alt+drag: look around · esc: un-isolate · Reset view: straight on"
+        } else if depth_mode {
+            "drag title: move · ctrl+scroll: zoom · shift+scroll over a card: slide it in Z · alt+drag: look around (parallax) · Reset view: straight on"
         } else {
             "double-click: text card · right-click: any card · drag title: move · ctrl+click: select · ctrl+a: select all · ctrl+c/v/d: copy/paste/duplicate · del: delete · drag group header: move group · ctrl+scroll: zoom"
         },
@@ -5818,6 +5860,12 @@ mod tests {
         eye: egui::Vec2,
         cam: f32,
         isolate: Option<CardId>,
+        /// Which volume mode the frame runs in: (depth, cube). The split IS
+        /// the feature under test — Cube's reading gestures must exist in
+        /// Cube mode and must NOT leak into Depth, which shipped first and
+        /// broke a mode in daily use.
+        depth: bool,
+        cube: bool,
     }
 
     impl Headless {
@@ -5845,7 +5893,17 @@ mod tests {
                 eye: egui::Vec2::ZERO,
                 cam: 0.0,
                 isolate: None,
+                depth: false,
+                cube: true,
             }
+        }
+
+        /// The same basket viewed in classic Depth mode.
+        fn depth() -> Self {
+            let mut h = Self::cube();
+            h.depth = true;
+            h.cube = false;
+            h
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) -> Vec<CanvasAction> {
@@ -5875,6 +5933,7 @@ mod tests {
             let node = doc.nodes.get(&self.node_id).unwrap();
             let (view, eye, cam, isolate) =
                 (&mut self.view, &mut self.eye, &mut self.cam, &mut self.isolate);
+            let (depth, cube) = (self.depth, self.cube);
             let mut md = CommonMarkCache::default();
             let mut tex = crate::images::TextureCache::default();
             let mut card_rects = HashMap::new();
@@ -5921,7 +5980,8 @@ mod tests {
                         false,
                         false,
                         false,
-                        true, // depth_mode
+                        depth,
+                        cube,
                         eye,
                         cam,
                         isolate,
@@ -6005,6 +6065,38 @@ mod tests {
             },
         ]);
         assert_eq!(h.cam, before, "a plain wheel pans, it does not fly");
+    }
+
+    /// THE regression the mode split exists for, pinned: Depth mode behaves
+    /// exactly as it did before Cube existed. v0.157.0 hung Cube's reading
+    /// gestures on Depth itself and the operator reported it within the hour —
+    /// every ordinary click in a mode in daily use ghosted the basket.
+    #[test]
+    fn depth_mode_keeps_its_old_behavior_cube_gestures_do_not_leak() {
+        let mut h = Headless::depth();
+        h.frame(vec![]);
+        // A plain click on a card neither isolates nor raises the popup.
+        h.frame(click_at(egui::pos2(200.0, 200.0)));
+        assert_eq!(h.isolate, None, "no isolation in Depth mode");
+        // PageDown does not fly the camera.
+        h.frame(vec![key(egui::Key::PageDown)]);
+        assert_eq!(h.cam, 0.0, "no z flight in Depth mode");
+        // And a dolly left behind by a Cube session is ignored: the projection
+        // must render as if it were zero (pinned at the transform level by
+        // flat_mode_ignores_the_dolly and the `dolly` gate in ui()).
+        let mods = egui::Modifiers { command: true, ctrl: true, shift: true, ..Default::default() };
+        h.frame_mods(
+            vec![
+                egui::Event::PointerMoved(egui::pos2(400.0, 300.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -120.0),
+                    modifiers: mods,
+                },
+            ],
+            mods,
+        );
+        assert_eq!(h.cam, 0.0, "ctrl+shift+wheel does not dolly in Depth mode");
     }
 
     #[test]

@@ -139,6 +139,7 @@ const FIND_OPEN_KEY: &str = "find_open";
 const BACKLINKS_OPEN_KEY: &str = "backlinks_open";
 const CLAIMS_OPEN_KEY: &str = "claims_open";
 const DEPTH_MODE_KEY: &str = "depth_mode";
+const CUBE_MODE_KEY: &str = "cube_mode";
 const TIME_MODE_KEY: &str = "time_mode";
 const MINIMAP_KEY: &str = "minimap";
 /// Desktop notifications. Off by default: an app that starts popping up
@@ -1245,6 +1246,11 @@ pub struct TrellisApp {
     /// Independent of `snap_mode`, which wins on any axis it claims.
     grid_mode: bool,
     depth_mode: bool,
+    /// Cube mode — the compressed-workspace-cube viewer. A separate mode from
+    /// Depth/Time on purpose: its reading gestures (plain-click isolate, z
+    /// flight) claim inputs those modes already use for editing. Mutually
+    /// exclusive with them.
+    cube_mode: bool,
     time_mode: bool,
     /// Path this build registered as the link handler, if any — shown in
     /// Settings so "why doesn't my link open?" has an answer on screen.
@@ -1522,6 +1528,11 @@ impl TrellisApp {
             .storage
             .and_then(|s| s.get_string(GRID_MODE_KEY))
             .map(|s| s == "true")
+            .unwrap_or(false);
+        let cube_mode = cc
+            .storage
+            .and_then(|s| s.get_string(CUBE_MODE_KEY))
+            .map(|v| v == "true")
             .unwrap_or(false);
         let depth_mode = cc
             .storage
@@ -1835,6 +1846,7 @@ impl TrellisApp {
             snap_mode,
             grid_mode,
             depth_mode,
+            cube_mode,
             time_mode,
             url_scheme_registered,
             card_clipboard: None,
@@ -3658,6 +3670,7 @@ impl TrellisApp {
             "snap_mode": self.snap_mode,
             "grid_mode": self.grid_mode,
             "depth_mode": self.depth_mode,
+            "cube_mode": self.cube_mode,
             "time_mode": self.time_mode,
             "notify_digest": self.notify_digest,
             "notify_agent": self.notify_agent,
@@ -3697,7 +3710,7 @@ impl TrellisApp {
                     .map(|s| crate::tree::TreeSort::from_key(s).key() == s)
                     .unwrap_or(false),
                 "minimap" | "dock_mode" | "snap_mode" | "grid_mode" | "depth_mode"
-                | "time_mode"
+                | "cube_mode" | "time_mode"
                 | "notify_digest" | "notify_agent" | "zoom_enabled" | "autosave"
                 | "stick_windows" | "agenda_open" | "agenda_show_done" | "kanban_open"
                 | "kanban_show_done" | "tags_open" | "claims_open" | "find_open"
@@ -3715,7 +3728,7 @@ impl TrellisApp {
                 _ => {
                     return Err(format!(
                         "unknown setting {k:?}. Settable: theme, tree_sort, minimap, \
-                         dock_mode, snap_mode, grid_mode, depth_mode, time_mode, \
+                         dock_mode, snap_mode, grid_mode, depth_mode, cube_mode, time_mode, \
                          notify_digest, \
                          notify_agent, zoom_enabled, autosave, stick_windows, agenda_open, \
                          agenda_show_done, agenda_project, kanban_open, kanban_show_done, \
@@ -3744,6 +3757,17 @@ impl TrellisApp {
                 "grid_mode" => self.grid_mode = v.as_bool().unwrap_or(false),
                 "depth_mode" => self.depth_mode = v.as_bool().unwrap_or(false),
                 "time_mode" => self.time_mode = v.as_bool().unwrap_or(false),
+                // Same exclusivity the toolbar enforces: Cube's reading
+                // gestures cannot share a canvas with Depth/Time's editing.
+                "cube_mode" => {
+                    self.cube_mode = v.as_bool().unwrap_or(false);
+                    if self.cube_mode {
+                        self.depth_mode = false;
+                        self.time_mode = false;
+                    } else {
+                        self.depth_isolate = None;
+                    }
+                }
                 "notify_digest" => self.notify_digest = v.as_bool().unwrap_or(false),
                 "notify_agent" => self.notify_agent = v.as_bool().unwrap_or(false),
                 "zoom_enabled" => self.zoom_enabled = v.as_bool().unwrap_or(false),
@@ -4973,6 +4997,7 @@ impl TrellisApp {
             | CanvasAction::ToggleSnapMode
             | CanvasAction::ToggleGridMode
             | CanvasAction::ToggleDepthMode
+            | CanvasAction::ToggleCubeMode
             | CanvasAction::ToggleTimeMode
             | CanvasAction::FollowLink(_)
             | CanvasAction::RevealElsewhere(..)
@@ -6002,8 +6027,29 @@ impl TrellisApp {
                 CanvasAction::ToggleDockMode => self.dock_mode = !self.dock_mode,
                 CanvasAction::ToggleSnapMode => self.snap_mode = !self.snap_mode,
                 CanvasAction::ToggleGridMode => self.grid_mode = !self.grid_mode,
-                CanvasAction::ToggleDepthMode => self.depth_mode = !self.depth_mode,
-                CanvasAction::ToggleTimeMode => self.time_mode = !self.time_mode,
+                CanvasAction::ToggleDepthMode => {
+                    self.depth_mode = !self.depth_mode;
+                    if self.depth_mode {
+                        self.cube_mode = false;
+                    }
+                }
+                CanvasAction::ToggleCubeMode => {
+                    self.cube_mode = !self.cube_mode;
+                    if self.cube_mode {
+                        // A viewer, not another axis: the reading gestures
+                        // claim inputs Depth and Time use for editing.
+                        self.depth_mode = false;
+                        self.time_mode = false;
+                    } else {
+                        self.depth_isolate = None;
+                    }
+                }
+                CanvasAction::ToggleTimeMode => {
+                    self.time_mode = !self.time_mode;
+                    if self.time_mode {
+                        self.cube_mode = false;
+                    }
+                }
 
                 CanvasAction::FollowLink(target) => {
                     // Same resolution as a link in a text card: `#id` is a card,
@@ -6028,7 +6074,7 @@ impl TrellisApp {
                         .filter(|t| self.doc.locate_card(*t).is_some())
                         .unwrap_or(cid);
                     let home = self.doc.locate_card(target).unwrap_or(node);
-                    self.depth_mode = false;
+                    self.cube_mode = false;
                     self.depth_isolate = None;
                     self.jump_to_card(ctx, home, target);
                 }
@@ -7214,6 +7260,25 @@ impl TrellisApp {
                                 "A card with start:: and due:: appears in every day between \
                                  them — the same card, not a copy.",
                             );
+                        if ui
+                            .checkbox(&mut self.cube_mode, "Cube — read a compressed workspace")
+                            .on_hover_text(
+                                "The cube viewer: click a card to isolate it, fly through the \
+                                 slices with PageUp/PageDown. A separate mode — turning it on \
+                                 turns Depth and Time off, and their behavior is unchanged.",
+                            )
+                            .changed()
+                        {
+                            if self.cube_mode {
+                                self.depth_mode = false;
+                                self.time_mode = false;
+                            } else {
+                                self.depth_isolate = None;
+                            }
+                        }
+                        if self.depth_mode || self.time_mode {
+                            self.cube_mode = false;
+                        }
                         ui.separator();
                         let both = self.depth_mode && self.time_mode;
                         if ui
@@ -8551,6 +8616,27 @@ impl TrellisApp {
                              as the same card — one id, one truth, edited in any of them. Off, a \
                              day shows only the cards that live in it, exactly as now.",
                         );
+                    if ui
+                        .checkbox(&mut self.cube_mode, "Cube — read a compressed workspace")
+                        .on_hover_text(
+                            "The cube viewer: click a card to isolate it (everything else \
+                             ghosts) with Go to card / View only this, and fly through the \
+                             slices with Ctrl+Shift+scroll or PageUp/PageDown. A separate mode \
+                             — Depth and Time keep their own behavior, and turning Cube on \
+                             turns them off.",
+                        )
+                        .changed()
+                    {
+                        if self.cube_mode {
+                            self.depth_mode = false;
+                            self.time_mode = false;
+                        } else {
+                            self.depth_isolate = None;
+                        }
+                    }
+                    if self.depth_mode || self.time_mode {
+                        self.cube_mode = false;
+                    }
                     // Colour emoji come from a font on the machine, not from the
                     // app: say which one, because "still grey" otherwise looks like
                     // a bug rather than a missing font.
@@ -12066,6 +12152,7 @@ impl eframe::App for TrellisApp {
                         self.grid_mode,
                         self.desktop_mode == Some(sel),
                         self.depth_mode,
+                        self.cube_mode,
                         &mut eye,
                         &mut cam,
                         &mut iso,
@@ -12242,6 +12329,7 @@ impl eframe::App for TrellisApp {
         storage.set_string(SNAP_MODE_KEY, self.snap_mode.to_string());
         storage.set_string(GRID_MODE_KEY, self.grid_mode.to_string());
         storage.set_string(DEPTH_MODE_KEY, self.depth_mode.to_string());
+        storage.set_string(CUBE_MODE_KEY, self.cube_mode.to_string());
         storage.set_string(TIME_MODE_KEY, self.time_mode.to_string());
         storage.set_string(AGENDA_OPEN_KEY, self.agenda_open.to_string());
         storage.set_string(AGENDA_DONE_KEY, self.agenda_show_done.to_string());

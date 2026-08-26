@@ -6,6 +6,25 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.158.0]
+
+### Changed
+- **Cube is its own mode — Depth and Time get their exact old behavior back.**
+  v0.157.0 hung the cube's reading gestures on Depth mode itself, and the
+  operator reported it within the hour: a plain click already means something
+  on every card (select, place the caret, work), Depth+Time was in daily use,
+  and suddenly every ordinary click ghosted the basket and raised a popup.
+  The cube was always meant to be a **new** feature, not a change to existing
+  ones. So there is now a **Cube** toggle beside Depth and Time (and a
+  `cube_mode` setting on `GET/POST /api/settings`): same projection as Depth,
+  plus the reading gestures — plain-click isolate with *Go to card* / *View
+  only this*, Ctrl+Shift+scroll / PageUp·PageDown flight, culling past the
+  camera. Cube is mutually exclusive with Depth and Time (its gestures claim
+  inputs they use for editing); *Go to card* exits Cube and leaves Depth
+  untouched. In Depth mode: no isolation, no popup, no flight, and any dolly a
+  Cube session left in a basket is ignored — pinned by a headless regression
+  test that clicks and flies in Depth mode and asserts nothing happens.
+
 ## [0.157.0]
 
 ### Added
