@@ -6,6 +6,29 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.156.1]
+
+### Fixed
+- **The channel boundary is the project subtree, never a name — and API.md now
+  says so** (operator ruling, 2026-08-26, after a Trellis session picked up a
+  message meant for another project's agent). A document can hold several
+  projects' workspaces, each with its own channel, and a waiting channel
+  belongs to the agent of the project whose subtree holds it: answer only the
+  channels under your project's root (`GET /api/channels?project=<node id>`,
+  or `node_path` in the listing) and report another project's waiting channel
+  rather than draining it — a reply from the wrong agent clears the flag under
+  the one the message was for. On a single-project document this collapses to
+  the older port-is-the-boundary rule. `channels_waiting` on `/api/instance`
+  stays document-wide, so the docs now warn a positive count may be somebody
+  else's channel.
+- **API.md stopped recommending the `claude` answerer plugin.** It told
+  readers to install and approve it while the plugin is installed nowhere and
+  never ran once (removed from both instances 2026-08-22). The section now
+  says what actually answers a channel — a running agent at its checkpoints,
+  or immediately via a background `/api/wait` watcher — states that a watcher
+  dies with its session, and keeps the plugin only as the design reference for
+  the `roots` project mapping, which is the same boundary rule.
+
 ## [0.156.0]
 
 ### Added

@@ -186,10 +186,21 @@ make first.
 [channel cards](#channels--a-card-that-is-a-conversation) in this document, and
 `channels_waiting` counts those whose **last message came from the operator** —
 somebody typed into a card and no agent has come back to it. Above zero, call
-`GET /api/channels` — **unfiltered**: filtering by `?agent=<a name you guessed>`
-is how a waiting message goes unread, because nothing ever told you the name a
-channel was created with. A waiting channel in *this* document is yours to
-answer; the boundary is the port you were started on, never a name.
+`GET /api/channels` — **unfiltered by name**: filtering by `?agent=<a name you
+guessed>` is how a waiting message goes unread, because nothing ever told you
+the name a channel was created with.
+
+**The boundary is the project subtree, never a name.** A document can hold
+several projects' workspaces, each with its own channel, and a waiting channel
+belongs to the agent of the project whose subtree holds it. Answer only the
+channels under *your* project's root — `?project=<its node id>` filters
+structurally, or read `node_path` in the listing — and **report** another
+project's waiting channel to the operator rather than draining it: a reply from
+the wrong project's agent clears the flag under the agent the message was for.
+On a document that holds a single project this collapses to the older rule (the
+port is the boundary). Note `channels_waiting` is **document-wide**, so on a
+shared document a positive count may be somebody else's channel — look before
+concluding it is yours.
 
 It is here for the same reason `stale_claims` is: **a channel only works if the
 agent looks**, and until this shipped the only thing that made an agent look was
@@ -1726,17 +1737,28 @@ A channel card carries **`channel`** in its own JSON — on `GET /api/cards/{cid
 and in every basket listing — so a client can tell a conversation from an ordinary
 card without a second request, exactly as `view` does for a saved view.
 
+**`?project=<node id>` is the filter an agent should use**: it scopes the
+listing to one project's subtree, which is the answering boundary (see
+[`channels_waiting`](#instance) — answer your project's channels, report the
+rest). `?agent=` matches `participants` and is for a name you were *assigned*,
+never one you guessed.
+
 
 **In the app:** card menu → **Make a channel…**, and on Android the card reader's
 **Channel…** — same fields, same rules. The API is not the only way in.
 
-**Something has to answer.** A channel that only an already-running agent ever
-reads is worse than a terminal — you would have to go and say *"I replied"* in
-order to be replied to. The **`claude` plugin** (`plugins/claude/`) is the waker:
-Trellis runs it **on-change**, it asks `GET /api/channels?agent=claude` what is
-addressed to it, and for anything that is not its own it runs `claude -p` and
-posts the answer with `say`. Install it, approve it, and the card can start a turn
-by itself.
+**Something has to answer — and in practice that is a running agent, not a
+plugin.** A message waits until an agent looks: at its checkpoints, or the
+moment it lands if the agent's harness runs an [`/api/wait`](#live-updates-long-poll)
+watcher in a background task (loop the long-poll, check `channels_waiting` after
+each return, end the task when it goes above zero so the completion notification
+wakes the session; restart it after answering and after a harness timeout). **A
+watcher dies with its session** — nothing watches between sessions, so a message
+sent while no agent is running waits for the next one. The **`claude` plugin**
+(`plugins/claude/`) was an attempt to answer with no session running; it stays
+in the repo as a reference but is installed nowhere — it never ran once in
+practice, and its design is kept here because the `roots` mapping below is the
+same project-boundary rule agents follow.
 
 **It answers in the channel's own project directory.** `node_path`'s first segment
 is the root basket, and the plugin's **`roots`** setting maps those names to
