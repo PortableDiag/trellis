@@ -6904,6 +6904,33 @@ impl Document {
 /// that reads as a wall.
 const EMBED_DEPTH: usize = 4;
 
+/// The card the first `![[#id]]` embed in `text` shows, if any.
+///
+/// Built for **Go to card** on a cube slice: a compressed-workspace cube is made
+/// of embed cards, so "the workspace where the card actually is" means the embed
+/// *target's* home, not the slice card's. An item reference (`![[#12^7]]`) still
+/// names card 12 — a line lives on its card. Returns `None` for a body with no
+/// embed, in which case the card itself is the destination.
+pub fn first_embed_target(text: &str) -> Option<CardId> {
+    let mut rest = text;
+    while let Some(at) = rest.find("![[") {
+        let after = &rest[at + 3..];
+        if let Some(end) = after.find("]]") {
+            let inner = after[..end].split('|').next().unwrap_or("").trim();
+            if let Some(t) = inner.strip_prefix('#') {
+                let card_part = t.trim().split('^').next().unwrap_or("").trim();
+                if let Ok(cid) = card_part.parse::<CardId>() {
+                    return Some(cid);
+                }
+            }
+            rest = &after[end + 2..];
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
 impl Document {
     /// Expand `![[#id]]` **embeds** into the text of the cards they name.
     ///
@@ -8506,6 +8533,20 @@ mod tests {
         assert_eq!(doc.locate_card(c), Some(a));
         doc.move_card_to_node(a, c, b, None);
         assert_eq!(doc.locate_card(c), Some(b));
+    }
+
+    /// A cube slice is an embed card, so "go to the card" must resolve the embed
+    /// target — and an item reference still names the card its line lives on.
+    #[test]
+    fn first_embed_target_reads_the_id_and_ignores_what_is_not_an_embed() {
+        assert_eq!(first_embed_target("Mon 8/25 · results\n![[#1391]]"), Some(1391));
+        assert_eq!(first_embed_target("![[#1391^766]] one line"), Some(1391));
+        assert_eq!(first_embed_target("![[#12|shown as]] alias form"), Some(12));
+        // A plain link is not an embed, and prose about the syntax is not one.
+        assert_eq!(first_embed_target("see [[#1391]]"), None);
+        assert_eq!(first_embed_target("an embed looks like `![[#id]]`"), None);
+        assert_eq!(first_embed_target("![[Basket]] is a basket embed, not a card"), None);
+        assert_eq!(first_embed_target(""), None);
     }
 
     #[test]

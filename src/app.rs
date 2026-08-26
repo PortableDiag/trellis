@@ -1047,6 +1047,13 @@ pub struct TrellisApp {
     /// same reason the pan/zoom is: an angle you chose to read one arrangement
     /// should not follow you into another.
     eyes: HashMap<NodeId, egui::Vec2>,
+    /// Camera z (the dolly) per basket — Ctrl+Shift+scroll / PageUp·PageDown in
+    /// Depth mode flies through the slices of a cube. Per basket for the same
+    /// reason the orbit is.
+    cams: HashMap<NodeId, f32>,
+    /// The card click-to-isolate singled out in Depth mode, with the basket it
+    /// was isolated in — so it cannot follow you into another basket.
+    depth_isolate: Option<(NodeId, CardId)>,
     md_cache: CommonMarkCache,
     tex_cache: TextureCache,
     renaming: Option<(NodeId, String)>,
@@ -1672,6 +1679,8 @@ impl TrellisApp {
             selected,
             views: HashMap::new(),
             eyes: HashMap::new(),
+            cams: HashMap::new(),
+            depth_isolate: None,
             md_cache: CommonMarkCache::default(),
             tex_cache: TextureCache::default(),
             renaming: None,
@@ -4967,6 +4976,7 @@ impl TrellisApp {
             | CanvasAction::ToggleTimeMode
             | CanvasAction::FollowLink(_)
             | CanvasAction::RevealElsewhere(..)
+            | CanvasAction::GotoCard(_)
             | CanvasAction::SaveAsTemplate(_)
             | CanvasAction::UpdateTemplate(..)
             | CanvasAction::DeleteTemplate(_)
@@ -6005,6 +6015,23 @@ impl TrellisApp {
                     // the same path the Agenda and a [[#id]] link already use.
                     self.jump_to_card(ctx, home, cid);
                 }
+                CanvasAction::GotoCard(cid) => {
+                    // Leave the cube for the card's real workspace. A cube slice
+                    // is an embed card, so the destination is the embed target's
+                    // home in flat mode; a card with no embed is its own
+                    // destination. A dangling embed falls back to the slice —
+                    // jumping nowhere would read as a dead button.
+                    let target = self
+                        .doc
+                        .card(node, cid)
+                        .and_then(|c| crate::model::first_embed_target(&crate::model::searchable_body(c)))
+                        .filter(|t| self.doc.locate_card(*t).is_some())
+                        .unwrap_or(cid);
+                    let home = self.doc.locate_card(target).unwrap_or(node);
+                    self.depth_mode = false;
+                    self.depth_isolate = None;
+                    self.jump_to_card(ctx, home, target);
+                }
                 CanvasAction::SetZ(cid, z) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {
                         c.z = z;
@@ -6156,7 +6183,10 @@ impl TrellisApp {
                     self.views.insert(node, TSTransform::IDENTITY);
                     // Reset view means *straight on* as well as unzoomed —
                     // otherwise an orbit you cannot undo is one click away.
+                    // The dolly and the isolation are part of the same promise.
                     self.eyes.insert(node, egui::Vec2::ZERO);
+                    self.cams.insert(node, 0.0);
+                    self.depth_isolate = None;
                 }
             }
         }
@@ -12018,6 +12048,11 @@ impl eframe::App for TrellisApp {
                         Vec::new()
                     };
                     let mut eye = self.eyes.get(&sel).copied().unwrap_or_default();
+                    let mut cam = self.cams.get(&sel).copied().unwrap_or(0.0);
+                    let mut iso = match self.depth_isolate {
+                        Some((n, c)) if n == sel => Some(c),
+                        _ => None,
+                    };
                     let node = self.doc.nodes.get(&sel).unwrap();
                     let actions = canvas::ui(
                         ui,
@@ -12032,6 +12067,8 @@ impl eframe::App for TrellisApp {
                         self.desktop_mode == Some(sel),
                         self.depth_mode,
                         &mut eye,
+                        &mut cam,
+                        &mut iso,
                         self.time_mode,
                         &projected,
                         &mut env,
@@ -12045,7 +12082,9 @@ impl eframe::App for TrellisApp {
                     if framing_card.is_none() && basket_target.is_none() {
                         self.views.insert(sel, view);
                         self.eyes.insert(sel, eye);
+                        self.cams.insert(sel, cam);
                     }
+                    self.depth_isolate = iso.map(|c| (sel, c));
                     let pointer_down = ui.input(|i| i.pointer.any_down());
                     self.apply_canvas(ctx, sel, actions, pointer_down);
                 } else {

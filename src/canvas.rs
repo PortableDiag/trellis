@@ -203,6 +203,10 @@ pub enum CanvasAction {
     /// the only interaction a projection offers, because it is a view of a card
     /// and the card is where you edit it.
     RevealElsewhere(crate::model::NodeId, CardId),
+    /// Leave the cube for the card's real workspace: resolve the clicked card's
+    /// `![[#id]]` embed target (a cube slice is an embed card), turn Depth off,
+    /// and reveal the target where it actually lives.
+    GotoCard(CardId),
     ResizeCard(CardId, egui::Vec2),
     /// Resize a card to fit its content (right-click → Fit to content).
     FitCard(CardId),
@@ -408,6 +412,15 @@ pub fn ui(
     // `eye`: camera offset from straight-on, in screen pixels — the orbit.
     // Alt+drag moves it; Reset view returns it to zero.
     eye: &mut egui::Vec2,
+    // `cam`: camera position along z, in world units — the dolly. Zero is the
+    // classic straight-on view; positive moves the camera toward the near
+    // cards, so flying forward walks through the slices of a cube.
+    // Ctrl+Shift+scroll and PageUp/PageDown move it; Reset view zeroes it.
+    cam: &mut f32,
+    // The card click-to-isolate has singled out: it draws normally, every other
+    // card drops to a ghost so the volume can be read INTO without rearranging
+    // it. Click another card to switch, empty canvas or Esc to clear.
+    isolate: &mut Option<CardId>,
     time_mode: bool,
     // `projected`: cards that live in another basket but are live on this day,
     // with the basket they actually live in. Empty unless Time is on and this
@@ -547,12 +560,54 @@ pub fn ui(
             *eye = (*eye + delta).clamp(egui::vec2(-600.0, -600.0), egui::vec2(600.0, 600.0));
             ui.ctx().request_repaint();
         }
+        // Fly through z. Ctrl+Shift+scroll is continuous travel; PageUp/PageDown
+        // step one cube slice at a time. This is the camera moving, not a card:
+        // every card's effective depth shifts together, so a far slice can be
+        // brought to the front row and read without touching the arrangement.
+        //
+        // The wheel form is pointer-scoped (the pointer must be over the canvas,
+        // read from raw_scroll_delta because Ctrl+wheel is otherwise routed into
+        // zoom_delta); the key form is window-scoped — keys need no pointer, only
+        // that no editor holds the caret, which owns PageUp/PageDown for its own
+        // scrolling. Deliberately NOT gated on `canvas_resp.hovered()`: hover on
+        // the background response goes false over any card, and flying is
+        // exactly the move you make while looking at a card.
+        let pointer_over = ui
+            .input(|i| i.pointer.latest_pos())
+            .is_some_and(|p| canvas_rect.contains(p))
+            && !minimap_over;
+        let typing = ui.ctx().memory(|m| m.focused().is_some());
+        let fly = ui.input(|i| {
+            let mut dz = 0.0f32;
+            if pointer_over && i.modifiers.command && i.modifiers.shift {
+                let d = i.raw_scroll_delta;
+                dz += (if d.y.abs() >= d.x.abs() { d.y } else { d.x }) * 2.0;
+            }
+            if !typing {
+                if i.key_pressed(egui::Key::PageUp) {
+                    dz += FLY_STEP;
+                }
+                if i.key_pressed(egui::Key::PageDown) {
+                    dz -= FLY_STEP;
+                }
+            }
+            dz
+        });
+        if fly != 0.0 {
+            // A margin past the card range on both ends, so the camera can back
+            // off behind the deepest slice and fly past the nearest one.
+            *cam = (*cam + fly).clamp(Z_MIN - 400.0, Z_MAX + 400.0);
+            ui.ctx().request_repaint();
+        }
     }
 
     // Shift+scroll is the Z gesture in depth mode, so it must not also pan —
-    // otherwise pushing a card away drags the whole basket with it.
+    // otherwise pushing a card away drags the whole basket with it. And
+    // Ctrl+Shift+scroll is the camera fly, which egui would otherwise hand to
+    // zoom_delta — so the zoom path stands down whenever Shift rides along.
     let depth_scroll = depth_mode && ui.input(|i| i.modifiers.shift_only());
-    if canvas_resp.hovered() && !minimap_over && !depth_scroll {
+    let depth_fly = depth_mode && ui.input(|i| i.modifiers.command && i.modifiers.shift);
+    if canvas_resp.hovered() && !minimap_over && !depth_scroll && !depth_fly {
         view.translation += ui.input(|i| i.smooth_scroll_delta);
         if zoom_enabled {
             let zd = ui.input(|i| i.zoom_delta());
@@ -954,7 +1009,7 @@ pub fn ui(
             // Nearest first: reverse of the draw order.
             if let Some(&i) = order.iter().rev().find(|&&i| {
                 let c = &node.cards[i];
-                let t = depth_transform(to_screen, canvas_rect.center() + *eye, c.z, depth_mode);
+                let t = depth_transform(to_screen, canvas_rect.center() + *eye, c.z, *cam, depth_mode);
                 t.mul_rect(world_rect(c)).contains(pp)
             }) {
                 let c = &node.cards[i];
@@ -971,7 +1026,7 @@ pub fn ui(
     // *view* of a card, and offering an edit here would be the second place a
     // task can be changed — which is the exact thing this design exists to avoid.
     for (home, home_path, card) in projected {
-        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, depth_mode);
+        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, *cam, depth_mode);
         let r = t.mul_rect(world_rect(card));
         if !canvas_rect.intersects(r) {
             continue;
@@ -1031,10 +1086,36 @@ pub fn ui(
             card.title
         ));
     }
+    // The isolated card draws last — nearest slice or not, it must sit on top
+    // of the ghosts, and being last also hands it pointer priority.
+    if let Some(iso) = *isolate {
+        match order.iter().position(|&i| node.cards[i].id == iso) {
+            Some(pos) => {
+                let idx = order.remove(pos);
+                order.push(idx);
+            }
+            // Deleted out from under the isolation.
+            None => *isolate = None,
+        }
+    }
     for &i in &order {
         let card = &node.cards[i];
-        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, depth_mode);
+        // Flying forward walks PAST a slice: a card between the cull plane and
+        // the camera is skipped, not smeared across the viewport on its way
+        // through the lens.
+        if depth_mode && card.z - *cam > CULL_NEAR * CAMERA_DIST {
+            env.card_rects.remove(&card.id);
+            continue;
+        }
+        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, *cam, depth_mode);
         env.card_rects.insert(card.id, t.mul_rect(world_rect(card)));
+        // Every card but the isolated one drops to a ghost: present enough to
+        // keep the volume's shape, faint enough to read the chosen card INTO
+        // the volume — and still clickable, which is how isolation moves on.
+        let ghost = depth_mode && isolate.is_some() && *isolate != Some(card.id);
+        if ghost {
+            ui.set_opacity(0.14);
+        }
         card_ui(
             ui,
             card,
@@ -1047,6 +1128,9 @@ pub fn ui(
             grid_mode,
             &mut actions,
         );
+        if ghost {
+            ui.set_opacity(1.0);
+        }
     }
 
     // While a header is being dragged, repaint it on top of the cards so you can
@@ -1450,12 +1534,115 @@ pub fn ui(
             });
         });
 
+    // Click-to-isolate, and its two-way popup (Depth mode only). Clicking a
+    // card ghosts every other card so the volume can be read INTO without
+    // rearranging it — the operator's fix for a cube whose overlaid day layouts
+    // occlude each other. The popup offers the two exits: leave the cube for
+    // the card's real workspace, or stay and frame just this card.
+    if depth_mode {
+        // The popup is drawn (and its rect taken) BEFORE the hit-test, so a
+        // click on its buttons never re-targets the isolation underneath it.
+        let mut popup_rect: Option<egui::Rect> = None;
+        if let Some(iso) = *isolate {
+            if let (Some(card), Some(r)) = (
+                node.cards.iter().find(|c| c.id == iso),
+                env.card_rects.get(&iso).copied(),
+            ) {
+                let pos = egui::pos2(
+                    r.left().clamp(canvas_rect.left() + 8.0, canvas_rect.right() - 240.0),
+                    (r.top() - 40.0).clamp(canvas_rect.top() + 8.0, canvas_rect.bottom() - 40.0),
+                );
+                let area = egui::Area::new(ui.id().with(("isolate_popup", iso)))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(pos)
+                    .show(ui.ctx(), |aui| {
+                        egui::Frame::popup(aui.style()).show(aui, |aui| {
+                            aui.horizontal(|aui| {
+                                if aui
+                                    .button("Go to card")
+                                    .on_hover_text(
+                                        "Leave the cube: open the workspace this card \
+                                         actually lives in, in regular flat mode. A cube \
+                                         slice is an embed, so this follows the ![[#id]] \
+                                         to the original.",
+                                    )
+                                    .clicked()
+                                {
+                                    actions.push(CanvasAction::GotoCard(iso));
+                                    *isolate = None;
+                                }
+                                if aui
+                                    .button("View only this")
+                                    .on_hover_text(
+                                        "Stay in the cube: fly the camera to this card and \
+                                         frame it for reading. Everything else stays a \
+                                         ghost — click another card to move on, Esc or \
+                                         empty canvas to step back out.",
+                                    )
+                                    .clicked()
+                                {
+                                    *cam = card.z;
+                                    let scale = (canvas_rect.width() * 0.72 / card.size.x.max(1.0))
+                                        .min(canvas_rect.height() * 0.8 / card.size.y.max(1.0))
+                                        .clamp(MIN_ZOOM, MAX_ZOOM);
+                                    view.scaling = scale;
+                                    let center = card.pos + card.size / 2.0;
+                                    view.translation = (canvas_rect.center() - canvas_rect.min)
+                                        - view.scaling * center.to_vec2();
+                                    ui.ctx().request_repaint();
+                                }
+                                if aui.button("✕").on_hover_text("Un-isolate (Esc)").clicked() {
+                                    *isolate = None;
+                                }
+                            });
+                        });
+                    });
+                popup_rect = Some(area.response.rect);
+            }
+        }
+        // Plain click: isolate the nearest card under the pointer, clear on
+        // empty canvas. Modifier clicks keep their existing meanings
+        // (Ctrl+click selects), and a drag is not a click.
+        let (clicked, no_mods, pp) = ui.input(|i| {
+            (i.pointer.primary_clicked(), i.modifiers.is_none(), i.pointer.latest_pos())
+        });
+        if clicked && no_mods && !minimap_over {
+            if let Some(pp) = pp {
+                let over_popup = popup_rect.is_some_and(|r| r.contains(pp));
+                if canvas_rect.contains(pp) && !over_popup {
+                    // Nearest first — reverse of the draw order, same rule the
+                    // Z gesture uses.
+                    let hit = order
+                        .iter()
+                        .rev()
+                        .map(|&i| &node.cards[i])
+                        .find(|c| env.card_rects.get(&c.id).is_some_and(|r| r.contains(pp)))
+                        .map(|c| c.id);
+                    match hit {
+                        Some(id) => {
+                            if *isolate != Some(id) {
+                                *isolate = Some(id);
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                        None => *isolate = None,
+                    }
+                }
+            }
+        }
+        if isolate.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            *isolate = None;
+        }
+    } else {
+        *isolate = None;
+    }
+
     // Hint line (screen space).
     ui.painter().text(
         canvas_rect.left_bottom() + egui::vec2(8.0, -6.0),
         egui::Align2::LEFT_BOTTOM,
         if depth_mode {
-            "drag title: move · ctrl+scroll: zoom · shift+scroll over a card: slide it in Z · alt+drag: look around (parallax) · Reset view: straight on"
+            "click a card: isolate (read into the volume) · ctrl+shift+scroll / pgup·pgdn: fly through Z · drag title: move · ctrl+scroll: zoom · shift+scroll over a card: slide it in Z · alt+drag: look around · Reset view: straight on"
         } else {
             "double-click: text card · right-click: any card · drag title: move · ctrl+click: select · ctrl+a: select all · ctrl+c/v/d: copy/paste/duplicate · del: delete · drag group header: move group · ctrl+scroll: zoom"
         },
@@ -1483,6 +1670,16 @@ pub const PULSE_PERIOD_S: f64 = 1.8;
 /// to read, and both are ways of losing a card that the user cannot easily undo.
 pub const Z_MIN: f32 = -1600.0;
 pub const Z_MAX: f32 = 1200.0;
+
+/// One PageUp/PageDown of camera travel, in world z units. Sized to the slice
+/// spacing the cube recipe uses (~380 per day), so one press is one day.
+pub const FLY_STEP: f32 = 380.0;
+
+/// How close to the camera plane a card may come before it is culled instead of
+/// drawn. Past this the projection blows a card up beyond legibility on its way
+/// to passing *through* the viewer — flying forward should walk past a slice,
+/// not smear it across the screen.
+const CULL_NEAR: f32 = 0.88;
 
 /// Which cards a selection box encloses.
 ///
@@ -1515,7 +1712,11 @@ pub(crate) fn cards_in(node: &crate::model::Node, world: egui::Rect) -> Vec<Card
 /// axis-aligned card is laid out at its *effective* size, so its text is
 /// rasterized for the size it is drawn at instead of being stretched. That is the
 /// mitigation for the one real cost of depth on a monitor.
-fn depth_transform(base: TSTransform, focus: egui::Pos2, z: f32, depth_mode: bool) -> TSTransform {
+fn depth_transform(base: TSTransform, focus: egui::Pos2, z: f32, cam: f32, depth_mode: bool) -> TSTransform {
+    // `cam` is the camera's own z — the dolly. What projection sees is the
+    // card's depth *relative to the camera*, which is what lets flying forward
+    // bring a far slice to the front row at full scale.
+    let z = z - cam;
     if !depth_mode || z == 0.0 {
         return base;
     }
@@ -1526,8 +1727,12 @@ fn depth_transform(base: TSTransform, focus: egui::Pos2, z: f32, depth_mode: boo
     // why a static perspective looks like nothing more than "some cards are
     // bigger".
 
-    // Positive z is toward the viewer, so it shortens the camera distance.
-    let s = (CAMERA_DIST / (CAMERA_DIST - z.clamp(Z_MIN, Z_MAX))).clamp(0.05, 20.0);
+    // Positive z is toward the viewer, so it shortens the camera distance. The
+    // near bound tracks the cull plane rather than Z_MAX, because with a dolly
+    // the *relative* z legitimately exceeds the stored range — a card the
+    // camera has flown up to should be big, and past the cull plane it is
+    // skipped rather than drawn.
+    let s = (CAMERA_DIST / (CAMERA_DIST - z.min(CULL_NEAR * CAMERA_DIST))).clamp(0.05, 20.0);
     // Scale the whole mapping about `focus`, the point on screen the camera looks
     // through: p -> focus + (base*p - focus) * s, which is still a TSTransform.
     TSTransform {
@@ -5569,6 +5774,255 @@ mod tests {
 
     fn range(r: &CCursorRange) -> (usize, usize) {
         (r.secondary.index, r.primary.index) // (min, max) as built by ccrange
+    }
+
+    /// Flying the camera to a slice's own z must render that slice at plain
+    /// scale — that is what makes "View only this" an exact framing, and what
+    /// makes travel read as walking through the volume rather than zooming.
+    #[test]
+    fn dollying_to_a_cards_z_renders_it_straight_on() {
+        let base = TSTransform::IDENTITY;
+        let focus = egui::pos2(400.0, 300.0);
+        // A deep cube slice, small when viewed from the origin…
+        let far = depth_transform(base, focus, -1400.0, 0.0, true);
+        assert!(far.scaling < 1.0, "a far slice draws smaller: {}", far.scaling);
+        // …is exactly base scale once the camera stands on its plane…
+        let arrived = depth_transform(base, focus, -1400.0, -1400.0, true);
+        assert_eq!(arrived, base);
+        // …and a slice now BEHIND the camera projects past the cull plane,
+        // which the draw loop skips rather than smearing through the lens.
+        let behind_z = 0.0f32;
+        let cam = -CULL_NEAR * CAMERA_DIST - 100.0;
+        assert!(behind_z - cam > CULL_NEAR * CAMERA_DIST, "cull condition catches it");
+    }
+
+    /// Depth off ignores the dolly entirely — a flat basket must look exactly
+    /// as it always has, whatever camera state a Depth session left behind.
+    #[test]
+    fn flat_mode_ignores_the_dolly() {
+        let base = TSTransform::IDENTITY;
+        let t = depth_transform(base, egui::pos2(0.0, 0.0), 300.0, 900.0, false);
+        assert_eq!(t, base);
+    }
+
+    /// Drive the REAL canvas through a headless egui frame with synthetic
+    /// input. This exists because the fly gesture shipped its first draft
+    /// gated on `canvas_resp.hovered()` and looked completely healthy in code
+    /// review — input plumbing can only be tested by running a frame, and
+    /// running a frame must not require the operator's display.
+    struct Headless {
+        ctx: egui::Context,
+        doc: crate::model::Document,
+        node_id: crate::model::NodeId,
+        view: TSTransform,
+        eye: egui::Vec2,
+        cam: f32,
+        isolate: Option<CardId>,
+    }
+
+    impl Headless {
+        /// Three cards at three depths, like a small cube: deep (-1400),
+        /// middle (-700), and one at z = 0 sitting at world (120,120)–(420,270).
+        fn cube() -> Self {
+            use crate::model::CardKind;
+            let mut doc = crate::model::Document::empty();
+            let node_id = doc.add_node(None, "Cube".into());
+            let zs = [0.0f32, -700.0, -1400.0];
+            for (i, z) in zs.iter().enumerate() {
+                let cid = doc
+                    .add_card(node_id, egui::pos2(120.0 + 500.0 * i as f32, 120.0), CardKind::Text)
+                    .unwrap();
+                let c = doc.card_mut(node_id, cid).unwrap();
+                c.size = egui::vec2(300.0, 150.0);
+                c.z = *z;
+                c.title = format!("slice {i}");
+            }
+            Headless {
+                ctx: egui::Context::default(),
+                doc,
+                node_id,
+                view: TSTransform::IDENTITY,
+                eye: egui::Vec2::ZERO,
+                cam: 0.0,
+                isolate: None,
+            }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> Vec<CanvasAction> {
+            self.frame_mods(events, egui::Modifiers::NONE)
+        }
+
+        /// `modifiers` models the held keyboard state (what egui-winit puts in
+        /// `RawInput::modifiers`) — per-event modifiers alone do NOT reach
+        /// `InputState::modifiers`, which is exactly what the first version of
+        /// this harness got wrong.
+        fn frame_mods(
+            &mut self,
+            events: Vec<egui::Event>,
+            modifiers: egui::Modifiers,
+        ) -> Vec<CanvasAction> {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                modifiers,
+                ..Default::default()
+            };
+            let mut actions = Vec::new();
+            let doc = &self.doc;
+            let node = doc.nodes.get(&self.node_id).unwrap();
+            let (view, eye, cam, isolate) =
+                (&mut self.view, &mut self.eye, &mut self.cam, &mut self.isolate);
+            let mut md = CommonMarkCache::default();
+            let mut tex = crate::images::TextureCache::default();
+            let mut card_rects = HashMap::new();
+            let masters = HashMap::new();
+            let mut inline_sent = std::collections::HashSet::new();
+            let mut channel_drafts = HashMap::new();
+            let on_desktop = HashSet::new();
+            let node_id = self.node_id;
+            // The FullOutput is shapes-to-paint, which a headless test has no
+            // screen for — the assertions read the state the frame mutated.
+            let _ = self.ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |cui| {
+                    let mut env = Env {
+                        doc,
+                        node: node_id,
+                        md: &mut md,
+                        tex: &mut tex,
+                        card_rects: &mut card_rects,
+                        templates: &[],
+                        masters: &masters,
+                        card_plugins: &[],
+                        inline_sent: &mut inline_sent,
+                        inline_epoch: 0,
+                        focus_card: None,
+                        highlight_card: None,
+                        highlight_until: 0.0,
+                        focus_group: None,
+                        highlight_group: None,
+                        channel_drafts: &mut channel_drafts,
+                        minimap: false,
+                        style: CardStyle::Normal,
+                        glow: false,
+                        on_desktop: &on_desktop,
+                        as_window: false,
+                    };
+                    actions = ui(
+                        cui,
+                        node,
+                        "Cube",
+                        view,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        true, // depth_mode
+                        eye,
+                        cam,
+                        isolate,
+                        false,
+                        &[],
+                        &mut env,
+                        &HashSet::new(),
+                    );
+                });
+            });
+            actions
+        }
+    }
+
+    fn key(k: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn click_at(pos: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    #[test]
+    fn pageup_and_pagedown_fly_the_camera() {
+        let mut h = Headless::cube();
+        h.frame(vec![]); // warm-up: layout settles, canvas rect exists
+        h.frame(vec![key(egui::Key::PageDown)]);
+        assert_eq!(h.cam, -FLY_STEP, "PageDown flies one slice deeper");
+        h.frame(vec![key(egui::Key::PageUp)]);
+        h.frame(vec![key(egui::Key::PageUp)]);
+        assert_eq!(h.cam, FLY_STEP, "PageUp flies back and past");
+    }
+
+    #[test]
+    fn ctrl_shift_scroll_flies_and_plain_scroll_does_not() {
+        let mut h = Headless::cube();
+        h.frame(vec![]);
+        let mid = egui::pos2(400.0, 300.0);
+        let mods = egui::Modifiers { command: true, ctrl: true, shift: true, ..Default::default() };
+        h.frame_mods(
+            vec![
+                egui::Event::PointerMoved(mid),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -120.0),
+                    modifiers: mods,
+                },
+            ],
+            mods,
+        );
+        // egui folds a shift+wheel onto the x axis; the axis-pick has to read
+        // whichever axis carries it — the same trap the per-card Z gesture hit.
+        assert_eq!(h.cam, -240.0, "ctrl+shift+wheel dollies (2x the raw delta)");
+        let before = h.cam;
+        h.frame(vec![
+            egui::Event::PointerMoved(mid),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -120.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        assert_eq!(h.cam, before, "a plain wheel pans, it does not fly");
+    }
+
+    #[test]
+    fn click_isolates_switches_and_clears() {
+        let mut h = Headless::cube();
+        h.frame(vec![]);
+        // The z = 0 card sits at world (120,120)–(420,270); view is identity.
+        h.frame(click_at(egui::pos2(200.0, 200.0)));
+        let first = h.isolate;
+        assert!(first.is_some(), "clicking a card isolates it");
+        // Empty canvas: far corner, no card there.
+        h.frame(click_at(egui::pos2(60.0, 550.0)));
+        assert_eq!(h.isolate, None, "clicking empty canvas steps back out");
+        // Isolate again, then Esc.
+        h.frame(click_at(egui::pos2(200.0, 200.0)));
+        assert!(h.isolate.is_some());
+        h.frame(vec![key(egui::Key::Escape)]);
+        assert_eq!(h.isolate, None, "Esc un-isolates");
     }
 
     #[test]

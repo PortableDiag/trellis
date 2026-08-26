@@ -6,7 +6,42 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
-## [0.156.1]
+## [0.157.0]
+
+### Added
+- **Depth mode learns to be read, not just looked at** — the three pieces the
+  compressed-workspace-cube prototype (card 2113) said were missing before a
+  cube could be a productivity tool rather than a neat visual:
+  - **Click-to-isolate.** Click a card in Depth mode and every other card drops
+    to a ghost, so the volume can be read *into* without rearranging it. Click
+    another card (ghosts stay clickable) to move on; Esc or empty canvas steps
+    back out. The isolated card draws on top of the ghosts whatever slice it is
+    in. Modifier clicks keep their old meanings — Ctrl+click still selects.
+  - **The isolate popup: two exits.** *Go to card* leaves the cube for the
+    card's real workspace in regular flat mode — a cube slice is an `![[#id]]`
+    embed, so it follows the embed to the original (a card with no embed is its
+    own destination). *View only this* stays in the cube: the camera flies to
+    the card's slice and frames it for reading — checking a week of daily test
+    results is click, read, click the next.
+  - **Fly through z.** Ctrl+Shift+scroll is continuous camera travel;
+    PageUp/PageDown step one cube slice (380 world units). This is a dolly, not
+    a zoom: every card's effective depth shifts together, so a far slice
+    arrives at the front row at full scale, and a slice flown *past* is culled
+    rather than smeared across the viewport. Reset view zeroes it along with
+    the orbit, and the camera state is per basket, like pan and orbit.
+  - The Depth hint line names all of it, and PageUp/PageDown stand down while a
+    card's editor has the caret.
+  - **The canvas gained a headless input harness.** The fly gesture's first
+    draft was gated on `canvas_resp.hovered()` — which goes false over any
+    card — and looked completely healthy in code review; input plumbing can
+    only be tested by running a frame, and running a frame must not require a
+    display. The tests now drive the real canvas through `egui::Context::run`
+    with synthetic keys, wheel and clicks, and pin all of it: PageUp/PageDown
+    fly, Ctrl+Shift+wheel dollies (including egui folding a shift+wheel onto
+    the x axis — the same trap the per-card Z gesture once hit), a plain wheel
+    still pans, click isolates/switches/clears, Esc exits. One harness gotcha
+    worth keeping: per-event modifiers never reach `InputState::modifiers` —
+    the held-key state rides on `RawInput::modifiers`.
 
 ### Fixed
 - **The channel boundary is the project subtree, never a name — and API.md now
