@@ -6,6 +6,18 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.161.0]
+
+### Fixed
+- **`PATCH /api/nodes/{id}` honors `null` to clear `color` and `bg`.** Reported
+  by an API user: `{"bg": null}` answered 200 and changed nothing — a plain
+  `Option` collapsed "clear it" into "field absent", so the documented clear
+  was inexpressible and the response dishonest. Both fields now use the same
+  double-Option rule as a card's `view`: a color sets, `null` clears (no tag /
+  back to the theme default), absent leaves it unchanged. Bad values are still
+  a 400 at parse time. Minor bump because a caller that was sending `null` and
+  relying on the no-op now gets the clear it asked for.
+
 ## [0.160.5]
 
 ### Fixed

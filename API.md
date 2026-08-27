@@ -610,8 +610,10 @@ even when the body is short.
 ```
 PATCH /api/nodes/{id}              {title?, color?, bg?, feed?}
   → 200 {"id":<id>}    | 404
-        color: tag color; bg: basket background color — both setting only
-        (can't clear via API; use the app's Default to reset)
+        color: tag color; bg: basket background color. A color sets it,
+        an explicit null CLEARS it (no tag / back to the theme default),
+        an absent field leaves it unchanged — the same null-vs-absent rule
+        as a card's view. Until v0.161.0 null was a silent 200 no-op.
         feed: read the basket as a FEED — one computed column, newest card
         first (by creation order, deliberately not `touched`, so editing an
         old entry never teleports it to the top). For baskets where time is

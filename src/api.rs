@@ -71,7 +71,7 @@ pub enum ApiRequest {
     /// a response could only be resolved by walking every basket.
     LocateCard(u64),
     CreateNode { parent: Option<NodeId>, title: String },
-    UpdateNode { id: NodeId, title: Option<String>, color: Option<[u8; 3]>, bg: Option<[u8; 3]>, feed: Option<bool> },
+    UpdateNode { id: NodeId, title: Option<String>, color: Option<Option<[u8; 3]>>, bg: Option<Option<[u8; 3]>>, feed: Option<bool> },
     DeleteNode(NodeId),
     // Reorder / reparent a node in the tree.
     MoveNode { id: NodeId, mv: MoveNodeInput },
@@ -1322,11 +1322,14 @@ struct ExpandAllInput {
 struct UpdateNodeInput {
     #[serde(default)]
     title: Option<String>,
-    #[serde(default, deserialize_with = "de_color_opt")]
-    color: Option<[u8; 3]>,
-    /// Basket background color. A color sets it; `null`/absent leaves it unchanged.
-    #[serde(default, deserialize_with = "de_color_opt")]
-    bg: Option<[u8; 3]>,
+    /// Tag color. A color sets it, `null` clears the tag, absent leaves it
+    /// unchanged — double-Option, like `view`, so the clear is expressible.
+    #[serde(default, deserialize_with = "de_color_clear")]
+    color: Option<Option<[u8; 3]>>,
+    /// Basket background color. A color sets it, `null` clears it back to the
+    /// theme default, absent leaves it unchanged.
+    #[serde(default, deserialize_with = "de_color_clear")]
+    bg: Option<Option<[u8; 3]>>,
     /// Read this basket as a feed — newest card first in one computed column,
     /// the stored arrangement untouched. Absent leaves it unchanged.
     #[serde(default)]
@@ -2969,6 +2972,20 @@ where
     Ok(Some(Option::<NodeId>::deserialize(d)?))
 }
 
+/// Deserialize a present, clearable color into `Some(..)` so the handler can
+/// tell a clear (`null` → `Some(None)`) from an omitted field (`None`) — the
+/// same double-Option rule as `view` and `parent`. With plain `de_color_opt`
+/// both collapsed to `None`, which turned the documented clear into a silent
+/// 200 no-op (reported by an API user against `PATCH /api/nodes/{id}
+/// {"bg": null}`). Bad values still fail here, so a typo stays a 400.
+fn de_color_clear<'de, D>(d: D) -> Result<Option<Option<[u8; 3]>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Value::deserialize(d)?;
+    color_from_value(&v).map(Some).map_err(serde::de::Error::custom)
+}
+
 fn color_from_value(v: &Value) -> Result<Option<[u8; 3]>, String> {
     match v {
         Value::Null => Ok(None),
@@ -3246,10 +3263,10 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     n.title = t;
                 }
                 if let Some(c) = color {
-                    n.color = Some(c);
+                    n.color = c;
                 }
                 if let Some(c) = bg {
-                    n.bg = Some(c);
+                    n.bg = c;
                 }
                 if let Some(f) = feed {
                     n.feed = f;
@@ -6510,6 +6527,50 @@ mod tests {
         let (_, got) = process(&mut doc, ApiRequest::GetNode(id));
         let v: Value = serde_json::from_str(&got.body).unwrap();
         assert_eq!(v["bg"], json!([239, 68, 68]));
+    }
+
+    #[test]
+    fn node_patch_null_clears_bg_and_color_while_absent_leaves_them() {
+        // Reported by an API user: {"bg": null} answered 200 and changed
+        // nothing, because a plain Option collapsed "clear" into "absent".
+        // The read model documents both fields as [r,g,b] or null, so null
+        // must be expressible as a write.
+        let mut doc = Document::empty();
+        let id = doc.add_node(None, "n".into());
+        doc.nodes.get_mut(&id).unwrap().color = Some([1, 2, 3]);
+        doc.nodes.get_mut(&id).unwrap().bg = Some([4, 5, 6]);
+
+        // Absent fields leave both alone.
+        let i: UpdateNodeInput = serde_json::from_str(r#"{"title":"t"}"#).unwrap();
+        assert!(i.color.is_none() && i.bg.is_none());
+        let (_, resp) = process(
+            &mut doc,
+            ApiRequest::UpdateNode { id, title: i.title, color: i.color, bg: i.bg, feed: None },
+        );
+        assert_eq!(resp.status, 200);
+        assert_eq!(doc.nodes[&id].color, Some([1, 2, 3]));
+        assert_eq!(doc.nodes[&id].bg, Some([4, 5, 6]));
+
+        // Explicit nulls clear both, and the response is an honest 200.
+        let i: UpdateNodeInput = serde_json::from_str(r#"{"color":null,"bg":null}"#).unwrap();
+        assert_eq!(i.color, Some(None));
+        assert_eq!(i.bg, Some(None));
+        let (dirty, resp) = process(
+            &mut doc,
+            ApiRequest::UpdateNode { id, title: None, color: i.color, bg: i.bg, feed: None },
+        );
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        assert_eq!(doc.nodes[&id].color, None);
+        assert_eq!(doc.nodes[&id].bg, None);
+        let (_, got) = process(&mut doc, ApiRequest::GetNode(id));
+        let v: Value = serde_json::from_str(&got.body).unwrap();
+        assert_eq!(v["color"], Value::Null);
+        assert_eq!(v["bg"], Value::Null);
+
+        // A bad value is still a 400 at parse time, not a silent anything.
+        assert!(serde_json::from_str::<UpdateNodeInput>(r#"{"bg":[1,2]}"#).is_err());
+        assert!(serde_json::from_str::<UpdateNodeInput>(r#"{"color":"default"}"#).is_err());
     }
 
     #[test]
