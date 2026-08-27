@@ -246,12 +246,19 @@ fn node_ui(
     ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 14.0);
 
-        // Expand / collapse triangle (only when there are children).
+        // Expand / collapse triangle (only when there are children). Both
+        // branches must occupy the SAME fixed-size widget slot: the old childless
+        // branch was a raw 18px spacer while the arrow was a button sized by its
+        // glyph plus padding — and a spacer is not a widget, so the arrow rows
+        // also picked up an item-spacing gap the spacer rows did not. Net effect:
+        // the color dots of arrow rows sat ~6px right of the others, a column
+        // that never quite lined up (operator's screenshot, 2026-08-26).
+        let arrow_slot = egui::vec2(18.0, ui.spacing().interact_size.y);
         if node.children.is_empty() {
-            ui.add_space(18.0);
+            ui.allocate_exact_size(arrow_slot, egui::Sense::hover());
         } else {
             let arrow = if node.expanded { "▾" } else { "▸" };
-            if ui.add(egui::Button::new(arrow).frame(false)).clicked() {
+            if ui.add_sized(arrow_slot, egui::Button::new(arrow).frame(false)).clicked() {
                 actions.push(TreeAction::ToggleExpand(id));
             }
         }

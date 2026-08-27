@@ -6,6 +6,16 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.160.2]
+
+### Fixed
+- **The tree's color dots line up.** A row with an expand arrow drew its dot
+  ~6px right of an arrowless row's: the childless branch was a raw 18px
+  spacer while the arrow was a button sized by its glyph plus padding — and a
+  spacer is not a widget, so arrow rows also picked up an item-spacing gap
+  the others did not. Both branches now occupy one fixed-size widget slot,
+  so the dots form a straight column whether or not a row can expand.
+
 ## [0.160.1]
 
 ### Fixed
