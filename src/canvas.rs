@@ -446,7 +446,6 @@ pub fn ui(
     // The dolly is not — Depth must render exactly as it did before Cube
     // existed, whatever camera position a Cube session left in this basket.
     let volume = depth_mode || cube_mode;
-    let dolly = if cube_mode { *cam } else { 0.0 };
 
     let (canvas_rect, canvas_resp) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -628,6 +627,10 @@ pub fn ui(
             ui.ctx().request_repaint();
         }
     }
+
+    // Read AFTER the fly block: the camera the wheel/keys just moved is the
+    // camera this frame draws through, or every flight renders one step late.
+    let dolly = if cube_mode { *cam } else { 0.0 };
 
     // Shift+scroll is the Z gesture in depth mode, so it must not also pan —
     // otherwise pushing a card away drags the whole basket with it. And
@@ -1131,7 +1134,23 @@ pub fn ui(
         // Flying forward walks PAST a slice: a card between the cull plane and
         // the camera is skipped, not smeared across the viewport on its way
         // through the lens.
-        if cube_mode && card.z - dolly > CULL_NEAR * CAMERA_DIST {
+        //
+        // **A composed scene PEELS instead.** Its slices are discrete planes a
+        // flight step apart, and the lens cull only removes a card ~4.6 slices
+        // after the camera passes it — so near the bottom of a cube the slices
+        // already flown through ballooned over the view and the deepest days
+        // could never be read by flight (reported live: "can't scroll past the
+        // 4th-to-last card"). In a scene, half a step past a slice means you
+        // have left it: it is culled at once, one layer per PageDown, all the
+        // way down. Ordinary baskets keep the lens cull — their cards sit at
+        // arbitrary depths, and a card slightly nearer than the camera is the
+        // front row, not a passed layer.
+        let cull_at = if node.id == crate::model::CUBE_SCENE_NODE {
+            FLY_STEP * 0.5
+        } else {
+            CULL_NEAR * CAMERA_DIST
+        };
+        if cube_mode && card.z - dolly > cull_at {
             env.card_rects.remove(&card.id);
             continue;
         }
@@ -5875,6 +5894,12 @@ mod tests {
         /// broke a mode in daily use.
         depth: bool,
         cube: bool,
+        /// What the last frame drew, per card — the cull/peel assertions read
+        /// this, because "reachable by flight" means "still drawn there".
+        card_rects: HashMap<CardId, egui::Rect>,
+        /// A composed cube scene to draw instead of the document node, exactly
+        /// as the app swaps one in.
+        scene: Option<crate::model::Node>,
     }
 
     impl Headless {
@@ -5904,6 +5929,8 @@ mod tests {
                 isolate: None,
                 depth: false,
                 cube: true,
+                card_rects: HashMap::new(),
+                scene: None,
             }
         }
 
@@ -5939,13 +5966,16 @@ mod tests {
             };
             let mut actions = Vec::new();
             let doc = &self.doc;
-            let node = doc.nodes.get(&self.node_id).unwrap();
+            let node = match &self.scene {
+                Some(s) => s,
+                None => doc.nodes.get(&self.node_id).unwrap(),
+            };
             let (view, eye, cam, isolate) =
                 (&mut self.view, &mut self.eye, &mut self.cam, &mut self.isolate);
             let (depth, cube) = (self.depth, self.cube);
             let mut md = CommonMarkCache::default();
             let mut tex = crate::images::TextureCache::default();
-            let mut card_rects = HashMap::new();
+            let card_rects = &mut self.card_rects;
             let masters = HashMap::new();
             let mut inline_sent = std::collections::HashSet::new();
             let mut channel_drafts = HashMap::new();
@@ -5960,7 +5990,7 @@ mod tests {
                         node: node_id,
                         md: &mut md,
                         tex: &mut tex,
-                        card_rects: &mut card_rects,
+                        card_rects,
                         templates: &[],
                         masters: &masters,
                         card_plugins: &[],
@@ -6031,6 +6061,48 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    /// The report this pins: "can't scroll past the 4th-to-last card." The
+    /// lens cull removes a passed card only ~4.6 slices later, and the clamp
+    /// stops 400 past the deepest slice — so the deepest days sat behind
+    /// ballooned passed slices for ever. A composed scene now PEELS: half a
+    /// step past a slice culls it, one layer per PageDown, to the very bottom.
+    #[test]
+    fn a_scene_peels_passed_slices_so_the_deepest_day_is_readable() {
+        use crate::model::CardKind;
+        let mut doc = crate::model::Document::empty();
+        let mut days = Vec::new();
+        for i in 0..6 {
+            let n = doc.add_node(None, format!("day {i}"));
+            doc.add_card(n, egui::pos2(100.0, 100.0), CardKind::Text).unwrap();
+            days.push(n);
+        }
+        let scene = doc.cube_scene(&days).unwrap();
+        let ids: Vec<CardId> = scene.cards.iter().map(|c| c.id).collect();
+        let mut h = Headless::cube();
+        h.doc = doc;
+        h.scene = Some(scene);
+        h.frame(vec![]);
+        assert!(
+            ids.iter().all(|id| h.card_rects.contains_key(id)),
+            "at baseline every slice draws"
+        );
+        // Fly to the deepest slice: five steps for six slices.
+        for _ in 0..5 {
+            h.frame(vec![key(egui::Key::PageDown)]);
+        }
+        assert_eq!(h.cam, -5.0 * FLY_STEP, "the clamp lets the camera reach the deepest slice");
+        assert!(
+            h.card_rects.contains_key(&ids[0]),
+            "the deepest slice is drawn, front-row"
+        );
+        for id in &ids[1..] {
+            assert!(!h.card_rects.contains_key(id), "every passed slice is peeled away");
+        }
+        // And flying back up restores the layers.
+        h.frame(vec![key(egui::Key::PageUp)]);
+        assert!(h.card_rects.contains_key(&ids[1]), "one step up, the next layer returns");
     }
 
     #[test]

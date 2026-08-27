@@ -6,6 +6,25 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.159.1]
+
+### Fixed
+- **A composed cube peels — the deepest days are reachable by flight.**
+  Reported live from the first real cube: "can't scroll past the 4th-to-last
+  card." The lens cull removes a passed card only ~4.6 slices after the camera
+  passes it, and the camera stops 400 past the deepest slice — so at the
+  bottom of a cube the slices already flown through ballooned over the view
+  and the last few days could never be read. A composed scene's slices are
+  discrete planes, so it now **peels**: half a flight step past a slice culls
+  it, one layer per PageDown, all the way down, and flying back up restores
+  the layers one at a time. Ordinary baskets viewed in Cube mode keep the
+  lens cull — their cards sit at arbitrary depths, and a card slightly nearer
+  than the camera is the front row, not a passed layer.
+- **The flight rendered one step late.** The dolly was read at the top of the
+  frame, before the wheel/keys moved the camera, so every draw was one flight
+  step behind the input. Caught by the headless harness while pinning the
+  peel, invisible in live use only because the next repaint caught up.
+
 ## [0.159.0]
 
 ### Added
