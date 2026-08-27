@@ -574,7 +574,9 @@ POST /api/nodes/{id}/cards [ {…}, {…} ]      the SAME endpoint, given an arr
 `kind` defaults to `"text"` and may be any of `text`, `code`, `checklist`,
 `table` (starts as an empty 3×3), `image`, or `sketch` (an empty draw surface). `pos` is `[x,y]` canvas coordinates
 (default `[40,40]`); pass distinct positions to avoid stacking cards on top of
-each other. `size` is `[w,h]`. **`z`** is depth in the **same units as `pos`** — positive is
+each other — except in a **[feed](#update) basket**, where `pos` is irrelevant
+to the reader (the feed lays out newest-first on its own) and you can simply
+omit it. `size` is `[w,h]`. **`z`** is depth in the **same units as `pos`** — positive is
 toward the viewer, so `z: 200` is as far *forward* as `pos` `+200` is to the
 right. See [Depth and time](#depth-and-time) before using it. `color` sets the title-bar accent at creation (see
 the accepted formats below). `items` is used only for `checklist`; `lang` only
@@ -2922,6 +2924,28 @@ curl -sX POST localhost:7373/api/cards/1400/append -H "X-API-Key: $K" \
 `![[#1391^766]]` shows a single checklist line. The body on disk keeps the
 `![[…]]` — expansion happens at render, so there is never a second copy to drift.
 
+### Keeping a log — make the basket a feed
+
+A running record — handoffs, ops checks, decisions — wants *newest first, no
+navigation*, and the writer should never think about coordinates:
+
+```sh
+# Once: declare the basket a feed.
+curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"feed": true}' $API/nodes/$LOG
+
+# Every entry after that is just a create — no pos, no column math, no
+# overlap repair. The feed shows the newest entry at the top.
+curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"kind":"text","title":"2026-08-26 — deploy check","fit":true,
+       "body":"All four assets verified by name.\n#ops"}' \
+  $API/nodes/$LOG/cards
+```
+
+The x/y arrangement underneath is preserved untouched — `{"feed": false}`
+returns the canvas exactly as it was. Entries stay ordinary cards: link them
+with `[[#id]]`, archive the finished ones, query them from the panels. The
+feed sorts by **creation order**, so editing an old entry never moves it.
+
 ### Everything else
 
 ```sh
@@ -3237,6 +3261,14 @@ curl -s -X DELETE -H "X-API-Key: $KEY" $API/templates/$IDX
 - **Placement:** the canvas is spatial. Give cards distinct `pos` values (e.g.
   step `x` by ~320 and `y` by ~200) so they don't overlap. Read a card's `pos`/
   `size` back from `GET /api/nodes/{id}` before repositioning.
+- **A log-style basket should be a feed, and then placement is free:** where a
+  basket is a chronological record — session handoffs, ops checks, a release
+  log — set `PATCH /api/nodes/{id} {"feed": true}` once and stop doing
+  position math for ever: `POST` the card with no `pos` and the feed shows it
+  first. (Before feeds the convention was *append below the lowest card in the
+  column, never at `[40,40]`, then check `…/overlaps`* — that recipe is still
+  right for a chronological basket someone wants kept as a **canvas**, but a
+  feed is the better answer and the reader lands on the newest entry.)
 - **Organize spatially:** use **groups** for a named, lasting cluster you drag as
   one box, or **docking** to stick a couple of related cards together. Either is
   reversible (`DELETE …/groups/{gid}` ungroups; `DELETE …/dock` detaches).

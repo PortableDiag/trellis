@@ -6,6 +6,18 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.160.1]
+
+### Fixed
+- **The docs teach the feed.** API.md's card-create section, the *Notes for
+  agents* placement bullet and a new worked example (*Keeping a log — make the
+  basket a feed*) now say what v0.160.0 made true: a chronological basket
+  should carry `feed: true`, and then inserting needs no `pos`, no
+  append-below-the-column, and no overlap repair. The old column recipe stays
+  documented for chronological baskets deliberately kept as canvases, with the
+  version gate spelled out (an older binary answers 400 to the field). Doc-only
+  release — API.md is compiled in, so a doc correction ships as a version.
+
 ## [0.160.0]
 
 ### Added
