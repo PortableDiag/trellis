@@ -945,7 +945,12 @@ pub fn ui(
     // through on hover. Only the visible part is clickable. A header being dragged
     // is repainted on top after the cards so you can see it while you move it.
     let mut dragging_header: Option<(GroupId, egui::Rect)> = None;
-    for group in &node.groups {
+    // In a feed nothing that is drawn FROM stored geometry may draw at all:
+    // the cards are in computed slots, so a group frame or dock connector
+    // painted from real x/y lands as a stray bar across the feed (operator's
+    // screenshot, first feed basket with a group in it). Groups and docking
+    // still exist untouched — they return with the canvas.
+    for group in node.groups.iter().filter(|_| !feed) {
         let Some(wb) = gbounds.get(&group.id) else { continue };
         let srect = to_screen.mul_rect(wb.expand(10.0));
         let gcol = egui::Color32::from_rgb(group.color[0], group.color[1], group.color[2]);
@@ -984,7 +989,7 @@ pub fn ui(
     }
 
     // --- dock connectors: faint links between stuck cards -------------------
-    for card in &node.cards {
+    for card in node.cards.iter().filter(|_| !feed) {
         if let Some(anchor_id) = card.docked_to {
             if let Some(anchor) = node.cards.iter().find(|c| c.id == anchor_id) {
                 bg.line_segment(

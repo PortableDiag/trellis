@@ -6,6 +6,16 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.160.4]
+
+### Fixed
+- **A feed draws nothing from stored geometry.** The first real feed basket
+  with a card group in it (operator's screenshot) showed the group frames as
+  stray full-width bars: the cards render in computed feed slots, but group
+  frames and dock connectors were still painted from the stored x/y. Both now
+  stand down in a feed, like the minimap and marquee already did. Groups and
+  docking themselves are untouched — they return with the canvas.
+
 ## [0.160.3]
 
 ### Fixed
