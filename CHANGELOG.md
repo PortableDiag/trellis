@@ -6,6 +6,15 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.160.5]
+
+### Fixed
+- **Time-mode projections stand down in a feed too.** The v0.160.4 lesson
+  ("every painter that reads stored geometry needs the gate — enumerate them")
+  applied to itself: projections, drawn on journal days from other baskets'
+  stored positions, were the one enumerated painter not yet gated. A feed
+  basket that is also a journal day no longer draws them across the column.
+
 ## [0.160.4]
 
 ### Fixed

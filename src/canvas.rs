@@ -1114,7 +1114,7 @@ pub fn ui(
     // passing through it. They are drawn, not built as widgets: a projection is a
     // *view* of a card, and offering an edit here would be the second place a
     // task can be changed — which is the exact thing this design exists to avoid.
-    for (home, home_path, card) in projected {
+    for (home, home_path, card) in projected.iter().filter(|_| !feed) {
         let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, dolly, volume);
         let r = t.mul_rect(world_rect(card));
         if !canvas_rect.intersects(r) {
