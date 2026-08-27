@@ -125,6 +125,37 @@ projection and naming where it lives. Turning either off changes only what you
 see: `z` and the span stay on the card, so an arrangement is never lost, and with
 Depth off `z` is simply the stacking order.
 
+**Cube — fly through a range of days.** Right-click a basket → **Open as
+cube…**, pick a from/to range over its child baskets, and each becomes a slice
+of a volume — oldest deepest, newest nearest, every day keeping its own
+arrangement. **PageUp/PageDown** (or Ctrl+Shift+scroll) fly the camera one
+slice at a time, peeling passed layers away; **click a card** to isolate it
+(everything else ghosts) and choose **View only this** (fly to it and read,
+right there in the cube) or **Go to card** (leave the cube for the card's real
+basket, flat). The cube is a *temporary view built of embeds* — nothing is
+created, copied or saved, and closing it just drops the view. **Cube** is its
+own toggle beside Depth and Time (a reading mode, so it claims the plain click
+those modes leave to editing), and `POST /api/cube {"nodes":[…]}` builds the
+same view for an agent.
+
+**Feed — a log basket reads newest-first.** A basket that is a chronological
+record (session handoffs, ops checks, a release log) can carry the **Feed**
+toggle: it renders as one top-anchored column, newest entry first, so opening
+it lands on the latest entry with no scrolling around. The layout is computed
+on read and never stored — the x/y arrangement underneath is untouched and
+returns exactly when Feed goes off — and inserting needs no position at all:
+create the card and the feed places it. Sorted by creation order, so editing an
+old entry never moves it. In any basket, **End** jumps to the most recent card
+and **Home** back to the top.
+
+**A stale plugin says so.** Plugins run from the instance's own folder, so a
+release in the repo does not update them by itself. **Tools → Plugins** now
+shows *"v1.2.0 available"* beside an out-of-date plugin with an **Update**
+button that copies the new code and keeps your settings and state; agents see
+the same as `stale_plugins` on `GET /api/instance` and the detail on
+`GET /api/plugins`. Updating stays a human act — there is deliberately no
+update endpoint and no auto-copy on launch.
+
 Cards drag by the title bar, resize from the corner, raise to front on click,
 duplicate, recolor, copy/paste into another basket, and delete. Right-click →
 **Export Card** saves just that card to share — **PNG** or **PDF** (a WYSIWYG

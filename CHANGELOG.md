@@ -6,6 +6,16 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.160.3]
+
+### Fixed
+- **README catches up with the day.** Three sections join the feature tour:
+  the **Cube** (fly through a range of days; the temporary embed-built view,
+  isolate, the two exits), the **Feed** (a log basket reads newest-first,
+  placement-free inserts, End/Home navigation), and **plugin staleness**
+  (Tools → Plugins says when a release is newer than the installed copy, and
+  the Update button keeps settings and state). Doc-only.
+
 ## [0.160.2]
 
 ### Fixed
