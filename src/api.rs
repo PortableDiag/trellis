@@ -381,6 +381,13 @@ pub enum ApiRequest {
     /// same reason, as `source` file mirroring. Answered in the app loop because
     /// it touches the filesystem and the status line.
     ImportVault { parent: Option<NodeId>, path: String },
+    /// Open a compressed-workspace cube over exactly these baskets, in order
+    /// (first deepest): the app composes a temporary scene of embed cards and
+    /// switches to Cube mode. Answered in the app loop — the scene is app
+    /// state, never document content.
+    CubeOpen(Vec<NodeId>),
+    /// Leave Cube mode and drop the scene.
+    CubeClose,
 }
 
 /// `POST /api/cards/{cid}/desktop` — optional screen position for the window.
@@ -1265,6 +1272,13 @@ pub struct DailyRootInput {
 /// **root project**, which is what the File menu does: a vault is somebody's
 /// whole notes, and burying it under whatever basket was selected is the wrong
 /// default.
+/// `POST /api/cube` — the baskets to align along z, in slice order.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CubeInput {
+    pub nodes: Vec<NodeId>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportVaultInput {
@@ -2309,6 +2323,14 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Delete, ["api", "daily", "root"]) => Ok(ApiRequest::SetDailyRoot(None)),
         (Method::Get, ["api", "cards", cid, "run"]) => Ok(ApiRequest::RunView(pid(cid)?)),
         (Method::Get, ["api", "properties", "problems"]) => Ok(ApiRequest::PropertyProblems),
+        (Method::Post, ["api", "cube"]) => {
+            let i: CubeInput = parse(body)?;
+            if i.nodes.is_empty() {
+                return Err((400, "nodes must name at least one basket".into()));
+            }
+            Ok(ApiRequest::CubeOpen(i.nodes))
+        }
+        (Method::Delete, ["api", "cube"]) => Ok(ApiRequest::CubeClose),
         (Method::Post, ["api", "import", "vault"]) => {
             let i: ImportVaultInput = parse(body)?;
             Ok(ApiRequest::ImportVault { parent: i.parent, path: i.path })
@@ -4972,6 +4994,8 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         // interception is ever missed — report it rather than silently no-op.
         ApiRequest::Instance
         | ApiRequest::Plugins
+        | ApiRequest::CubeOpen(_)
+        | ApiRequest::CubeClose
         | ApiRequest::RenderHtml { .. }
         | ApiRequest::WriteSource { .. }
         | ApiRequest::DiffSource { .. }
@@ -6397,6 +6421,16 @@ mod tests {
         assert!(matches!(
             route(&Method::Get, "/api/plugins", "", "").unwrap(),
             ApiRequest::Plugins
+        ));
+        assert!(matches!(
+            route(&Method::Post, "/api/cube", "", r#"{"nodes":[9,10,11]}"#).unwrap(),
+            ApiRequest::CubeOpen(n) if n == vec![9, 10, 11]
+        ));
+        // An empty list is refused at the route, before the app is asked.
+        assert!(route(&Method::Post, "/api/cube", "", r#"{"nodes":[]}"#).is_err());
+        assert!(matches!(
+            route(&Method::Delete, "/api/cube", "", "").unwrap(),
+            ApiRequest::CubeClose
         ));
         assert!(route(&Method::Get, "/api/bogus", "", "").is_err());
         assert!(route(&Method::Get, "/api/nodes/notanumber", "", "").is_err());

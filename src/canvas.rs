@@ -613,9 +613,18 @@ pub fn ui(
             dz
         });
         if fly != 0.0 {
-            // A margin past the card range on both ends, so the camera can back
-            // off behind the deepest slice and fly past the nearest one.
-            *cam = (*cam + fly).clamp(Z_MIN - 400.0, Z_MAX + 400.0);
+            // Clamp to the basket's own z range plus a margin, not a fixed
+            // constant: a month of cube slices runs far deeper than Z_MIN, and
+            // a camera that cannot reach the deepest slice makes the flight a
+            // lie. The margin lets you back off behind the deepest slice and
+            // fly just past the nearest one; the range also means empty space
+            // beyond the content is unreachable, so you cannot get lost in it.
+            let (lo, hi) = node
+                .cards
+                .iter()
+                .map(|c| c.z)
+                .fold((0.0f32, 0.0f32), |(lo, hi), z| (lo.min(z), hi.max(z)));
+            *cam = (*cam + fly).clamp(lo - 400.0, hi + 400.0);
             ui.ctx().request_repaint();
         }
     }

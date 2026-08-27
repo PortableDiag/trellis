@@ -6,6 +6,38 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.159.0]
+
+### Added
+- **The cube operation: a range of baskets becomes a volume.** This is the
+  compressed-workspace-cube feature as actually designed (the operator, after
+  two approximations shipped around it): *select a range of day baskets, and
+  the cube operation aligns those workspaces' cards along z in a temporary
+  area you traverse*. Not a basket you decorate, not a mode you point at one
+  workspace — an operation over several.
+  - **Right-click a basket → Open as cube…** offers a from/to range over its
+    child baskets (a month of dailies → pick the week you mean). Each basket
+    becomes one slice, first deepest, last nearest, keeping its own x/y
+    arrangement (staggered a little per slice so the layers read as layers).
+  - **`POST /api/cube {"nodes":[…]}`** is the same operation for an agent —
+    slice order is list order, the whole list is validated before anything
+    changes (a 404 names every id that is not a basket), and
+    **`DELETE /api/cube`** leaves the view. Full UI parity, as always.
+  - **The scene is temporary and made of `![[#id]]` embeds** — live views of
+    the real cards. Nothing is created, copied or saved; the document is
+    untouched; the scene renders under a node id no document can reach, so
+    stray canvas mutations against it land nowhere. *Go to card* follows a
+    slice's embed home, exactly as in any cube.
+  - The scene keeps its **own camera** (pan/zoom/orbit/dolly) under that
+    sentinel id — flying through a cube never scrambles the view of the
+    basket you were in. The fly clamp now adapts to the basket's real z range,
+    so a month of slices is reachable end to end, and there is no empty space
+    beyond the content to get lost in.
+  - Building a new cube resets the cube camera; closing the cube (toolbar,
+    Settings, API, or *Go to card*) drops the scene everywhere — one
+    `exit_cube` for every exit, because three exits each forgetting one piece
+    is how half-exited modes happen.
+
 ## [0.158.0]
 
 ### Changed

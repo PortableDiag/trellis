@@ -53,6 +53,9 @@ pub enum TreeAction {
     ToggleReorder,
     /// Run the plugin at this index against this node.
     RunPlugin(NodeId, usize),
+    /// Open this node's child baskets as a compressed-workspace cube — the
+    /// range picker follows in the app, since the tree row has no room for one.
+    OpenAsCube(NodeId),
 }
 
 /// `renaming` holds the node currently being renamed inline and its edit buffer.
@@ -346,6 +349,20 @@ fn node_ui(
                         }
                     });
                     ui.separator();
+                }
+                if !node.children.is_empty()
+                    && ui
+                        .button("Open as cube…")
+                        .on_hover_text(
+                            "Align a range of this basket's child baskets along z — each \
+                             child a slice, oldest deepest — in a temporary Cube view. \
+                             Nothing is created or copied: the slices are live views of \
+                             the real cards.",
+                        )
+                        .clicked()
+                {
+                    actions.push(TreeAction::OpenAsCube(id));
+                    ui.close_menu();
                 }
                 if ui.button("Rename").clicked() {
                     *renaming = Some((id, node.title.clone()));

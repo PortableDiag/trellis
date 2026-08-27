@@ -6904,6 +6904,13 @@ impl Document {
 /// that reads as a wall.
 const EMBED_DEPTH: usize = 4;
 
+/// The node id a cube scene renders under — deliberately an id no document can
+/// reach (`add_node` counts up from small integers), so every mutation an
+/// interactive canvas emits against the scene misses the document and lands
+/// nowhere. The scene is a VIEW; the only writes that may come out of it are
+/// the ones that resolve back to the original cards.
+pub const CUBE_SCENE_NODE: NodeId = NodeId::MAX;
+
 /// The card the first `![[#id]]` embed in `text` shows, if any.
 ///
 /// Built for **Go to card** on a cube slice: a compressed-workspace cube is made
@@ -6932,6 +6939,78 @@ pub fn first_embed_target(text: &str) -> Option<CardId> {
 }
 
 impl Document {
+    /// Compose a **compressed-workspace cube**: the given baskets' cards
+    /// aligned along z in a temporary node, first slice deepest, last nearest
+    /// the viewer. This is the cube *operation* — select a range of day
+    /// baskets and traverse them as a volume.
+    ///
+    /// Every slice card is an `![[#id]]` **embed** of the original, so the
+    /// scene shows live content and stores nothing — the one-task-one-card
+    /// rule, applied to a whole view. Each basket keeps its own arrangement
+    /// (cards at their real x/y), offset a little per slice so the layers'
+    /// edges read as layers. The scene node carries [`CUBE_SCENE_NODE`], an id
+    /// no document reaches, so stray canvas mutations against it land nowhere.
+    ///
+    /// The whole list is validated before anything is built — one unknown
+    /// basket refuses the cube rather than silently thinning it.
+    pub fn cube_scene(&self, slices: &[NodeId]) -> Option<Node> {
+        if slices.is_empty() || !slices.iter().all(|id| self.nodes.contains_key(id)) {
+            return None;
+        }
+        let n = slices.len();
+        let mut cards = Vec::new();
+        let mut next = 1;
+        for (idx, nid) in slices.iter().enumerate() {
+            let src_node = &self.nodes[nid];
+            // Last slice at z = 0 (nearest), each earlier one a flight step
+            // deeper. The camera's fly clamp adapts to the basket's z range,
+            // so a month of slices stays reachable.
+            let z = -((n - 1 - idx) as f32) * 380.0;
+            let offset = egui::vec2(64.0 * idx as f32, 44.0 * idx as f32);
+            for src in &src_node.cards {
+                let mut c = Card::new(next, src.pos + offset, CardKind::Text);
+                next += 1;
+                // `Card::new` opens a text card editing — right for a person
+                // dropping a card, wrong for a composed view: an editing card
+                // shows its raw `![[#id]]` and a toolbar instead of rendering
+                // the embed. Found on the first live scene, not by the tests,
+                // which read fields rather than pixels.
+                c.editing = false;
+                c.body = format!("![[#{}]]", src.id);
+                c.title = if src.title.is_empty() {
+                    format!("{} · #{}", src_node.title, src.id)
+                } else {
+                    format!("{} · {}", src_node.title, src.title)
+                };
+                c.size = src.size;
+                c.z = z;
+                c.color = src.color;
+                cards.push(c);
+            }
+        }
+        let title = if n == 1 {
+            format!("Cube — {}", self.nodes[&slices[0]].title)
+        } else {
+            format!(
+                "Cube — {} … {}",
+                self.nodes[&slices[0]].title,
+                self.nodes[&slices[n - 1]].title
+            )
+        };
+        Some(Node {
+            id: CUBE_SCENE_NODE,
+            title,
+            parent: None,
+            children: Vec::new(),
+            cards,
+            groups: Vec::new(),
+            expanded: true,
+            color: None,
+            bg: None,
+            touched: None,
+        })
+    }
+
     /// Expand `![[#id]]` **embeds** into the text of the cards they name.
     ///
     /// The complement of `[[#id]]`. A link says *go and look at that*; an embed
@@ -8533,6 +8612,42 @@ mod tests {
         assert_eq!(doc.locate_card(c), Some(a));
         doc.move_card_to_node(a, c, b, None);
         assert_eq!(doc.locate_card(c), Some(b));
+    }
+
+    /// The cube operation: a range of baskets becomes one temporary node of
+    /// embed cards, first slice deepest, arrangements kept, nothing stored.
+    #[test]
+    fn cube_scene_aligns_baskets_along_z_as_embeds() {
+        let mut doc = Document::empty();
+        let mon = doc.add_node(None, "Mon".into());
+        let tue = doc.add_node(None, "Tue".into());
+        let m1 = doc.add_card(mon, egui::pos2(10.0, 20.0), CardKind::Text).unwrap();
+        doc.card_mut(mon, m1).unwrap().title = "standup".into();
+        let _m2 = doc.add_card(mon, egui::pos2(300.0, 20.0), CardKind::Text).unwrap();
+        let t1 = doc.add_card(tue, egui::pos2(50.0, 60.0), CardKind::Text).unwrap();
+
+        let scene = doc.cube_scene(&[mon, tue]).expect("both baskets exist");
+        assert_eq!(scene.id, CUBE_SCENE_NODE);
+        assert_eq!(scene.cards.len(), 3);
+        // Monday is the first slice → deepest; Tuesday nearest at z = 0.
+        assert_eq!(scene.cards[0].z, -380.0);
+        assert_eq!(scene.cards[2].z, 0.0);
+        // Arrangement kept, second slice staggered.
+        assert_eq!(scene.cards[0].pos, egui::pos2(10.0, 20.0));
+        assert_eq!(scene.cards[2].pos, egui::pos2(50.0 + 64.0, 60.0 + 44.0));
+        // Every slice card is an embed of its original — a view, not a copy —
+        // and it RENDERS: an editing card would show raw `![[#id]]` + toolbar.
+        assert_eq!(scene.cards[0].body, format!("![[#{m1}]]"));
+        assert!(scene.cards.iter().all(|c| !c.editing), "slices render, never edit");
+        assert_eq!(first_embed_target(&scene.cards[2].body), Some(t1));
+        assert!(scene.cards[0].title.starts_with("Mon · standup"));
+        // Scene card ids are fresh and unique within the scene.
+        let mut ids: Vec<_> = scene.cards.iter().map(|c| c.id).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), 3);
+        // One unknown basket refuses the whole cube.
+        assert!(doc.cube_scene(&[mon, 999]).is_none());
+        assert!(doc.cube_scene(&[]).is_none());
     }
 
     /// A cube slice is an embed card, so "go to the card" must resolve the embed

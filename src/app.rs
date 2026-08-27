@@ -1251,6 +1251,14 @@ pub struct TrellisApp {
     /// flight) claim inputs those modes already use for editing. Mutually
     /// exclusive with them.
     cube_mode: bool,
+    /// The composed cube scene, when the cube OPERATION built one: a range of
+    /// baskets' cards aligned along z in a temporary node of embeds. Held in
+    /// app state only — never in the document, never saved. `None` in Cube
+    /// mode means the current basket is being cube-viewed as itself.
+    cube_scene: Option<crate::model::Node>,
+    /// The "Open as cube…" range picker: (parent, from-index, to-index into
+    /// its children).
+    cube_picker: Option<(NodeId, usize, usize)>,
     time_mode: bool,
     /// Path this build registered as the link handler, if any — shown in
     /// Settings so "why doesn't my link open?" has an answer on screen.
@@ -1847,6 +1855,8 @@ impl TrellisApp {
             grid_mode,
             depth_mode,
             cube_mode,
+            cube_scene: None,
+            cube_picker: None,
             time_mode,
             url_scheme_registered,
             card_clipboard: None,
@@ -3760,12 +3770,12 @@ impl TrellisApp {
                 // Same exclusivity the toolbar enforces: Cube's reading
                 // gestures cannot share a canvas with Depth/Time's editing.
                 "cube_mode" => {
-                    self.cube_mode = v.as_bool().unwrap_or(false);
-                    if self.cube_mode {
+                    if v.as_bool().unwrap_or(false) {
+                        self.cube_mode = true;
                         self.depth_mode = false;
                         self.time_mode = false;
                     } else {
-                        self.depth_isolate = None;
+                        self.exit_cube();
                     }
                 }
                 "notify_digest" => self.notify_digest = v.as_bool().unwrap_or(false),
@@ -3793,6 +3803,117 @@ impl TrellisApp {
             }
         }
         Ok(())
+    }
+
+    /// The "Open as cube…" range picker: pick a from/to among a basket's
+    /// child baskets and build the temporary scene. A window rather than
+    /// cubing the whole parent blind, because "a range of them" is the ask —
+    /// a month of dailies is usually more cube than a question needs.
+    fn cube_picker_window(&mut self, ctx: &egui::Context) {
+        let Some((parent, mut from, mut to)) = self.cube_picker else { return };
+        let children: Vec<NodeId> = match self.doc.nodes.get(&parent) {
+            Some(n) if !n.children.is_empty() => n.children.clone(),
+            _ => {
+                self.cube_picker = None;
+                return;
+            }
+        };
+        let titles: Vec<String> = children
+            .iter()
+            .map(|id| {
+                self.doc
+                    .nodes
+                    .get(id)
+                    .map(|n| n.title.clone())
+                    .unwrap_or_else(|| format!("#{id}"))
+            })
+            .collect();
+        from = from.min(titles.len() - 1);
+        to = to.min(titles.len() - 1);
+        let parent_title =
+            self.doc.nodes.get(&parent).map(|n| n.title.clone()).unwrap_or_default();
+        let mut open = true;
+        let mut build = false;
+        egui::Window::new("Open as cube")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "A range of {parent_title}'s child baskets becomes a cube: each \
+                     basket one slice, first slice deepest, last nearest. The slices \
+                     are live views of the real cards — nothing is created or copied."
+                ));
+                ui.add_space(4.0);
+                egui::ComboBox::from_label("From").selected_text(&titles[from]).show_ui(
+                    ui,
+                    |ui| {
+                        for (i, t) in titles.iter().enumerate() {
+                            ui.selectable_value(&mut from, i, t);
+                        }
+                    },
+                );
+                egui::ComboBox::from_label("To").selected_text(&titles[to]).show_ui(
+                    ui,
+                    |ui| {
+                        for (i, t) in titles.iter().enumerate() {
+                            ui.selectable_value(&mut to, i, t);
+                        }
+                    },
+                );
+                let (a, b) = if from <= to { (from, to) } else { (to, from) };
+                ui.label(
+                    egui::RichText::new(format!("{} slice(s)", b - a + 1)).weak().small(),
+                );
+                if ui.button("Build cube").clicked() {
+                    build = true;
+                }
+            });
+        self.cube_picker = if open && !build { Some((parent, from, to)) } else { None };
+        if build {
+            let (a, b) = if from <= to { (from, to) } else { (to, from) };
+            self.open_cube(&children[a..=b].to_vec());
+        }
+    }
+
+    /// Build and enter a cube over exactly these baskets — the shared tail of
+    /// the picker and the API route.
+    fn open_cube(&mut self, slices: &[NodeId]) -> bool {
+        match self.doc.cube_scene(slices) {
+            Some(scene) => {
+                self.status = format!(
+                    "Cube — {} slice(s), {} card(s). Click a card to isolate; \
+                     Ctrl+Shift+scroll or PageUp/PageDown fly through the slices; \
+                     Esc steps back out.",
+                    slices.len(),
+                    scene.cards.len()
+                );
+                self.cube_scene = Some(scene);
+                self.cube_mode = true;
+                self.depth_mode = false;
+                self.time_mode = false;
+                // A fresh cube gets a fresh camera — a dolly left by the last
+                // cube would open this one somewhere in the middle of it.
+                self.views.remove(&crate::model::CUBE_SCENE_NODE);
+                self.eyes.remove(&crate::model::CUBE_SCENE_NODE);
+                self.cams.remove(&crate::model::CUBE_SCENE_NODE);
+                self.depth_isolate = None;
+                true
+            }
+            None => {
+                self.status = "Could not build the cube — check the baskets exist".into();
+                false
+            }
+        }
+    }
+
+    /// Leave Cube mode entirely: mode off, scene dropped, isolation cleared.
+    /// One function because three exits (toolbar, settings API, Go to card)
+    /// each forgetting one of the three is how half-exited modes happen.
+    fn exit_cube(&mut self) {
+        self.cube_mode = false;
+        self.cube_scene = None;
+        self.depth_isolate = None;
     }
 
     /// The release version waiting for an installed plugin — `Some` only when
@@ -3900,6 +4021,38 @@ impl TrellisApp {
                     .filter(|p| self.plugin_update_available(p).is_some())
                     .count(),
             })))
+            }
+            api::ApiRequest::CubeOpen(nodes) => {
+                // The whole list is validated before anything changes, and a
+                // refusal names what is missing — the same batch rule the card
+                // routes follow.
+                let missing: Vec<String> = nodes
+                    .iter()
+                    .filter(|id| !self.doc.nodes.contains_key(id))
+                    .map(|id| id.to_string())
+                    .collect();
+                if !missing.is_empty() {
+                    return Some(api::ApiResponse::err(
+                        404,
+                        &format!("no such node(s): {}", missing.join(", ")),
+                    ));
+                }
+                let slices = nodes.clone();
+                if self.open_cube(&slices) {
+                    let scene_cards =
+                        self.cube_scene.as_ref().map(|s| s.cards.len()).unwrap_or(0);
+                    Some(api::ApiResponse::ok(serde_json::json!({
+                        "cube_mode": true,
+                        "slices": slices.len(),
+                        "cards": scene_cards,
+                    })))
+                } else {
+                    Some(api::ApiResponse::err(400, "could not build the cube"))
+                }
+            }
+            api::ApiRequest::CubeClose => {
+                self.exit_cube();
+                Some(api::ApiResponse::ok(serde_json::json!({ "cube_mode": false })))
             }
             api::ApiRequest::Plugins => {
                 let list: Vec<serde_json::Value> = self
@@ -4918,7 +5071,9 @@ impl TrellisApp {
             | TreeAction::ImportBasket(_)
             // Running a plugin changes nothing by itself; whatever it does over
             // the API is recorded there, under its own token.
-            | TreeAction::RunPlugin(..) => return None,
+            | TreeAction::RunPlugin(..)
+            // Opens a picker; the scene it builds is view state.
+            | TreeAction::OpenAsCube(_) => return None,
 
             TreeAction::AddRoot => ch(Op::Created, 0),
             TreeAction::AddChild(p) => ch(Op::Created, 0).field(&format!("parent={p}")),
@@ -5208,6 +5363,12 @@ impl TrellisApp {
                 TreeAction::ExportBasketPdf(id) => self.begin_basket_shot(id, BasketFmt::Pdf),
                 TreeAction::ExportBasketPng(id) => self.begin_basket_shot(id, BasketFmt::Png),
                 TreeAction::ImportBasket(id) => self.import_basket(id),
+                TreeAction::OpenAsCube(id) => {
+                    let n = self.doc.nodes.get(&id).map(|n| n.children.len()).unwrap_or(0);
+                    if n > 0 {
+                        self.cube_picker = Some((id, 0, n - 1));
+                    }
+                }
                 TreeAction::RunPlugin(id, idx) => {
                     // The node is handed over in the environment, so the plugin
                     // knows which basket it was invoked on.
@@ -6034,14 +6195,14 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::ToggleCubeMode => {
-                    self.cube_mode = !self.cube_mode;
                     if self.cube_mode {
+                        self.exit_cube();
+                    } else {
+                        self.cube_mode = true;
                         // A viewer, not another axis: the reading gestures
                         // claim inputs Depth and Time use for editing.
                         self.depth_mode = false;
                         self.time_mode = false;
-                    } else {
-                        self.depth_isolate = None;
                     }
                 }
                 CanvasAction::ToggleTimeMode => {
@@ -6066,17 +6227,27 @@ impl TrellisApp {
                     // is an embed card, so the destination is the embed target's
                     // home in flat mode; a card with no embed is its own
                     // destination. A dangling embed falls back to the slice —
-                    // jumping nowhere would read as a dead button.
-                    let target = self
-                        .doc
-                        .card(node, cid)
-                        .and_then(|c| crate::model::first_embed_target(&crate::model::searchable_body(c)))
+                    // jumping nowhere would read as a dead button. When a
+                    // composed scene drew the click, the slice lives in the
+                    // scene, not the document.
+                    let body = if node == crate::model::CUBE_SCENE_NODE {
+                        self.cube_scene
+                            .as_ref()
+                            .and_then(|s| s.cards.iter().find(|c| c.id == cid))
+                            .map(crate::model::searchable_body)
+                    } else {
+                        self.doc.card(node, cid).map(crate::model::searchable_body)
+                    };
+                    let target = body
+                        .as_deref()
+                        .and_then(crate::model::first_embed_target)
                         .filter(|t| self.doc.locate_card(*t).is_some())
                         .unwrap_or(cid);
-                    let home = self.doc.locate_card(target).unwrap_or(node);
-                    self.cube_mode = false;
-                    self.depth_isolate = None;
-                    self.jump_to_card(ctx, home, target);
+                    let home = self.doc.locate_card(target);
+                    self.exit_cube();
+                    if let Some(home) = home {
+                        self.jump_to_card(ctx, home, target);
+                    }
                 }
                 CanvasAction::SetZ(cid, z) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {
@@ -7273,11 +7444,14 @@ impl TrellisApp {
                                 self.depth_mode = false;
                                 self.time_mode = false;
                             } else {
+                                self.cube_scene = None;
                                 self.depth_isolate = None;
                             }
                         }
-                        if self.depth_mode || self.time_mode {
+                        if (self.depth_mode || self.time_mode) && self.cube_mode {
                             self.cube_mode = false;
+                            self.cube_scene = None;
+                            self.depth_isolate = None;
                         }
                         ui.separator();
                         let both = self.depth_mode && self.time_mode;
@@ -8631,11 +8805,14 @@ impl TrellisApp {
                             self.depth_mode = false;
                             self.time_mode = false;
                         } else {
+                            self.cube_scene = None;
                             self.depth_isolate = None;
                         }
                     }
-                    if self.depth_mode || self.time_mode {
+                    if (self.depth_mode || self.time_mode) && self.cube_mode {
                         self.cube_mode = false;
+                        self.cube_scene = None;
+                        self.depth_isolate = None;
                     }
                     // Colour emoji come from a font on the machine, not from the
                     // app: say which one, because "still grey" otherwise looks like
@@ -8866,6 +9043,7 @@ impl TrellisApp {
                         "GET    /api/docs[?section=examples]   → THIS build's API.md, compiled in (any scope; ~100KB whole)",
                             "GET    /api/settings   → theme, canvas toggles, panels, notifications, retention",
                             "POST   /api/settings   {theme?, tree_sort?, minimap?, snap_mode?, grid_mode?, notify_digest?, …}",
+                        "POST   /api/cube       {nodes:[<basket ids>]}  (open a compressed-workspace cube over those baskets, in order, first deepest — a temporary view of embeds, nothing stored; DELETE /api/cube leaves it)",
                             "GET    /api/tree",
                             "GET    /api/nodes",
                             "POST   /api/nodes               {parent?, title}",
@@ -12038,7 +12216,13 @@ impl eframe::App for TrellisApp {
                         self.card_sel.clear();
                         self.card_sel_node = Some(sel);
                     }
-                    let mut view = self.views.get(&sel).copied().unwrap_or_default();
+                    // A composed cube scene draws instead of the basket, under
+                    // its own view/camera key — flying through a cube must not
+                    // scramble the pan/zoom of the basket you happened to be in.
+                    let scene_active = self.cube_mode && self.cube_scene.is_some();
+                    let draw_id =
+                        if scene_active { crate::model::CUBE_SCENE_NODE } else { sel };
+                    let mut view = self.views.get(&draw_id).copied().unwrap_or_default();
                     // If a WYSIWYG card screenshot is in its Framing phase for this
                     // node, reframe the view to fit that card so the whole card is
                     // captured unclipped. The reframe is temporary (not persisted).
@@ -12101,7 +12285,11 @@ impl eframe::App for TrellisApp {
                         glow: matches!(self.theme, Theme::Futuristic | Theme::SynthWave | Theme::Phosphor),
                     };
                     let can_paste = self.card_clipboard.is_some();
-                    let node_path = crate::tree::node_path(&self.doc, sel);
+                    let node_path = if self.cube_mode && self.cube_scene.is_some() {
+                        self.cube_scene.as_ref().unwrap().title.clone()
+                    } else {
+                        crate::tree::node_path(&self.doc, sel)
+                    };
                     // Time mode: if this basket is a journal day, gather the cards
                     // whose span covers it. Cloned because the canvas borrows the
                     // document immutably for the node it is drawing, and these
@@ -12133,13 +12321,17 @@ impl eframe::App for TrellisApp {
                     } else {
                         Vec::new()
                     };
-                    let mut eye = self.eyes.get(&sel).copied().unwrap_or_default();
-                    let mut cam = self.cams.get(&sel).copied().unwrap_or(0.0);
+                    let mut eye = self.eyes.get(&draw_id).copied().unwrap_or_default();
+                    let mut cam = self.cams.get(&draw_id).copied().unwrap_or(0.0);
                     let mut iso = match self.depth_isolate {
-                        Some((n, c)) if n == sel => Some(c),
+                        Some((n, c)) if n == draw_id => Some(c),
                         _ => None,
                     };
-                    let node = self.doc.nodes.get(&sel).unwrap();
+                    let node = if scene_active {
+                        self.cube_scene.as_ref().unwrap()
+                    } else {
+                        self.doc.nodes.get(&sel).unwrap()
+                    };
                     let actions = canvas::ui(
                         ui,
                         node,
@@ -12167,13 +12359,16 @@ impl eframe::App for TrellisApp {
                     self.focus_group = None;
                     // Never let a temporary export reframe overwrite the real view.
                     if framing_card.is_none() && basket_target.is_none() {
-                        self.views.insert(sel, view);
-                        self.eyes.insert(sel, eye);
-                        self.cams.insert(sel, cam);
+                        self.views.insert(draw_id, view);
+                        self.eyes.insert(draw_id, eye);
+                        self.cams.insert(draw_id, cam);
                     }
-                    self.depth_isolate = iso.map(|c| (sel, c));
+                    self.depth_isolate = iso.map(|c| (draw_id, c));
                     let pointer_down = ui.input(|i| i.pointer.any_down());
-                    self.apply_canvas(ctx, sel, actions, pointer_down);
+                    // With a scene active, `draw_id` is the sentinel — every
+                    // mutating action resolves against a node the document
+                    // does not have, and lands nowhere. The scene is a view.
+                    self.apply_canvas(ctx, draw_id, actions, pointer_down);
                 } else {
                     self.selected = None;
                 }
@@ -12243,6 +12438,9 @@ impl eframe::App for TrellisApp {
         }
         if self.show_requirements {
             self.requirements_window(ctx);
+        }
+        if self.cube_picker.is_some() {
+            self.cube_picker_window(ctx);
         }
         if self.show_plugins {
             self.plugins_window(ctx);

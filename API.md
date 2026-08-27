@@ -303,6 +303,36 @@ agent that could turn on LAN access, or point the mirror policy at `/`, would be
 escalating with the credential you gave it for notes. Those stay in
 **Tools → Settings**.
 
+### Cube — a range of baskets as a volume
+
+The cube **operation**: align several baskets' cards along z — each basket one
+slice, first slice deepest, last nearest — and switch to [Cube
+mode](#settings) to traverse them. Built for a run of journal days: *what did
+each day look like*, flown through rather than opened one by one.
+
+```
+POST /api/cube      {"nodes": [<basket id>, …]}     (slice order = list order)
+  → 200 {"cube_mode":true,"slices":N,"cards":M}
+  | 400 (empty list, or the scene could not be built)
+  | 404 (naming every id that is not a basket — the whole list is validated
+         before anything changes)
+DELETE /api/cube
+  → 200 {"cube_mode":false}                          (leave the cube view)
+```
+
+The scene is **temporary and composed of `![[#id]]` embeds** — live views of
+the real cards, each slice keeping its basket's own arrangement. Nothing is
+created, copied or saved; the document is untouched, and closing the cube (or
+*Go to card*, or turning Cube off) simply drops the view. In the app the same
+operation is **right-click a basket → Open as cube…**, which offers a from/to
+range over its child baskets.
+
+Traversal, once open: click a card to **isolate** it (everything else ghosts)
+with *Go to card* / *View only this*; **Ctrl+Shift+scroll** or
+**PageUp/PageDown** fly the camera through the slices (one PageDown = one
+slice); Esc steps back out. *Go to card* follows the slice's embed to the
+original, in its real basket, in flat mode.
+
 ### Read
 ```
 GET /api/tree
