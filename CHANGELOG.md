@@ -6,6 +6,34 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.160.0]
+
+### Added
+- **A basket can declare how it is read: canvas, or feed.** Designed from
+  scratch after the operator challenged the log-basket convention ("so anytime
+  I go to those workspaces I have to scroll around to the last cards, that's
+  the plan?"): a log has no arrangement — its y axis was doing *time*, badly.
+  A **feed** basket renders as one top-anchored column, **newest entry
+  first** — open it and the latest handoff is simply there.
+  - Toggle: **Feed** in the canvas toolbar, or `PATCH /api/nodes/{id}
+    {"feed": true}`. The flag lives on the node (a document edit, in the
+    change log as `feed`).
+  - The layout is **computed on read and never stored** — same principle as
+    view cards and the cube scene. The x/y arrangement underneath is
+    untouched and returns exactly when feed goes off: the promise Depth makes
+    about z, made about layout. No position may be written *from* a feed
+    (drag/resize/z writes are dropped at the canvas exit), and
+    minimap/marquee/Depth/Time/Cube stand down on a feed basket.
+  - Sorted by **creation order** (the card id — the document-wide counter),
+    deliberately not `touched`: fixing a typo in an old entry must not
+    teleport it to the top.
+  - **Inserting into a feed basket needs no position**: just POST the card.
+    The read-the-column-bottom / append / repair-overlaps recipe evaporates.
+- **Jump-to-newest, in every basket.** `End` centers and flashes the most
+  recently touched card (falling back to the newest-created); `Home` is Reset
+  view. For the canvas baskets that stay canvases — arriving is the whole
+  trip. Both stand down while an editor holds the caret, like PageUp/Down.
+
 ## [0.159.1]
 
 ### Fixed

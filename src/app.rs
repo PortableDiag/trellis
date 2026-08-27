@@ -5111,6 +5111,9 @@ impl TrellisApp {
         let group = |op, id: crate::model::GroupId| Change::new(Ui, Entity::Group, op, id).in_node(node);
         let upd = |id: &CardId, f: &str| card(Op::Updated, *id).titled(title(id)).field(f);
         Some(match a {
+            CanvasAction::ToggleFeed => {
+                Change::new(Ui, Entity::Node, Op::Updated, node).field("feed")
+            }
             CanvasAction::ToggleDesktopMode => {
                 Change::new(Ui, Entity::Node, Op::Updated, node).field("desktop_mode")
             }
@@ -5157,6 +5160,7 @@ impl TrellisApp {
             | CanvasAction::FollowLink(_)
             | CanvasAction::RevealElsewhere(..)
             | CanvasAction::GotoCard(_)
+            | CanvasAction::JumpToNewest(_)
             | CanvasAction::SaveAsTemplate(_)
             | CanvasAction::UpdateTemplate(..)
             | CanvasAction::DeleteTemplate(_)
@@ -6221,6 +6225,21 @@ impl TrellisApp {
                     // Go to where the card actually lives and reveal it there —
                     // the same path the Agenda and a [[#id]] link already use.
                     self.jump_to_card(ctx, home, cid);
+                }
+                CanvasAction::ToggleFeed => {
+                    if let Some(n) = self.doc.nodes.get_mut(&node) {
+                        n.feed = !n.feed;
+                        self.status = if n.feed {
+                            format!("{} reads as a feed — newest first; the arrangement is kept", n.title)
+                        } else {
+                            format!("{} is a canvas again — arrangement restored", n.title)
+                        };
+                    }
+                }
+                CanvasAction::JumpToNewest(cid) => {
+                    self.focus_card = Some(cid);
+                    self.highlight_card = Some(cid);
+                    self.highlight_until = ctx.input(|i| i.time) + canvas::HIGHLIGHT_SECS;
                 }
                 CanvasAction::GotoCard(cid) => {
                     // Leave the cube for the card's real workspace. A cube slice
@@ -9048,7 +9067,7 @@ impl TrellisApp {
                             "GET    /api/nodes",
                             "POST   /api/nodes               {parent?, title}",
                             "GET    /api/nodes/{id}",
-                            "PATCH  /api/nodes/{id}          {title?, color?, bg?}",
+                            "PATCH  /api/nodes/{id}          {title?, color?, bg?, feed?}   (feed: read the basket newest-first in one computed column; the stored arrangement is untouched)",
                             "DELETE /api/nodes/{id}",
                             "POST   /api/nodes/{id}/move     {before|after|index|to, parent?}",
                             "POST   /api/nodes/{id}/expand   {expanded, recursive?}",

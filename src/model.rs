@@ -1759,6 +1759,14 @@ pub struct Node {
     /// readable in both directions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touched: Option<u64>,
+    /// Read this basket as a **feed**: a single top-anchored column, newest
+    /// card first, positions computed on read and never stored. For baskets
+    /// where time is the structure (handoffs, ops checks, release logs) —
+    /// opening one shows the latest entry with no navigation. The x/y
+    /// arrangement underneath is untouched, so turning the feed off returns
+    /// the canvas exactly as it was: the same promise Depth makes about z.
+    #[serde(default)]
+    pub feed: bool,
 }
 
 fn default_true() -> bool {
@@ -2947,6 +2955,7 @@ impl Document {
                 expanded: true,
                 color: None,
                 bg: None,
+                feed: false,
             },
         );
         match parent {
@@ -2978,6 +2987,7 @@ impl Document {
                 expanded: true,
                 color: None,
                 bg: None,
+                feed: false,
             },
         );
         if let Some(list) = self.sibling_list_mut(id) {
@@ -7008,6 +7018,7 @@ impl Document {
             color: None,
             bg: None,
             touched: None,
+            feed: false,
         })
     }
 

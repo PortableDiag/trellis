@@ -207,6 +207,11 @@ pub enum CanvasAction {
     /// `![[#id]]` embed target (a cube slice is an embed card), turn Cube mode
     /// off, and reveal the target where it actually lives.
     GotoCard(CardId),
+    /// Toggle this basket's **feed** flag — read it as one computed column,
+    /// newest first. A document edit (the flag lives on the node).
+    ToggleFeed,
+    /// Center and flash the basket's most recent card (`End`).
+    JumpToNewest(CardId),
     /// Toggle Cube mode — the compressed-workspace-cube VIEWER. A separate
     /// mode, deliberately not a change to Depth: Depth and Time were in daily
     /// use, and Cube's reading gestures (plain-click isolate, z flight) would
@@ -445,7 +450,33 @@ pub fn ui(
     // The projection is shared: Cube draws through the same camera Depth does.
     // The dolly is not — Depth must render exactly as it did before Cube
     // existed, whatever camera position a Cube session left in this basket.
+    // A feed basket reads as a feed regardless of the volume toggles: Depth
+    // and Cube act on stored arrangements, and a feed's arrangement is
+    // computed. Shadowing the flags keeps every downstream gate honest.
+    let feed = node.feed;
+    let depth_mode = depth_mode && !feed;
+    let cube_mode = cube_mode && !feed;
     let volume = depth_mode || cube_mode;
+    // The feed layout: newest first. The key is the card id — the document-wide
+    // creation counter, so within a basket a higher id IS a later entry — and
+    // deliberately not `touched`: editing an old entry must not teleport it to
+    // the top (the same reason `verify::` is not `touched`). Computed on read,
+    // never stored; the real x/y arrangement underneath is untouched.
+    let feed_pos: HashMap<CardId, egui::Pos2> = if feed {
+        let mut by_new: Vec<&Card> = node.cards.iter().collect();
+        by_new.sort_by(|a, b| b.id.cmp(&a.id));
+        let mut y = 40.0f32;
+        by_new
+            .into_iter()
+            .map(|c| {
+                let p = egui::pos2(40.0, y);
+                y += c.size.y + 24.0;
+                (c.id, p)
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
 
     let (canvas_rect, canvas_resp) =
         ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -466,7 +497,7 @@ pub fn ui(
     // pointed-at spot) and the empty-canvas pan is suppressed. The drag latches
     // via a memory flag so it keeps tracking even if the pointer leaves the box.
     // The map's *visuals* are painted later, on top of the cards.
-    let minimap_geom = if env.minimap { minimap_geometry(canvas_rect, &node.cards) } else { None };
+    let minimap_geom = if env.minimap && !feed { minimap_geometry(canvas_rect, &node.cards) } else { None };
     let mut minimap_active = false; // a minimap drag owns the view this frame
     let mut minimap_over = false; // pointer is over the map (suppress canvas gestures)
     if let Some(g) = &minimap_geom {
@@ -519,7 +550,7 @@ pub fn ui(
     let marquee_id = ui.id().with("canvas_marquee");
     let shift = ui.input(|i| i.modifiers.shift_only());
     let mut marquee: Option<egui::Pos2> = ui.memory(|m| m.data.get_temp(marquee_id));
-    if canvas_resp.drag_started_by(egui::PointerButton::Primary) && shift && !minimap_active {
+    if canvas_resp.drag_started_by(egui::PointerButton::Primary) && shift && !minimap_active && !feed {
         marquee = canvas_resp.interact_pointer_pos();
         ui.memory_mut(|m| m.data.insert_temp(marquee_id, marquee.unwrap_or_default()));
     }
@@ -628,6 +659,27 @@ pub fn ui(
         }
     }
 
+    // Jump-to-newest / back-to-top, in any basket. `End` centers and flashes
+    // the most recently touched card (falling back to the newest-created) —
+    // built because a chronological column makes you scroll to its end, and
+    // arriving is the whole trip. `Home` is Reset view. Guarded like
+    // PageUp/PageDown: an editor's caret owns these keys.
+    {
+        let nav_typing = ui.ctx().memory(|m| m.focused().is_some());
+        if !nav_typing {
+            if ui.input(|i| i.key_pressed(egui::Key::End)) {
+                if let Some(c) =
+                    node.cards.iter().max_by_key(|c| (c.touched.unwrap_or(0), c.id))
+                {
+                    actions.push(CanvasAction::JumpToNewest(c.id));
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+                actions.push(CanvasAction::ResetView);
+            }
+        }
+    }
+
     // Read AFTER the fly block: the camera the wheel/keys just moved is the
     // camera this frame draws through, or every flight renders one step late.
     let dolly = if cube_mode { *cam } else { 0.0 };
@@ -669,7 +721,8 @@ pub fn ui(
     // lands in the middle of the canvas.
     if let Some(fid) = env.focus_card {
         if let Some(c) = node.cards.iter().find(|c| c.id == fid) {
-            let world_center = c.pos + c.size * 0.5;
+            let shown = feed_pos.get(&c.id).copied().unwrap_or(c.pos);
+            let world_center = shown + c.size * 0.5;
             view.translation = (canvas_rect.center() - canvas_rect.min)
                 - view.scaling * world_center.to_vec2();
         }
@@ -1154,7 +1207,12 @@ pub fn ui(
             env.card_rects.remove(&card.id);
             continue;
         }
-        let t = depth_transform(to_screen, canvas_rect.center() + *eye, card.z, dolly, volume);
+        let t = if feed {
+            let shown = feed_pos.get(&card.id).copied().unwrap_or(card.pos);
+            to_screen * TSTransform::from_translation(shown - card.pos)
+        } else {
+            depth_transform(to_screen, canvas_rect.center() + *eye, card.z, dolly, volume)
+        };
         env.card_rects.insert(card.id, t.mul_rect(world_rect(card)));
         // Every card but the isolated one drops to a ghost: present enough to
         // keep the volume's shape, faint enough to read the chosen card INTO
@@ -1388,6 +1446,18 @@ pub fn ui(
         .show(ui.ctx(), |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(feed, "Feed")
+                    .on_hover_text(
+                        "Read this basket as a feed: one column, newest entry first, \
+                         laid out on the fly. The x/y arrangement is kept untouched \
+                         underneath — turning Feed off returns it exactly. While on, \
+                         Depth/Time/Cube and card dragging stand down here.",
+                    )
+                    .clicked()
+                {
+                    actions.push(CanvasAction::ToggleFeed);
+                }
                 if ui
                     .selectable_label(dock_mode, "Dock")
                     .on_hover_text("Dock mode: drag a card onto another to stick them together")
@@ -1709,7 +1779,9 @@ pub fn ui(
     ui.painter().text(
         canvas_rect.left_bottom() + egui::vec2(8.0, -6.0),
         egui::Align2::LEFT_BOTTOM,
-        if cube_mode {
+        if feed {
+            "feed: newest first, layout computed — the arrangement underneath is untouched · scroll: read · end: newest · home: top · edit/click cards as normal"
+        } else if cube_mode {
             "click a card: isolate (read into the volume) · ctrl+shift+scroll / pgup·pgdn: fly through Z · ctrl+scroll: zoom · alt+drag: look around · esc: un-isolate · Reset view: straight on"
         } else if depth_mode {
             "drag title: move · ctrl+scroll: zoom · shift+scroll over a card: slide it in Z · alt+drag: look around (parallax) · Reset view: straight on"
@@ -1719,6 +1791,22 @@ pub fn ui(
         egui::FontId::proportional(11.0),
         ui.visuals().weak_text_color(),
     );
+
+    // A feed's layout is computed, so no position may be written FROM it: a
+    // drag against a feed slot would overwrite the real arrangement the flag
+    // promises to preserve. The widgets still render their drags; the writes
+    // are dropped here, at the one exit.
+    if feed {
+        actions.retain(|a| {
+            !matches!(
+                a,
+                CanvasAction::MoveCard(..)
+                    | CanvasAction::ResizeCard(..)
+                    | CanvasAction::MoveGroup(..)
+                    | CanvasAction::SetZ(..)
+            )
+        });
+    }
 
     actions
 }
@@ -6146,6 +6234,48 @@ mod tests {
             },
         ]);
         assert_eq!(h.cam, before, "a plain wheel pans, it does not fly");
+    }
+
+    /// A feed basket draws newest-first in one column at computed slots,
+    /// whatever the stored positions say — and stores nothing back.
+    #[test]
+    fn a_feed_lays_out_newest_first_in_one_column() {
+        let mut h = Headless::cube();
+        h.cube = false;
+        // Scatter the stored arrangement; the feed must ignore it.
+        for (i, c) in h.doc.nodes.get_mut(&h.node_id).unwrap().cards.iter_mut().enumerate() {
+            c.pos = egui::pos2(500.0 - 200.0 * i as f32, 300.0 + 90.0 * i as f32);
+            c.z = 0.0;
+        }
+        h.doc.nodes.get_mut(&h.node_id).unwrap().feed = true;
+        h.frame(vec![]);
+        let ids: Vec<CardId> =
+            h.doc.nodes[&h.node_id].cards.iter().map(|c| c.id).collect();
+        let (newest, oldest) = (*ids.iter().max().unwrap(), *ids.iter().min().unwrap());
+        let rn = h.card_rects[&newest];
+        let ro = h.card_rects[&oldest];
+        assert!(rn.top() < ro.top(), "newest card sits above the oldest");
+        assert_eq!(rn.left(), ro.left(), "one column, x aligned");
+    }
+
+    /// `End` asks to reveal the newest card; `Home` resets the view. Guarded
+    /// so a caret in an editor keeps its own End/Home.
+    #[test]
+    fn end_jumps_to_the_newest_card() {
+        let mut h = Headless::cube();
+        h.cube = false; // an ordinary flat basket
+        h.frame(vec![]);
+        let actions = h.frame(vec![key(egui::Key::End)]);
+        let newest = h.doc.nodes[&h.node_id].cards.iter().map(|c| c.id).max().unwrap();
+        assert!(
+            actions.iter().any(|a| matches!(a, CanvasAction::JumpToNewest(id) if *id == newest)),
+            "End emits the jump to the newest card"
+        );
+        let actions = h.frame(vec![key(egui::Key::Home)]);
+        assert!(
+            actions.iter().any(|a| matches!(a, CanvasAction::ResetView)),
+            "Home resets the view"
+        );
     }
 
     /// THE regression the mode split exists for, pinned: Depth mode behaves

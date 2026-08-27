@@ -606,10 +606,20 @@ even when the body is short.
 
 ### Update
 ```
-PATCH /api/nodes/{id}              {title?, color?, bg?}
+PATCH /api/nodes/{id}              {title?, color?, bg?, feed?}
   → 200 {"id":<id>}    | 404
         color: tag color; bg: basket background color — both setting only
         (can't clear via API; use the app's Default to reset)
+        feed: read the basket as a FEED — one computed column, newest card
+        first (by creation order, deliberately not `touched`, so editing an
+        old entry never teleports it to the top). For baskets where time is
+        the structure: handoffs, ops checks, release logs. The stored x/y
+        arrangement is untouched and returns exactly when feed goes false —
+        the promise Depth makes about z, made about layout. While a basket is
+        a feed, INSERTING NEEDS NO POSITION: just POST the card and the feed
+        places it — no reading the column bottom, no overlap repair. Depth/
+        Time/Cube and card dragging stand down on a feed basket; `End` jumps
+        to the newest card and `Home` to the top in every basket either way.
 
 PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, fit?, lang?, pos?, z?, size?, items?, rows?, header?, inline_images?, source?}
   → 200 {<updated card>}   | 404

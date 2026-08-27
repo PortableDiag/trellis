@@ -71,7 +71,7 @@ pub enum ApiRequest {
     /// a response could only be resolved by walking every basket.
     LocateCard(u64),
     CreateNode { parent: Option<NodeId>, title: String },
-    UpdateNode { id: NodeId, title: Option<String>, color: Option<[u8; 3]>, bg: Option<[u8; 3]> },
+    UpdateNode { id: NodeId, title: Option<String>, color: Option<[u8; 3]>, bg: Option<[u8; 3]>, feed: Option<bool> },
     DeleteNode(NodeId),
     // Reorder / reparent a node in the tree.
     MoveNode { id: NodeId, mv: MoveNodeInput },
@@ -854,7 +854,7 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
 
     Some(match req {
         ApiRequest::CreateNode { title, .. } => ch(E::Node, Op::Created, 0).titled(title.clone()),
-        ApiRequest::UpdateNode { id, title, color, bg } => {
+        ApiRequest::UpdateNode { id, title, color, bg, feed } => {
             let mut c = ch(E::Node, Op::Updated, *id)
                 .titled(title.clone().unwrap_or_else(|| node_title(id)));
             if title.is_some() {
@@ -865,6 +865,9 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
             }
             if bg.is_some() {
                 c = c.field("bg");
+            }
+            if feed.is_some() {
+                c = c.field("feed");
             }
             c
         }
@@ -1324,6 +1327,10 @@ struct UpdateNodeInput {
     /// Basket background color. A color sets it; `null`/absent leaves it unchanged.
     #[serde(default, deserialize_with = "de_color_opt")]
     bg: Option<[u8; 3]>,
+    /// Read this basket as a feed — newest card first in one computed column,
+    /// the stored arrangement untouched. Absent leaves it unchanged.
+    #[serde(default)]
+    feed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2106,7 +2113,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "nodes", id]) => Ok(ApiRequest::GetNode(pid(id)?)),
         (Method::Patch, ["api", "nodes", id]) => {
             let i: UpdateNodeInput = parse(body)?;
-            Ok(ApiRequest::UpdateNode { id: pid(id)?, title: i.title, color: i.color, bg: i.bg })
+            Ok(ApiRequest::UpdateNode { id: pid(id)?, title: i.title, color: i.color, bg: i.bg, feed: i.feed })
         }
         (Method::Delete, ["api", "nodes", id]) => Ok(ApiRequest::DeleteNode(pid(id)?)),
         (Method::Post, ["api", "nodes", id, "move"]) => {
@@ -3233,7 +3240,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let id = doc.add_node(parent, title);
             (true, ApiResponse::created(json!({ "id": id })))
         }
-        ApiRequest::UpdateNode { id, title, color, bg } => match doc.nodes.get_mut(&id) {
+        ApiRequest::UpdateNode { id, title, color, bg, feed } => match doc.nodes.get_mut(&id) {
             Some(n) => {
                 if let Some(t) = title {
                     n.title = t;
@@ -3243,6 +3250,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some(c) = bg {
                     n.bg = Some(c);
+                }
+                if let Some(f) = feed {
+                    n.feed = f;
                 }
                 (true, ApiResponse::ok(json!({ "id": id })))
             }
@@ -5275,6 +5285,7 @@ fn node_json(n: &crate::model::Node) -> Value {
         "expanded": n.expanded,
         "color": n.color,
         "bg": n.bg,
+        "feed": n.feed,
         "touched": n.touched,
         "groups": groups_json(n),
         "cards": n.cards.iter().map(card_json).collect::<Vec<_>>(),
@@ -6458,10 +6469,21 @@ mod tests {
         let (_, got) = process(&mut doc, ApiRequest::GetNode(id));
         assert_eq!(got.status, 200);
         assert!(got.body.contains("Test"));
+        assert!(got.body.contains("\"feed\": false"), "a basket is a canvas by default");
+
+        // Flip it to a feed and read it back — the flag is a document edit.
+        let (dirty, up) = process(
+            &mut doc,
+            ApiRequest::UpdateNode { id, title: None, color: None, bg: None, feed: Some(true) },
+        );
+        assert!(dirty);
+        assert_eq!(up.status, 200);
+        let (_, got) = process(&mut doc, ApiRequest::GetNode(id));
+        assert!(got.body.contains("\"feed\": true"));
 
         let (_, up) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: Some("Renamed".into()), color: None, bg: None },
+            ApiRequest::UpdateNode { id, title: Some("Renamed".into()), color: None, bg: None, feed: None },
         );
         assert_eq!(up.status, 200);
         assert_eq!(doc.nodes[&id].title, "Renamed");
@@ -6479,7 +6501,7 @@ mod tests {
         let i: UpdateNodeInput = serde_json::from_str(r#"{"bg":"red"}"#).unwrap();
         let (dirty, resp) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: None, color: None, bg: i.bg },
+            ApiRequest::UpdateNode { id, title: None, color: None, bg: i.bg, feed: None },
         );
         assert!(dirty);
         assert_eq!(resp.status, 200);
