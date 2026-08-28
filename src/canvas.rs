@@ -497,7 +497,8 @@ pub fn ui(
     // pointed-at spot) and the empty-canvas pan is suppressed. The drag latches
     // via a memory flag so it keeps tracking even if the pointer leaves the box.
     // The map's *visuals* are painted later, on top of the cards.
-    let minimap_geom = if env.minimap && !feed { minimap_geometry(canvas_rect, &node.cards) } else { None };
+    let minimap_geom =
+        if env.minimap && !feed { minimap_geometry(canvas_rect, &node.cards, projected) } else { None };
     let mut minimap_active = false; // a minimap drag owns the view this frame
     let mut minimap_over = false; // pointer is over the map (suppress canvas gestures)
     if let Some(g) = &minimap_geom {
@@ -1331,6 +1332,14 @@ pub fn ui(
             let r = egui::Rect::from_min_max(w2m(c.pos), w2m(c.pos + c.size));
             let col = egui::Color32::from_rgb(c.color[0], c.color[1], c.color[2]);
             paint.rect_filled(r, 0.0, col.gamma_multiply(0.85));
+        }
+        // Projections, in the map's version of the canvas's language: hollow, in
+        // the card's accent, where a resident card is a solid block — so the map
+        // shows the same day the canvas does without claiming the card lives here.
+        for (_, _, c) in projected {
+            let r = egui::Rect::from_min_max(w2m(c.pos), w2m(c.pos + c.size));
+            let col = egui::Color32::from_rgb(c.color[0], c.color[1], c.color[2]);
+            paint.rect_stroke(r, 0.0, egui::Stroke::new(1.0, col.gamma_multiply(0.85)));
         }
         // Reticle: the current viewport (screen → world → minimap).
         let inv = |sp: egui::Pos2| {
@@ -5878,14 +5887,25 @@ struct MinimapGeom {
 
 /// Compute the minimap box for the current basket: the world bounding box of all
 /// cards, fit (preserving aspect) into a small box tucked into the canvas's
-/// bottom-right corner. `None` if the basket is empty.
-fn minimap_geometry(canvas_rect: egui::Rect, cards: &[Card]) -> Option<MinimapGeom> {
-    if cards.is_empty() {
+/// bottom-right corner. `None` if the basket shows nothing at all.
+///
+/// Projections count. The canvas draws a Time-mode projection like any other
+/// occupant of the day, so a map computed from the resident cards alone both
+/// understates the day (one dot where the canvas shows two cards) and can crop
+/// the projection outside the map's world box entirely — the operator read a
+/// two-card day as one. `None` only when residents *and* projections are empty:
+/// a day that only has work passing through it still gets a map.
+fn minimap_geometry(
+    canvas_rect: egui::Rect,
+    cards: &[Card],
+    projected: &[(crate::model::NodeId, String, Card)],
+) -> Option<MinimapGeom> {
+    if cards.is_empty() && projected.is_empty() {
         return None;
     }
     let mut min = egui::pos2(f32::MAX, f32::MAX);
     let mut max = egui::pos2(f32::MIN, f32::MIN);
-    for c in cards {
+    for c in cards.iter().chain(projected.iter().map(|(_, _, c)| c)) {
         min.x = min.x.min(c.pos.x);
         min.y = min.y.min(c.pos.y);
         max.x = max.x.max(c.pos.x + c.size.x);
@@ -5966,6 +5986,38 @@ mod tests {
         let base = TSTransform::IDENTITY;
         let t = depth_transform(base, egui::pos2(0.0, 0.0), 300.0, 900.0, false);
         assert_eq!(t, base);
+    }
+
+    /// The minimap's world box covers projections, not just resident cards.
+    /// The canvas draws a Time-mode projection like any occupant of the day,
+    /// and a map computed from the residents alone read a two-card day as one
+    /// (operator's report) — with the projection cropped outside the map's
+    /// world entirely when it sat past the residents' bounds.
+    #[test]
+    fn minimap_world_box_covers_projections() {
+        let canvas = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut resident = Card::new(1, egui::pos2(40.0, 40.0), crate::model::CardKind::Text);
+        resident.size = egui::vec2(100.0, 80.0);
+        let mut visiting = Card::new(2, egui::pos2(900.0, 700.0), crate::model::CardKind::Text);
+        visiting.size = egui::vec2(120.0, 90.0);
+        let projected = vec![(7 as crate::model::NodeId, "2026 › Aug › Tue".to_string(), visiting)];
+
+        // Residents alone: the old world box.
+        let own = minimap_geometry(canvas, std::slice::from_ref(&resident), &[]).unwrap();
+        // With the projection, the box must reach the visiting card's far corner.
+        let both = minimap_geometry(canvas, std::slice::from_ref(&resident), &projected).unwrap();
+        assert_eq!(both.world_min, egui::pos2(40.0, 40.0));
+        assert!(
+            both.scale < own.scale,
+            "the world grew to cover the projection, so the map zooms out: {} vs {}",
+            both.scale,
+            own.scale
+        );
+
+        // A day with nothing of its own but work passing through still gets a
+        // map — None only when there is nothing to show at all.
+        assert!(minimap_geometry(canvas, &[], &projected).is_some());
+        assert!(minimap_geometry(canvas, &[], &[]).is_none());
     }
 
     /// Drive the REAL canvas through a headless egui frame with synthetic

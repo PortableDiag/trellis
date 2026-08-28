@@ -6,6 +6,19 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.161.1]
+
+### Fixed
+- **The minimap shows the whole day, projections included.** With Time on, a
+  card spanning this day from another one is drawn on the canvas but was
+  missing from the minimap — the map computed its world box and its dots from
+  the resident cards alone, so a two-card day read as one (operator's report),
+  and a projection sitting past the residents' bounds was cropped outside the
+  map's world entirely. Projections now extend the world box and draw on the
+  map — hollow, in the card's accent, where a resident is a solid block: the
+  map's version of the canvas's not-a-resident language. A day with nothing of
+  its own but work passing through gets a map now too.
+
 ## [0.161.0]
 
 ### Fixed
