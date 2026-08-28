@@ -1400,9 +1400,11 @@ impl Card {
         }
     }
 
-    /// This card's inline `key:: value` properties (parsed from title + body).
+    /// This card's inline `key:: value` properties, parsed from its title and
+    /// its *content* — see [`property_source`] for why that is not
+    /// [`searchable_body`].
     pub fn properties(&self) -> Vec<(String, String)> {
-        extract_properties(&format!("{}\n{}", self.title, searchable_body(self)))
+        extract_properties(&property_source(self))
     }
 
     pub fn new(id: CardId, pos: egui::Pos2, kind: CardKind) -> Self {
@@ -4240,8 +4242,7 @@ impl Document {
     pub fn card_properties(&self, node: NodeId, card: CardId) -> Vec<(String, String)> {
         match self.card(node, card) {
             Some(c) => {
-                let hay = format!("{}\n{}", c.title, searchable_body(c));
-                extract_properties(&hay)
+                extract_properties(&property_source(c))
             }
             None => Vec::new(),
         }
@@ -4510,9 +4511,8 @@ impl Document {
         let mut m: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
         for node in self.nodes.values() {
             for card in &node.cards {
-                let hay = format!("{}\n{}", card.title, searchable_body(card));
                 let mut seen = std::collections::BTreeSet::new();
-                for (k, _) in extract_properties(&hay) {
+                for (k, _) in card.properties() {
                     if seen.insert(k.clone()) {
                         *m.entry(k).or_insert(0) += 1;
                     }
@@ -4683,8 +4683,7 @@ impl Document {
         let mut matches: Vec<(NodeId, CardId)> = Vec::new();
         for n in self.nodes.values() {
             for c in &n.cards {
-                let hay = format!("{}\n{}", c.title, searchable_body(c));
-                for (k, v) in extract_properties(&hay) {
+                for (k, v) in c.properties() {
                     if k != "alias" && k != "aliases" {
                         continue;
                     }
@@ -5048,7 +5047,7 @@ impl Document {
                     }
                 }
                 if let Some(k) = &key {
-                    let props = extract_properties(&hay);
+                    let props = card.properties();
                     let ok = props.iter().any(|(pk, pv)| {
                         pk == k && value.as_ref().map_or(true, |w| pv.to_lowercase() == *w)
                     });
@@ -5220,8 +5219,7 @@ impl Document {
         let mut hits = Vec::new();
         for node in self.nodes.values() {
             for card in &node.cards {
-                let hay = format!("{}\n{}", card.title, searchable_body(card));
-                let props = extract_properties(&hay);
+                let props = card.properties();
                 if let Some((_, v)) = props.iter().find(|(k, v)| {
                     *k == key && want_val.as_ref().map_or(true, |w| v.to_lowercase() == *w)
                 }) {
@@ -6326,6 +6324,42 @@ pub fn searchable_body(card: &Card) -> String {
     }
 }
 
+/// The text a card's `key:: value` properties are read from: the title, then
+/// the content — **one line per unit**. A checklist's units are its items and a
+/// table's are its cells, each on a line of its own.
+///
+/// Deliberately not [`searchable_body`], which joins a checklist's items and a
+/// table's cells with *spaces* because search only wants a haystack.
+/// [`extract_properties`] is line-based, and a free-text value (`status:: done`,
+/// `owner:: Jane Doe`) runs to the end of its line — so on the space-joined
+/// form a `status:: done` at the end of one item swallowed the whole of the next
+/// item as its value. Found on a live working list on 2026-08-28: four ticked
+/// lines ending `status:: done` came back as `status = "done The tree remembers
+/// your place …"`, the last one carrying every unticked line after it, and the
+/// Kanban grew a column named after a sentence. The per-item agenda path was
+/// never affected (it parses each line alone), which is why it went unnoticed.
+///
+/// Every reader of card-level properties goes through this so the title +
+/// content rule stays in one place: the card JSON, Kanban, `/api/query`,
+/// `/api/properties`, aliases, saved views and frontmatter export.
+pub fn property_source(card: &Card) -> String {
+    let content = match &card.kind {
+        CardKind::Checklist { items } => items
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        CardKind::Table { table } => table
+            .rows
+            .iter()
+            .flat_map(|r| r.iter().map(|c| c.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => searchable_body(card),
+    };
+    format!("{}\n{}", card.title, content)
+}
+
 fn snippet_around(text: &str, pos: usize, len: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     // `pos`/`len` are byte offsets into `text`; map to a char window loosely.
@@ -6675,13 +6709,12 @@ pub fn frontmatter_to_trellis(fields: &[(String, String)]) -> String {
 /// none — so an exported card lands in Obsidian with its metadata intact rather
 /// than flattened into prose.
 pub fn frontmatter_for(card: &Card) -> String {
-    // The same haystack `Document::card_properties` uses, so an exported card's
-    // frontmatter is exactly the properties the Agenda and Kanban read — the rule
+    // `Card::properties` is the same reader the Agenda and Kanban use, so an
+    // exported card's frontmatter is exactly the properties they read — the rule
     // that a checklist card's properties come from its title and items, never its
     // body, holds here for free.
-    let hay = format!("{}\n{}", card.title, searchable_body(card));
-    let props = extract_properties(&hay);
-    let tags = extract_tags(&hay);
+    let props = card.properties();
+    let tags = extract_tags(&format!("{}\n{}", card.title, searchable_body(card)));
     if props.is_empty() && tags.is_empty() {
         return String::new();
     }
@@ -6835,8 +6868,7 @@ impl Document {
             }
             "text" => Some(searchable_body(c)),
             _ => {
-                let hay = format!("{}\n{}", c.title, searchable_body(c));
-                extract_properties(&hay)
+                c.properties()
                     .into_iter()
                     .filter(|(pk, _)| *pk == k)
                     .next_back()
@@ -7786,6 +7818,46 @@ mod tests {
         });
         assert_eq!(preview_text(&table).lines().count(), 2);
         assert_eq!(searchable_body(&table).lines().count(), 1);
+    }
+
+    /// **A checklist's properties are read one item per line, a table's one cell
+    /// per line.** `extract_properties` is line-based and a free-text value runs
+    /// to the end of its line, so the space-joined `searchable_body` let a
+    /// `status:: done` at the end of one item take the next item — and every
+    /// later one — as its value. Seen live on a working list on 2026-08-28.
+    #[test]
+    fn card_properties_do_not_run_across_items_or_cells() {
+        let cl = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Checklist {
+            items: vec![
+                ChecklistItem { id: 1, text: "Feeds on the phone — DONE status:: done".into(), done: true },
+                ChecklistItem { id: 2, text: "Embeds: still plain text on the phone".into(), done: false },
+                ChecklistItem { id: 3, text: "owner:: Jane Doe".into(), done: false },
+            ],
+        });
+        assert_eq!(
+            cl.properties(),
+            vec![("status".to_string(), "done".to_string()), ("owner".to_string(), "Jane Doe".to_string())]
+        );
+
+        let table = Card::new(2, egui::pos2(0.0, 0.0), CardKind::Table {
+            table: TableData::from_values(vec![
+                vec!["status:: done".to_string(), "owner:: ada".to_string()],
+                vec!["plain".to_string(), "text".to_string()],
+            ]),
+        });
+        assert_eq!(
+            table.properties(),
+            vec![("status".to_string(), "done".to_string()), ("owner".to_string(), "ada".to_string())]
+        );
+
+        // The title still counts, and a text card is unchanged.
+        let mut t = Card::new(3, egui::pos2(0.0, 0.0), CardKind::Text);
+        t.title = "Thing  [status:: doing]".into();
+        t.body = "due:: 2026-08-15 — and prose after it".into();
+        assert_eq!(
+            t.properties(),
+            vec![("status".to_string(), "doing".to_string()), ("due".to_string(), "2026-08-15".to_string())]
+        );
     }
 
     /// **A neighbourhood is both directions and shortest-path.** Following only

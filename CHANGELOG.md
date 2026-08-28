@@ -6,6 +6,25 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.161.3]
+
+### Fixed
+- **A checklist's properties are read one item per line, a table's one cell
+  per line.** A card's `key:: value` properties were parsed from the same
+  space-joined haystack search uses, and the parser is line-based with a
+  free-text value running to the end of its line — so on a working list a
+  `status:: done` at the end of one item took the *next* item's whole text as
+  its value, and the last ticked line took every unticked line after it.
+  Found on the live Android-parity list: the card JSON reported
+  `status = "done The tree remembers your place …"`, `/api/query` could not
+  match `status:: done`, and the Kanban grew a column named after a sentence.
+  The per-item Agenda path was never affected (it parses each line alone),
+  which is why it went unnoticed. Card-level properties now come from one
+  `property_source` — title, then items or cells each on a line of their own —
+  and every reader (card JSON, Kanban, `/api/query`, `/api/properties`,
+  aliases, saved-view columns, frontmatter export) goes through it. Pinned by
+  a test in both kinds.
+
 ## [0.161.2]
 
 ### Fixed
