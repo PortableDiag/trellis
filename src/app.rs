@@ -9067,7 +9067,7 @@ impl TrellisApp {
                             "GET    /api/nodes",
                             "POST   /api/nodes               {parent?, title}",
                             "GET    /api/nodes/{id}",
-                            "PATCH  /api/nodes/{id}          {title?, color?, bg?, feed?}   (feed: read the basket newest-first in one computed column; the stored arrangement is untouched)",
+                            "PATCH  /api/nodes/{id}          {title?, color?, bg?, feed?}   (color/bg: a color sets, null clears, absent leaves alone; feed: read the basket newest-first in one computed column; the stored arrangement is untouched)",
                             "DELETE /api/nodes/{id}",
                             "POST   /api/nodes/{id}/move     {before|after|index|to, parent?}",
                             "POST   /api/nodes/{id}/expand   {expanded, recursive?}",

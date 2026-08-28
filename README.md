@@ -171,6 +171,8 @@ and zooms (Ctrl+scroll); each node remembers its view. A **minimap** in the
 bottom-right corner (toggle in **Settings → Canvas**) shows the whole basket at a
 glance with a reticle for your current view — so you can spot cards that sit far
 from the main cluster, and click or drag on it to jump there without zooming out.
+With Time on, cards projected into the day from elsewhere are on the map too,
+drawn hollow in their accent where a resident card is a solid block.
 
 **Organizing cards**
 - **Group** — Ctrl/Cmd+click cards to multi-select, then "Group N cards" wraps

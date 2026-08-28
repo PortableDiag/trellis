@@ -2943,6 +2943,23 @@ curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
   $API/nodes/$LOG/cards
 ```
 
+### Tag and un-tag a node
+
+A node's `color` (the tag dot in the tree) and `bg` (the basket background)
+follow the same null-vs-absent rule as a card's `view` (since v0.161.0 — before
+that, `null` was accepted and silently stored nothing):
+
+```sh
+# A color sets it — array, hex or name, like every other color input.
+curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"color":"teal","bg":[16,24,32]}' $API/nodes/$NID
+
+# An explicit null CLEARS: no tag dot / back to the theme-default canvas.
+curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"bg":null}' $API/nodes/$NID
+
+# An absent field is left alone — this touches only the title.
+curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"title":"Renamed"}' $API/nodes/$NID
+```
+
 The x/y arrangement underneath is preserved untouched — `{"feed": false}`
 returns the canvas exactly as it was. Entries stay ordinary cards: link them
 with `[[#id]]`, archive the finished ones, query them from the panels. The

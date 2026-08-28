@@ -6,6 +6,15 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.161.2]
+
+### Fixed
+- **The docs teach the clear.** Doc-only. API.md's Examples gain *Tag and
+  un-tag a node* — the set / null-clears / absent-leaves pattern v0.161.0
+  established — and the in-app Settings → Endpoints line for `PATCH
+  /api/nodes/{id}` says it too. The README's minimap paragraph catches up with
+  v0.161.1: projections are on the map, hollow in their accent.
+
 ## [0.161.1]
 
 ### Fixed
