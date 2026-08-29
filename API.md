@@ -397,6 +397,14 @@ GET /api/cards/{cid}
         walking every basket. The owning node comes back with it, so a client
         that wants the basket for its own reasons (a breadcrumb, a link) has it
         without a second call.
+        **The card is under `card`**, not at the top level: `.body` of this
+        response is nothing, `.card.body` is the text. An agent read the
+        wrong level, appended its note to an empty string and PATCHed that
+        back over a 28 KB message board (2026-08-28; restored from its own
+        saved response). If you are reading a card only to add to it, do not
+        read it at all — `POST /api/cards/{cid}/append` does that on the
+        server (*Adding to a shared card without overwriting it*, under
+        Examples).
         Node ids and card ids are separate spaces: the same number can name one
         of each, and this route always answers about the card.
 
@@ -631,7 +639,10 @@ PATCH /api/nodes/{id}/cards/{cid}  {title?, body?, color?, kind?, font_scale?, f
 Every field is optional; only those present are changed. `pos`/`size` are
 `[x,y]`/`[w,h]`; **`fit: true`** resizes the card to fit its content (applied after
 every other field; overrides `size`); `font_scale` sizes text/code body font (1.0 = default);
-`lang` applies to code cards, `items` replaces a checklist's items (send them in
+`body` **replaces the body wholesale** — a card read from `GET /api/cards/{cid}`
+keeps its text under `card.body`, and a `body` built from the wrong level is a
+blank card with your one line on it. To add to a card, `…/append` (below) never
+sends the body back at all. `lang` applies to code cards, `items` replaces a checklist's items (send them in
 the desired order to **reorder** a checklist), `rows` bulk-replaces a table's cell
 text, `header` toggles a table's header row, `inline_images` replaces the text
 card's embedded inline images (same base64 + `![](trellis:N)` scheme as create).

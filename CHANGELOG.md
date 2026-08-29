@@ -6,6 +6,23 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.161.4]
+
+### Fixed
+- **The docs say where the body is, and that PATCH replaces it.** Doc-only.
+  `GET /api/cards/{cid}` wraps the card — `{node, node_path, card:{…}}` — and
+  an agent read `.body` off the wrapper, got nothing, appended its note to
+  that and PATCHed the result back over a 28 KB message board (2026-08-28;
+  it restored the card from its own saved response, nothing lost). The
+  by-id GET now says the text is `card.body`, the PATCH reference says
+  `body` replaces wholesale, and both point at `POST …/cards/{cid}/append`,
+  which adds to a card on the server without reading it — the route built
+  for exactly this in v0.118.0, which the agent did not know existed. The
+  Settings → Endpoints lines say the same. A server-side "refuse a body
+  that shrinks" guard was proposed and declined: clearing or rewriting a
+  body is a legitimate edit, the version history and change log already
+  make it recoverable, and append is the answer to the actual class.
+
 ## [0.161.3]
 
 ### Fixed
