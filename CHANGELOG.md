@@ -6,6 +6,27 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.162.0]
+
+### Added
+- **`GET /api/errors` — the API remembers what it refused.** Every response of
+  400 or above (refusals, faults, failed auth) is recorded: status, method,
+  path with query, the agent (`X-Agent` or token label), the error message
+  sent, and the first 200 characters of the request body when one was read —
+  never on a 401, so a mistyped key cannot land in a log. Same
+  `epoch`/`seq`/`truncated` contract as `/api/changes`; 5000 kept in memory,
+  `total` counts past that. **`api_errors` on `GET /api/instance`** is that
+  count, the fourth read-in flag beside `stale_claims`, `channels_waiting` and
+  `stale_plugins` — above zero, go and read which calls failed. **And it is a
+  file**: each entry is appended as it happens to `<data-dir>/trellis/api-errors.log`
+  (JSON lines, `epoch` on every line, rotates once at 1 MB), so it survives a
+  restart and reads with `tail -f`. Until now a failed API call left no
+  trace anywhere — not the change log (successes only), not even stderr —
+  and with several agents driving the API all day the operator was relying
+  on the agent that got the error to mention it. Refused for a scoped token
+  (whole-document). A file that cannot be written is reported once in
+  `file_error` and never refuses a request: the log is a record, not a gate.
+
 ## [0.161.4]
 
 ### Fixed

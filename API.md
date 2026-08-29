@@ -150,7 +150,7 @@ GET /api/instance
          "path":"/home/you/work.ron","port":7373,"lan":false,
          "lan_host":"192.168.0.101","lan_hosts":["192.168.0.101","100.64.100.6"],
          "nodes":42,"unsaved_changes":false,"stale_claims":0,
-         "channels":2,"channels_waiting":1,"stale_plugins":0}
+         "channels":2,"channels_waiting":1,"stale_plugins":0,"api_errors":0}
 ```
 `document` is the file name (`"untitled"` for a never-saved document) and `path`
 is its full path, or `null` when untitled. `nodes` is the document's node count.
@@ -222,6 +222,16 @@ every instance keeps executing the old copy — with no symptom beyond a feature
 that silently does nothing. Above zero, read [`GET /api/plugins`](#plugins) for
 which ones. It rides here for the same reason `stale_claims` does: staleness
 should be noticed at read-in, not after a feature quietly fails.
+
+**`api_errors` counts the API calls this run has refused or failed** — every
+response of 400 or above since the app started. It is the fourth read-in flag,
+and it exists because the other three are about the *document* while this one
+is about the *agents*: with several of them driving the API all day, the only
+record of a refused call used to be the agent that made it, and an agent that
+misreads a response leaves no trace at all. Above zero, read
+[`GET /api/errors`](#what-failed-the-error-log) — which calls, by whom, and
+what they were told — and mention what you find, because the operator has been
+relying on you to.
 
 ### Plugins
 
@@ -2531,6 +2541,56 @@ same place, so they cannot disagree.
   entity named. That is what makes the log impossible to desync from — there is
   no patch to misapply — and it is why consecutive identical changes collapse
   into one entry (a card drag is *one* `moved`, not one per frame).
+
+### What failed (the error log)
+The change log records what succeeded. This records what **did not**: every
+response of **400 or above** the API has answered this run — refusals (400, 403,
+404, 409), faults (500, 503, 504) and failed authentication (401) alike.
+```
+GET /api/errors?since=<seq>&limit=<n>
+  → 200 {"epoch":…, "since":…, "count":N, "total":T, "retained":M,
+         "oldest":<seq|null>, "newest":<seq>, "truncated":false,
+         "file":"/home/you/.local/share/trellis/api-errors.log", "file_error":null,
+         "errors":[ … ]}
+  | 403 for a scoped token — the log is whole-document
+```
+`limit` defaults to 200 (max 2000). `total` is every failure this run, including
+ones already rotated out of memory (the last 5000 are kept); it is the same
+number `api_errors` on [`/api/instance`](#instance) reports.
+
+Each entry:
+
+| field | meaning |
+|---|---|
+| `seq` | this failure's own sequence number — **not** a document revision; nothing changed |
+| `ts` | unix seconds |
+| `status` | the HTTP status the caller was sent |
+| `method`, `path` | the request, path **with its query string** |
+| `agent` | `X-Agent`, or a scoped token's label; absent for an anonymous call |
+| `error` | the `error` message the caller was sent |
+| `request` | the first 200 characters of the request body, when one was read. **Never present on a 401** — the body is not read before the key is checked, so a mistyped credential cannot land in the log |
+
+```jsonc
+{"seq":12,"ts":1787962687,"status":404,"method":"PATCH","path":"/api/cards/9903",
+ "agent":"claude","error":"no such card 9903","request":"{\"body\":\"\"}"}
+```
+
+**It is also a file.** Every entry is appended, as it happens, to
+`<data-dir>/trellis/api-errors.log` beside `app.ron` — one JSON object per line
+with `epoch` added, so it survives a restart and a crash, and reads with
+`tail -f` or `jq`. It rotates once at 1 MB to `api-errors.log.1`. `file` in the
+answer says where it is for *this* instance, and `file_error` carries the first
+write failure if the file could not be written — the log is a record, not a
+gate, so a bad path never refuses a request.
+
+**What to do with it.** Read it at read-in when `api_errors` is above zero, and
+after a batch of your own writes — a 400 you did not notice is a card you think
+you wrote. Nothing in an entry is a secret the caller did not already send, but
+the excerpt can show *what* was sent, which is usually the whole diagnosis:
+`{"bg": null}` against a build older than v0.161.0, `{"body": ""}` from a
+response read at the wrong level. Same `epoch`/`seq`/`truncated` contract as the
+change log, so a client that already follows one needs nothing new for the
+other.
 
 ## Scoped tokens
 

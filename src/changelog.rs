@@ -281,6 +281,187 @@ impl ChangeLog {
     }
 }
 
+/// One failed API call — a response of 400 or above, as the caller saw it.
+///
+/// **This exists because nothing else recorded a failure.** `ChangeLog` records
+/// what *succeeded*; a 400/403/404/409/500 was answered and forgotten — not
+/// even written to stderr, which on the live instances is a terminal nobody is
+/// reading anyway. With several agents driving the API all day, the only record
+/// of a refused call was the agent that made it, and an agent that mis-reads a
+/// response (2026-08-28: a card body PATCHed blank) leaves no trace at all.
+///
+/// Deliberately **not** a `Change`: a failure changed nothing, so it has no
+/// place in a log whose contract is "re-fetch what this names". It has its own
+/// counter, its own retention and its own file.
+#[derive(Clone, Debug, Serialize)]
+pub struct ApiError {
+    pub seq: u64,
+    /// Unix seconds.
+    pub ts: u64,
+    pub status: u16,
+    pub method: String,
+    /// Path plus query string — the query is part of what was asked.
+    pub path: String,
+    /// `X-Agent`, or a scoped token's label. Absent for an anonymous call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The `error` the caller was sent.
+    pub error: String,
+    /// The first [`REQUEST_EXCERPT`] characters of the request body, when one
+    /// was read. **Never present for a 401**: the body is not read before the
+    /// key is checked, so a mistyped credential cannot land in a log file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+}
+
+/// How much of a failed request's body is kept — enough to see *what* was sent
+/// (`{"bg": null}`, `{"body": ""}`), not enough to make the log a copy of the
+/// document.
+pub const REQUEST_EXCERPT: usize = 200;
+
+/// Clip a request body to [`REQUEST_EXCERPT`] characters, on a char boundary,
+/// marking the cut. Empty in, `None` out — an absent body is not an excerpt.
+pub fn request_excerpt(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let mut out: String = body.chars().take(REQUEST_EXCERPT).collect();
+    if body.chars().count() > REQUEST_EXCERPT {
+        out.push('…');
+    }
+    Some(out)
+}
+
+/// The on-disk log rotates at this size, once, to `<name>.1`. Two megabytes of
+/// failures is thousands of them; older than that is not worth a third file.
+const ERROR_FILE_ROTATE_BYTES: u64 = 1 << 20;
+
+/// Where the on-disk copy lives: `<data-dir>/trellis/api-errors.log`, beside
+/// `app.ron` — per instance, like every other piece of app state.
+pub fn error_log_path(data_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    match data_dir {
+        Some(d) => Some(d.join("trellis").join("api-errors.log")),
+        None => directories::ProjectDirs::from("dev", "Trellis", "Trellis")
+            .map(|p| p.data_dir().join("api-errors.log")),
+    }
+}
+
+/// The rotating in-memory error log, mirrored to a JSON-lines file.
+///
+/// In memory it answers *this session* over `GET /api/errors`, with the same
+/// `epoch`/`seq`/`truncated` contract as [`ChangeLog`] so a client that already
+/// follows the change log needs nothing new. The file answers *last week*: one
+/// JSON object per line, appended as each failure happens, so it survives a
+/// restart and a crash, and reads with `tail -f` or `jq`.
+pub struct ErrorLog {
+    entries: VecDeque<ApiError>,
+    cap: usize,
+    epoch: u64,
+    next_seq: u64,
+    total: u64,
+    file: Option<std::path::PathBuf>,
+    /// The first write failure, kept so it can be reported once rather than on
+    /// every request — a log that cannot be written must still not stop the API.
+    file_error: Option<String>,
+}
+
+impl ErrorLog {
+    pub fn new(cap: usize, epoch: u64, file: Option<std::path::PathBuf>) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            cap: cap.max(1),
+            epoch,
+            next_seq: 1,
+            total: 0,
+            file,
+            file_error: None,
+        }
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Record one failure: stamps `seq` and `ts`, keeps it in memory, and
+    /// appends it to the file. Nothing collapses — two identical failures are
+    /// two failures, and the count is the point.
+    pub fn push(&mut self, mut e: ApiError) {
+        e.seq = self.next_seq;
+        self.next_seq += 1;
+        e.ts = now_secs();
+        self.total += 1;
+        self.write_line(&e);
+        self.entries.push_back(e);
+        while self.entries.len() > self.cap {
+            self.entries.pop_front();
+        }
+    }
+
+    fn write_line(&mut self, e: &ApiError) {
+        let Some(path) = self.file.clone() else { return };
+        let result = (|| -> std::io::Result<()> {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) >= ERROR_FILE_ROTATE_BYTES {
+                let mut rotated = path.clone().into_os_string();
+                rotated.push(".1");
+                std::fs::rename(&path, rotated)?;
+            }
+            let mut line = serde_json::to_value(e).unwrap_or_default();
+            // The epoch rides on every line so a reader of the file can tell
+            // which run a `seq` belongs to — in memory the endpoint says it once.
+            if let Some(obj) = line.as_object_mut() {
+                obj.insert("epoch".into(), serde_json::Value::from(self.epoch));
+            }
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+            writeln!(f, "{line}")
+        })();
+        if let Err(err) = result {
+            if self.file_error.is_none() {
+                self.file_error = Some(format!("{}: {err}", path.display()));
+            }
+        }
+    }
+
+    /// Everything after `since`, oldest first, capped at `limit`; the `bool` is
+    /// **truncated** — entries the caller needed have rotated out of memory.
+    /// The file still has them.
+    pub fn since(&self, since: u64, limit: usize) -> (Vec<ApiError>, bool) {
+        let truncated = self.entries.front().is_some_and(|first| since + 1 < first.seq);
+        let out: Vec<ApiError> =
+            self.entries.iter().filter(|c| c.seq > since).take(limit).cloned().collect();
+        (out, truncated)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Failures this run, including ones rotated out of memory.
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
+    pub fn newest(&self) -> u64 {
+        self.entries.back().map(|c| c.seq).unwrap_or(0)
+    }
+
+    pub fn oldest(&self) -> Option<u64> {
+        self.entries.front().map(|c| c.seq)
+    }
+
+    pub fn file(&self) -> Option<&std::path::Path> {
+        self.file.as_deref()
+    }
+
+    pub fn file_error(&self) -> Option<&str> {
+        self.file_error.as_deref()
+    }
+}
+
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -458,5 +639,99 @@ mod tests {
     #[test]
     fn epochs_differ_between_runs() {
         assert_ne!(new_epoch(), new_epoch(), "a stale client must be able to tell");
+    }
+
+    fn api_err(status: u16, path: &str) -> ApiError {
+        ApiError {
+            seq: 0,
+            ts: 0,
+            status,
+            method: "PATCH".into(),
+            path: path.into(),
+            agent: Some("claude".into()),
+            error: "no such card".into(),
+            request: request_excerpt(r#"{"body":""}"#),
+        }
+    }
+
+    /// **A failure is counted, kept, and written — and never collapsed.** The
+    /// change log merges repeats because a client re-fetches either way; here the
+    /// count IS the information, so two identical 404s are two entries.
+    #[test]
+    fn error_log_keeps_every_failure_and_mirrors_it_to_disk() {
+        let dir = std::env::temp_dir().join(format!("trellis-errlog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("trellis").join("api-errors.log");
+        let mut l = ErrorLog::new(2, 77, Some(file.clone()));
+        l.push(api_err(404, "/api/cards/903"));
+        l.push(api_err(404, "/api/cards/903"));
+        l.push(api_err(400, "/api/nodes/1/cards?x=1"));
+        assert_eq!(l.total(), 3, "the count survives rotation out of memory");
+        assert_eq!(l.len(), 2, "only `cap` stay in memory");
+        let (got, truncated) = l.since(0, 10);
+        assert_eq!(got.len(), 2);
+        assert!(truncated, "seq 1 has rotated away and the caller is told");
+        assert_eq!(got[0].seq, 2);
+        assert!(got[0].ts > 1_700_000_000);
+        assert_eq!(l.newest(), 3);
+        assert_eq!(l.oldest(), Some(2));
+        assert!(l.file_error().is_none(), "{:?}", l.file_error());
+
+        // The file has all three, one JSON object per line, each stamped with
+        // the epoch so a `seq` can be placed in a run.
+        let text = std::fs::read_to_string(&file).unwrap();
+        let lines: Vec<serde_json::Value> =
+            text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0]["seq"], 1);
+        assert_eq!(lines[0]["epoch"], 77);
+        assert_eq!(lines[0]["status"], 404);
+        assert_eq!(lines[0]["agent"], "claude");
+        assert_eq!(lines[0]["request"], r#"{"body":""}"#);
+        assert_eq!(lines[2]["path"], "/api/nodes/1/cards?x=1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The file rotates once, at a megabyte, and the API never stops.** A
+    /// write failure is remembered once and does not refuse the request that
+    /// triggered it — the log is a record, not a gate.
+    #[test]
+    fn error_file_rotates_and_a_bad_path_is_reported_not_fatal() {
+        let dir = std::env::temp_dir().join(format!("trellis-errrot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("api-errors.log");
+        std::fs::write(&file, vec![b'x'; (ERROR_FILE_ROTATE_BYTES + 1) as usize]).unwrap();
+        let mut l = ErrorLog::new(10, 1, Some(file.clone()));
+        l.push(api_err(500, "/api/backup"));
+        let rotated = dir.join("api-errors.log.1");
+        assert!(rotated.exists(), "the full file moved aside");
+        assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 1, "a fresh file holds the new line");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A path that cannot be created: still counted, still in memory.
+        let mut bad = ErrorLog::new(10, 1, Some(std::path::PathBuf::from("/proc/no-such-dir/api-errors.log")));
+        bad.push(api_err(400, "/api/x"));
+        assert_eq!(bad.total(), 1);
+        assert_eq!(bad.len(), 1);
+        assert!(bad.file_error().is_some());
+
+        // No file at all is a valid configuration.
+        let mut none = ErrorLog::new(10, 1, None);
+        none.push(api_err(400, "/api/x"));
+        assert_eq!(none.total(), 1);
+    }
+
+    /// **An excerpt is a glimpse, not a copy.** Clipped on a character boundary,
+    /// marked, and absent (not empty) when there was no body.
+    #[test]
+    fn request_excerpt_clips_and_marks() {
+        assert_eq!(request_excerpt(""), None);
+        assert_eq!(request_excerpt("   "), None);
+        assert_eq!(request_excerpt(r#"{"a":1}"#).as_deref(), Some(r#"{"a":1}"#));
+        let long = "é".repeat(REQUEST_EXCERPT + 5);
+        let got = request_excerpt(&long).unwrap();
+        assert_eq!(got.chars().count(), REQUEST_EXCERPT + 1);
+        assert!(got.ends_with('…'));
     }
 }

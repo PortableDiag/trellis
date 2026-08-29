@@ -1308,6 +1308,10 @@ pub struct TrellisApp {
     /// thread, which serves `/api/changes`. In memory only — see changelog.rs
     /// for why it deliberately isn't part of the document.
     changes: Arc<Mutex<crate::changelog::ChangeLog>>,
+    /// What FAILED — every 4xx/5xx the API answered, shared with the server
+    /// thread which records them and serves `/api/errors`. In memory for the
+    /// session and mirrored to `<data-dir>/trellis/api-errors.log`.
+    errors: Arc<Mutex<crate::changelog::ErrorLog>>,
     /// Notify on startup with what is due, and when an agent edits.
     notify_digest: bool,
     notify_agent: bool,
@@ -1649,6 +1653,13 @@ impl TrellisApp {
             crate::changelog::DEFAULT_CAP,
             crate::changelog::new_epoch(),
         )));
+        // Same epoch as the change log — one number says which run both belong
+        // to. Its file sits beside app.ron, so it is per instance like the key.
+        let errors = Arc::new(Mutex::new(crate::changelog::ErrorLog::new(
+            crate::changelog::DEFAULT_CAP,
+            changes.lock().map(|c| c.epoch()).unwrap_or(0),
+            crate::changelog::error_log_path(startup.data_dir.as_deref()),
+        )));
         // Approvals persist: a plugin the user allowed stays allowed until they
         // revoke it, and a token that survives a restart is what makes revoking
         // meaningful rather than "it stops working when you close the app".
@@ -1682,6 +1693,7 @@ impl TrellisApp {
             Arc::clone(&doc_revision),
             Arc::clone(&changes),
             Arc::clone(&grants),
+            Arc::clone(&errors),
         ) {
             Ok(server) => (Some(server), api_status_line(api_lan, api_port)),
             Err(e) => (None, format!("Failed to start on port {api_port}: {e}")),
@@ -1878,6 +1890,7 @@ impl TrellisApp {
             api_server,
             doc_revision,
             changes,
+            errors,
             grants,
             plugins,
             plugin_errors,
@@ -2155,6 +2168,7 @@ impl TrellisApp {
                 Arc::clone(&self.doc_revision),
                 Arc::clone(&self.changes),
                 Arc::clone(&self.grants),
+                Arc::clone(&self.errors),
             ) {
                 Ok(server) => {
                     result = Ok(server);
@@ -4020,6 +4034,12 @@ impl TrellisApp {
                     .iter()
                     .filter(|p| self.plugin_update_available(p).is_some())
                     .count(),
+                // Failed API calls this run (every 4xx/5xx). Same read-in
+                // contract as the three above: above zero, `GET /api/errors`
+                // says which calls, by whom, and what they were refused for —
+                // instead of relying on the agent that got the error to
+                // mention it.
+                "api_errors": self.errors.lock().map(|e| e.total()).unwrap_or(0),
             })))
             }
             api::ApiRequest::CubeOpen(nodes) => {
@@ -9173,6 +9193,7 @@ impl TrellisApp {
                             "POST   /api/import/vault       {path, parent?}  (an Obsidian vault → baskets; .canvas → a basket)",
                             "GET    /api/wait?rev=<n>                  (long-poll: that something changed, + epoch)",
                             "GET    /api/changes?since=<seq>[&limit=<n>]  (what changed: actor/entity/op/fields/property)",
+                            "GET    /api/errors?since=<seq>[&limit=<n>]   (what FAILED: every 4xx/5xx this run — status/method/path/agent/error/request excerpt; api_errors on /api/instance is the count; mirrored to <data-dir>/trellis/api-errors.log)",
                             "GET    /api/history                       (version snapshots + keep / min_gap_mins retention)",
                             "POST   /api/history/restore     {file}    (restore a snapshot)",
                             "GET    /api/backup                        (status)",

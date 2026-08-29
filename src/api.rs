@@ -15,7 +15,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::mpsc::{Sender, SyncSender};
-use crate::changelog::{Change, ChangeLog};
+use crate::changelog::{ApiError, Change, ChangeLog, ErrorLog};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1786,6 +1786,7 @@ pub fn serve(
     revision: Arc<AtomicU64>,
     changes: Arc<Mutex<ChangeLog>>,
     grants: Arc<Mutex<Vec<crate::plugins::Grant>>>,
+    errors: Arc<Mutex<ErrorLog>>,
 ) -> Result<Arc<tiny_http::Server>, String> {
     // `lan` binds all interfaces so other devices on the network can reach the
     // API (still key-gated); otherwise localhost-only.
@@ -1802,10 +1803,39 @@ pub fn serve(
                 let revision = Arc::clone(&revision);
                 let changes = Arc::clone(&changes);
                 let grants = Arc::clone(&grants);
+                let errors = Arc::clone(&errors);
                 std::thread::spawn(move || {
                     let mut request = request;
-                    let resp =
-                        handle(&mut request, &ctx, &tx, &key, &revision, &changes, &grants);
+                    // Read before `handle` consumes the request: a failure that
+                    // returns before the agent is resolved (401, a bad route)
+                    // is still attributed to whoever declared themselves.
+                    let declared = request_agent(&request);
+                    let method = request.method().to_string();
+                    let url = request.url().to_string();
+                    let mut meta = RequestMeta::default();
+                    let resp = handle(
+                        &mut request, &ctx, &tx, &key, &revision, &changes, &grants, &errors, &mut meta,
+                    );
+                    // **Every failure is recorded, in one place.** Below 400 is
+                    // the caller's success and the change log's business; from
+                    // 400 up it is a refusal or a fault, and until v0.162.0 it
+                    // was answered and forgotten. Recorded after the response is
+                    // built and before it is sent, so a log that cannot be
+                    // written can never turn a 400 into a hang.
+                    if resp.status >= 400 {
+                        if let Ok(mut log) = errors.lock() {
+                            log.push(ApiError {
+                                seq: 0,
+                                ts: 0,
+                                status: resp.status,
+                                method,
+                                path: url,
+                                agent: meta.agent.or(declared),
+                                error: error_message_of(&resp),
+                                request: meta.request,
+                            });
+                        }
+                    }
                     let header = tiny_http::Header::from_bytes(
                         &b"Content-Type"[..],
                         resp.content_type.as_bytes(),
@@ -1840,6 +1870,25 @@ pub fn serve(
     Ok(server)
 }
 
+/// What the error log needs from inside `handle`, which consumes the request:
+/// the identity the credential settled on, and a glimpse of the body — set only
+/// once the body has actually been read, so a 401 never carries one.
+#[derive(Default)]
+struct RequestMeta {
+    agent: Option<String>,
+    request: Option<String>,
+}
+
+/// The `error` a failed response carried, or its body clipped if it was not the
+/// usual `{"error": …}` shape.
+fn error_message_of(resp: &ApiResponse) -> String {
+    serde_json::from_str::<Value>(&resp.body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .unwrap_or_else(|| resp.body.chars().take(200).collect())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle(
     request: &mut tiny_http::Request,
     ctx: &egui::Context,
@@ -1848,6 +1897,8 @@ fn handle(
     revision: &Arc<AtomicU64>,
     changes: &Arc<Mutex<ChangeLog>>,
     grants: &Arc<Mutex<Vec<crate::plugins::Grant>>>,
+    errors: &Arc<Mutex<ErrorLog>>,
+    meta: &mut RequestMeta,
 ) -> ApiResponse {
     let method = request.method().clone();
     let raw_url = request.url().to_string();
@@ -1907,6 +1958,7 @@ fn handle(
                         }
                         scope = Some(g.scope);
                         grant_label = Some(g.plugin.clone());
+                        meta.agent = Some(g.plugin.clone());
                     }
                     None => return ApiResponse::err(401, "missing or invalid API key"),
                 }
@@ -1966,8 +2018,44 @@ fn handle(
         }));
     }
 
+    // The failures, served the same way as the changes. **Refused for a scoped
+    // token**: a failed request's path and body excerpt can name any basket in
+    // the document, and a route that names no basket cannot be checked against
+    // one — the rule every whole-document read already follows.
+    if method == Method::Get && path == "/api/errors" {
+        if scope.is_some() {
+            return ApiResponse::err(
+                403,
+                "the error log is whole-document; a scoped token cannot read it",
+            );
+        }
+        let since = query_get(&query, "since").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let limit = query_get(&query, "limit")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(200)
+            .clamp(1, 2000);
+        let Ok(log) = errors.lock() else {
+            return ApiResponse::err(500, "error log unavailable");
+        };
+        let (list, truncated) = log.since(since, limit);
+        return ApiResponse::ok(json!({
+            "epoch": log.epoch(),
+            "since": since,
+            "count": list.len(),
+            "total": log.total(),
+            "retained": log.len(),
+            "oldest": log.oldest(),
+            "newest": log.newest(),
+            "truncated": truncated,
+            "file": log.file().map(|p| p.display().to_string()),
+            "file_error": log.file_error(),
+            "errors": list,
+        }));
+    }
+
     let mut body = String::new();
     let _ = request.as_reader().read_to_string(&mut body);
+    meta.request = crate::changelog::request_excerpt(&body);
 
     let mut req = match route(&method, &path, &query, &body) {
         Ok(r) => r,
@@ -1983,6 +2071,9 @@ fn handle(
         (None, Some(declared)) => Some(declared),
         (None, None) => None,
     };
+    if meta.agent.is_none() {
+        meta.agent = agent.clone();
+    }
     if let Some(name) = agent.as_deref() {
         if !crate::model::valid_agent_name(name) {
             return ApiResponse::err(
