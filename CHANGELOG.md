@@ -6,6 +6,16 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.162.1]
+
+### Fixed
+- **The Windows build of 0.162.0 never shipped.** Its CI job failed on one
+  new test — `error_file_rotates_and_a_bad_path_is_reported_not_fatal` used
+  `/proc/no-such-dir/…` as an unwritable path, and Windows simply created it
+  under the current drive. The test now blocks the path with a *file* in the
+  way, which no OS will make a directory of. No code change; **v0.162.0 has
+  Linux and macOS assets only**, this release has all four.
+
 ## [0.162.0]
 
 ### Added

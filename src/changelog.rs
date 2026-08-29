@@ -709,12 +709,18 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 1, "a fresh file holds the new line");
         let _ = std::fs::remove_dir_all(&dir);
 
-        // A path that cannot be created: still counted, still in memory.
-        let mut bad = ErrorLog::new(10, 1, Some(std::path::PathBuf::from("/proc/no-such-dir/api-errors.log")));
+        // A path that cannot be created — a component of it is a FILE, which
+        // no OS will make a directory of. (The first cut used `/proc/…`, which
+        // Windows happily creates under the current drive: 0.162.0's Windows
+        // CI job failed on exactly that and shipped without its asset.)
+        let block = std::env::temp_dir().join(format!("trellis-errblock-{}", std::process::id()));
+        std::fs::write(&block, b"not a directory").unwrap();
+        let mut bad = ErrorLog::new(10, 1, Some(block.join("sub").join("api-errors.log")));
         bad.push(api_err(400, "/api/x"));
         assert_eq!(bad.total(), 1);
         assert_eq!(bad.len(), 1);
         assert!(bad.file_error().is_some());
+        let _ = std::fs::remove_file(&block);
 
         // No file at all is a valid configuration.
         let mut none = ErrorLog::new(10, 1, None);
