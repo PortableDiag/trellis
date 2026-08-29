@@ -3014,6 +3014,11 @@ curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
   $API/nodes/$LOG/cards
 ```
 
+The x/y arrangement underneath is preserved untouched — `{"feed": false}`
+returns the canvas exactly as it was. Entries stay ordinary cards: link them
+with `[[#id]]`, archive the finished ones, query them from the panels. The
+feed sorts by **creation order**, so editing an old entry never moves it.
+
 ### Tag and un-tag a node
 
 A node's `color` (the tag dot in the tree) and `bg` (the basket background)
@@ -3031,10 +3036,26 @@ curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"bg":null}' $API/nodes/$NID
 curl -s -X PATCH -H "X-API-Key: $KEY" -d '{"title":"Renamed"}' $API/nodes/$NID
 ```
 
-The x/y arrangement underneath is preserved untouched — `{"feed": false}`
-returns the canvas exactly as it was. Entries stay ordinary cards: link them
-with `[[#id]]`, archive the finished ones, query them from the panels. The
-feed sorts by **creation order**, so editing an old entry never moves it.
+### Reading what failed
+
+`api_errors` on `/api/instance` above zero means calls have been refused this
+run. Read them — yours and everyone else's — before you report:
+
+```sh
+# Every failure this run, oldest first: who, what, why, and what they sent.
+curl -s -H "X-API-Key: $KEY" "$API/errors" | jq '.errors[] | {seq,status,agent,method,path,error,request}'
+
+# Only what happened since you last looked — keep `newest` from the last answer.
+curl -s -H "X-API-Key: $KEY" "$API/errors?since=$LAST"
+
+# The same record on disk, for last week: one JSON object per line.
+tail -n 20 ~/.local/share/trellis/trellis/api-errors.log | jq -c '{ts,status,agent,path,error}'
+```
+
+A 400 you did not notice is a card you think you wrote. The `request` excerpt is
+usually the whole diagnosis — `{"bg": null}` against a build older than v0.161.0,
+`{"body": ""}` from a response read at the wrong level — and `agent` says whose
+prompt needs the fix.
 
 ### Everything else
 

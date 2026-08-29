@@ -6,6 +6,15 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.162.2]
+
+### Fixed
+- **The docs teach the error log.** Doc-only. API.md's Examples gain *Reading
+  what failed* — the whole run, `?since=` for what is new, and the on-disk file
+  through `jq` — and the in-app Settings → Examples list has the same call. Also
+  puts the feed paragraph that v0.161.2 had left stranded under *Tag and un-tag
+  a node* back under *Keeping a log*, where it belongs.
+
 ## [0.162.1]
 
 ### Fixed

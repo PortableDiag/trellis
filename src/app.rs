@@ -8903,6 +8903,14 @@ impl TrellisApp {
                                 ),
                             ),
                             (
+                                "What failed since I last looked?",
+                                format!(
+                                    "# api_errors on /instance above zero: read who was refused, and why.\n\
+                                     curl -s -H 'X-API-Key: {k}' '{a}/errors?since=0'\n\
+                                     # also on disk: <data-dir>/trellis/api-errors.log (one JSON object per line)"
+                                ),
+                            ),
+                            (
                                 "The tree, then one basket, then one card",
                                 format!(
                                     "curl -H 'X-API-Key: {k}' {a}/tree\n\
