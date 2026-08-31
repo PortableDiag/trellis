@@ -347,15 +347,20 @@ fn node_ui(
             }
             resp.context_menu(|ui| {
                 // The id, readable in place — the same line the card menu grew
-                // in v0.153.1, for the other id space. Written `node 42` rather
-                // than `#42`: `#` belongs to cards (`[[#1391]]`) and `#g` to
-                // groups, and a basket's own link form is `[[42]]`, so a bare
-                // `#42` here would name a card that exists and is not this.
+                // in v0.153.1, for the other id space.
+                //
+                // **Bare, because a basket's id is bare.** The rule across both
+                // menus is *what goes inside the brackets*: a card links as
+                // `[[#1391]]` so its menu says `#1391`, a basket links as
+                // `[[42]]` so its menu says `42`. v0.163.2 wrote `node 42` to
+                // keep a bare `#42` from reading as card 42 — right worry, wrong
+                // fix, since the `#` is exactly the part a basket does not have.
+                // The prefix was a label that appears nowhere else in the app.
                 // Full size and full contrast, per v0.153.2.
-                ui.label(egui::RichText::new(format!("node {id}")).monospace().strong())
+                ui.label(egui::RichText::new(format!("{id}")).monospace().strong())
                     .on_hover_text(format!(
-                        "GET /api/nodes/{id} for an agent  ·  [[{id}]] links to this basket \
-                         from a card"
+                        "[[{id}]] links to this basket from a card  ·  /api/nodes/{id} \
+                         is how an agent reaches it"
                     ));
                 ui.separator();
                 if !node_plugins.is_empty() {

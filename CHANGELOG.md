@@ -6,6 +6,18 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.163.3]
+
+### Changed
+- **A basket's menu shows the bare id, `42`.** v0.163.2 wrote it `node 42`, on
+  the reasoning that a bare `#42` on a basket would be the syntax for card 42 —
+  an id that exists and is not it. Right worry, wrong fix: the `#` is precisely
+  the part a basket's id does not have, and the prefix was a label that appears
+  nowhere else in the app. Both menus now show **what goes inside the brackets** —
+  a card links as `[[#1391]]` so its line reads `#1391`, a basket links as
+  `[[42]]` so its line reads `42` — which is also the id an agent puts in
+  `/api/nodes/42`. The hover gives both uses. The card menu is unchanged.
+
 ## [0.163.2]
 
 ### Changed
