@@ -576,7 +576,7 @@ for a search hit that matched a **node title** rather than a card.
 POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
-POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, color?, font_scale?, fit?, image_base64?, inline_images?, source?}
+POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, color?, font_scale?, fit?, image_base64?, inline_images?, source?, channel?}
   → 201 {"id":<cid>}
 
 POST /api/nodes/{id}/cards [ {…}, {…} ]      the SAME endpoint, given an array

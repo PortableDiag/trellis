@@ -6,6 +6,15 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.163.1]
+
+### Fixed
+- **The create signature lists `channel`.** Doc-only. v0.163.0 taught
+  `POST /api/nodes/{id}/cards` the field and wrote it up under *Channels*, but
+  left it out of the field list in the create reference and in Settings →
+  Endpoints — the two places a caller reads to find out what a create takes.
+  The parity tests hold paths, not fields, so nothing caught it.
+
 ## [0.163.0]
 
 ### Added

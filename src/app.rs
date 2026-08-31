@@ -9151,7 +9151,7 @@ impl TrellisApp {
                             "POST   /api/daily  {date?}                (a day's journal node, created on demand; opt-in per instance)",
                             "GET    /api/daily                         (is it on, and which node is the journal root)",
                             "POST   /api/daily/root {node}   /   DELETE /api/daily/root   (turn it on / off)",
-                            "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, fit?, image_base64?, inline_images?, source?}",
+                            "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, fit?, image_base64?, inline_images?, source?, channel?}",
                             "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body? (REPLACES it — append adds), kind?, color?, font_scale?, fit?, pos?, z?, size?, items?, source?, emphasis?, emphasis_intensity?, emphasis_minutes?, …}",
                             "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
                             "DELETE /api/nodes/{id}/cards/{cid}",
