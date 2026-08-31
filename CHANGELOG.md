@@ -6,6 +6,18 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.163.2]
+
+### Changed
+- **A basket's context menu says which node it is.** `node <id>` sits at the top
+  of the tree's right-click menu, above the separator — the line the card menu
+  grew in v0.153.1, for the other id space. Seeing a node id meant Copy → Node id
+  and pasting it somewhere to look. Written `node 42` rather than `#42`
+  deliberately: `#` belongs to cards (`[[#1391]]`) and `#g` to groups, so a bare
+  `#42` on a basket would name a card that exists and is not this one. The hover
+  gives both ways to use it — `/api/nodes/42` and `[[42]]` — and Copy → Node id
+  is unchanged for when you want it on the clipboard.
+
 ## [0.163.1]
 
 ### Fixed

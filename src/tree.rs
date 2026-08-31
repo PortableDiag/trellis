@@ -346,6 +346,18 @@ fn node_ui(
                 *renaming = Some((id, node.title.clone()));
             }
             resp.context_menu(|ui| {
+                // The id, readable in place — the same line the card menu grew
+                // in v0.153.1, for the other id space. Written `node 42` rather
+                // than `#42`: `#` belongs to cards (`[[#1391]]`) and `#g` to
+                // groups, and a basket's own link form is `[[42]]`, so a bare
+                // `#42` here would name a card that exists and is not this.
+                // Full size and full contrast, per v0.153.2.
+                ui.label(egui::RichText::new(format!("node {id}")).monospace().strong())
+                    .on_hover_text(format!(
+                        "GET /api/nodes/{id} for an agent  ·  [[{id}]] links to this basket \
+                         from a card"
+                    ));
+                ui.separator();
                 if !node_plugins.is_empty() {
                     ui.menu_button("Plugins", |ui| {
                         for (idx, title) in node_plugins {
