@@ -6,6 +6,34 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.163.0]
+
+### Added
+- **`PATCH …/cards/{cid}/items/{item}` — edit one checklist line in place.**
+  `{text?, done?}`, node-addressed and by bare card id. Until now `/done`,
+  `/property` and `DELETE` could each address a line while changing its
+  *wording* meant rewriting the whole `items` array — the one call that carries
+  ids across **by position**, so a line reordered or removed in between hands
+  every later id to a different line, and since v0.90.0 a dated line is a task
+  addressed by that id. An agent tried exactly this call and got a 404. Sending
+  neither field is a 400, not a 200 that changed nothing.
+- **A card can be created as a channel.** `POST /api/nodes/{id}/cards` now
+  accepts `channel`, which `PATCH` had accepted all along — so a channel card
+  could not be *born* one and an agent creating a conversation in one call got
+  a 400 naming the field. Same shape as v0.155.0's group-born-with-its-colour.
+  The **one primary channel per project** rule is checked before the card
+  exists, with the same wording `PATCH` uses, and a refused create makes
+  nothing.
+
+### Fixed
+- **The unknown-route 404 names the reference.** An unauthenticated caller
+  tried `/api/help`, `/api/routes` and `/api/openapi` in a row looking for the
+  docs; the answer said only that none of them were routes. It now points at
+  `GET /api/docs` — the manual for the build that is answering — and its
+  `?section=`.
+
+All three came out of `GET /api/errors`, on its first full day of being read.
+
 ## [0.162.2]
 
 ### Fixed

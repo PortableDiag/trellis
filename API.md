@@ -456,6 +456,7 @@ DELETE /api/cards/{cid}
 POST   /api/cards/{cid}/property           {key, value}   (400 on checklist/table/image/sketch)
 DELETE /api/cards/{cid}/property?key=due
 POST   /api/cards/{cid}/move               {node, pos?} or {before|after|index|to}
+PATCH  /api/cards/{cid}/items/{item}       {text?, done?}
 POST   /api/cards/{cid}/items/{item}/done  {done}
 POST   /api/cards/{cid}/items/{item}/property   {key, value}
 DELETE /api/cards/{cid}/items/{item}/property?key=due
@@ -1663,7 +1664,22 @@ Address the line, not its position:
 POST   /api/nodes/{id}/cards/{cid}/items/{item}/property {key, value}
 DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due
 POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done}
+PATCH  /api/nodes/{id}/cards/{cid}/items/{item}          {text?, done?}
 ```
+
+**Editing one line's text** (v0.163.0) is the `PATCH`, and it is the reason the
+list above is not enough on its own: until it shipped, `/done`, `/property` and
+`DELETE` could each address a line while changing its *wording* meant rewriting
+the whole `items` array — the one call that re-ids lines by position. Both fields
+are optional; sending neither is a 400 rather than a 200 that changed nothing.
+
+```sh
+PATCH  /api/nodes/{id}/cards/{cid}/items/{item}   {text?, done?}
+  → 200 {"card":<cid>, "item":<item>, "text":"…", "done":false}
+  | 400 (neither field)   | 404 (card, or no such item on it)
+```
+
+Takes a bare card id too: `PATCH /api/cards/{cid}/items/{item}`.
 
 **Add and remove a line one at a time** (v0.118.0) rather than rewriting the array:
 
@@ -1784,6 +1800,10 @@ Point two agents at one and it is an agent-to-agent log you can read in real tim
 ```
 PATCH /api/cards/{cid}   {"channel": {"participants":["alice","operator"], "primary": true}}
   → the card is now a channel        | {"channel": null} makes it an ordinary card again
+
+POST /api/nodes/{id}/cards   {"title":"…", "channel": {"participants":[…], "primary": false}}
+  → a card BORN a channel (v0.163.0), so it takes one call rather than create-then-patch
+  | 400 ('<project>' already has a primary channel: card <cid> in <path>)
 
 POST /api/nodes/{id}/cards/{cid}/say   {text}
 POST /api/cards/{cid}/say              (same, by card id alone)

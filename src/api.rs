@@ -95,6 +95,15 @@ pub enum ApiRequest {
     ClearItemProperty { node: NodeId, card: u64, item: u64, key: String },
     /// Tick or untick one checklist item — the done signal, over the API.
     SetItemDone { node: NodeId, card: u64, item: u64, done: bool },
+    /// Edit one checklist line **in place**, addressed by its id.
+    ///
+    /// The gap the error log surfaced (2026-08-29): `/done`, `/property` and
+    /// `DELETE` could each address a line, but nothing could change its *text*,
+    /// so an agent wanting to fix a typo was pushed to the wholesale `items`
+    /// rewrite — which carries ids across **by position**, and since v0.90.0 a
+    /// dated line is a task addressed by that id. The rewrite is how a line's
+    /// task quietly becomes a different line's.
+    UpdateItem { node: NodeId, card: u64, item: u64, input: UpdateItemInput },
     /// Remove a `key:: value` line outright. Distinct from setting it empty,
     /// which leaves the property present but unreadable — a card whose `due::`
     /// is blank stays on the agenda under "No date" instead of leaving it.
@@ -439,6 +448,23 @@ pub struct AddItemInput {
     at: Option<usize>,
 }
 
+/// `PATCH …/cards/{cid}/items/{item}` — edit one checklist line in place.
+///
+/// Both fields are optional and at least one is required: a patch that names
+/// neither changed nothing and is a caller mistake worth reporting, not a 200
+/// that did nothing (the same standard v0.146.1 applied to a property landing
+/// where nothing reads it). `done` is accepted here as well as on `…/done`
+/// because a PATCH that refused the neighbouring field would be a 400 with no
+/// reason a caller could guess; `…/done` stays, and is still the shorter call.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateItemInput {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    done: Option<bool>,
+}
+
 /// `{key, value}` — the body of every "set one property" route, card or item.
 ///
 /// One definition rather than the two identical inline copies this had: they are
@@ -462,6 +488,7 @@ pub enum CardOp {
     ClearProperty { key: String },
     Move(MoveCardInput),
     ItemDone { item: u64, done: bool },
+    UpdateItem { item: u64, input: UpdateItemInput },
     SetItemProperty { item: u64, key: String, value: String },
     ClearItemProperty { item: u64, key: String },
     Append(AppendInput),
@@ -516,6 +543,7 @@ pub fn resolve_by_card(node: NodeId, card: u64, op: CardOp) -> ApiRequest {
         CardOp::ClearProperty { key } => ApiRequest::ClearCardProperty { node, card, key },
         CardOp::Move(mv) => ApiRequest::MoveCard { node, card, mv },
         CardOp::ItemDone { item, done } => ApiRequest::SetItemDone { node, card, item, done },
+        CardOp::UpdateItem { item, input } => ApiRequest::UpdateItem { node, card, item, input },
         CardOp::SetItemProperty { item, key, value } => {
             ApiRequest::SetItemProperty { node, card, item, key, value }
         }
@@ -749,6 +777,7 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::SetItemProperty { node, .. }
         | ApiRequest::ClearItemProperty { node, .. }
         | ApiRequest::SetItemDone { node, .. }
+        | ApiRequest::UpdateItem { node, .. }
         | ApiRequest::DockCard { node, .. }
         | ApiRequest::DetachCard { node, .. }
         | ApiRequest::SetCardGroup { node, .. }
@@ -1027,6 +1056,19 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
             .titled(card_title(node, card))
             .field(&format!("item={item}"))
             .field(&format!("done={done}")),
+        ApiRequest::UpdateItem { node, card, item, input } => {
+            let mut c = ch(E::Card, Op::Updated, *card)
+                .in_node(*node)
+                .titled(card_title(node, card))
+                .field(&format!("item={item}"));
+            if input.text.is_some() {
+                c = c.field("item.text");
+            }
+            if let Some(d) = input.done {
+                c = c.field(&format!("done={d}"));
+            }
+            c
+        }
         ApiRequest::SetItemProperty { node, card, item, key, value } => {
             ch(E::Card, Op::Updated, *card)
                 .in_node(*node)
@@ -1411,6 +1453,15 @@ pub struct AddCardInput {
     /// Mirror a file: the body becomes a read-only live copy of it.
     #[serde(default)]
     source: Option<String>,
+    /// Make the new card a **channel** — a conversation, per `PATCH`'s `channel`.
+    ///
+    /// Accepted here because `PATCH` accepted it and create did not, so a channel
+    /// could not be *born* one: an agent creating a channel in one call got a 400
+    /// naming the field, and had to create-then-PATCH. Same shape as v0.155.0's
+    /// group-born-with-its-colour. The one-primary-per-project rule is checked
+    /// before the card exists, not after.
+    #[serde(default)]
+    channel: Option<crate::model::Channel>,
 }
 
 fn default_kind() -> String {
@@ -2387,6 +2438,13 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             card: pid(cid)?,
             op: CardOp::RemoveImage { index: index_seg(idx)? },
         }),
+        (Method::Patch, ["api", "cards", cid, "items", iid]) => {
+            let i: UpdateItemInput = parse(body)?;
+            Ok(ApiRequest::ByCard {
+                card: pid(cid)?,
+                op: CardOp::UpdateItem { item: pid(iid)?, input: i },
+            })
+        }
         (Method::Post, ["api", "cards", cid, "items", iid, "done"]) => {
             let i: DoneInput = parse(body)?;
             Ok(ApiRequest::ByCard {
@@ -2505,6 +2563,12 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             }
             Ok(ApiRequest::ClearItemProperty {
                 node: pid(nid)?, card: pid(cid)?, item: pid(iid)?, key,
+            })
+        }
+        (Method::Patch, ["api", "nodes", nid, "cards", cid, "items", iid]) => {
+            let i: UpdateItemInput = parse(body)?;
+            Ok(ApiRequest::UpdateItem {
+                node: pid(nid)?, card: pid(cid)?, item: pid(iid)?, input: i,
             })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "items", iid, "done"]) => {
@@ -2780,7 +2844,19 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
                 idx.parse().map_err(|_| (400, format!("bad template index: {idx}")))?;
             Ok(ApiRequest::TemplateDelete(index))
         }
-        _ => Err((404, format!("no route for {:?} {}", method, path))),
+        // The 404 names the reference. An unauthenticated caller once tried
+        // `/api/help`, `/api/routes` and `/api/openapi` in a row looking for the
+        // docs (error log, 2026-08-29) — every one of them a route this API does
+        // not have, and the answer said only that. `GET /api/docs` is the manual
+        // for the build that is answering, so the answer says so.
+        _ => Err((
+            404,
+            format!(
+                "no route for {:?} {} — the reference for this build is \
+                 GET /api/docs (?section=Examples to narrow it)",
+                method, path
+            ),
+        )),
     }
 }
 
@@ -3244,6 +3320,25 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             } else {
                 (false, ApiResponse::err(404, "no such checklist item on that card"))
             }
+        }
+        ApiRequest::UpdateItem { node, card, item, input } => {
+            if input.text.is_none() && input.done.is_none() {
+                return (
+                    false,
+                    ApiResponse::err(400, "nothing to change: send \"text\", \"done\", or both"),
+                );
+            }
+            let Some(line) = doc.item_mut(node, card, item) else {
+                return (false, ApiResponse::err(404, "no such checklist item on that card"));
+            };
+            if let Some(t) = input.text {
+                line.text = t;
+            }
+            if let Some(d) = input.done {
+                line.done = d;
+            }
+            let (text, done) = (line.text.clone(), line.done);
+            (true, ApiResponse::ok(json!({ "card": card, "item": item, "text": text, "done": done })))
         }
         ApiRequest::ClearCardProperty { node, card, key } => {
             let Some(c) = doc.card(node, card) else {
@@ -5265,6 +5360,32 @@ fn add_one(doc: &mut Document, node: NodeId, input: AddCardInput) -> Result<u64,
     if !doc.nodes.contains_key(&node) {
                 return Err(ApiResponse::err(404, "node not found"));
             }
+            // **One primary channel per project**, checked before the card
+            // exists — the same rule `UpdateCard` enforces, and the same wording,
+            // because a caller that hits it on create and on patch should not
+            // have to learn it twice. `u64::MAX` names no card, so nothing is
+            // excused from the check.
+            if let Some(ch) = input.channel.as_ref() {
+                if ch.primary {
+                    if let Some((nid, other)) = doc.other_primary_channel(node, u64::MAX) {
+                        let root = doc.root_of(node);
+                        let where_ = doc.node_path(nid);
+                        let project = doc
+                            .nodes
+                            .get(&root)
+                            .map(|n| n.title.clone())
+                            .unwrap_or_else(|| "this project".into());
+                        return Err(ApiResponse::err(
+                            400,
+                            &format!(
+                                "'{project}' already has a primary channel: card {other} \
+                                 in {where_} — clear its `primary` first, or leave this \
+                                 one non-primary"
+                            ),
+                        ));
+                    }
+                }
+            }
             let kind = match input.kind.as_str() {
                 "code" => CardKind::Code { lang: input.lang.clone().unwrap_or_else(|| "text".into()) },
                 "checklist" => CardKind::Checklist {
@@ -5318,6 +5439,7 @@ fn add_one(doc: &mut Document, node: NodeId, input: AddCardInput) -> Result<u64,
                         // The body is filled in by the app's refresh pass; the
                         // request only names the file.
                         c.source = input.source.filter(|s| !s.trim().is_empty());
+                        c.channel = input.channel;
                         if let Some(col) = input.color {
                             c.color = col;
                         }
@@ -8794,6 +8916,166 @@ mod tests {
         .unwrap();
         assert_eq!(process(&mut doc, req).1.status, 201);
         assert_eq!(doc.nodes[&nid].cards.len(), before + 2);
+    }
+
+    /// **One line's text is editable in place** — the gap the error log surfaced.
+    ///
+    /// The alternative is the wholesale `items` rewrite, which carries ids across
+    /// by position; the assertion that matters here is the sibling's id, not the
+    /// edited line's.
+    #[test]
+    fn patching_one_item_edits_that_line_and_leaves_its_siblings_ids_alone() {
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc
+            .add_card(nid, egui::pos2(0.0, 0.0), CardKind::Checklist { items: vec![] })
+            .unwrap();
+        for text in ["first", "second due:: 2026-09-01"] {
+            let input: AddItemInput =
+                serde_json::from_str(&format!(r#"{{"text":"{text}"}}"#)).unwrap();
+            assert_eq!(
+                process(&mut doc, ApiRequest::AddItem { node: nid, card: cid, input }).1.status,
+                201
+            );
+        }
+        let ids: Vec<u64> = match &doc.card(nid, cid).unwrap().kind {
+            CardKind::Checklist { items } => items.iter().map(|i| i.id).collect(),
+            _ => unreachable!(),
+        };
+
+        let req = route(
+            &Method::Patch,
+            &format!("/api/nodes/{nid}/cards/{cid}/items/{}", ids[0]),
+            "",
+            r#"{"text":"first, reworded","done":true}"#,
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(dirty);
+        assert_eq!(resp.status, 200, "{}", resp.body);
+        assert!(resp.body.contains("first, reworded"), "{}", resp.body);
+
+        match &doc.card(nid, cid).unwrap().kind {
+            CardKind::Checklist { items } => {
+                assert_eq!(items[0].text, "first, reworded");
+                assert!(items[0].done);
+                assert_eq!(items[0].id, ids[0], "the edited line keeps its id");
+                assert_eq!(items[1].id, ids[1], "and so does the line after it");
+                assert_eq!(items[1].text, "second due:: 2026-09-01", "the task line is untouched");
+            }
+            _ => unreachable!(),
+        }
+
+        // The card-addressed twin resolves to the same request.
+        assert!(matches!(
+            resolve_by_card(
+                nid,
+                cid,
+                CardOp::UpdateItem {
+                    item: ids[1],
+                    input: serde_json::from_str(r#"{"text":"x"}"#).unwrap(),
+                },
+            ),
+            ApiRequest::UpdateItem { node, card, .. } if node == nid && card == cid
+        ));
+
+        // Neither field is a caller mistake, not a 200 that changed nothing.
+        let req = route(
+            &Method::Patch,
+            &format!("/api/cards/{cid}/items/{}", ids[0]),
+            "",
+            "{}",
+        )
+        .unwrap();
+        let ApiRequest::ByCard { op: CardOp::UpdateItem { item, input }, .. } = req else {
+            panic!("the bare-id form should resolve to an UpdateItem");
+        };
+        let (dirty, resp) =
+            process(&mut doc, ApiRequest::UpdateItem { node: nid, card: cid, item, input });
+        assert!(!dirty);
+        assert_eq!(resp.status, 400, "{}", resp.body);
+
+        // A line that is not there is a 404, never a silent no-op.
+        assert_eq!(
+            process(
+                &mut doc,
+                ApiRequest::UpdateItem {
+                    node: nid,
+                    card: cid,
+                    item: 9999,
+                    input: serde_json::from_str(r#"{"text":"x"}"#).unwrap(),
+                }
+            )
+            .1
+            .status,
+            404
+        );
+    }
+
+    /// **A channel card can be born one**, and the one-primary rule is checked
+    /// before the card exists rather than after it.
+    #[test]
+    fn a_card_can_be_created_as_a_channel_and_the_primary_rule_still_holds() {
+        let mut doc = Document::empty();
+        let root = doc.add_node(None, "Project".into());
+        let nid = doc.add_node(Some(root), "Basket".into());
+
+        let req = route(
+            &Method::Post,
+            &format!("/api/nodes/{nid}/cards"),
+            "",
+            r#"{"title":"Agent channel","channel":{"participants":["claude","operator"],"primary":true}}"#,
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(dirty);
+        assert_eq!(resp.status, 201, "{}", resp.body);
+        let first = doc.nodes[&nid].cards.last().unwrap().id;
+        assert!(
+            doc.card(nid, first).unwrap().channel.as_ref().is_some_and(|c| c.primary),
+            "the card should already be a primary channel, with no PATCH"
+        );
+
+        // A second primary channel in the same project is refused, and nothing
+        // is created — the same rule PATCH enforces, named the same way.
+        let before = doc.nodes[&nid].cards.len();
+        let req = route(
+            &Method::Post,
+            &format!("/api/nodes/{nid}/cards"),
+            "",
+            r#"{"title":"Second","channel":{"primary":true}}"#,
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, req);
+        assert!(!dirty);
+        assert_eq!(resp.status, 400, "{}", resp.body);
+        assert!(resp.body.contains("primary channel"), "{}", resp.body);
+        assert_eq!(doc.nodes[&nid].cards.len(), before, "nothing created by a refused create");
+
+        // A non-primary channel beside it is legal — an agent-to-agent card is a
+        // second channel in the same workspace.
+        let req = route(
+            &Method::Post,
+            &format!("/api/nodes/{nid}/cards"),
+            "",
+            r#"{"title":"A2A","channel":{"participants":["claude","codex"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(process(&mut doc, req).1.status, 201);
+    }
+
+    /// **The unknown-route 404 names the reference.** An unauthenticated caller
+    /// tried `/api/help`, `/api/routes` and `/api/openapi` in a row (error log,
+    /// 2026-08-29) and the answer told it only that none of them existed.
+    #[test]
+    fn an_unknown_route_points_at_the_docs() {
+        for path in ["/api/help", "/api/routes", "/api/openapi"] {
+            let Err((status, msg)) = route(&Method::Get, path, "", "") else {
+                panic!("{path} is not a route this API has");
+            };
+            assert_eq!(status, 404);
+            assert!(msg.contains("/api/docs"), "the 404 should name the reference: {msg}");
+        }
     }
 
     /// — a 200 that changed nothing anyone can see is the worst answer available.
