@@ -312,6 +312,22 @@ pub struct ApiError {
     /// key is checked, so a mistyped credential cannot land in a log file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request: Option<String>,
+    /// The caller's IP address — the one field that identifies an **anonymous**
+    /// caller, who by definition sent no `X-Agent` and no credential.
+    ///
+    /// Recorded because the log could not answer the question it kept raising.
+    /// An unidentified client polled one instance unauthenticated for three
+    /// days across two sessions — `/api/instance` over and over, `/api/docs`,
+    /// once with the *other* instance's key in the query string — and every
+    /// entry said only that somebody had, never who. `127.0.0.1` says a program
+    /// on this machine, a LAN address says a device, and the API binds
+    /// `0.0.0.0` whenever *LAN* is on, so both are reachable.
+    ///
+    /// **The address only, never the port**: the port is a fresh ephemeral
+    /// number on every connection and identifies nothing. `None` when the
+    /// server could not report a peer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
 }
 
 /// How much of a failed request's body is kept — enough to see *what* was sent
@@ -692,6 +708,7 @@ mod tests {
             agent: Some("claude".into()),
             error: "no such card".into(),
             request: request_excerpt(r#"{"body":""}"#),
+            remote: Some("127.0.0.1".into()),
         }
     }
 
@@ -729,6 +746,7 @@ mod tests {
         assert_eq!(lines[0]["status"], 404);
         assert_eq!(lines[0]["agent"], "claude");
         assert_eq!(lines[0]["request"], r#"{"body":""}"#);
+        assert_eq!(lines[0]["remote"], "127.0.0.1", "the caller's address is on the disk copy too");
         assert_eq!(lines[2]["path"], "/api/nodes/1/cards?x=1");
         let _ = std::fs::remove_dir_all(&dir);
     }

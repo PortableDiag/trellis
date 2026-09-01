@@ -9203,7 +9203,7 @@ impl TrellisApp {
                             "POST   /api/import/vault       {path, parent?}  (an Obsidian vault → baskets; .canvas → a basket)",
                             "GET    /api/wait?rev=<n>                  (long-poll: that something changed, + epoch)",
                             "GET    /api/changes?since=<seq>[&limit=<n>]  (what changed: actor/entity/op/fields/property)",
-                            "GET    /api/errors?since=<seq>[&limit=<n>]   (what FAILED: every 4xx/5xx this run — status/method/path/agent/error/request excerpt; api_errors on /api/instance is the count; mirrored to <data-dir>/trellis/api-errors.log)",
+                            "GET    /api/errors?since=<seq>[&limit=<n>]   (what FAILED: every 4xx/5xx this run — status/method/path/agent/error/request excerpt/remote IP; api_errors on /api/instance is the count; mirrored to <data-dir>/trellis/api-errors.log)",
                             "GET    /api/history                       (version snapshots + keep / min_gap_mins retention)",
                             "POST   /api/history/restore     {file}    (restore a snapshot)",
                             "GET    /api/backup                        (status)",

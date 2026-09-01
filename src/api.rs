@@ -1884,6 +1884,13 @@ pub fn serve(
                                 agent: meta.agent.or(declared),
                                 error: error_message_of(&resp),
                                 request: meta.request,
+                                // The IP only — the peer port is a fresh
+                                // ephemeral number per connection and
+                                // identifies nothing. Read here rather than
+                                // beside `declared` because only a failure
+                                // wants it, and it is the ONLY field that names
+                                // an anonymous caller: no key, no `X-Agent`.
+                                remote: request.remote_addr().map(|a| a.ip().to_string()),
                             });
                         }
                     }

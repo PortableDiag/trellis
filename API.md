@@ -2592,6 +2592,17 @@ Each entry:
 | `agent` | `X-Agent`, or a scoped token's label; absent for an anonymous call |
 | `error` | the `error` message the caller was sent |
 | `request` | the first 200 characters of the request body, when one was read. **Never present on a 401** — the body is not read before the key is checked, so a mistyped credential cannot land in the log |
+| `remote` | the caller's **IP address** — the address only, never the ephemeral peer port. The one field that identifies an *anonymous* caller (v0.164.0) |
+
+**An anonymous caller is identified by `remote`, and by nothing else** (v0.164.0).
+`agent` is whatever the caller *declared* in `X-Agent`, so a client that declares
+nothing — a browser, a misconfigured script, a device on the LAN — used to leave
+an entry saying only that somebody had called. That is not hypothetical: an
+unidentified client polled one instance unauthenticated for three days,
+`/api/instance` over and over, and two sessions in a row could report it and not
+name it. `127.0.0.1` says a program on this machine; anything else says a device,
+because the API binds `0.0.0.0` whenever *LAN* is on. The peer **port** is
+deliberately not recorded: it is a fresh number on every connection.
 
 **A key belongs in the `X-API-Key` header, never in the query string.** This API
 has never accepted `?api_key=`, and a caller that tries it gets a 401 — but until
@@ -2603,7 +2614,8 @@ to authenticate by query string" is the half worth reading.
 
 ```jsonc
 {"seq":12,"ts":1787962687,"status":404,"method":"PATCH","path":"/api/cards/9903",
- "agent":"claude","error":"no such card 9903","request":"{\"body\":\"\"}"}
+ "agent":"claude","error":"no such card 9903","request":"{\"body\":\"\"}",
+ "remote":"127.0.0.1"}
 ```
 
 **It is also a file.** Every entry is appended, as it happens, to

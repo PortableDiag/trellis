@@ -6,6 +6,25 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.164.0]
+
+### Added
+- **The error log says where the call came from.** Every entry in
+  `GET /api/errors` (and in `<data-dir>/trellis/api-errors.log`) now carries
+  **`remote`**, the caller's IP address. It is the only field that identifies an
+  **anonymous** caller: `agent` is whatever the caller declared in `X-Agent`, so
+  a client that declares nothing left an entry saying only that somebody had
+  called. That gap was live — an unidentified client polled the personal
+  instance unauthenticated across three days (`/api/instance` over and over,
+  `/api/docs`, once with the *other* instance's key in a query string), and two
+  sessions in a row could report it and not name it. `127.0.0.1` says a program
+  on this machine, anything else says a device, because the API binds `0.0.0.0`
+  whenever LAN is on.
+  The **address only, never the peer port** — that is a fresh ephemeral number
+  on every connection and identifies nothing. Read in the failure branch rather
+  than beside the method and path, so a successful request pays nothing for it.
+  API.md's field table, its worked entry and Settings → Endpoints moved with it.
+
 ## [0.163.5]
 
 ### Fixed

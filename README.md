@@ -475,10 +475,11 @@ drawn hollow in their accent where a resident card is a solid block.
   `GET /api/changes` says **what** changed — which card, who changed it, which
   fields, and the `key:: value` if a property moved — so a client re-reads one
   card instead of the whole document; and `GET /api/errors` says what **failed** —
-  every 4xx/5xx the API answered, with who asked and what they sent, counted
-  as `api_errors` on `/api/instance` and mirrored to a per-instance
-  `api-errors.log`, so a refused call is on record whether or not the agent
-  that made it mentions it. An instance serves one document, so **the port
+  every 4xx/5xx the API answered, with who asked, **the address they asked
+  from**, and what they sent, counted as `api_errors` on `/api/instance` and
+  mirrored to a per-instance `api-errors.log`, so a refused call is on record
+  whether or not the agent that made it mentions it — and a caller that names
+  itself in nothing is still identified by its IP. An instance serves one document, so **the port
   addresses the document** — `GET /api/instance` reports which one is open, and
   edits are autosaved a couple of seconds later without anyone pressing Save.
   Enable it in **Tools → Settings**, where **Examples** gives you copy-paste
