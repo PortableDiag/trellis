@@ -6,6 +6,16 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.163.5]
+
+### Fixed
+- **README catches up with the day.** Doc-only. The per-line checklist routes
+  now include `PATCH …/items/{item}` (v0.163.0) in both places they are listed —
+  the shared-card paragraph and the bare-id list — and the Tree section says the
+  basket menu's first line is its **id**, bare, because that is what goes inside
+  `[[42]]` and `/api/nodes/42` (v0.163.2–0.163.3). The seven Prompt Manager
+  prompts that teach this API learned the same three things in the same pass.
+
 ## [0.163.4]
 
 ### Fixed

@@ -29,6 +29,9 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   **Basket color**; the black grid stays the default)
 - Right-click → **Copy** a node's **id** (for the agent API, `/api/nodes/{id}`)
   or its **path** breadcrumb, so you can point an agent at the exact node
+- The basket's **id is the first line of that menu**, readable without copying
+  it out — bare (`42`), because that is what goes inside a `[[42]]` link and into
+  `/api/nodes/42`, the way a card's menu shows `#1391` for `[[#1391]]`
 
 **Basket canvas** — six real card types:
 - **Text** — CommonMark markdown, rendered live, with edit/preview toggle. Fenced
@@ -592,15 +595,16 @@ hands back, since the agenda and the claims list deliberately span baskets.
 message board or a running log does not need read-modify-write — which is where
 whatever the other one typed in between gets lost. Checklists get the same
 treatment a line at a time: `POST /api/cards/{cid}/items` and
-`DELETE …/items/{item}` add and remove one line, leaving every other line's id
-alone, because rewriting the whole list carries ids across by position and a dated
-line *is* a task.
+`DELETE …/items/{item}` add and remove one line, and `PATCH …/items/{item}`
+(v0.163.0) rewords or ticks one, leaving every other line's id alone — because
+rewriting the whole list carries ids across by position and a dated line *is* a
+task.
 
 **A card id is a complete address — for changing it, not just finding it.**
 Every query surface hands out card ids (search, the agenda, claims, backlinks, the
 change log) and `[[#1391]]` *is* one, so `PATCH /api/cards/{cid}`,
-`POST /api/cards/{cid}/property`, `…/move`, `…/items/{item}/done` and
-`DELETE /api/cards/{cid}` all take the bare id. Since v0.142.0 so do the
+`POST /api/cards/{cid}/property`, `…/move`, `…/items/{item}/done`,
+`PATCH …/items/{item}` and `DELETE /api/cards/{cid}` all take the bare id. Since v0.142.0 so do the
 kind-specific ops — `…/table`, `…/sketch`, `…/chart`, `…/dock`, `…/group`,
 `…/images`, `…/attachments` and `…/export` — which had been basket-only for no
 recorded reason, so editing a table someone had just pasted the id of still meant
