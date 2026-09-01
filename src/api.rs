@@ -4560,9 +4560,17 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     );
                 }
             }
-            // Applied in order, stopping at the first failure and saying which
-            // one — a batch that half-applies and reports plain success is
-            // exactly the failure this batching was added to prevent.
+            // **The table is put back if any op fails.** The shape check above
+            // catches what is knowable without applying (a missing `at`), but an
+            // index out of range is only knowable against the table as it stands
+            // *at that point in the list* — and until v0.163.4 such a failure
+            // stopped the loop and left the earlier ops in place. A 46-op batch
+            // died on op 16 and left 15 applied (error log, 2026-08-31), which is
+            // the half-edited table this batching exists to prevent, and what
+            // API.md has always promised it does not do. Snapshot-and-restore
+            // rather than a dry run: the ops mutate through `doc`, so replaying
+            // them against a copy would be a second implementation of every one.
+            let snapshot = doc.table_mut(node, card).map(|t| t.clone());
             let total = ops.len();
             for (i, op) in ops.into_iter().enumerate() {
                 let name = op.op.clone();
@@ -4608,13 +4616,18 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                     }
             };
                 if !ok {
+                    // Put the table back exactly as it was. `dirty` is false
+                    // because, once restored, nothing changed.
+                    if let (Some(t), Some(orig)) = (doc.table_mut(node, card), snapshot) {
+                        *t = orig;
+                    }
                     return (
-                        i > 0,
+                        false,
                         ApiResponse::err(
                             400,
                             &format!(
                                 "table op {}/{} ({name}) failed (not a table, or index out of \
-                                 range); {} earlier op(s) were applied",
+                                 range); nothing was applied — the {} earlier op(s) were undone",
                                 i + 1,
                                 total,
                                 i
@@ -6380,11 +6393,16 @@ mod tests {
         assert_eq!(table.rows[0][0].text, "solo");
     }
 
-    /// A batch that fails partway must say **which** op failed and how many were
-    /// applied. Reporting a bare failure would leave the caller unable to tell
-    /// what state the table is in.
+    /// A batch that fails partway names **which** op failed — and leaves the
+    /// table exactly as it found it.
+    ///
+    /// Until v0.163.4 the earlier ops stayed applied, and this test asserted
+    /// that they did. A 46-op batch from a real agent died on op 16 and left 15
+    /// applied, which is the half-edited table the batching exists to prevent
+    /// and which API.md has always said cannot happen. The assertion is now the
+    /// other way round: `kept` must NOT be in the cell.
     #[test]
-    fn a_failing_op_names_itself_and_what_already_applied() {
+    fn a_failing_op_names_itself_and_undoes_what_applied() {
         let mut doc = Document::default();
         let n = doc.add_node(None, "B".into());
         let c = doc
@@ -6395,11 +6413,34 @@ mod tests {
         let req = route(&Method::Post, &format!("/api/nodes/{n}/cards/{c}/table"), "", body).unwrap();
         let (changed, resp) = process(&mut doc, req);
         assert_eq!(resp.status, 400);
-        assert!(changed, "the first op did apply, so the document is dirty");
+        assert!(!changed, "a rolled-back batch changed nothing, so nothing is dirty");
         assert!(resp.body.contains("2/2"), "names the failing op: {}", resp.body);
-        assert!(resp.body.contains("1 earlier op"), "says what landed: {}", resp.body);
+        assert!(resp.body.contains("nothing was applied"), "says it rolled back: {}", resp.body);
         let CardKind::Table { table } = &doc.card(n, c).unwrap().kind else { panic!() };
-        assert_eq!(table.rows[0][0].text, "kept");
+        assert_eq!(table.rows[0][0].text, "", "the op before the failure must be undone");
+    }
+
+    /// A credential a caller put in the QUERY STRING never reaches the log.
+    ///
+    /// The 401 rule already kept a mistyped key out of `request`; the path went
+    /// in whole, and the caller most likely to be holding a real key is exactly
+    /// the one authenticating the wrong way round. Seen live 2026-08-31.
+    #[test]
+    fn a_key_in_the_query_string_is_redacted_from_the_error_log() {
+        use crate::changelog::redact_query;
+        for (given, want) in [
+            ("/api/instance?api_key=deadbeef", "/api/instance?api_key=<redacted>"),
+            ("/api/docs?key=", "/api/docs?key=<redacted>"),
+            ("/api/x?a=1&token=zzz&b=2", "/api/x?a=1&token=<redacted>&b=2"),
+            // The name is kept — "somebody tried to authenticate by query
+            // string" is the half worth reading.
+            ("/api/x?API_KEY=zzz", "/api/x?API_KEY=<redacted>"),
+            // Whole-name match only, and a path with no query is untouched.
+            ("/api/search?q=keyword", "/api/search?q=keyword"),
+            ("/api/cards/12", "/api/cards/12"),
+        ] {
+            assert_eq!(redact_query(given), want, "redacting {given}");
+        }
     }
 
 

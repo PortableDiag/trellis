@@ -319,6 +319,44 @@ pub struct ApiError {
 /// document.
 pub const REQUEST_EXCERPT: usize = 200;
 
+/// Query parameter names whose VALUE is a credential and must never be logged.
+///
+/// Matched case-insensitively, and on the whole name only — `key` is redacted,
+/// `keyword` is not.
+const SECRET_PARAMS: [&str; 8] = [
+    "key", "api_key", "apikey", "token", "access_token", "secret", "password", "passphrase",
+];
+
+/// Blank out credential values in a recorded path's query string.
+///
+/// **The 401 protection had a hole.** [`ApiError::request`] is deliberately
+/// absent on a 401 so a mistyped key cannot reach the log — but the *path* is
+/// recorded whole, query included, and a caller that authenticates the wrong way
+/// round (`/api/instance?api_key=…`, which this API does not accept) puts its key
+/// in the query. That is exactly the caller most likely to be holding a real key
+/// and getting it refused, and the log is a file on disk that outlives the run.
+/// Seen live on 2026-08-31, in the log this function now cleans.
+///
+/// Applied in [`ErrorLog::push`], so it reaches memory and file together and no
+/// call site can forget it. The parameter NAME is kept: "somebody tried to
+/// authenticate by query string" is the useful half, and it is what tells you to
+/// go and tell them the header form.
+pub fn redact_query(path: &str) -> String {
+    let Some((base, query)) = path.split_once('?') else {
+        return path.to_string();
+    };
+    let cleaned: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, _)) if SECRET_PARAMS.iter().any(|s| name.eq_ignore_ascii_case(s)) => {
+                format!("{name}=<redacted>")
+            }
+            _ => pair.to_string(),
+        })
+        .collect();
+    format!("{base}?{}", cleaned.join("&"))
+}
+
 /// Clip a request body to [`REQUEST_EXCERPT`] characters, on a char boundary,
 /// marking the cut. Empty in, `None` out — an absent body is not an excerpt.
 pub fn request_excerpt(body: &str) -> Option<String> {
@@ -387,6 +425,9 @@ impl ErrorLog {
     /// appends it to the file. Nothing collapses — two identical failures are
     /// two failures, and the count is the point.
     pub fn push(&mut self, mut e: ApiError) {
+        // One choke point for both copies: a credential a caller put in the
+        // query string never reaches memory OR the file. See `redact_query`.
+        e.path = redact_query(&e.path);
         e.seq = self.next_seq;
         self.next_seq += 1;
         e.ts = now_secs();

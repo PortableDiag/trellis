@@ -933,9 +933,12 @@ which this one had been missed by. Omitting an argument used to substitute a
 default silently: `set_cell` with no `text` wrote an empty string over the cell
 and answered 200, no `row`/`col` wrote over `0,0`, and `remove_row` with no `at`
 deleted the first row. `autofit_cols`'s `col` is the one optional (absent = every
-column), and an absent or null `color` still means *clear it*. In a batch the
-whole list is checked before anything is applied, so a malformed op leaves the
-table untouched rather than half-edited.
+column), and an absent or null `color` still means *clear it*. **A batch applies
+wholly or not at all**: malformed ops are caught before anything is written, and
+an op that fails *while applying* — an index out of range against the table as it
+stands at that point in the list — puts the table back as it was and answers 400
+naming the op (v0.163.4). Before that, such a failure stopped the loop and left
+the earlier ops in place, which a 46-op batch discovered the hard way.
 
 Columns are **110px** until something changes them, and cell text does not wrap —
 so a table built from `rows` clips anything longer than that. **`autofit_cols`
@@ -2585,10 +2588,18 @@ Each entry:
 | `seq` | this failure's own sequence number — **not** a document revision; nothing changed |
 | `ts` | unix seconds |
 | `status` | the HTTP status the caller was sent |
-| `method`, `path` | the request, path **with its query string** |
+| `method`, `path` | the request, path **with its query string** — with any credential in it blanked: a value under `key`, `api_key`, `token`, `secret`, `password` or `passphrase` is recorded as `<redacted>`, the parameter name kept (v0.163.4) |
 | `agent` | `X-Agent`, or a scoped token's label; absent for an anonymous call |
 | `error` | the `error` message the caller was sent |
 | `request` | the first 200 characters of the request body, when one was read. **Never present on a 401** — the body is not read before the key is checked, so a mistyped credential cannot land in the log |
+
+**A key belongs in the `X-API-Key` header, never in the query string.** This API
+has never accepted `?api_key=`, and a caller that tries it gets a 401 — but until
+v0.163.4 the whole query went into the log, so the caller most likely to be
+holding a *real* key wrote it to a file on disk. Found in a live log on
+2026-08-31 (one instance's key recorded by the other). The value is now blanked
+in memory and in the file; the parameter name survives, because "somebody tried
+to authenticate by query string" is the half worth reading.
 
 ```jsonc
 {"seq":12,"ts":1787962687,"status":404,"method":"PATCH","path":"/api/cards/9903",

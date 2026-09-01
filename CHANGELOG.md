@@ -6,6 +6,30 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.163.4]
+
+### Fixed
+- **A table batch applies wholly or not at all.** An op that failed *while
+  applying* — an index out of range against the table as it stands at that point
+  in the list — stopped the loop and left every earlier op in place. A real
+  46-op batch died on op 16 and left 15 applied (found in `GET /api/errors`),
+  which is the half-edited table the batching exists to prevent and which API.md
+  has always said cannot happen. The table is now snapshotted and put back, the
+  400 says `nothing was applied`, and the response is no longer marked dirty.
+  Snapshot-and-restore rather than a dry run: the ops mutate through the
+  document, so replaying them against a copy would be a second implementation of
+  every op.
+- **A credential in a query string never reaches the error log.** `request` has
+  been absent on a 401 since v0.162.0 so a mistyped key could not land in the
+  file — but the `path` was recorded whole, query included, and a caller that
+  authenticates the wrong way round (`?api_key=…`, which this API does not
+  accept) puts its key there. That is precisely the caller holding a real key.
+  Found live on 2026-08-31: one instance's key sitting in the other's log. The
+  value is now `<redacted>` in memory and on disk, applied in `ErrorLog::push`
+  so both copies get it and no call site can forget; the parameter name is kept,
+  because "somebody tried to authenticate by query string" is the half worth
+  reading.
+
 ## [0.163.3]
 
 ### Changed
