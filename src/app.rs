@@ -2756,11 +2756,18 @@ impl TrellisApp {
                     self.plugin_running.remove(&r.plugin);
                     self.plugin_cancel.remove(&r.plugin);
                     self.plugin_progress.remove(&r.plugin);
-                    self.status = if r.ok || r.cancelled {
-                        r.summary.clone()
+                    if r.ok || r.cancelled {
+                        self.status = r.summary.clone();
                     } else {
-                        format!("Plugin failed: {}", r.summary)
-                    };
+                        // `plugin_log` keeps this too, but only in memory, only
+                        // for the run, and only the last 50 — a plugin failing
+                        // every scheduled run leaves nothing behind once you
+                        // close the window. cloud-backup is the case that
+                        // matters: its off-site copy silently stops advancing
+                        // and the app looks entirely healthy.
+                        let (name, summary) = (r.plugin.clone(), r.summary.clone());
+                        self.fail("plugin", format!("Plugin failed: {summary}"), Some(name));
+                    }
                     self.plugin_log.push(r);
                     // Keep the pane bounded; a chatty plugin shouldn't grow forever.
                     if self.plugin_log.len() > 50 {
@@ -8066,10 +8073,14 @@ impl TrellisApp {
                 let name = p.manifest.name.clone();
                 let dir = p.dir.clone();
                 let vals = self.plugin_config.get(&name).cloned().unwrap_or_default();
-                self.status = match crate::plugins::write_config(&dir, &vals) {
-                    Ok(()) => format!("Saved settings for {name}"),
-                    Err(e) => format!("Could not save {name} settings: {e}"),
-                };
+                match crate::plugins::write_config(&dir, &vals) {
+                    Ok(()) => self.status = format!("Saved settings for {name}"),
+                    Err(e) => self.fail(
+                        "plugin",
+                        format!("Could not save {name} settings: {e}"),
+                        Some(name),
+                    ),
+                }
             }
         }
         if let Some(name) = to_revoke {

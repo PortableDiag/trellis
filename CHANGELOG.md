@@ -6,6 +6,18 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.165.2]
+
+### Fixed
+- **A failed plugin run now reaches the app error log.** v0.165.0 routed saves,
+  snapshots and backups through `fail`, but a plugin's own failure still only set
+  the status bar and pushed to `plugin_log` — **in memory, for the run, capped at
+  50**. A plugin failing every scheduled run therefore left nothing behind once
+  the window closed. `cloud-backup` is the case that matters: its off-site copy
+  silently stops advancing while the app looks entirely healthy, which is the
+  exact shape this release exists to end. A failed plugin-settings write goes the
+  same way, with the plugin name as `subject`.
+
 ## [0.165.1]
 
 ### Fixed

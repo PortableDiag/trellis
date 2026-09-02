@@ -2703,6 +2703,12 @@ home with the save's own result because a worker thread owns no log.
 `Backup: 1/3 failed` and names only the first; the off-site copy being the broken
 one is the case worth reading back later.
 
+**A failed plugin run lands here too** (v0.165.2), with the plugin name as
+`subject`. Before that it set the status bar and pushed to an in-memory log
+capped at 50 entries, so a plugin failing on every scheduled run left nothing
+behind once the window closed — and an off-site backup that quietly stops
+advancing looks exactly like one that is working.
+
 **It is also a file**, on the same terms as the API log: one JSON object per line
 with `epoch` added, appended as each failure happens, at
 `<data-dir>/trellis/app-errors.log`, rotating once at 1 MB to `app-errors.log.1`.
