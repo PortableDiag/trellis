@@ -225,6 +225,8 @@ pub enum CanvasAction {
     SetBody(CardId, String),
     SetLang(CardId, String),
     SetColor(CardId, [u8; 3]),
+    /// A pattern over the title bar, or `None` to go back to the flat color.
+    SetFill(CardId, Option<crate::model::Fill>),
     SetFontScale(CardId, f32),
     SetEditing(CardId, bool),
     Duplicate(CardId),
@@ -317,6 +319,7 @@ pub enum CanvasAction {
     MoveGroup(GroupId, egui::Vec2),
     SetGroupTitle(GroupId, String),
     SetGroupColor(GroupId, [u8; 3]),
+    SetGroupFill(GroupId, Option<crate::model::Fill>),
     // Docking (stick a card onto another).
     /// Choose a file for this card to mirror (opens a file dialog).
     PickSource(CardId),
@@ -490,6 +493,16 @@ pub fn ui(
         .map(|c| egui::Color32::from_rgb(c[0], c[1], c[2]))
         .unwrap_or_else(|| ui.visuals().extreme_bg_color);
     painter.rect_filled(canvas_rect, 0.0, bg);
+    // A basket's pattern, over the flat colour. This is the largest area in the
+    // app and the one where a gradient actually changes how a document reads:
+    // two projects that looked alike become two obviously different rooms.
+    //
+    // **Zoom is deliberately 1.0 here.** A stripe on a *card* is part of the
+    // card and should shrink with it; the canvas is the room, so its bands stay
+    // put as you zoom around inside it.
+    if let Some(f) = &node.bg_fill {
+        paint_fill(&painter, canvas_rect, 0.0, f, bg, 1.0);
+    }
     draw_grid(&painter, canvas_rect, *view, ui.visuals().weak_text_color());
 
     // Minimap interaction — resolved from raw pointer input *before* the canvas
@@ -968,6 +981,9 @@ pub fn ui(
             egui::vec2(srect.width(), hh),
         );
         bg.rect_filled(header, 4.0 * zoom, gcol.gamma_multiply(0.9));
+        if let Some(f) = &group.fill {
+            paint_fill(&bg, header, 4.0 * zoom, f, gcol.gamma_multiply(0.9), zoom);
+        }
         let label = if group.title.is_empty() { "Group" } else { group.title.as_str() };
         bg.text(
             header.left_center() + egui::vec2(6.0 * zoom, 0.0),
@@ -2085,7 +2101,7 @@ fn card_ui(
     }
 
     // The effective title-bar background (for picking a readable title color).
-    let title_bg;
+    let mut title_bg;
     // --- card frame, per theme ---------------------------------------------
     match env.style {
         CardStyle::Sticky => {
@@ -2200,6 +2216,18 @@ fn card_ui(
             p.rect_stroke(rect, r, egui::Stroke::new(1.0, accent));
             p.rect_filled(title_rect, r, accent.gamma_multiply(0.35));
         }
+    }
+    // A pattern, if this card has one, over whatever the style painted. It goes
+    // AFTER the match rather than inside each arm because a fill is an explicit
+    // choice by the person holding the mouse and a style is a global default:
+    // when they disagree, the specific one wins. Every style keeps its outline,
+    // its rules and its pin-1 dot — only the flat title band is replaced.
+    if let Some(f) = &card.fill {
+        paint_fill(&p, title_rect, r, f, mix(panel, accent, 0.35), zoom);
+        // Text contrast is judged against the fill's average, since the bar is
+        // no longer one colour and no single sample would be right.
+        let k = f.key_color();
+        title_bg = egui::Color32::from_rgb(k[0], k[1], k[2]);
     }
     // Multi-select outline (Ctrl+click builds a selection to group).
     if selected {
@@ -3985,6 +4013,224 @@ fn snap_position(
     (egui::pos2(pos.x + dx, pos.y + dy), best_x.map(|(_, _, g)| g), best_y.map(|(_, _, g)| g))
 }
 
+/// Paint a [`Fill`] into `rect`, rounded like the flat `rect_filled` it replaces.
+///
+/// **Everything is one `Mesh`.** egui has no gradient primitive, but it does
+/// interpolate vertex colours across a triangle, which is exactly a gradient —
+/// so a linear fade is four vertices whose colours are their own projection onto
+/// the fill's axis, and stripes are a quad per band. That keeps this to one draw
+/// call per fill and needs no texture, no shader and no image cache.
+///
+/// **Rounding is approximated by drawing the flat colour underneath first.** A
+/// mesh cannot have rounded corners, so the base `rect_filled` paints the
+/// rounded silhouette and the pattern is clipped to `rect` on top of it; at the
+/// 6px radius the app uses, the corner sliver that shows is the base colour,
+/// which is the right colour to show. Doing it properly would mean tessellating
+/// a rounded path per fill, for a difference nobody can see.
+pub(crate) fn paint_fill(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    rounding: f32,
+    fill: &crate::model::Fill,
+    base: egui::Color32,
+    zoom: f32,
+) {
+    use crate::model::Fill;
+    if !rect.is_positive() {
+        return;
+    }
+    // The rounded silhouette, so corners are never bare.
+    painter.rect_filled(rect, rounding, base);
+    let p = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    let c = |rgb: [u8; 3]| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+
+    match fill {
+        Fill::Gradient { from, to, angle } => {
+            // Colour each corner by where it falls along the gradient axis, so
+            // the interpolation egui already does between vertices IS the fade.
+            let (dx, dy) = angle_unit(*angle);
+            let corners = rect_corners(rect);
+            let proj: Vec<f32> = corners.iter().map(|p| p.x * dx + p.y * dy).collect();
+            let (lo, hi) = (
+                proj.iter().cloned().fold(f32::INFINITY, f32::min),
+                proj.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+            );
+            let span = (hi - lo).max(f32::EPSILON);
+            let mut mesh = egui::Mesh::default();
+            for (i, pos) in corners.iter().enumerate() {
+                let t = (proj[i] - lo) / span;
+                mesh.colored_vertex(*pos, lerp_color(c(*from), c(*to), t));
+            }
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+            p.add(mesh);
+        }
+        Fill::Corners { tl, tr, br, bl } => {
+            // A colour per corner. egui interpolates across each triangle, so
+            // the centre is the blend — which is what "corners one colour, sides
+            // another" looks like when the four agree and the card's own colour
+            // shows through the middle.
+            let corners = rect_corners(rect);
+            let cols = [c(*tl), c(*tr), c(*br), c(*bl)];
+            // Split through the centre rather than corner-to-corner: a two-
+            // triangle quad blends along its shared diagonal and the seam shows.
+            let mid = rect.center();
+            let avg = egui::Color32::from_rgb(
+                ((tl[0] as u32 + tr[0] as u32 + br[0] as u32 + bl[0] as u32) / 4) as u8,
+                ((tl[1] as u32 + tr[1] as u32 + br[1] as u32 + bl[1] as u32) / 4) as u8,
+                ((tl[2] as u32 + tr[2] as u32 + br[2] as u32 + bl[2] as u32) / 4) as u8,
+            );
+            let mut mesh = egui::Mesh::default();
+            for (i, pos) in corners.iter().enumerate() {
+                mesh.colored_vertex(*pos, cols[i]);
+            }
+            mesh.colored_vertex(mid, avg);
+            for i in 0..4u32 {
+                mesh.add_triangle(i, (i + 1) % 4, 4);
+            }
+            p.add(mesh);
+        }
+        Fill::Stripes { a, b, angle, width } => {
+            // Bands perpendicular to the axis. Drawn as quads long enough to
+            // cover the rect at any rotation — the diagonal is the worst case.
+            let (dx, dy) = angle_unit(*angle);
+            let (px, py) = (-dy, dx); // along the band
+            let w = (width.max(2.0)) * zoom.max(0.05);
+            let center = rect.center();
+            let reach = rect.size().length(); // >= half-diagonal, at any angle
+            let n = (reach / w).ceil() as i32 + 1;
+            let mut mesh = egui::Mesh::default();
+            for i in -n..=n {
+                let col = if i.rem_euclid(2) == 0 { c(*a) } else { c(*b) };
+                let s0 = i as f32 * w;
+                let s1 = s0 + w;
+                // Quad: [s0,s1] along the axis, +/- reach along the band.
+                let quad = [
+                    center + egui::vec2(dx * s0 - px * reach, dy * s0 - py * reach),
+                    center + egui::vec2(dx * s1 - px * reach, dy * s1 - py * reach),
+                    center + egui::vec2(dx * s1 + px * reach, dy * s1 + py * reach),
+                    center + egui::vec2(dx * s0 + px * reach, dy * s0 + py * reach),
+                ];
+                let base_i = mesh.vertices.len() as u32;
+                for v in quad {
+                    mesh.colored_vertex(v, col);
+                }
+                mesh.add_triangle(base_i, base_i + 1, base_i + 2);
+                mesh.add_triangle(base_i, base_i + 2, base_i + 3);
+            }
+            p.add(mesh);
+        }
+        Fill::TieDye { colors, seed, scale } => {
+            // **A grid of coloured vertices, not a texture.** The other patterns
+            // are four vertices because a flat ramp needs no more; a spiral is
+            // curved, so it needs enough vertices that egui's linear
+            // interpolation between them reads as a curve. That keeps tie-dye on
+            // the same footing as the rest — one mesh, no image, nothing to
+            // cache, nothing to regenerate when a card is resized, and it stays
+            // sharp at any zoom because it is geometry rather than pixels.
+            let cols: Vec<egui::Color32> = colors.iter().map(|x| c(*x)).collect();
+            if cols.is_empty() {
+                return;
+            }
+            // One vertex per ~7 screen points, bounded: a title bar gets a
+            // handful, a full canvas gets the cap. Beyond ~64 the extra
+            // triangles are smaller than the smoothing they buy.
+            let nx = (rect.width() / 7.0).ceil().clamp(6.0, 64.0) as usize;
+            let ny = (rect.height() / 7.0).ceil().clamp(6.0, 64.0) as usize;
+            let s = (*scale * zoom.max(0.05)).max(4.0);
+            let center = rect.center();
+            let mut mesh = egui::Mesh::default();
+            for iy in 0..=ny {
+                for ix in 0..=nx {
+                    let px = rect.left() + rect.width() * ix as f32 / nx as f32;
+                    let py = rect.top() + rect.height() * iy as f32 / ny as f32;
+                    let pos = egui::pos2(px, py);
+                    mesh.colored_vertex(pos, tiedye_at(pos, center, s, *seed, &cols));
+                }
+            }
+            let w = nx + 1;
+            for iy in 0..ny {
+                for ix in 0..nx {
+                    let i = (iy * w + ix) as u32;
+                    let (a, b, c2, d) = (i, i + 1, i + 1 + w as u32, i + w as u32);
+                    mesh.add_triangle(a, b, c2);
+                    mesh.add_triangle(a, c2, d);
+                }
+            }
+            p.add(mesh);
+        }
+    }
+}
+
+/// The tie-dye colour at one point: a spiral ramp through the palette, warped by
+/// cheap value noise so the bands crinkle instead of being drawn with a compass.
+///
+/// The spiral is `radius + angle`, which is what makes it a *spiral* rather than
+/// concentric rings — follow one band round once and you have moved out by one
+/// band, exactly like fabric tied at a point and twisted.
+fn tiedye_at(
+    p: egui::Pos2,
+    center: egui::Pos2,
+    scale: f32,
+    seed: u32,
+    cols: &[egui::Color32],
+) -> egui::Color32 {
+    let d = p - center;
+    let r = d.length() / scale;
+    let ang = d.y.atan2(d.x) / std::f32::consts::TAU; // -0.5..0.5
+    // Two octaves is enough to look hand-made and cheap enough to run per vertex.
+    let warp = 0.30 * value_noise(p.x / scale * 1.7, p.y / scale * 1.7, seed)
+        + 0.15 * value_noise(p.x / scale * 4.1, p.y / scale * 4.1, seed ^ 0x9e37);
+    let t = (r + ang + warp).rem_euclid(1.0);
+    let n = cols.len();
+    let x = t * n as f32;
+    let i = (x.floor() as usize) % n;
+    let f = x - x.floor();
+    // Smoothstep, so a band edge is a soft bleed like dye in cloth rather than a
+    // hard line — which is what separates tie-dye from a striped shirt.
+    let f = f * f * (3.0 - 2.0 * f);
+    lerp_color(cols[i], cols[(i + 1) % n], f)
+}
+
+/// Value noise in [-1, 1]: hashed lattice points, smoothly interpolated. No
+/// tables and no allocation, so it is fine to call per vertex.
+fn value_noise(x: f32, y: f32, seed: u32) -> f32 {
+    let (xi, yi) = (x.floor(), y.floor());
+    let (xf, yf) = (x - xi, y - yi);
+    let h = |ix: f32, iy: f32| -> f32 {
+        let mut n = (ix as i32 as u32)
+            .wrapping_mul(0x27d4_eb2d)
+            ^ (iy as i32 as u32).wrapping_mul(0x1656_67b1)
+            ^ seed.wrapping_mul(0x85eb_ca6b);
+        n ^= n >> 15;
+        n = n.wrapping_mul(0x2c1b_3c6d);
+        n ^= n >> 12;
+        (n as f32 / u32::MAX as f32) * 2.0 - 1.0
+    };
+    let sx = xf * xf * (3.0 - 2.0 * xf);
+    let sy = yf * yf * (3.0 - 2.0 * yf);
+    let top = h(xi, yi) + sx * (h(xi + 1.0, yi) - h(xi, yi));
+    let bot = h(xi, yi + 1.0) + sx * (h(xi + 1.0, yi + 1.0) - h(xi, yi + 1.0));
+    top + sy * (bot - top)
+}
+
+/// Degrees clockwise from left-to-right, as a unit vector in screen space
+/// (y grows downward, which is why this is not the textbook formula).
+fn angle_unit(deg: f32) -> (f32, f32) {
+    let r = deg.to_radians();
+    (r.cos(), r.sin())
+}
+
+fn rect_corners(r: egui::Rect) -> [egui::Pos2; 4] {
+    [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()]
+}
+
+fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    egui::Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
 /// Render the shared accent palette: a hue per column, three shades per row,
 /// the two neutrals below, and a **Custom** picker for anything else.
 ///
@@ -3995,6 +4241,138 @@ fn snap_position(
 /// **The grid is laid out by hand, not wrapped.** A `horizontal_wrapped` run of
 /// 44 swatches reflows with the menu width and puts a hue's three shades in
 /// unrelated places; the whole value of shades is reading down a column.
+/// The pattern menu: pick a preset built from two colours, or clear back to flat.
+///
+/// `Some(None)` means "no pattern"; `Some(Some(f))` is a fill. Shared by the
+/// card, group and basket menus for the same reason `swatch_grid` is — one
+/// picker, so all three stay identical without anyone maintaining three.
+///
+/// **Presets, not a parameter editor.** A fill has an angle, a width and up to
+/// four colours; exposing all of that in a right-click menu would be a form. The
+/// menu offers the shapes people actually asked for, built from two swatches
+/// they choose here, and the full parameter space stays reachable over the API,
+/// which is where a caller that wants 37 degrees is already working.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fill_menu(
+    ui: &mut egui::Ui,
+    current: Option<&crate::model::Fill>,
+) -> Option<Option<crate::model::Fill>> {
+    use crate::model::Fill;
+    let mut out = None;
+    let id = ui.id().with("fill-pick");
+
+    // **The colours are a LIST you build, not two slots.** Tie-dye cycles
+    // through as many as you give it, and "pick the pattern, then pick your own
+    // colours" is the whole ask — hardcoding the third colour onwards would be
+    // choosing for you. The geometric patterns take the first two (corners the
+    // first four), so one list serves all of them and there is no mode to be in.
+    let mut cols: Vec<[u8; 3]> = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<Vec<[u8; 3]>>(id))
+        .unwrap_or_default();
+    // Seed from whatever the thing already has, so opening the menu on a
+    // patterned card starts from its colours rather than from nothing.
+    if cols.is_empty() {
+        cols = match current {
+            Some(Fill::Gradient { from, to, .. }) => vec![*from, *to],
+            Some(Fill::Stripes { a, b, .. }) => vec![*a, *b],
+            Some(Fill::Corners { tl, tr, br, bl }) => vec![*tl, *tr, *br, *bl],
+            Some(Fill::TieDye { colors, .. }) => colors.clone(),
+            None => vec![[0x3b, 0x82, 0xf6], [0x8b, 0x5c, 0xf6]],
+        };
+    }
+
+    ui.label(egui::RichText::new("Your colors — click one to remove").small().weak());
+    ui.horizontal_wrapped(|ui| {
+        let mut remove = None;
+        for (i, c) in cols.iter().enumerate() {
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+            ui.painter().rect_filled(rect, 3.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
+            ui.painter()
+                .rect_stroke(rect, 3.0, egui::Stroke::new(1.0, egui::Color32::from_gray(90)));
+            // Two is the fewest that can be a pattern, so the last two are not
+            // removable — a menu that lets you reach an invalid state and then
+            // refuses to act on it is worse than one that never offers it.
+            if cols.len() > 2 && resp.on_hover_text("Remove").clicked() {
+                remove = Some(i);
+            }
+        }
+        if let Some(i) = remove {
+            cols.remove(i);
+        }
+    });
+    if cols.len() < 6 {
+        ui.menu_button("Add a color…", |ui| {
+            if let Some(c) = swatch_grid(ui) {
+                cols.push(c);
+                ui.ctx().memory_mut(|m| m.data.insert_temp(id, cols.clone()));
+                ui.close_menu();
+            }
+        });
+    } else {
+        ui.add_enabled(false, egui::Button::new("Add a color…"))
+            .on_disabled_hover_text("Six is the most a pattern can cycle before the bands stop reading");
+    }
+    ui.ctx().memory_mut(|m| m.data.insert_temp(id, cols.clone()));
+    ui.separator();
+
+    // The first two drive the geometric patterns; `nth` wraps, so a list of two
+    // still fills four corners.
+    let n = cols.len().max(1);
+    let nth = |i: usize| cols[i % n];
+    let (a, b) = (nth(0), nth(1));
+
+    // A live sample beside each preset: the pattern IS the label.
+    let preset = |ui: &mut egui::Ui, name: &str, f: Fill, out: &mut Option<Option<Fill>>| {
+        ui.horizontal(|ui| {
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(52.0, 18.0), egui::Sense::click());
+            paint_fill(ui.painter(), rect, 3.0, &f, egui::Color32::from_rgb(a[0], a[1], a[2]), 1.0);
+            ui.painter()
+                .rect_stroke(rect, 3.0, egui::Stroke::new(1.0, egui::Color32::from_gray(90)));
+            if resp.clicked() || ui.button(name).clicked() {
+                *out = Some(Some(f));
+                ui.close_menu();
+            }
+        });
+    };
+    preset(ui, "Fade →", Fill::Gradient { from: a, to: b, angle: 0.0 }, &mut out);
+    preset(ui, "Fade ↓", Fill::Gradient { from: a, to: b, angle: 90.0 }, &mut out);
+    preset(ui, "Fade ↘", Fill::Gradient { from: a, to: b, angle: 45.0 }, &mut out);
+    preset(ui, "Stripes |", Fill::Stripes { a, b, angle: 0.0, width: 18.0 }, &mut out);
+    preset(ui, "Stripes /", Fill::Stripes { a, b, angle: 45.0, width: 18.0 }, &mut out);
+    preset(ui, "Stripes —", Fill::Stripes { a, b, angle: 90.0, width: 18.0 }, &mut out);
+    preset(
+        ui,
+        "Corners",
+        Fill::Corners { tl: nth(0), tr: nth(1), br: nth(2), bl: nth(3) },
+        &mut out,
+    );
+    // A fresh seed while the menu is open, so the sample keeps showing a
+    // *different* crinkle — the honest advertisement that two cards with these
+    // colours will not be the same picture.
+    let seed = (ui.input(|i| i.time) * 7.0) as u32;
+    preset(
+        ui,
+        &format!("Tie dye ({} colors)", cols.len()),
+        Fill::TieDye { colors: cols.clone(), seed, scale: 70.0 },
+        &mut out,
+    );
+    preset(
+        ui,
+        "Tie dye — tight",
+        Fill::TieDye { colors: cols.clone(), seed, scale: 32.0 },
+        &mut out,
+    );
+    ui.separator();
+    if ui.button("No pattern").clicked() {
+        out = Some(None);
+        ui.close_menu();
+    }
+    out
+}
+
 pub(crate) fn swatch_grid(ui: &mut egui::Ui) -> Option<[u8; 3]> {
     const CELL: f32 = 16.0;
     const GAP: f32 = 3.0;
@@ -4130,6 +4508,11 @@ fn card_menu(
         if let Some(col) = swatch_grid(ui) {
             actions.push(CanvasAction::SetColor(card.id, col));
             ui.close_menu();
+        }
+    });
+    ui.menu_button("Pattern", |ui| {
+        if let Some(f) = fill_menu(ui, card.fill.as_ref()) {
+            actions.push(CanvasAction::SetFill(card.id, f));
         }
     });
     ui.menu_button("Emphasis", |ui| {
@@ -4599,6 +4982,11 @@ fn group_menu(ui: &mut egui::Ui, group: &CardGroup, actions: &mut Vec<CanvasActi
         if let Some(col) = swatch_grid(ui) {
             actions.push(CanvasAction::SetGroupColor(group.id, col));
             ui.close_menu();
+        }
+    });
+    ui.menu_button("Pattern", |ui| {
+        if let Some(f) = fill_menu(ui, group.fill.as_ref()) {
+            actions.push(CanvasAction::SetGroupFill(group.id, f));
         }
     });
     // A group's id was previously visible nowhere, so the only way to point

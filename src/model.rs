@@ -100,6 +100,119 @@ pub fn color_from_swatch(s: &str) -> Option<[u8; 3]> {
     None
 }
 
+/// A pattern painted where a flat `color` used to be — two or more colours in
+/// one fill.
+///
+/// **A field, not a replacement for `color`.** Every card, group and basket
+/// keeps its `color`, which stays the single source for everything that is not
+/// an *area*: outline strokes, the tree's tag dot, minimap marks, the halo. A
+/// fill only ever upgrades a place that was already painting a solid rectangle,
+/// so nothing that reads `color` today had to learn anything, and a document
+/// opened in an older build simply shows the flat colour again.
+///
+/// `angle` is degrees clockwise from "left to right". `width` is in canvas
+/// units before zoom, so a stripe keeps its apparent size as you zoom.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "pattern", rename_all = "lowercase")]
+pub enum Fill {
+    /// Two colours fading into each other along `angle`.
+    Gradient {
+        from: [u8; 3],
+        to: [u8; 3],
+        #[serde(default)]
+        angle: f32,
+    },
+    /// Alternating bands of two colours, `width` units apart, along `angle`.
+    Stripes {
+        a: [u8; 3],
+        b: [u8; 3],
+        #[serde(default)]
+        angle: f32,
+        #[serde(default = "default_stripe_width")]
+        width: f32,
+    },
+    /// A colour per corner, blended across the middle — which is also how you
+    /// get "corners one colour, sides another": set all four corners the same
+    /// and it reads as a vignette against the card's own colour.
+    Corners {
+        tl: [u8; 3],
+        tr: [u8; 3],
+        br: [u8; 3],
+        bl: [u8; 3],
+    },
+    /// A spiral tie-dye: two to six colours cycling around a warped spiral.
+    ///
+    /// `seed` picks the crinkle, so two cards with the same colours are not the
+    /// same picture — which is the entire character of the real thing. `scale`
+    /// is how far apart the bands sit, in canvas units.
+    TieDye {
+        colors: Vec<[u8; 3]>,
+        #[serde(default)]
+        seed: u32,
+        #[serde(default = "default_tiedye_scale")]
+        scale: f32,
+    },
+}
+
+fn default_tiedye_scale() -> f32 {
+    70.0
+}
+
+fn default_stripe_width() -> f32 {
+    18.0
+}
+
+impl Fill {
+    /// The one colour to use where a pattern cannot go — a 1px stroke, the
+    /// tree's tag dot, a minimap mark. The average of what the fill paints, so
+    /// the outline of a red/blue striped card still reads as purple-ish rather
+    /// than as whichever colour happened to be listed first.
+    pub fn key_color(&self) -> [u8; 3] {
+        let cols: Vec<[u8; 3]> = match self {
+            Fill::Gradient { from, to, .. } => vec![*from, *to],
+            Fill::Stripes { a, b, .. } => vec![*a, *b],
+            Fill::Corners { tl, tr, br, bl } => vec![*tl, *tr, *br, *bl],
+            Fill::TieDye { colors, .. } => {
+                if colors.is_empty() {
+                    return [0x64, 0x74, 0x8b];
+                }
+                colors.clone()
+            }
+        };
+        let n = cols.len() as u32;
+        let mut out = [0u8; 3];
+        for i in 0..3 {
+            out[i] = (cols.iter().map(|c| c[i] as u32).sum::<u32>() / n) as u8;
+        }
+        out
+    }
+
+    /// Clamp anything a caller can get wrong. A zero or negative stripe width is
+    /// an infinite loop in the painter, and an angle is only meaningful mod 360.
+    pub fn sanitize(&mut self) {
+        match self {
+            Fill::Gradient { angle, .. } => *angle = angle.rem_euclid(360.0),
+            Fill::Stripes { angle, width, .. } => {
+                *angle = angle.rem_euclid(360.0);
+                *width = width.clamp(2.0, 400.0);
+            }
+            Fill::Corners { .. } => {}
+            Fill::TieDye { colors, scale, .. } => {
+                // Two is the fewest that can be a pattern at all; past six the
+                // bands are too thin to read as anything but noise. An empty
+                // list would divide by zero in the painter.
+                if colors.is_empty() {
+                    *colors = vec![[0x3b, 0x82, 0xf6], [0x8b, 0x5c, 0xf6]];
+                } else if colors.len() == 1 {
+                    colors.push(colors[0]);
+                }
+                colors.truncate(6);
+                *scale = scale.clamp(8.0, 600.0);
+            }
+        }
+    }
+}
+
 /// A named container that a set of cards belong to (via [`Card::group`]). Drawn
 /// as a box around its members; dragging its header moves the whole group.
 #[derive(Clone, Serialize, Deserialize)]
@@ -107,6 +220,9 @@ pub struct CardGroup {
     pub id: GroupId,
     pub title: String,
     pub color: [u8; 3],
+    /// A pattern for the group's header band, instead of the flat `color`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Fill>,
 }
 
 /// One line of a checklist card.
@@ -831,6 +947,10 @@ pub struct Card {
     pub body: String,
     /// RGB accent used for the card's title bar.
     pub color: [u8; 3],
+    /// An optional pattern painted over the title bar instead of the flat
+    /// `color`. See [`Fill`] — `color` is still what every stroke and dot uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Fill>,
     pub kind: CardKind,
     /// When this was last changed, in unix seconds — the only timestamp Trellis
     /// stores. Nothing in the document carried a "when" before, so sorting by
@@ -1487,6 +1607,7 @@ impl Card {
             touched: None,
             channel: None,
             html: None,
+            fill: None,
             source: None,
             source_mtime: None,
             source_tail: None,
@@ -1812,6 +1933,12 @@ pub struct Node {
     /// (the black grid canvas).
     #[serde(default)]
     pub bg: Option<[u8; 3]>,
+    /// A pattern for the basket canvas, instead of the flat `bg`. This is the
+    /// one that pays: a canvas is the largest area in the app, and a gradient
+    /// across it is the difference between two projects that look alike and two
+    /// that are obviously different rooms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bg_fill: Option<Fill>,
     /// When this was last changed, in unix seconds — the only timestamp Trellis
     /// stores. Nothing in the document carried a "when" before, so sorting by
     /// recent activity was impossible; the in-memory change log answers it within
@@ -3020,6 +3147,7 @@ impl Document {
                 expanded: true,
                 color: None,
                 bg: None,
+                bg_fill: None,
                 feed: false,
             },
         );
@@ -3052,6 +3180,7 @@ impl Document {
                 expanded: true,
                 color: None,
                 bg: None,
+                bg_fill: None,
                 feed: false,
             },
         );
@@ -3130,7 +3259,7 @@ impl Document {
                 c.group = Some(gid);
             }
         }
-        n.groups.push(CardGroup { id: gid, title, color: [0x64, 0x74, 0x8b] });
+        n.groups.push(CardGroup { id: gid, title, color: [0x64, 0x74, 0x8b], fill: None });
         self.next_group_id = gid + 1;
         Some(gid)
     }
@@ -7112,6 +7241,7 @@ impl Document {
             expanded: true,
             color: None,
             bg: None,
+            bg_fill: None,
             touched: None,
             feed: false,
         })
@@ -7879,6 +8009,65 @@ mod tests {
         assert_eq!(SWATCH_HUES.len(), 14);
         assert_eq!(SWATCH_NEUTRALS.len(), 2);
         assert_eq!(SWATCH_HUES.len() * 3 + SWATCH_NEUTRALS.len(), 44);
+    }
+
+    /// **A fill's key colour is the average of what it paints**, so the 1px
+    /// outline of a red/blue striped card reads as purple-ish rather than as
+    /// whichever colour happened to be listed first.
+    #[test]
+    fn a_fill_reduces_to_one_colour_for_strokes_and_dots() {
+        let f = Fill::Stripes { a: [255, 0, 0], b: [0, 0, 255], angle: 0.0, width: 10.0 };
+        assert_eq!(f.key_color(), [127, 0, 127]);
+        let f = Fill::Corners { tl: [40, 0, 0], tr: [40, 0, 0], br: [0, 0, 40], bl: [0, 0, 40] };
+        assert_eq!(f.key_color(), [20, 0, 20]);
+        // An empty tie-dye palette must not divide by zero on the way to a dot.
+        let f = Fill::TieDye { colors: vec![], seed: 1, scale: 70.0 };
+        assert_eq!(f.key_color(), [0x64, 0x74, 0x8b]);
+    }
+
+    /// **`sanitize` is the guard between a caller and the painter.** A zero
+    /// stripe width or an empty tie-dye palette is an infinite loop or a divide
+    /// by zero on every frame — caught once on the way in, not defended against
+    /// 60 times a second.
+    #[test]
+    fn a_fill_is_clamped_on_the_way_in() {
+        let mut f = Fill::Stripes { a: [1, 1, 1], b: [2, 2, 2], angle: -90.0, width: 0.0 };
+        f.sanitize();
+        match f {
+            Fill::Stripes { angle, width, .. } => {
+                assert_eq!(angle, 270.0, "an angle is only meaningful mod 360");
+                assert!(width >= 2.0, "a zero-width stripe never advances");
+            }
+            _ => panic!(),
+        }
+        // One colour cannot cycle; it is doubled rather than refused, because a
+        // one-colour tie-dye is a coherent thing to ask for by accident.
+        let mut f = Fill::TieDye { colors: vec![[9, 9, 9]], seed: 0, scale: 1.0 };
+        f.sanitize();
+        match &f {
+            Fill::TieDye { colors, scale, .. } => {
+                assert_eq!(colors.len(), 2);
+                assert!(*scale >= 8.0);
+            }
+            _ => panic!(),
+        }
+        // And an empty one gets a real default rather than painting nothing.
+        let mut f = Fill::TieDye { colors: vec![], seed: 0, scale: 1e9 };
+        f.sanitize();
+        match &f {
+            Fill::TieDye { colors, scale, .. } => {
+                assert_eq!(colors.len(), 2);
+                assert!(*scale <= 600.0);
+            }
+            _ => panic!(),
+        }
+        // Past six the bands are thinner than the smoothing between them.
+        let mut f = Fill::TieDye { colors: vec![[0, 0, 0]; 12], seed: 0, scale: 70.0 };
+        f.sanitize();
+        match &f {
+            Fill::TieDye { colors, .. } => assert_eq!(colors.len(), 6),
+            _ => panic!(),
+        }
     }
 
     /// A shade word reads either side, and means nothing on its own or on a

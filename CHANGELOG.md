@@ -6,6 +6,58 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.168.0]
+
+### Added
+- **Patterns, not just colours: cards, groups and basket backgrounds take a
+  `fill`.** Four of them — `gradient` (two colours fading into each other at any
+  angle), `stripes` (two colours, angle, width), `corners` (a colour per corner,
+  blended through the middle) and `tiedye` (two to six colours cycling around a
+  warped spiral, with a `seed` so two cards are never the same picture).
+  **A field beside `color`, not a replacement for it.** `color` stays the single
+  source for everything that is not an *area* — outline strokes, the tree's tag
+  dot, minimap marks, the halo — so nothing that reads `color` had to learn
+  anything, and a document opened in an older build simply shows the flat colour
+  again. A fill's `key_color()` is the average of what it paints, so the outline
+  of a red/blue striped card reads as purple rather than as whichever colour
+  happened to be listed first.
+  **Everything is one `Mesh`.** egui has no gradient primitive, but it does
+  interpolate vertex colours across a triangle — which *is* a gradient. A fade is
+  four vertices coloured by their own projection onto the fill's axis; stripes
+  are a quad per band; tie-dye is a vertex grid evaluated through a spiral ramp
+  with two octaves of value noise. No textures, no image cache, nothing to
+  regenerate when a card is resized, and it stays sharp at any zoom because it is
+  geometry rather than pixels.
+  In the app: right-click → **Pattern** on a card or group, **Basket pattern** on
+  a node. Pick two swatches, then a preset with a live sample beside it. Over the
+  API: `PATCH {"fill":{"pattern":"gradient","from":"blue","to":"dark blue"}}`, and
+  `{"bg_fill":…}` on a node. Colours inside a fill go through the **same** parser
+  as every other colour, so names and hex both work — a caller should not have to
+  learn a second syntax because the field is nested. `null` clears; an absent
+  field leaves it alone (the double-Option rule `view` established), so a patch
+  that only touches a title cannot silently wipe a pattern. A fill is
+  presentation, so the batch card route takes it.
+  Clamped on the way in rather than defended against every frame: a zero stripe
+  width would never advance the painter, an empty tie-dye palette would divide by
+  zero, and an angle is only meaningful mod 360.
+
+### Fixed
+- **A plugin's output could be silently truncated and still reported as a
+  success.** The stdout reader ended on a read error with a bare `break`: the
+  loop stopped, the partial output was kept, and the run was still judged by the
+  child's exit status — so a plugin whose stream was cut half way through
+  reported success, with half its output and whatever summary it had managed to
+  print. Nothing anywhere said the stream had been cut.
+  The error is now kept: the run is **not** ok, the summary says *"output was cut
+  short"*, and the captured output carries a truncation marker. An exit code
+  describes the child; this describes what we managed to read from it.
+  This is the strongest suspect for the plugin test that has failed twice in two
+  weeks under full-suite load and never reproduces on demand (recorded
+  2026-08-20, again 2026-09-02) — one progress callback arriving instead of two
+  is exactly what a mid-stream break looks like. Rather than guess a third time,
+  the next occurrence names itself, and the test now asserts the stream was not
+  cut *before* it asserts the count.
+
 ## [0.167.0]
 
 ### Fixed

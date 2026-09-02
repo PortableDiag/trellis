@@ -47,6 +47,8 @@ pub enum TreeAction {
     SetColor(NodeId, Option<[u8; 3]>),
     /// Set (or clear, with `None`) a node's basket background color.
     SetBg(NodeId, Option<[u8; 3]>),
+    /// A pattern for the basket canvas, or `None` for the flat color.
+    SetBgFill(NodeId, Option<crate::model::Fill>),
     /// Drag & drop: put `moved` before/after `target` (adopting its parent).
     Reorder { moved: NodeId, target: NodeId, before: bool },
     /// Toggle reorder mode (nodes draggable) on/off.
@@ -474,6 +476,11 @@ fn node_ui(
                     if let Some(col) = crate::canvas::swatch_grid(ui) {
                         actions.push(TreeAction::SetBg(id, Some(col)));
                         ui.close_menu();
+                    }
+                });
+                ui.menu_button("Basket pattern", |ui| {
+                    if let Some(f) = crate::canvas::fill_menu(ui, node.bg_fill.as_ref()) {
+                        actions.push(TreeAction::SetBgFill(id, f));
                     }
                 });
                 ui.separator();

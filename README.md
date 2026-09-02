@@ -32,6 +32,13 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   plus white and black and a **Custom…** picker for any color at all. The dark
   row is what a canvas background usually wants; the base row is the original
   sixteen swatches, unchanged, so nothing already colored moved.
+- **Patterns**, not just flat colors: right-click → **Pattern** on a card or
+  group, **Basket pattern** on a node. Two colors fading into each other at any
+  angle, stripes, a color per corner, or a **tie-dye** spiral that takes a seed
+  so no two cards come out the same. Painted as geometry rather than an image, so
+  it stays sharp at any zoom; the flat color is kept underneath and is still what
+  every outline and tree dot uses, so a document opened in an older build just
+  shows the plain color again.
 - Right-click → **Copy** a node's **id** (for the agent API, `/api/nodes/{id}`)
   or its **path** breadcrumb, so you can point an agent at the exact node
 - The basket's **id is the first line of that menu**, readable without copying

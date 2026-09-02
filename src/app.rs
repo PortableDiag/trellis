@@ -5244,6 +5244,9 @@ impl TrellisApp {
             TreeAction::SetAllExpanded(_) => ch(Op::Updated, 0).field("expanded.all"),
             TreeAction::SetColor(id, _) => ch(Op::Updated, *id).titled(title(id)).field("color"),
             TreeAction::SetBg(id, _) => ch(Op::Updated, *id).titled(title(id)).field("bg"),
+            TreeAction::SetBgFill(id, _) => {
+                ch(Op::Updated, *id).titled(title(id)).field("bg_fill")
+            }
             TreeAction::MoveUp(id)
             | TreeAction::MoveDown(id)
             | TreeAction::MoveToTop(id)
@@ -5353,6 +5356,7 @@ impl TrellisApp {
             CanvasAction::SetBody(c, _) => upd(c, "body"),
             CanvasAction::SetLang(c, _) => upd(c, "lang"),
             CanvasAction::SetColor(c, _) => upd(c, "color"),
+            CanvasAction::SetFill(c, _) => upd(c, "fill"),
             CanvasAction::SetFontScale(c, _) => upd(c, "font_scale"),
             CanvasAction::SetEditing(c, _) => upd(c, "editing"),
             CanvasAction::ChecklistToggle(c, _) => upd(c, "items.toggle"),
@@ -5409,6 +5413,7 @@ impl TrellisApp {
             CanvasAction::MoveGroup(g, _) => group(Op::Moved, *g).field("pos"),
             CanvasAction::SetGroupTitle(g, t) => group(Op::Updated, *g).titled(t.clone()).field("title"),
             CanvasAction::SetGroupColor(g, _) => group(Op::Updated, *g).field("color"),
+            CanvasAction::SetGroupFill(g, _) => group(Op::Updated, *g).field("fill"),
         })
     }
 
@@ -5517,6 +5522,11 @@ impl TrellisApp {
                 TreeAction::SetBg(id, bg) => {
                     if let Some(n) = self.doc.nodes.get_mut(&id) {
                         n.bg = bg;
+                    }
+                }
+                TreeAction::SetBgFill(id, f) => {
+                    if let Some(n) = self.doc.nodes.get_mut(&id) {
+                        n.bg_fill = f;
                     }
                 }
                 TreeAction::ExportBasket(id, fmt, subs) => self.export_basket(id, fmt, subs),
@@ -6098,6 +6108,11 @@ impl TrellisApp {
                         c.color = col;
                     }
                 }
+                CanvasAction::SetFill(cid, f) => {
+                    if let Some(c) = self.doc.card_mut(node, cid) {
+                        c.fill = f;
+                    }
+                }
                 CanvasAction::SetFontScale(cid, s) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {
                         c.font_scale = s;
@@ -6450,6 +6465,13 @@ impl TrellisApp {
                 CanvasAction::MoveGroup(g, delta) => self.doc.move_group(node, g, delta),
                 CanvasAction::SetGroupTitle(g, t) => self.doc.set_group_title(node, g, t),
                 CanvasAction::SetGroupColor(g, c) => self.doc.set_group_color(node, g, c),
+                CanvasAction::SetGroupFill(g, f) => {
+                    if let Some(n) = self.doc.nodes.get_mut(&node) {
+                        if let Some(gr) = n.groups.iter_mut().find(|x| x.id == g) {
+                            gr.fill = f;
+                        }
+                    }
+                }
                 CanvasAction::PickSource(cid) => {
                     if let Some(path) = rfd::FileDialog::new()
                         .set_title("Mirror a file in this card")

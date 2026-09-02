@@ -71,7 +71,16 @@ pub enum ApiRequest {
     /// a response could only be resolved by walking every basket.
     LocateCard(u64),
     CreateNode { parent: Option<NodeId>, title: String },
-    UpdateNode { id: NodeId, title: Option<String>, color: Option<Option<[u8; 3]>>, bg: Option<Option<[u8; 3]>>, feed: Option<bool> },
+    UpdateNode {
+        id: NodeId,
+        title: Option<String>,
+        color: Option<Option<[u8; 3]>>,
+        bg: Option<Option<[u8; 3]>>,
+        /// A pattern for the basket canvas. `Some(None)` clears it back to the
+        /// flat `bg`; absent leaves it alone.
+        bg_fill: Option<Option<crate::model::Fill>>,
+        feed: Option<bool>,
+    },
     DeleteNode(NodeId),
     // Reorder / reparent a node in the tree.
     MoveNode { id: NodeId, mv: MoveNodeInput },
@@ -891,7 +900,7 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
 
     Some(match req {
         ApiRequest::CreateNode { title, .. } => ch(E::Node, Op::Created, 0).titled(title.clone()),
-        ApiRequest::UpdateNode { id, title, color, bg, feed } => {
+        ApiRequest::UpdateNode { id, title, color, bg, bg_fill, feed } => {
             let mut c = ch(E::Node, Op::Updated, *id)
                 .titled(title.clone().unwrap_or_else(|| node_title(id)));
             if title.is_some() {
@@ -902,6 +911,9 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
             }
             if bg.is_some() {
                 c = c.field("bg");
+            }
+            if bg_fill.is_some() {
+                c = c.field("bg_fill");
             }
             if feed.is_some() {
                 c = c.field("feed");
@@ -933,6 +945,7 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
                 (patch.title.is_some(), "title"),
                 (patch.body.is_some(), "body"),
                 (patch.color.is_some(), "color"),
+                (patch.fill.is_some(), "fill"),
                 (patch.lang.is_some(), "lang"),
                 (patch.pos.is_some(), "pos"),
                 (patch.z.is_some(), "z"),
@@ -1380,6 +1393,11 @@ struct UpdateNodeInput {
     /// theme default, absent leaves it unchanged.
     #[serde(default, deserialize_with = "de_color_clear")]
     bg: Option<Option<[u8; 3]>>,
+    /// A **pattern** for the basket canvas instead of the flat `bg`. Same
+    /// null-vs-absent rule as `bg` and `view`: an object sets it, `null` clears
+    /// it back to the flat colour, absent leaves it alone.
+    #[serde(default, deserialize_with = "de_fill_clear")]
+    bg_fill: Option<Option<crate::model::Fill>>,
     /// Read this basket as a feed — newest card first in one computed column,
     /// the stored arrangement untouched. Absent leaves it unchanged.
     #[serde(default)]
@@ -1521,6 +1539,12 @@ pub struct UpdateCardInput {
     /// RGB title-bar accent (array, hex, or name — see `de_color_opt`).
     #[serde(default, deserialize_with = "de_color_opt")]
     color: Option<[u8; 3]>,
+    /// A **pattern** over the title bar instead of the flat `color`. An object
+    /// sets it, `null` clears it back to the flat colour, absent leaves it
+    /// alone — the double-Option rule `view` established, so a patch that only
+    /// touches a title cannot silently wipe a fill.
+    #[serde(default, deserialize_with = "de_fill_clear")]
+    fill: Option<Option<crate::model::Fill>>,
     /// Syntax-highlight language (code cards only).
     #[serde(default)]
     lang: Option<String>,
@@ -2293,7 +2317,14 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         (Method::Get, ["api", "nodes", id]) => Ok(ApiRequest::GetNode(pid(id)?)),
         (Method::Patch, ["api", "nodes", id]) => {
             let i: UpdateNodeInput = parse(body)?;
-            Ok(ApiRequest::UpdateNode { id: pid(id)?, title: i.title, color: i.color, bg: i.bg, feed: i.feed })
+            Ok(ApiRequest::UpdateNode {
+                id: pid(id)?,
+                title: i.title,
+                color: i.color,
+                bg: i.bg,
+                bg_fill: i.bg_fill,
+                feed: i.feed,
+            })
         }
         (Method::Delete, ["api", "nodes", id]) => Ok(ApiRequest::DeleteNode(pid(id)?)),
         (Method::Post, ["api", "nodes", id, "move"]) => {
@@ -3195,6 +3226,57 @@ where
     color_from_value(&v).map(Some).map_err(serde::de::Error::custom)
 }
 
+/// A fill, or `null` to clear it. Double-Option so "absent" and "clear" differ,
+/// exactly as `view` and `bg` do.
+///
+/// **The colours inside a fill go through the same parser as every other
+/// colour**, so `{"pattern":"gradient","from":"blue","to":"dark blue"}` works —
+/// a caller should never have to learn a second colour syntax because the field
+/// happens to be nested. The fill is `sanitize`d on the way in: a zero stripe
+/// width would be an infinite loop in the painter, and an angle is only
+/// meaningful mod 360.
+fn de_fill_clear<'de, D>(d: D) -> Result<Option<Option<crate::model::Fill>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Value::deserialize(d)?;
+    if v.is_null() {
+        return Ok(Some(None));
+    }
+    let mut v = v;
+    normalize_fill_colors(&mut v).map_err(serde::de::Error::custom)?;
+    let mut fill: crate::model::Fill =
+        serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+    fill.sanitize();
+    Ok(Some(Some(fill)))
+}
+
+/// Rewrite every colour-shaped member of a fill object through
+/// [`color_from_value`], so names and hex reach the strict `[u8;3]` fields.
+fn normalize_fill_colors(v: &mut Value) -> Result<(), String> {
+    const COLOR_KEYS: [&str; 8] = ["from", "to", "a", "b", "tl", "tr", "br", "bl"];
+    let Some(obj) = v.as_object_mut() else {
+        return Err("a fill must be an object with a \"pattern\"".to_string());
+    };
+    for k in COLOR_KEYS {
+        if let Some(slot) = obj.get_mut(k) {
+            let rgb = color_from_value(slot)?
+                .ok_or_else(|| format!("`{k}` in a fill cannot be null"))?;
+            *slot = json!([rgb[0], rgb[1], rgb[2]]);
+        }
+    }
+    // `colors` is a LIST of them (tie-dye), and each entry gets the same
+    // treatment — a name is a name wherever it appears.
+    if let Some(Value::Array(list)) = obj.get_mut("colors") {
+        for slot in list.iter_mut() {
+            let rgb = color_from_value(slot)?
+                .ok_or_else(|| "a color in `colors` cannot be null".to_string())?;
+            *slot = json!([rgb[0], rgb[1], rgb[2]]);
+        }
+    }
+    Ok(())
+}
+
 fn color_from_value(v: &Value) -> Result<Option<[u8; 3]>, String> {
     match v {
         Value::Null => Ok(None),
@@ -3471,7 +3553,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let id = doc.add_node(parent, title);
             (true, ApiResponse::created(json!({ "id": id })))
         }
-        ApiRequest::UpdateNode { id, title, color, bg, feed } => match doc.nodes.get_mut(&id) {
+        ApiRequest::UpdateNode { id, title, color, bg, bg_fill, feed } => match doc.nodes.get_mut(&id) {
             Some(n) => {
                 if let Some(t) = title {
                     n.title = t;
@@ -3481,6 +3563,9 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some(c) = bg {
                     n.bg = c;
+                }
+                if let Some(f) = bg_fill {
+                    n.bg_fill = f;
                 }
                 if let Some(f) = feed {
                     n.feed = f;
@@ -5569,6 +5654,10 @@ fn node_json(n: &crate::model::Node) -> Value {
         "expanded": n.expanded,
         "color": n.color,
         "bg": n.bg,
+        // Always present, unlike a card's `fill`: a node response is one object,
+        // not one per card, so it costs nothing and a caller can tell "no
+        // pattern" from "this build has no patterns" without a version check.
+        "bg_fill": n.bg_fill,
         "feed": n.feed,
         "touched": n.touched,
         "groups": groups_json(n),
@@ -5585,6 +5674,7 @@ fn groups_json(n: &crate::model::Node) -> Vec<Value> {
                 "id": g.id,
                 "title": g.title,
                 "color": g.color,
+                "fill": g.fill,
                 "cards": n.cards.iter().filter(|c| c.group == Some(g.id)).map(|c| c.id).collect::<Vec<_>>(),
             })
         })
@@ -5717,6 +5807,16 @@ pub(crate) fn card_json(c: &Card) -> Value {
     });
     // Only when it is set, so a document full of ordinary cards does not grow a
     // field per card in every response.
+    //
+    // **A caller must be able to read back what it wrote.** `fill` was applied
+    // and stored correctly and simply never appeared here, so a PATCH answered
+    // 200, the pattern painted on screen, and every read said `null` — which is
+    // indistinguishable from the write having been ignored. Caught by a live
+    // round-trip; no unit test on the model could have seen it, because the
+    // model was right.
+    if let Some(f) = &c.fill {
+        v["fill"] = serde_json::to_value(f).unwrap_or(Value::Null);
+    }
     if c.emphasis != crate::model::Emphasis::None {
         v["emphasis"] = json!(c.emphasis.key());
         v["emphasis_intensity"] = json!(c.emphasis_intensity);
@@ -5872,6 +5972,12 @@ pub(crate) fn card_json(c: &Card) -> Value {
 fn apply_presentation(c: &mut crate::model::Card, p: &UpdateCardInput) {
     if let Some(col) = p.color {
         c.color = col;
+    }
+    // A fill is presentation like a colour is, so it rides the batch route too —
+    // "make these six cards the same striped green" is exactly the sort of thing
+    // the batch exists for, and unlike `body` it says nothing about content.
+    if let Some(f) = &p.fill {
+        c.fill = f.clone();
     }
     if let Some(fs) = p.font_scale {
         c.font_scale = fs.clamp(0.25, 4.0);
@@ -6775,6 +6881,178 @@ mod tests {
         assert_eq!(resp.status, 500);
     }
 
+    /// **A fill is a field beside `color`, with the null-vs-absent rule `view`
+    /// established** — so a patch that only touches a title cannot silently wipe
+    /// a pattern, and `null` is how you actually clear one.
+    #[test]
+    fn a_fill_sets_clears_and_survives_an_unrelated_patch() {
+        use crate::model::Fill;
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        let patch = |doc: &mut Document, body: &str| {
+            let p: UpdateCardInput = serde_json::from_str(body).unwrap();
+            process(doc, ApiRequest::UpdateCard { node: n, card: c, patch: p })
+        };
+        // Colours inside a fill go through the SAME parser as every other
+        // colour — a caller must not have to learn a second syntax because the
+        // field is nested.
+        let (dirty, resp) = patch(
+            &mut doc,
+            r##"{"fill":{"pattern":"gradient","from":"blue","to":"#8b5cf6","angle":45}}"##,
+        );
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        match doc.nodes[&n].cards[0].fill.as_ref().expect("fill set") {
+            Fill::Gradient { from, to, angle } => {
+                assert_eq!(*from, [0x3b, 0x82, 0xf6], "the name resolved");
+                assert_eq!(*to, [0x8b, 0x5c, 0xf6], "the hex resolved");
+                assert_eq!(*angle, 45.0);
+            }
+            other => panic!("wrong pattern: {:?}", serde_json::to_string(other)),
+        }
+        // An unrelated patch leaves it alone — the whole point of the double Option.
+        patch(&mut doc, r#"{"title":"Renamed"}"#);
+        assert!(doc.nodes[&n].cards[0].fill.is_some(), "a title patch wiped the fill");
+        // An explicit null clears it.
+        patch(&mut doc, r#"{"fill":null}"#);
+        assert!(doc.nodes[&n].cards[0].fill.is_none());
+
+        // A stripe width of zero would spin the painter forever; it is clamped
+        // on the way in rather than defended against on every frame.
+        patch(&mut doc, r#"{"fill":{"pattern":"stripes","a":"red","b":"white","width":0,"angle":720}}"#);
+        match doc.nodes[&n].cards[0].fill.as_ref().unwrap() {
+            Fill::Stripes { width, angle, .. } => {
+                assert!(*width >= 2.0, "width clamped, got {width}");
+                assert_eq!(*angle, 0.0, "720 degrees is 0");
+            }
+            _ => panic!("wrong pattern"),
+        }
+        // Tie-dye takes a list of colours, each through the same colour parser.
+        patch(
+            &mut doc,
+            r##"{"fill":{"pattern":"tiedye","colors":["red","dark violet","#14b8a6"],"seed":7}}"##,
+        );
+        match doc.nodes[&n].cards[0].fill.as_ref().unwrap() {
+            Fill::TieDye { colors, seed, scale } => {
+                assert_eq!(colors.len(), 3);
+                assert_eq!(colors[0], [0xef, 0x44, 0x44], "a name inside the list resolved");
+                assert_eq!(colors[2], [0x14, 0xb8, 0xa6], "and a hex");
+                assert_eq!(*seed, 7);
+                assert!(*scale > 0.0, "an absent scale gets the default, not zero");
+            }
+            _ => panic!("wrong pattern"),
+        }
+        // An unknown pattern is a 400 naming it, like every other input.
+        let bad = serde_json::from_str::<UpdateCardInput>(r#"{"fill":{"pattern":"plaid"}}"#);
+        assert!(bad.is_err(), "an unknown pattern must be refused");
+        // And a fill is PRESENTATION, so it rides the batch route — "make these
+        // six cards the same striped green" is what the batch is for, and unlike
+        // `body` it says nothing about content.
+        assert!(
+            route(
+                &Method::Patch,
+                "/api/nodes/5/cards",
+                "",
+                r#"{"cards":[1,2],"fill":{"pattern":"corners","tl":"red","tr":"red","br":"blue","bl":"blue"}}"#,
+            )
+            .is_ok(),
+            "a fill is presentation and must be accepted for a list of cards"
+        );
+    }
+
+    /// **A caller must be able to READ BACK what it wrote.** `fill` was applied
+    /// and stored correctly and simply never appeared in `card_json`, so a PATCH
+    /// answered 200, the pattern painted on screen, and every read said `null` —
+    /// indistinguishable from the write being ignored. Found by a live
+    /// round-trip against a running instance; no test on the model could see it,
+    /// because the model was right. This is that round-trip, in a test.
+    #[test]
+    fn a_fill_comes_back_out_of_the_read_it_went_in_through() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let p: UpdateCardInput =
+            serde_json::from_str(r#"{"fill":{"pattern":"tiedye","colors":["red","blue"],"seed":3}}"#)
+                .unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch: p });
+
+        // The node-addressed read answers with the card object itself; only the
+        // bare-id route wraps it in `{"card": …}`.
+        let (_d, resp) = process(&mut doc, ApiRequest::GetCard { node: n, card: c });
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        let got = &v["fill"];
+        assert_eq!(got["pattern"], "tiedye", "the read has to carry it: {}", resp.body);
+        assert_eq!(got["colors"][0], json!([0xef, 0x44, 0x44]));
+        assert_eq!(got["seed"], 3);
+
+        // A card with no fill still carries no `fill` key, so an ordinary
+        // document does not grow a null per card in every response.
+        let plain = doc.add_card(n, egui::pos2(1.0, 1.0), CardKind::Text).unwrap();
+        let (_d, resp) = process(&mut doc, ApiRequest::GetCard { node: n, card: plain });
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert!(v.get("fill").is_none(), "no fill, no key: {}", resp.body);
+
+        // A basket's pattern comes back on the node read, always present.
+        let i: UpdateNodeInput =
+            serde_json::from_str(r#"{"bg_fill":{"pattern":"stripes","a":"red","b":"blue"}}"#)
+                .unwrap();
+        process(
+            &mut doc,
+            ApiRequest::UpdateNode {
+                id: n,
+                title: None,
+                color: None,
+                bg: None,
+                bg_fill: i.bg_fill,
+                feed: None,
+            },
+        );
+        let (_d, resp) = process(&mut doc, ApiRequest::GetNode(n));
+        let v: Value = serde_json::from_str(&resp.body).unwrap();
+        assert_eq!(v["bg_fill"]["pattern"], "stripes", "{}", resp.body);
+    }
+
+    /// A basket's pattern rides on the node patch with the same rules, and lands
+    /// in the change log under its own field name.
+    #[test]
+    fn a_basket_takes_a_pattern_too() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let i: UpdateNodeInput =
+            serde_json::from_str(r#"{"bg_fill":{"pattern":"gradient","from":"dark blue","to":"black"}}"#)
+                .unwrap();
+        let (dirty, resp) = process(
+            &mut doc,
+            ApiRequest::UpdateNode {
+                id: n,
+                title: None,
+                color: None,
+                bg: None,
+                bg_fill: i.bg_fill,
+                feed: None,
+            },
+        );
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        assert!(doc.nodes[&n].bg_fill.is_some());
+
+        let i: UpdateNodeInput = serde_json::from_str(r#"{"bg_fill":null}"#).unwrap();
+        process(
+            &mut doc,
+            ApiRequest::UpdateNode {
+                id: n,
+                title: None,
+                color: None,
+                bg: None,
+                bg_fill: i.bg_fill,
+                feed: None,
+            },
+        );
+        assert!(doc.nodes[&n].bg_fill.is_none(), "null clears it");
+    }
+
     /// `/api/app-errors` parses like `/api/errors` — same `since`/`limit`, same
     /// clamp — and, naming no basket, is refused for a subtree-scoped token by
     /// the default `target_node` rule rather than by a special case.
@@ -6811,7 +7089,7 @@ mod tests {
         // Flip it to a feed and read it back — the flag is a document edit.
         let (dirty, up) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: None, color: None, bg: None, feed: Some(true) },
+            ApiRequest::UpdateNode { id, title: None, color: None, bg: None, bg_fill: None, feed: Some(true) },
         );
         assert!(dirty);
         assert_eq!(up.status, 200);
@@ -6820,7 +7098,7 @@ mod tests {
 
         let (_, up) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: Some("Renamed".into()), color: None, bg: None, feed: None },
+            ApiRequest::UpdateNode { id, title: Some("Renamed".into()), color: None, bg: None, bg_fill: None, feed: None },
         );
         assert_eq!(up.status, 200);
         assert_eq!(doc.nodes[&id].title, "Renamed");
@@ -6838,7 +7116,7 @@ mod tests {
         let i: UpdateNodeInput = serde_json::from_str(r#"{"bg":"red"}"#).unwrap();
         let (dirty, resp) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: None, color: None, bg: i.bg, feed: None },
+            ApiRequest::UpdateNode { id, title: None, color: None, bg: i.bg, bg_fill: None, feed: None },
         );
         assert!(dirty);
         assert_eq!(resp.status, 200);
@@ -6865,7 +7143,7 @@ mod tests {
         assert!(i.color.is_none() && i.bg.is_none());
         let (_, resp) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: i.title, color: i.color, bg: i.bg, feed: None },
+            ApiRequest::UpdateNode { id, title: i.title, color: i.color, bg: i.bg, bg_fill: None, feed: None },
         );
         assert_eq!(resp.status, 200);
         assert_eq!(doc.nodes[&id].color, Some([1, 2, 3]));
@@ -6877,7 +7155,7 @@ mod tests {
         assert_eq!(i.bg, Some(None));
         let (dirty, resp) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: None, color: i.color, bg: i.bg, feed: None },
+            ApiRequest::UpdateNode { id, title: None, color: i.color, bg: i.bg, bg_fill: None, feed: None },
         );
         assert!(dirty);
         assert_eq!(resp.status, 200);

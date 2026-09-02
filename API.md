@@ -698,6 +698,41 @@ Card/group colors are a **title-bar / container accent**, not a full fill. An
 unrecognized color is a `400`, so a successful response means the color was
 applied.
 
+**Patterns** (v0.168.0) — a card or group takes a `fill`, and a node takes a
+`bg_fill`, painted where the flat color used to be:
+
+```jsonc
+PATCH /api/cards/{cid}   {"fill": {"pattern":"gradient","from":"blue","to":"dark blue","angle":45}}
+PATCH /api/cards/{cid}   {"fill": {"pattern":"stripes","a":"green","b":"dark green","angle":45,"width":14}}
+PATCH /api/cards/{cid}   {"fill": {"pattern":"corners","tl":"cyan","tr":"pink","br":"cyan","bl":"pink"}}
+PATCH /api/cards/{cid}   {"fill": {"pattern":"tiedye","colors":["red","amber","teal"],"seed":7,"scale":60}}
+PATCH /api/nodes/{id}    {"bg_fill": {"pattern":"gradient","from":"#101828","to":"#2a1b3d","angle":60}}
+```
+
+| pattern | fields | |
+|---|---|---|
+| `gradient` | `from`, `to`, `angle?` | two colors fading into each other |
+| `stripes` | `a`, `b`, `angle?`, `width?` | alternating bands, `width` in canvas units |
+| `corners` | `tl`, `tr`, `br`, `bl` | a color per corner, blended through the middle |
+| `tiedye` | `colors` (2–6), `seed?`, `scale?` | a warped spiral cycling the palette |
+
+`angle` is degrees clockwise from left-to-right. **Colors inside a fill go
+through the same parser as every other color**, so names, hex and `[r,g,b]` all
+work — you should never have to learn a second color syntax because the field is
+nested. `seed` picks tie-dye's crinkle, so two cards with the same colors are not
+the same picture.
+
+**A fill is a field beside `color`, not a replacement.** `color` is still what
+every *stroke* uses — the card outline, the tree's tag dot, minimap marks — and a
+fill only replaces the flat area. A document opened in a build older than
+v0.168.0 simply shows the flat color again.
+
+`null` clears a fill, an **absent** field leaves it alone (the same rule `view`
+and `bg` follow), so a patch that only touches a title cannot silently wipe a
+pattern. A fill is presentation, so the batch route `PATCH /api/nodes/{id}/cards`
+takes it for a whole list. Values are clamped on the way in: a zero stripe width
+and an empty `colors` list are corrected rather than accepted.
+
 ### Delete
 ```
 DELETE /api/nodes/{id}             → 200 {"deleted":<id>}    | 404   (removes the whole subtree)

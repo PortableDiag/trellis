@@ -620,9 +620,28 @@ pub fn run(
 
     let mut stdout = String::new();
     let mut summary: Option<String> = None;
+    // A read error used to `break` in silence: the loop ended, the partial
+    // output was kept, and the run was still judged by the child's exit status —
+    // so a plugin whose stdout failed half way through reported SUCCESS with
+    // half its output and whatever summary it had managed to print. Nothing
+    // anywhere said the stream had been cut.
+    //
+    // This is very likely what has been failing
+    // `progress_arrives_line_by_line_and_the_last_message_is_the_summary` once
+    // every couple of weeks under full-suite load — one callback instead of two.
+    // It is not reproducible on demand and was recorded as a known flake on
+    // 2026-08-20; rather than guess again, the error is now *kept*, so the next
+    // occurrence names itself instead of looking like a miscount.
+    let mut read_error: Option<String> = None;
     if let Some(p) = out_pipe {
         for line in std::io::BufReader::new(p).lines() {
-            let Ok(line) = line else { break };
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => {
+                    read_error = Some(e.to_string());
+                    break;
+                }
+            };
             stdout.push_str(&line);
             stdout.push('\n');
             let (percent, message) = parse_progress(&line);
@@ -643,9 +662,14 @@ pub fn run(
     let stderr = err_thread.join().unwrap_or_default();
 
     let was_cancelled = cancel.load(Ordering::Relaxed);
-    let ok = !was_cancelled && status.map(|s| s.success()).unwrap_or(false);
+    // A truncated stream is not a success, whatever the child's exit code says:
+    // the exit code describes the child, and this describes what we managed to
+    // read from it.
+    let ok = !was_cancelled && read_error.is_none() && status.map(|s| s.success()).unwrap_or(false);
     let summary = if was_cancelled {
         format!("{} cancelled", plugin.manifest.title)
+    } else if let Some(e) = &read_error {
+        format!("{} — output was cut short: {e}", plugin.manifest.title)
     } else {
         summary.unwrap_or_else(|| match status {
             Some(s) if s.success() => format!("{} finished", plugin.manifest.title),
@@ -654,6 +678,9 @@ pub fn run(
         })
     };
     let mut output = stdout;
+    if let Some(e) = &read_error {
+        output.push_str(&format!("\n--- output truncated: {e} ---\n"));
+    }
     if !stderr.trim().is_empty() {
         output.push_str("\n--- stderr ---\n");
         output.push_str(&stderr);
@@ -801,6 +828,16 @@ mod tests {
             seen.lock().unwrap().push(pr);
         });
         let seen = seen.into_inner().unwrap();
+        // If this ever fails on the count again, the run itself now says why:
+        // a cut-short stream is reported rather than silently yielding one
+        // callback instead of two. Assert that first, so the next failure names
+        // the cause instead of only the symptom.
+        assert!(
+            !r.summary.contains("cut short"),
+            "stdout was truncated, which is the suspected cause of this test's \
+             historic flakiness: {}",
+            r.summary
+        );
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].percent, Some(50.0));
         assert_eq!(seen[0].message, "halfway");
