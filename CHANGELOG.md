@@ -6,6 +6,13 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.165.1]
+
+### Fixed
+- **The table-op refusal said "nothing was applied" twice.** The new
+  `at`-not-`row` message appended it, and the batch wrapper appends it too —
+  proven live on a scratch instance, which is the only place the two halves meet.
+
 ## [0.165.0]
 
 ### Added

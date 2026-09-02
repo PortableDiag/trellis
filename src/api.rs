@@ -1796,9 +1796,11 @@ impl TableOpInput {
                 let sent = if self.op.ends_with("_row") { self.row } else { self.col };
                 let axis = if self.op.ends_with("_row") { "row" } else { "col" };
                 if self.at.is_none() && sent.is_some() {
+                    // No "nothing was applied" here: the batch wrapper appends
+                    // that itself, and saying it twice reads like a stutter.
                     return Err(format!(
                         "table op `{}` needs `at`, not `{axis}` — `{axis}` is read \
-                         only by the cell ops; `at` is the index to {} (nothing was applied)",
+                         only by the cell ops; `at` is the index to {}",
                         self.op,
                         if self.op.starts_with("insert") { "insert at" } else { "remove" },
                     ));
