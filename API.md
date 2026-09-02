@@ -680,6 +680,20 @@ create or update) you may send an `[r,g,b]` array (0–255 each), a hex string
 swatch palette: `"red"`, `"orange"`, `"amber"`, `"yellow"`, `"lime"`, `"green"`,
 `"teal"`, `"cyan"`, `"blue"`, `"indigo"`, `"purple"`/`"violet"`,
 `"pink"`/`"magenta"`, `"slate"`/`"gray"`, `"stone"`, `"white"`, `"black"`.
+
+**Each of those fourteen hues also takes a shade word** (v0.166.0):
+`"light blue"` and `"dark blue"` — or `"blue light"` / `"blue dark"`, since both
+readings are natural and neither is wrong. That is the same palette the app's
+color menus now show: a hue per column, three shades per row. The **unqualified
+name is unchanged**, byte for byte, so every color already written into a
+document or a prompt still resolves to exactly what it did before. `"white"` and
+`"black"` are not hues and take no shade word — `"light white"` is a `400`, not a
+guess.
+
+Names are a convenience, not a limit: the document has always stored a plain RGB
+triple, so **any** of the 16.7M colors is reachable by hex or `[r,g,b]`, and the
+app's **Custom…** picker reaches the same range from the UI.
+
 Card/group colors are a **title-bar / container accent**, not a full fill. An
 unrecognized color is a `400`, so a successful response means the color was
 applied.

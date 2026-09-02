@@ -3985,26 +3985,82 @@ fn snap_position(
     (egui::pos2(pos.x + dx, pos.y + dy), best_x.map(|(_, _, g)| g), best_y.map(|(_, _, g)| g))
 }
 
-/// Render the shared accent palette as a wrapped grid of swatch buttons.
-/// Returns the picked color, or `None` if nothing was clicked this frame.
-/// Shared by the card, group and (via `pub(crate)`) tree-node color menus.
+/// Render the shared accent palette: a hue per column, three shades per row,
+/// the two neutrals below, and a **Custom** picker for anything else.
+///
+/// Returns the picked color, or `None` if nothing was chosen this frame. Shared
+/// by the card, group and (via `pub(crate)`) tree node-color and basket-color
+/// menus, so every one of them gains the same range at once.
+///
+/// **The grid is laid out by hand, not wrapped.** A `horizontal_wrapped` run of
+/// 44 swatches reflows with the menu width and puts a hue's three shades in
+/// unrelated places; the whole value of shades is reading down a column.
 pub(crate) fn swatch_grid(ui: &mut egui::Ui) -> Option<[u8; 3]> {
+    const CELL: f32 = 16.0;
+    const GAP: f32 = 3.0;
     let mut picked = None;
-    ui.set_max_width(8.0 * 22.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-        for (name, col) in crate::model::SWATCHES {
-            let color = egui::Color32::from_rgb(col[0], col[1], col[2]);
-            let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-            ui.painter().rect_filled(rect, 3.0, color);
-            ui.painter()
-                .rect_stroke(rect, 3.0, egui::Stroke::new(1.0, egui::Color32::from_gray(90)));
-            if resp.on_hover_text(*name).clicked() {
-                picked = Some(*col);
+
+    let swatch = |ui: &mut egui::Ui, col: [u8; 3], tip: &str, picked: &mut Option<[u8; 3]>| {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(CELL, CELL), egui::Sense::click());
+        ui.painter().rect_filled(rect, 3.0, egui::Color32::from_rgb(col[0], col[1], col[2]));
+        ui.painter()
+            .rect_stroke(rect, 3.0, egui::Stroke::new(1.0, egui::Color32::from_gray(90)));
+        if resp.on_hover_text(tip).clicked() {
+            *picked = Some(col);
+        }
+    };
+
+    ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+    // One row per shade, one column per hue — so a column is a hue and a row is
+    // a brightness, which is how you actually hunt for a colour.
+    for (shade, label) in
+        [(crate::model::SHADE_LIGHT, "light"), (crate::model::SHADE_BASE, ""), (crate::model::SHADE_DARK, "dark")]
+    {
+        ui.horizontal(|ui| {
+            for (name, shades) in crate::model::SWATCH_HUES {
+                let tip = if label.is_empty() {
+                    (*name).to_string()
+                } else {
+                    format!("{label} {}", name.to_ascii_lowercase())
+                };
+                swatch(ui, shades[shade], &tip, &mut picked);
             }
+        });
+    }
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        for (name, rgb) in crate::model::SWATCH_NEUTRALS {
+            swatch(ui, *rgb, name, &mut picked);
         }
     });
+
+    ui.separator();
+    // Anything at all. The document has always stored a plain RGB triple and the
+    // API has always accepted `#rrggbb`, so this adds no format — it only lets
+    // the app reach what the file could already hold.
+    ui.menu_button("Custom…", |ui| {
+        let id = ui.id().with("custom-swatch");
+        let mut c = ui
+            .ctx()
+            .memory(|m| m.data.get_temp::<egui::Color32>(id))
+            .unwrap_or(egui::Color32::from_rgb(0x3b, 0x82, 0xf6));
+        egui::widgets::color_picker::color_picker_color32(
+            ui,
+            &mut c,
+            egui::widgets::color_picker::Alpha::Opaque,
+        );
+        ui.ctx().memory_mut(|m| m.data.insert_temp(id, c));
+        let rgb = [c.r(), c.g(), c.b()];
+        ui.horizontal(|ui| {
+            ui.label("Hex:");
+            ui.monospace(format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]));
+        });
+        if ui.button("Use this color").clicked() {
+            picked = Some(rgb);
+            ui.close_menu();
+        }
+    });
+
     picked
 }
 

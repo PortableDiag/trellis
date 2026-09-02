@@ -6,6 +6,37 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.166.0]
+
+### Added
+- **The color palette grew from 16 to 44, and then to all of them.** Every color
+  menu in the app — card, group, node tag and basket background — shares one
+  picker, so all four gained the same range at once.
+  **Three shades per hue.** The old palette was the sixteen Tailwind 500s, which
+  is enough to tag a dozen things and not enough to run a document: two projects
+  both wanting "a blue" had to share one, and a basket *background* had to be
+  picked from the same saturated accents a card frame uses, when what a canvas
+  wants is the dark end. The light and dark columns are the same fourteen hues at
+  Tailwind 300 and 700 — **the base row is byte-for-byte the old palette**, so
+  every color already stored keeps its name and nothing already colored moved.
+  The grid is laid out by hand rather than wrapped, because the value of shades
+  is reading *down a column* and a reflowing wrap scatters a hue's three shades.
+  **And a `Custom…` picker for anything else.** The document has always stored a
+  plain RGB triple and the API has always accepted `#rrggbb`, so this adds no
+  format — it only lets the app reach what the file could already hold.
+- **The API takes a shade word**: `"light blue"`, `"dark blue"`, or `"blue light"`
+  / `"blue dark"`, since both readings are natural and neither is wrong. White and
+  black are not hues and take no shade word — `"light white"` is a 400, not a
+  guess.
+
+### Fixed
+- **Named colors had two definitions.** `api::color_from_str` carried its own
+  copy of all sixteen RGB triples under a comment saying they matched the shared
+  swatch palette — two literals for one fact, and nothing would have failed if
+  they had drifted. Names now resolve through `model::color_from_swatch`, the
+  single reader of the single table. Adding shades made the duplicate
+  unmaintainable, which is the useful kind of pressure.
+
 ## [0.165.2]
 
 ### Fixed

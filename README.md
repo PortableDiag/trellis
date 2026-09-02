@@ -26,7 +26,12 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   until nothing is hidden, keeping the arrangement (every card's left edge stays
   put) — unlike Autosort, which replaces a layout with a grid
 - Per-node color tags and a per-node **basket background color** (right-click →
-  **Basket color**; the black grid stays the default)
+  **Basket color**; the black grid stays the default). Every color menu in the
+  app — card, group, node tag and basket background — shows the same palette:
+  **fourteen hues in three shades**, a hue per column and a brightness per row,
+  plus white and black and a **Custom…** picker for any color at all. The dark
+  row is what a canvas background usually wants; the base row is the original
+  sixteen swatches, unchanged, so nothing already colored moved.
 - Right-click → **Copy** a node's **id** (for the agent API, `/api/nodes/{id}`)
   or its **path** breadcrumb, so you can point an agent at the exact node
 - The basket's **id is the first line of that menu**, readable without copying

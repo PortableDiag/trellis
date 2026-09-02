@@ -3220,29 +3220,15 @@ fn color_from_value(v: &Value) -> Result<Option<[u8; 3]>, String> {
 }
 
 /// Parse a hex (`#rgb` / `#rrggbb`, `#` optional) or named color into RGB.
+///
+/// **Names come from [`crate::model::color_from_swatch`], not from a list here.**
+/// Until v0.166.0 this function carried its own copy of all sixteen RGB triples
+/// under a comment saying they matched the shared palette — two literals for one
+/// fact, and nothing would have failed if they had drifted. Adding shades made
+/// that unmaintainable, which is the useful kind of pressure.
 fn color_from_str(s: &str) -> Option<[u8; 3]> {
-    // Named colors match the shared swatch palette (crate::model::SWATCHES).
-    let named: Option<[u8; 3]> = match s.trim().to_ascii_lowercase().as_str() {
-        "red" => Some([0xef, 0x44, 0x44]),
-        "orange" => Some([0xf9, 0x73, 0x16]),
-        "amber" => Some([0xf5, 0x9e, 0x0b]),
-        "yellow" => Some([0xea, 0xb3, 0x08]),
-        "lime" => Some([0x84, 0xcc, 0x16]),
-        "green" => Some([0x22, 0xc5, 0x5e]),
-        "teal" => Some([0x14, 0xb8, 0xa6]),
-        "cyan" => Some([0x06, 0xb6, 0xd4]),
-        "blue" => Some([0x3b, 0x82, 0xf6]),
-        "indigo" => Some([0x63, 0x66, 0xf1]),
-        "purple" | "violet" => Some([0x8b, 0x5c, 0xf6]),
-        "pink" | "magenta" => Some([0xec, 0x48, 0x99]),
-        "slate" | "gray" | "grey" => Some([0x64, 0x74, 0x8b]),
-        "stone" => Some([0x78, 0x71, 0x6c]),
-        "white" => Some([0xff, 0xff, 0xff]),
-        "black" => Some([0x1e, 0x1e, 0x1e]),
-        _ => None,
-    };
-    if named.is_some() {
-        return named;
+    if let Some(rgb) = crate::model::color_from_swatch(s) {
+        return Some(rgb);
     }
     let h = s.trim().strip_prefix('#').unwrap_or_else(|| s.trim());
     match h.len() {
@@ -7026,9 +7012,38 @@ mod tests {
         // now applies color + size (previously silently dropped).
         assert_eq!(color_from_str("red"), Some([0xef, 0x44, 0x44]));
         // Every named swatch in the shared palette resolves via the API too.
-        for (name, rgb) in crate::model::SWATCHES {
+        // Every swatch the picker offers resolves by name over the API too —
+        // the base name, and both readings of each shade word.
+        for (name, shades) in crate::model::SWATCH_HUES {
+            let lower = name.to_ascii_lowercase();
+            assert_eq!(color_from_str(name), Some(shades[crate::model::SHADE_BASE]), "{name}");
+            for (prefix, suffix, want) in [
+                ("light ", " light", shades[crate::model::SHADE_LIGHT]),
+                ("dark ", " dark", shades[crate::model::SHADE_DARK]),
+            ] {
+                assert_eq!(color_from_str(&format!("{prefix}{lower}")), Some(want), "{prefix}{lower}");
+                assert_eq!(color_from_str(&format!("{lower}{suffix}")), Some(want), "{lower}{suffix}");
+            }
+        }
+        for (name, rgb) in crate::model::SWATCH_NEUTRALS {
             assert_eq!(color_from_str(name), Some(*rgb), "swatch {name}");
         }
+        // The base row is byte-for-byte what the sixteen-swatch palette was, so
+        // every colour already written into a document keeps its name.
+        assert_eq!(color_from_str("blue"), Some([0x3b, 0x82, 0xf6]));
+        assert_eq!(color_from_str("slate"), Some([0x64, 0x74, 0x8b]));
+        assert_eq!(color_from_str("white"), Some([0xff, 0xff, 0xff]));
+        assert_eq!(color_from_str("black"), Some([0x1e, 0x1e, 0x1e]));
+        // Aliases still resolve, and take a shade like any other hue.
+        assert_eq!(color_from_str("purple"), color_from_str("violet"));
+        assert_eq!(color_from_str("grey"), color_from_str("slate"));
+        assert_eq!(color_from_str("dark magenta"), color_from_str("dark pink"));
+        // A neutral has no shades, so a shade word on one is not a colour.
+        assert_eq!(color_from_str("light white"), None);
+        assert_eq!(color_from_str("dark black"), None);
+        // Neither is a shade word on nothing.
+        assert_eq!(color_from_str("light"), None);
+        assert_eq!(color_from_str("dark "), None);
         assert_eq!(color_from_str("#22c55e"), Some([0x22, 0xc5, 0x5e]));
         assert_eq!(color_from_str("#e44"), Some([0xee, 0x44, 0x44]));
         assert_eq!(color_from_str("nonsense"), None);

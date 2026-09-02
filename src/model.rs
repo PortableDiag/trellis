@@ -17,25 +17,88 @@ pub type ItemId = u64;
 pub type GroupId = u64;
 
 /// Shared accent-color palette used by the card, group and node color menus.
-/// Names mirror the flexible color names the agent API accepts.
-pub const SWATCHES: &[(&str, [u8; 3])] = &[
-    ("Red", [0xef, 0x44, 0x44]),
-    ("Orange", [0xf9, 0x73, 0x16]),
-    ("Amber", [0xf5, 0x9e, 0x0b]),
-    ("Yellow", [0xea, 0xb3, 0x08]),
-    ("Lime", [0x84, 0xcc, 0x16]),
-    ("Green", [0x22, 0xc5, 0x5e]),
-    ("Teal", [0x14, 0xb8, 0xa6]),
-    ("Cyan", [0x06, 0xb6, 0xd4]),
-    ("Blue", [0x3b, 0x82, 0xf6]),
-    ("Indigo", [0x63, 0x66, 0xf1]),
-    ("Violet", [0x8b, 0x5c, 0xf6]),
-    ("Pink", [0xec, 0x48, 0x99]),
-    ("Slate", [0x64, 0x74, 0x8b]),
-    ("Stone", [0x78, 0x71, 0x6c]),
-    ("White", [0xff, 0xff, 0xff]),
-    ("Black", [0x1e, 0x1e, 0x1e]),
+///
+/// **Three shades per hue, not one.** The original palette was the sixteen
+/// Tailwind 500s, which is enough to tag a dozen things and not enough to run a
+/// document: two projects both wanting "a blue" had to share one, and a basket
+/// *background* had to be picked from the same saturated accents a card frame
+/// uses, where what a canvas wants is the dark end. The light and dark columns
+/// are the same hues at Tailwind 300 and 700, so the base row is exactly what it
+/// always was and every colour already stored keeps its name.
+///
+/// Names are what the agent API accepts, and [`color_from_swatch`] is the ONLY
+/// reader — `api::color_from_str` used to carry a hand-copied duplicate of these
+/// values under a comment claiming they matched.
+pub const SWATCH_HUES: &[(&str, [[u8; 3]; 3])] = &[
+    ("Red",    [[0xfc, 0xa5, 0xa5], [0xef, 0x44, 0x44], [0xb9, 0x1c, 0x1c]]),
+    ("Orange", [[0xfd, 0xba, 0x74], [0xf9, 0x73, 0x16], [0xc2, 0x41, 0x0c]]),
+    ("Amber",  [[0xfc, 0xd3, 0x4d], [0xf5, 0x9e, 0x0b], [0xb4, 0x53, 0x09]]),
+    ("Yellow", [[0xfd, 0xe0, 0x47], [0xea, 0xb3, 0x08], [0xa1, 0x62, 0x07]]),
+    ("Lime",   [[0xbe, 0xf2, 0x64], [0x84, 0xcc, 0x16], [0x4d, 0x7c, 0x0f]]),
+    ("Green",  [[0x86, 0xef, 0xac], [0x22, 0xc5, 0x5e], [0x15, 0x80, 0x3d]]),
+    ("Teal",   [[0x5e, 0xea, 0xd4], [0x14, 0xb8, 0xa6], [0x0f, 0x76, 0x6e]]),
+    ("Cyan",   [[0x67, 0xe8, 0xf9], [0x06, 0xb6, 0xd4], [0x0e, 0x74, 0x90]]),
+    ("Blue",   [[0x93, 0xc5, 0xfd], [0x3b, 0x82, 0xf6], [0x1d, 0x4e, 0xd8]]),
+    ("Indigo", [[0xa5, 0xb4, 0xfc], [0x63, 0x66, 0xf1], [0x43, 0x38, 0xca]]),
+    ("Violet", [[0xc4, 0xb5, 0xfd], [0x8b, 0x5c, 0xf6], [0x6d, 0x28, 0xd9]]),
+    ("Pink",   [[0xf9, 0xa8, 0xd4], [0xec, 0x48, 0x99], [0xbe, 0x18, 0x5d]]),
+    ("Slate",  [[0xcb, 0xd5, 0xe1], [0x64, 0x74, 0x8b], [0x33, 0x41, 0x55]]),
+    ("Stone",  [[0xd6, 0xd3, 0xd1], [0x78, 0x71, 0x6c], [0x44, 0x40, 0x3c]]),
 ];
+
+/// Index into a hue's shades. The middle one is the historic single value.
+pub const SHADE_LIGHT: usize = 0;
+pub const SHADE_BASE: usize = 1;
+pub const SHADE_DARK: usize = 2;
+
+/// The two colours that are not hues, so they get no light/dark column.
+pub const SWATCH_NEUTRALS: &[(&str, [u8; 3])] =
+    &[("White", [0xff, 0xff, 0xff]), ("Black", [0x1e, 0x1e, 0x1e])];
+
+/// Resolve a swatch name to RGB: `blue`, `light blue`, `dark blue`, plus the
+/// aliases the API has always accepted. Case-insensitive; the shade word may
+/// lead or trail, because both readings are natural and neither is wrong.
+///
+/// The single source of truth for named colours. Returns `None` for anything
+/// that is not a swatch name — the caller then tries hex.
+pub fn color_from_swatch(s: &str) -> Option<[u8; 3]> {
+    let t = s.trim().to_ascii_lowercase();
+    let (shade, hue) = match t.strip_prefix("light ") {
+        Some(rest) => (SHADE_LIGHT, rest),
+        None => match t.strip_prefix("dark ") {
+            Some(rest) => (SHADE_DARK, rest),
+            None => match t.strip_suffix(" light") {
+                Some(rest) => (SHADE_LIGHT, rest),
+                None => match t.strip_suffix(" dark") {
+                    Some(rest) => (SHADE_DARK, rest),
+                    None => (SHADE_BASE, t.as_str()),
+                },
+            },
+        },
+    };
+    let hue = hue.trim();
+    // Aliases, kept because they are already written into documents and prompts.
+    let hue = match hue {
+        "purple" => "violet",
+        "magenta" => "pink",
+        "gray" | "grey" => "slate",
+        other => other,
+    };
+    for (name, shades) in SWATCH_HUES {
+        if name.eq_ignore_ascii_case(hue) {
+            return Some(shades[shade]);
+        }
+    }
+    // A neutral has no shades, so it only matches unqualified.
+    if shade == SHADE_BASE {
+        for (name, rgb) in SWATCH_NEUTRALS {
+            if name.eq_ignore_ascii_case(hue) {
+                return Some(*rgb);
+            }
+        }
+    }
+    None
+}
 
 /// A named container that a set of cards belong to (via [`Card::group`]). Drawn
 /// as a box around its members; dragging its header moves the whole group.
@@ -7785,6 +7848,61 @@ mod channel_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The base row IS the old sixteen-swatch palette**, so every colour
+    /// already written into a document or a prompt keeps meaning what it meant.
+    /// Pinned by value, not by construction — a table this test builds from the
+    /// same constant it is checking proves nothing.
+    #[test]
+    fn the_palette_grew_without_moving_what_was_there() {
+        for (name, want) in [
+            ("red", [0xef, 0x44, 0x44]),
+            ("orange", [0xf9, 0x73, 0x16]),
+            ("amber", [0xf5, 0x9e, 0x0b]),
+            ("yellow", [0xea, 0xb3, 0x08]),
+            ("lime", [0x84, 0xcc, 0x16]),
+            ("green", [0x22, 0xc5, 0x5e]),
+            ("teal", [0x14, 0xb8, 0xa6]),
+            ("cyan", [0x06, 0xb6, 0xd4]),
+            ("blue", [0x3b, 0x82, 0xf6]),
+            ("indigo", [0x63, 0x66, 0xf1]),
+            ("violet", [0x8b, 0x5c, 0xf6]),
+            ("pink", [0xec, 0x48, 0x99]),
+            ("slate", [0x64, 0x74, 0x8b]),
+            ("stone", [0x78, 0x71, 0x6c]),
+            ("white", [0xff, 0xff, 0xff]),
+            ("black", [0x1e, 0x1e, 0x1e]),
+        ] {
+            assert_eq!(color_from_swatch(name), Some(want), "{name} moved");
+        }
+        // 14 hues x 3 shades + 2 neutrals = 44, up from 16.
+        assert_eq!(SWATCH_HUES.len(), 14);
+        assert_eq!(SWATCH_NEUTRALS.len(), 2);
+        assert_eq!(SWATCH_HUES.len() * 3 + SWATCH_NEUTRALS.len(), 44);
+    }
+
+    /// A shade word reads either side, and means nothing on its own or on a
+    /// neutral — the picker offers no light white, so the API must not invent one.
+    #[test]
+    fn a_shade_word_qualifies_a_hue_and_nothing_else() {
+        assert_eq!(color_from_swatch("light blue"), color_from_swatch("blue light"));
+        assert_eq!(color_from_swatch("DARK Teal"), color_from_swatch("teal dark"));
+        assert_ne!(color_from_swatch("light blue"), color_from_swatch("blue"));
+        assert_ne!(color_from_swatch("dark blue"), color_from_swatch("blue"));
+        assert_eq!(color_from_swatch("light white"), None);
+        assert_eq!(color_from_swatch("light"), None);
+        assert_eq!(color_from_swatch("dark"), None);
+        assert_eq!(color_from_swatch("puce"), None);
+        // Every shade of every hue is a distinct colour — a palette with a
+        // duplicate in it is a typo nobody would ever see.
+        let mut all: Vec<[u8; 3]> = SWATCH_HUES.iter().flat_map(|(_, s)| *s).collect();
+        all.extend(SWATCH_NEUTRALS.iter().map(|(_, c)| *c));
+        let n = all.len();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), n, "the palette has a duplicate colour in it");
+    }
+
     use super::*;
 
     /// **A checklist keeps its content in `items` and a table in `rows`**, so a
