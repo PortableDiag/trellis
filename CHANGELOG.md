@@ -6,6 +6,32 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.167.0]
+
+### Fixed
+- **A scheduled plugin's interval was measured from app start, so a long one
+  never fired.** `plugin_last_run` was an in-memory `Instant`, seeded at launch —
+  every restart reset the clock. A plugin on a 6-hour schedule therefore only ran
+  if Trellis stayed open for six unbroken hours, and on a machine that sleeps
+  overnight and is restarted through the day it could go **months without firing**
+  while Settings showed a perfectly correct "every 360 min".
+  Found live: `cloud-backup` had not run in 19 hours across four restarts, and
+  its off-site copy had been advancing only when someone ran it by hand. The
+  plugin was never broken — the schedule was. That is the worst version of this
+  class: the thing that fails silently is the backup.
+  Last-run times are now **wall-clock seconds persisted in app config**, so an
+  interval survives a restart (an `Instant` cannot be — it is monotonic from an
+  arbitrary origin). A timestamp in the *future*, from a clock step or a restored
+  config, counts as due rather than wedging the schedule until real time catches
+  up.
+  **Overdue on launch now runs**, after a 90-second settling delay. "Never on
+  launch" was the original guard against every scheduled plugin firing at once
+  during startup; that was the right worry and the wrong fix, because combined
+  with a clock that reset each run it meant a long-interval plugin never ran.
+- **Settings → Plugins now shows when each scheduled plugin last ran** — "Last
+  run: 19 hours ago — overdue, runs shortly", or "never". A schedule you cannot
+  see is one you cannot trust, and nothing on that screen had said so.
+
 ## [0.166.0]
 
 ### Added

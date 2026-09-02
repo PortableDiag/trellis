@@ -101,6 +101,8 @@ const TEMPLATES_KEY: &str = "card_templates";
 /// here rather than in the `.ron`.
 const DESKTOP_CARDS_KEY: &str = "desktop_cards";
 const GRANTS_KEY: &str = "plugin_grants";
+/// Last-run times for scheduled plugins, so an interval survives a restart.
+const PLUGIN_RUNS_KEY: &str = "plugin_last_run";
 const MIRROR_MODE_KEY: &str = "mirror_policy";
 const MIRROR_DIRS_KEY: &str = "mirror_dirs";
 const MIRROR_WRITE_KEY: &str = "mirror_write";
@@ -1379,7 +1381,24 @@ pub struct TrellisApp {
     plugin_cancel: std::collections::HashMap<String, Arc<AtomicBool>>,
     /// Last run time per scheduled plugin, and the change-log sequence each
     /// on-change plugin has already been told about.
-    plugin_last_run: std::collections::HashMap<String, Instant>,
+    /// When this run started, so an overdue scheduled plugin can wait out a
+    /// short settling delay instead of firing during startup.
+    started_at: Instant,
+    /// When each scheduled plugin last ran, as **wall-clock unix seconds** and
+    /// persisted in app config.
+    ///
+    /// It was an `Instant`, in memory, seeded at launch — so the interval was
+    /// measured from *app start* and reset by every restart. A plugin on a
+    /// 6-hour schedule therefore only ever fired if Trellis stayed open for six
+    /// unbroken hours, and on a machine that sleeps overnight and gets restarted
+    /// through the day it could go **months without firing** while looking
+    /// perfectly configured. Found 2026-09-02: `cloud-backup` (360 min) had not
+    /// run in 19 hours across four restarts, and its off-site copy had been
+    /// advancing only when someone ran it by hand.
+    ///
+    /// An `Instant` cannot be persisted or compared across runs — it is
+    /// monotonic since an arbitrary origin — so this is a `SystemTime`.
+    plugin_last_run: std::collections::HashMap<String, u64>,
     plugin_seen_seq: std::collections::HashMap<String, u64>,
     /// Revision at the last observed change, for the on-change debounce.
     plugin_change_at: Option<(u64, Instant)>,
@@ -1687,6 +1706,14 @@ impl TrellisApp {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         let grants = Arc::new(Mutex::new(stored_grants));
+        // When each scheduled plugin last ran, in wall-clock seconds. Persisted
+        // for the same reason the grants are: a schedule that forgets across a
+        // restart is not a schedule. See `plugin_last_run`.
+        let stored_plugin_runs: std::collections::HashMap<String, u64> = cc
+            .storage
+            .and_then(|s| s.get_string(PLUGIN_RUNS_KEY))
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         let plugins_root = crate::plugins::plugins_dir(startup.data_dir.as_deref());
         let (plugins, plugin_errors) = match &plugins_root {
             Some(d) => {
@@ -1936,7 +1963,8 @@ impl TrellisApp {
             plugin_running: std::collections::HashSet::new(),
             plugin_progress: std::collections::HashMap::new(),
             plugin_cancel: std::collections::HashMap::new(),
-            plugin_last_run: std::collections::HashMap::new(),
+            started_at: Instant::now(),
+            plugin_last_run: stored_plugin_runs,
             plugin_seen_seq: std::collections::HashMap::new(),
             plugin_change_at: None,
             plugin_config: std::collections::HashMap::new(),
@@ -2670,25 +2698,42 @@ impl TrellisApp {
                     && !self.plugin_running.contains(&p.manifest.name)
             })
             .filter(|(_, p)| {
-                let every = Duration::from_secs(p.manifest.interval_mins.max(1) * 60);
+                let every = p.manifest.interval_mins.max(1) * 60;
                 match self.plugin_last_run.get(&p.manifest.name) {
-                    Some(t) => now.duration_since(*t) >= every,
-                    // Not on launch: opening the app shouldn't kick off every
-                    // scheduled plugin at once.
+                    // Overdue is measured against the wall clock and therefore
+                    // survives a restart — the whole point of persisting it.
+                    // A last-run in the FUTURE means the clock moved (a timezone
+                    // change, an NTP step, a restored config); treat it as due
+                    // rather than waiting for real time to catch up, which could
+                    // be indefinitely.
+                    Some(&t) => crate::changelog::now_secs().checked_sub(t).map(|d| d >= every).unwrap_or(true),
+                    // Never run: seeded below, so the first interval is measured
+                    // from the first launch that saw the plugin.
                     None => false,
                 }
             })
             .map(|(i, _)| i)
             .collect();
-        for i in due {
-            let name = self.plugins[i].manifest.name.clone();
-            self.plugin_last_run.insert(name, now);
-            self.run_plugin(i, vec![("TRELLIS_TRIGGER".into(), "schedule".into())]);
+        // An overdue plugin waits out a short settling delay rather than firing
+        // during startup. Opening the app should not kick off every scheduled
+        // plugin at once — the original reason this ran nothing on launch — but
+        // "never on launch" was the wrong fix, because with the clock reset by
+        // every restart it meant a long-interval plugin never ran at all.
+        const SETTLE: Duration = Duration::from_secs(90);
+        if !due.is_empty() && now.duration_since(self.started_at) >= SETTLE {
+            for i in due {
+                let name = self.plugins[i].manifest.name.clone();
+                self.plugin_last_run.insert(name, crate::changelog::now_secs());
+                self.run_plugin(i, vec![("TRELLIS_TRIGGER".into(), "schedule".into())]);
+            }
         }
-        // Seed the clock so the first interval is measured from launch.
+        // Seed the clock for a plugin this config has never seen, so its first
+        // interval is measured from now rather than from the epoch — which would
+        // make every newly-installed scheduled plugin due immediately.
+        let seed = crate::changelog::now_secs();
         for p in &self.plugins {
             if p.manifest.triggers.contains(&Trigger::Schedule) {
-                self.plugin_last_run.entry(p.manifest.name.clone()).or_insert(now);
+                self.plugin_last_run.entry(p.manifest.name.clone()).or_insert(seed);
             }
         }
 
@@ -7924,6 +7969,26 @@ impl TrellisApp {
                                 .weak()
                                 .small(),
                         );
+                        // When it actually last ran. A schedule you cannot see is
+                        // one you cannot trust: cloud-backup sat unfired for
+                        // months behind a correct-looking "every 360 min" while
+                        // its off-site copy advanced only when run by hand, and
+                        // nothing on this screen said so.
+                        if p.manifest.triggers.contains(&crate::plugins::Trigger::Schedule) {
+                            let line = match self.plugin_last_run.get(&p.manifest.name) {
+                                Some(&t) => {
+                                    let ago = crate::changelog::now_secs().saturating_sub(t);
+                                    let overdue = ago >= p.manifest.interval_mins.max(1) * 60;
+                                    format!(
+                                        "Last run: {}{}",
+                                        human_ago(ago),
+                                        if overdue { " — overdue, runs shortly" } else { "" }
+                                    )
+                                }
+                                None => "Last run: never".to_string(),
+                            };
+                            ui.label(egui::RichText::new(line).weak().small());
+                        }
                         // Settings the plugin asked for. Rendered here because a
                         // config file in a directory nobody can find is not a
                         // setting anyone will ever change.
@@ -12670,6 +12735,9 @@ impl eframe::App for TrellisApp {
         if let Some(p) = &self.doc_path {
             storage.set_string(LAST_DOC_KEY, p.display().to_string());
         }
+        if let Ok(j) = serde_json::to_string(&self.plugin_last_run) {
+            storage.set_string(PLUGIN_RUNS_KEY, j);
+        }
         storage.set_string(API_KEY_KEY, self.api_key.clone());
         storage.set_string(API_PORT_KEY, self.api_port.to_string());
         storage.set_string(API_LAN_KEY, self.api_lan.to_string());
@@ -13358,6 +13426,24 @@ const HISTORY_GAP_MINS_RANGE: std::ops::RangeInclusive<u64> = 1..=1440;
 
 /// The hidden sibling directory that holds a document's version snapshots, e.g.
 /// `Notes.ron` → `.Notes.ron.history/`. `None` for a pathless document.
+/// "3 min ago" / "5 hours ago" / "2 days ago", for the plugin schedule line.
+/// Coarse on purpose — the question is "is this thing running at all", not the
+/// exact second.
+fn human_ago(secs: u64) -> String {
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86_399 => {
+            let h = secs / 3600;
+            format!("{h} hour{} ago", if h == 1 { "" } else { "s" })
+        }
+        _ => {
+            let d = secs / 86_400;
+            format!("{d} day{} ago", if d == 1 { "" } else { "s" })
+        }
+    }
+}
+
 fn history_dir(doc_path: &std::path::Path) -> Option<PathBuf> {
     let name = doc_path.file_name()?.to_string_lossy();
     Some(doc_path.with_file_name(format!(".{name}.history")))
@@ -13524,6 +13610,42 @@ fn default_autosave_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A schedule must survive a restart.** `plugin_last_run` was an `Instant`
+    /// seeded at launch, so the interval was measured from app start: a 6-hour
+    /// plugin only fired if Trellis stayed open six unbroken hours, and on a
+    /// machine restarted through the day it never fired at all. Found live —
+    /// cloud-backup, 360 min, 19 hours and four restarts without running.
+    #[test]
+    fn a_scheduled_plugin_is_due_on_wall_clock_time() {
+        let every = 360 * 60; // the interval cloud-backup asks for
+        let now = crate::changelog::now_secs();
+        let due = |last: u64| now.checked_sub(last).map(|d| d >= every).unwrap_or(true);
+
+        assert!(!due(now), "just ran");
+        assert!(!due(now - every + 60), "a minute short is not due");
+        assert!(due(now - every), "exactly the interval is due");
+        assert!(due(now - 19 * 3600), "19 hours on a 6-hour schedule is overdue");
+        // A last-run in the FUTURE means the clock moved under us. Due, rather
+        // than waiting for real time to catch up — which could be indefinite.
+        assert!(due(now + 86_400), "a future timestamp must not wedge the schedule");
+    }
+
+    /// The last-run line in Settings answers "is this running at all", so it is
+    /// coarse and never blank.
+    #[test]
+    fn human_ago_reads_as_a_sentence() {
+        assert_eq!(human_ago(0), "just now");
+        assert_eq!(human_ago(59), "just now");
+        assert_eq!(human_ago(60), "1 min ago");
+        assert_eq!(human_ago(3599), "59 min ago");
+        assert_eq!(human_ago(3600), "1 hour ago");
+        assert_eq!(human_ago(7200), "2 hours ago");
+        assert_eq!(human_ago(86_400), "1 day ago");
+        assert_eq!(human_ago(19 * 3600), "19 hours ago");
+        assert_eq!(human_ago(60 * 86_400), "60 days ago");
+    }
+
     use super::*;
 
     /// **An embed is a block**, so it has to land on its own line — left inline it
