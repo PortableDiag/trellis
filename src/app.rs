@@ -1085,8 +1085,11 @@ pub struct TrellisApp {
     /// A background save is in flight (guards against overlapping saves).
     saving: bool,
     /// Background-save completion channel: (path, result, revision-at-save-start).
-    save_tx: Sender<(PathBuf, Result<(), String>, u64)>,
-    save_rx: Receiver<(PathBuf, Result<(), String>, u64)>,
+    /// `(path, save result, doc revision at spawn, version-history error)`.
+    /// The snapshot's failure travels with the save's because the worker thread
+    /// has nowhere to report to — see `write_history_snapshot`.
+    save_tx: Sender<(PathBuf, Result<(), String>, u64, Option<String>)>,
+    save_rx: Receiver<(PathBuf, Result<(), String>, u64, Option<String>)>,
     status: String,
 
     /// Version-history browse/restore window.
@@ -1312,6 +1315,14 @@ pub struct TrellisApp {
     /// thread which records them and serves `/api/errors`. In memory for the
     /// session and mirrored to `<data-dir>/trellis/api-errors.log`.
     errors: Arc<Mutex<crate::changelog::ErrorLog>>,
+    /// What the **app** failed at — a save that did not land, a snapshot or
+    /// backup that could not be written, a plugin that would not run. Written
+    /// only on the app thread and read only by app-intercepted endpoints, so it
+    /// needs no lock, unlike `errors` which the server thread also writes.
+    ///
+    /// Before v0.165.0 each of these set `status` and nothing else: one String,
+    /// one label, erased by the next message. See [`crate::changelog::AppError`].
+    app_errors: crate::changelog::ErrorLog<crate::changelog::AppError>,
     /// Notify on startup with what is due, and when an agent edits.
     notify_digest: bool,
     notify_agent: bool,
@@ -1660,6 +1671,13 @@ impl TrellisApp {
             changes.lock().map(|c| c.epoch()).unwrap_or(0),
             crate::changelog::error_log_path(startup.data_dir.as_deref()),
         )));
+        // The app's own failures: same epoch and cap, its own file. Not behind a
+        // Mutex — only this thread ever touches it.
+        let app_errors = crate::changelog::ErrorLog::new(
+            crate::changelog::DEFAULT_CAP,
+            changes.lock().map(|c| c.epoch()).unwrap_or(0),
+            crate::changelog::app_error_log_path(startup.data_dir.as_deref()),
+        );
         // Approvals persist: a plugin the user allowed stays allowed until they
         // revoke it, and a token that survives a restart is what makes revoking
         // meaningful rather than "it stops working when you close the app".
@@ -1891,6 +1909,7 @@ impl TrellisApp {
             doc_revision,
             changes,
             errors,
+            app_errors,
             grants,
             plugins,
             plugin_errors,
@@ -1956,6 +1975,25 @@ impl TrellisApp {
 
     /// Snapshot `node` onto the undo stack before it is mutated (clears redo).
     /// Cheap: clones one node, not the whole document. Capped history.
+    /// Report a failure by the app: to the status bar, where it is seen, **and**
+    /// to the app error log, where it survives.
+    ///
+    /// The status bar alone was the whole reporting mechanism until v0.165.0,
+    /// and it is a single `String` painted in a single label — the next status
+    /// message erases it. A save that failed while the operator was looking
+    /// elsewhere left no trace at all, which on a volume that stalls under write
+    /// load is the failure that matters most. Every `status = format!("… failed")`
+    /// should come through here.
+    fn fail(&mut self, op: &str, error: impl std::fmt::Display, subject: Option<String>) {
+        let error = error.to_string();
+        let mut e = crate::changelog::AppError::new(op, &error);
+        if let Some(s) = subject {
+            e = e.about(s);
+        }
+        self.app_errors.push(e);
+        self.status = error;
+    }
+
     fn push_undo(&mut self, node: NodeId) {
         if let Some(n) = self.doc.nodes.get(&node) {
             self.redo.clear();
@@ -2041,7 +2079,7 @@ impl TrellisApp {
         let exe = match exe_for_restart() {
             Some(e) => e,
             None => {
-                self.status = "Restart failed: cannot find the Trellis binary".into();
+                self.fail("restart", "Restart failed: cannot find the Trellis binary", None);
                 return;
             }
         };
@@ -2057,7 +2095,7 @@ impl TrellisApp {
             .spawn()
         {
             Ok(_) => self.status = "Restarting…".into(),
-            Err(e) => self.status = format!("Restart failed: {e}"),
+            Err(e) => self.fail("restart", format!("Restart failed: {e}"), None),
         }
     }
 
@@ -2204,7 +2242,7 @@ impl TrellisApp {
                         self.status = format!("OCR done — {words} words, now searchable");
                     }
                 }
-                Err(e) => self.status = format!("OCR failed: {e}"),
+                Err(e) => self.fail("ocr", format!("OCR failed: {e}"), None),
             }
         }
     }
@@ -2421,7 +2459,7 @@ impl TrellisApp {
                     }
                 }
                 Ok(_) => self.status = "Snip cancelled".into(),
-                Err(e) => self.status = format!("Snip failed: {e}"),
+                Err(e) => self.fail("snip", format!("Snip failed: {e}"), None),
             }
         }
     }
@@ -4040,7 +4078,31 @@ impl TrellisApp {
                 // instead of relying on the agent that got the error to
                 // mention it.
                 "api_errors": self.errors.lock().map(|e| e.total()).unwrap_or(0),
+                // Failures by the APP this run — a save, a version snapshot, a
+                // backup, a plugin. Same read-in contract again: above zero,
+                // `GET /api/app-errors` says which. It is the half `api_errors`
+                // could never see, and until v0.165.0 it had no reader at all —
+                // these were written to the status bar, which the next message
+                // erased.
+                "app_errors": self.app_errors.total(),
             })))
+            }
+            api::ApiRequest::AppErrors { since, limit } => {
+                let (since, limit) = (*since, *limit);
+                let (list, truncated) = self.app_errors.since(since, limit);
+                Some(api::ApiResponse::ok(serde_json::json!({
+                    "epoch": self.app_errors.epoch(),
+                    "since": since,
+                    "count": list.len(),
+                    "total": self.app_errors.total(),
+                    "retained": self.app_errors.len(),
+                    "oldest": self.app_errors.oldest(),
+                    "newest": self.app_errors.newest(),
+                    "truncated": truncated,
+                    "file": self.app_errors.file().map(|p| p.display().to_string()),
+                    "file_error": self.app_errors.file_error(),
+                    "errors": list,
+                })))
             }
             api::ApiRequest::CubeOpen(nodes) => {
                 // The whole list is validated before anything changes, and a
@@ -4281,7 +4343,7 @@ impl TrellisApp {
                     }
                 }
                 self.dirty = true;
-                self.status = format!("Render failed: {e}");
+                self.fail("render", format!("Render failed: {e}"), None);
                 api::ApiResponse::err(500, &e)
             }
         }
@@ -4712,8 +4774,10 @@ impl TrellisApp {
 
     /// Take a version-history snapshot using this instance's retention
     /// settings. Thin wrapper so both save paths honour the same values.
-    fn write_history_snapshot(&self, path: &std::path::Path) {
-        write_history_snapshot(path, self.history_keep, self.history_gap_mins * 60);
+    fn write_history_snapshot(&mut self, path: &std::path::Path) {
+        if let Err(e) = write_history_snapshot(path, self.history_keep, self.history_gap_mins * 60) {
+            self.fail("history", format!("Version history: {e}"), Some(path.display().to_string()));
+        }
     }
 
     /// Synchronous save — only for `on_exit`, where a background thread would be
@@ -4737,7 +4801,7 @@ impl TrellisApp {
                 self.last_change = None;
                 self.status = format!("Saved → {}", path.display());
             }
-            Err(e) => self.status = format!("Save failed: {e}"),
+            Err(e) => self.fail("save", format!("Save failed: {e}"), None),
         }
     }
 
@@ -4757,10 +4821,15 @@ impl TrellisApp {
         let (keep, gap_secs) = (self.history_keep, self.history_gap_mins * 60);
         std::thread::spawn(move || {
             let res = serialize_and_write(&doc, &path);
-            if res.is_ok() {
-                write_history_snapshot(&path, keep, gap_secs);
-            }
-            let _ = tx.send((path, res, snapshot));
+            // The snapshot's failure rides home with the save's, because the
+            // worker has nothing to report to: it is not the UI thread and does
+            // not own the error log.
+            let snap_err = if res.is_ok() {
+                write_history_snapshot(&path, keep, gap_secs).err()
+            } else {
+                None
+            };
+            let _ = tx.send((path, res, snapshot, snap_err));
             ctx.request_repaint();
         });
     }
@@ -4768,7 +4837,7 @@ impl TrellisApp {
     /// Apply finished background saves.
     fn pump_save(&mut self) {
         let done: Vec<_> = std::iter::from_fn(|| self.save_rx.try_recv().ok()).collect();
-        for (path, res, snapshot) in done {
+        for (path, res, snapshot, snap_err) in done {
             self.saving = false;
             match res {
                 Ok(_) => {
@@ -4779,7 +4848,10 @@ impl TrellisApp {
                     }
                     self.status = format!("Saved → {}", path.display());
                 }
-                Err(e) => self.status = format!("Save failed: {e}"),
+                Err(e) => self.fail("save", format!("Save failed: {e}"), None),
+            }
+            if let Some(e) = snap_err {
+                self.fail("history", format!("Version history: {e}"), Some(path.display().to_string()));
             }
         }
     }
@@ -4796,13 +4868,24 @@ impl TrellisApp {
         for outcomes in done {
             self.backing_up = false;
             let failed: Vec<&crate::backup::DestOutcome> = outcomes.iter().filter(|o| !o.ok).collect();
-            self.backup_status = if failed.is_empty() {
-                format!("Backed up to {} destination(s) OK", outcomes.len())
+            if failed.is_empty() {
+                self.backup_status = format!("Backed up to {} destination(s) OK", outcomes.len());
+                self.status = self.backup_status.clone();
             } else {
+                // Every failed destination is its own entry: "1/3 failed" in the
+                // status bar names only the first, and the off-site copy being
+                // the broken one is exactly what you need to be able to read back.
                 let first = failed[0];
-                format!("Backup: {}/{} failed — {}: {}", failed.len(), outcomes.len(), first.dest, first.detail)
-            };
-            self.status = self.backup_status.clone();
+                self.backup_status = format!(
+                    "Backup: {}/{} failed — {}: {}",
+                    failed.len(), outcomes.len(), first.dest, first.detail
+                );
+                for o in &failed {
+                    let (dest, detail) = (o.dest.clone(), o.detail.clone());
+                    self.fail("backup", format!("Backup failed — {dest}: {detail}"), Some(dest));
+                }
+                self.status = self.backup_status.clone();
+            }
         }
 
         // Scheduled trigger: enabled, an interval set, and enough time elapsed.
@@ -4833,7 +4916,8 @@ impl TrellisApp {
             Ok(b) => b,
             Err(e) => {
                 self.backup_status = format!("Backup failed: could not serialize document: {e}");
-                self.status = self.backup_status.clone();
+                let msg = self.backup_status.clone();
+                self.fail("backup", msg, None);
                 return;
             }
         };
@@ -4921,7 +5005,7 @@ impl TrellisApp {
                     self.dirty = false;
                     self.status = format!("Opened {}", path.display());
                 }
-                Err(e) => self.status = format!("Open failed: {e}"),
+                Err(e) => self.fail("open", format!("Open failed: {e}"), None),
             }
         }
     }
@@ -4957,7 +5041,7 @@ impl TrellisApp {
         {
             match std::fs::write(&path, self.doc.export_html()) {
                 Ok(_) => self.status = format!("Exported HTML → {}", path.display()),
-                Err(e) => self.status = format!("Export failed: {e}"),
+                Err(e) => self.fail("export", format!("Export failed: {e}"), None),
             }
         }
     }
@@ -4971,9 +5055,9 @@ impl TrellisApp {
             match self.doc.export_json() {
                 Ok(s) => match std::fs::write(&path, s) {
                     Ok(_) => self.status = format!("Exported JSON → {}", path.display()),
-                    Err(e) => self.status = format!("Export failed: {e}"),
+                    Err(e) => self.fail("export", format!("Export failed: {e}"), None),
                 },
-                Err(e) => self.status = format!("Serialize failed: {e}"),
+                Err(e) => self.fail("export", format!("Serialize failed: {e}"), None),
             }
         }
     }
@@ -4986,7 +5070,7 @@ impl TrellisApp {
         {
             match std::fs::write(&path, self.doc.export_markdown()) {
                 Ok(_) => self.status = format!("Exported Markdown → {}", path.display()),
-                Err(e) => self.status = format!("Export failed: {e}"),
+                Err(e) => self.fail("export", format!("Export failed: {e}"), None),
             }
         }
     }
@@ -4999,7 +5083,7 @@ impl TrellisApp {
         {
             match self.doc.export_pdf().and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
                 Ok(_) => self.status = format!("Exported PDF → {}", path.display()),
-                Err(e) => self.status = format!("Export failed: {e}"),
+                Err(e) => self.fail("export", format!("Export failed: {e}"), None),
             }
         }
     }
@@ -5017,7 +5101,7 @@ impl TrellisApp {
         {
             match self.doc.export_image(gif).and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
                 Ok(_) => self.status = format!("Exported {label} → {}", path.display()),
-                Err(e) => self.status = format!("Export failed: {e}"),
+                Err(e) => self.fail("export", format!("Export failed: {e}"), None),
             }
         }
     }
@@ -5453,7 +5537,7 @@ impl TrellisApp {
         match content {
             Some(s) => match std::fs::write(&path, s) {
                 Ok(_) => self.status = format!("Exported basket {label} → {}", path.display()),
-                Err(e) => self.status = format!("Export failed: {e}"),
+                Err(e) => self.fail("export", format!("Export failed: {e}"), None),
             },
             None => self.status = "Export failed: node not found".to_string(),
         }
@@ -5484,7 +5568,7 @@ impl TrellisApp {
                 self.mark_dirty();
                 self.status = crate::vault::describe(&r, &name);
             }
-            Err(e) => self.status = format!("Import failed: {e}"),
+            Err(e) => self.fail("import", format!("Import failed: {e}"), None),
         }
     }
 
@@ -5510,7 +5594,7 @@ impl TrellisApp {
                 }
                 None => self.status = "Import failed: not a Trellis basket file".to_string(),
             },
-            Err(e) => self.status = format!("Import failed: {e}"),
+            Err(e) => self.fail("import", format!("Import failed: {e}"), None),
         }
     }
 
@@ -5607,7 +5691,7 @@ impl TrellisApp {
         let Some(path) = self.file_dialog().set_file_name(&name).save_file() else { return };
         match std::fs::write(&path, &data) {
             Ok(()) => self.status = format!("Saved {} \u{2192} {}", name, path.display()),
-            Err(e) => self.status = format!("Could not save {name}: {e}"),
+            Err(e) => self.fail("save", format!("Could not save {name}: {e}"), Some(name.to_string())),
         }
     }
 
@@ -5636,7 +5720,7 @@ impl TrellisApp {
                         self.status = crate::vault::describe(&r, &name);
                     }
                     Ok(_) => self.status = format!("Nothing to import: {name} holds no files"),
-                    Err(e) => self.status = format!("Import failed: {e}"),
+                    Err(e) => self.fail("import", format!("Import failed: {e}"), None),
                 }
                 vault_status = true;
                 continue;
@@ -6484,7 +6568,7 @@ impl TrellisApp {
                     self.status = format!("Imported {}", path.display());
                 }
             }
-            Err(e) => self.status = format!("Import failed: {e}"),
+            Err(e) => self.fail("import", format!("Import failed: {e}"), None),
         }
     }
 
@@ -6512,7 +6596,7 @@ impl TrellisApp {
         };
         match data.and_then(|d| std::fs::write(&path, d).map_err(|e| e.to_string())) {
             Ok(_) => self.status = format!("Exported → {}", path.display()),
-            Err(e) => self.status = format!("Export failed: {e}"),
+            Err(e) => self.fail("export", format!("Export failed: {e}"), None),
         }
     }
 
@@ -6541,7 +6625,7 @@ impl TrellisApp {
         };
         match std::fs::write(&path, &bytes) {
             Ok(_) => self.status = format!("Saved image → {}", path.display()),
-            Err(e) => self.status = format!("Save failed: {e}"),
+            Err(e) => self.fail("save", format!("Save failed: {e}"), None),
         }
     }
 
@@ -6622,7 +6706,7 @@ impl TrellisApp {
         let bytes = match data {
             Ok(b) => b,
             Err(e) => {
-                self.status = format!("Export failed: {e}");
+                self.fail("export", format!("Export failed: {e}"), None);
                 return;
             }
         };
@@ -6637,7 +6721,7 @@ impl TrellisApp {
         };
         match std::fs::write(&path, &bytes) {
             Ok(_) => self.status = format!("Exported card → {}", path.display()),
-            Err(e) => self.status = format!("Export failed: {e}"),
+            Err(e) => self.fail("export", format!("Export failed: {e}"), None),
         }
     }
 
@@ -6873,13 +6957,13 @@ impl TrellisApp {
                 {
                     match std::fs::write(&path, &bytes) {
                         Ok(_) => self.status = format!("Exported basket {label} → {}", path.display()),
-                        Err(e) => self.status = format!("Export failed: {e}"),
+                        Err(e) => self.fail("export", format!("Export failed: {e}"), None),
                     }
                 } else {
                     self.status = "Export cancelled".to_string();
                 }
             }
-            Err(e) => self.status = format!("Export failed: {e}"),
+            Err(e) => self.fail("export", format!("Export failed: {e}"), None),
         }
     }
 
@@ -8450,7 +8534,7 @@ impl TrellisApp {
                                         std::env::current_exe().ok().map(|p| p.display().to_string());
                                     self.status = format!("Registered {scheme}:// — {path}");
                                 }
-                                Err(e) => self.status = format!("Could not register: {e}"),
+                                Err(e) => self.fail("plugin", format!("Could not register: {e}"), None),
                             }
                         }
                     });
@@ -8907,7 +8991,12 @@ impl TrellisApp {
                                 format!(
                                     "# api_errors on /instance above zero: read who was refused, and why.\n\
                                      curl -s -H 'X-API-Key: {k}' '{a}/errors?since=0'\n\
-                                     # also on disk: <data-dir>/trellis/api-errors.log (one JSON object per line)"
+                                     # also on disk: <data-dir>/trellis/api-errors.log (one JSON object per line)\n\n\
+                                     # app_errors is the other half: what the APP failed at — a save,\n\
+                                     # a version snapshot, a backup, a plugin. No caller made these, so\n\
+                                     # nothing else would ever mention them.\n\
+                                     curl -s -H 'X-API-Key: {k}' '{a}/app-errors?since=0'\n\
+                                     # also on disk: <data-dir>/trellis/app-errors.log"
                                 ),
                             ),
                             (
@@ -9204,6 +9293,7 @@ impl TrellisApp {
                             "GET    /api/wait?rev=<n>                  (long-poll: that something changed, + epoch)",
                             "GET    /api/changes?since=<seq>[&limit=<n>]  (what changed: actor/entity/op/fields/property)",
                             "GET    /api/errors?since=<seq>[&limit=<n>]   (what FAILED: every 4xx/5xx this run — status/method/path/agent/error/request excerpt/remote IP; api_errors on /api/instance is the count; mirrored to <data-dir>/trellis/api-errors.log)",
+                            "GET    /api/app-errors?since=<seq>[&limit=<n>]   (what the APP failed at this run — save/history/backup/plugin: op/error/subject; app_errors on /api/instance is the count; mirrored to <data-dir>/trellis/app-errors.log)",
                             "GET    /api/history                       (version snapshots + keep / min_gap_mins retention)",
                             "POST   /api/history/restore     {file}    (restore a snapshot)",
                             "GET    /api/backup                        (status)",
@@ -9655,7 +9745,7 @@ impl TrellisApp {
                     format_stamp(&p.file_name().unwrap_or_default().to_string_lossy())
                 );
             }
-            Err(e) => self.status = format!("Restore failed: {e}"),
+            Err(e) => self.fail("restore", format!("Restore failed: {e}"), None),
         }
     }
 
@@ -13298,21 +13388,32 @@ fn is_readable_gzip(p: &std::path::Path) -> bool {
 
 /// After a successful save, drop a timestamped snapshot into the history dir
 /// (unless the newest one is younger than the min gap), then prune to the cap.
-/// Runs on whatever thread saved; failures are best-effort and ignored.
-fn write_history_snapshot(doc_path: &std::path::Path, keep: usize, min_gap_secs: u64) {
-    let Some(dir) = history_dir(doc_path) else { return };
+/// Runs on whatever thread saved. **A failure is returned, not swallowed**: it
+/// used to `return` at five separate points with no trace anywhere, so version
+/// history could be quietly dead for weeks and look exactly like a document that
+/// simply had not changed. `Ok(())` also covers "too soon" — declining a snapshot
+/// because the last one is younger than the gap is the setting working, not a
+/// failure. Callers record the `Err` through `App::fail`.
+fn write_history_snapshot(
+    doc_path: &std::path::Path,
+    keep: usize,
+    min_gap_secs: u64,
+) -> Result<(), String> {
+    let Some(dir) = history_dir(doc_path) else {
+        return Err(format!("no history directory for {}", doc_path.display()));
+    };
     let snaps = history_snapshots(doc_path);
     if let Some((newest, _)) = snaps.first() {
         if let Ok(age) = newest.metadata().and_then(|m| m.modified()).and_then(|t| t.elapsed().map_err(std::io::Error::other)) {
             if age.as_secs() < min_gap_secs {
-                return;
+                return Ok(());
             }
         }
     }
-    let Ok(bytes) = std::fs::read(doc_path) else { return };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
+    let bytes = std::fs::read(doc_path)
+        .map_err(|e| format!("could not read {} to snapshot it: {e}", doc_path.display()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     let stamp = crate::backup::stamp(std::time::SystemTime::now());
     // Temp-then-rename, like the document save itself. Writing straight to the
     // final name leaves a TRUNCATED `.gz` behind if the write does not finish —
@@ -13321,9 +13422,9 @@ fn write_history_snapshot(doc_path: &std::path::Path, keep: usize, min_gap_secs:
     // 12.8 MB ones, written while the process was leaving.
     let tmp = dir.join(format!("{stamp}.ron.gz.part"));
     let final_path = dir.join(format!("{stamp}.ron.gz"));
-    if std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &final_path)).is_err() {
+    if let Err(e) = std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &final_path)) {
         let _ = std::fs::remove_file(&tmp);
-        return;
+        return Err(format!("could not write {}: {e}", final_path.display()));
     }
     // Prune oldest beyond the cap. `max(1)` so a bad setting can never delete
     // every snapshot including the one just written.
@@ -13331,6 +13432,7 @@ fn write_history_snapshot(doc_path: &std::path::Path, keep: usize, min_gap_secs:
     for (path, _) in snaps.into_iter().skip(keep.max(1)) {
         let _ = std::fs::remove_file(path);
     }
+    Ok(())
 }
 
 fn serialize_and_write(doc: &Document, path: &std::path::Path) -> Result<(), String> {

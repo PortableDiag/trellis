@@ -6,6 +6,60 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.165.0]
+
+### Added
+- **The app says what IT failed at: `GET /api/app-errors`, `app_errors` on
+  `/api/instance`, and `<data-dir>/trellis/app-errors.log`.** The API error log
+  added in v0.162.0 records what *callers* were refused. This records what the
+  app could not do with no caller involved at all — a save that did not land, a
+  version-history snapshot or a backup that could not be written, a plugin that
+  would not run.
+  **Why it was missing.** Every one of those was reported by assigning to the
+  status bar — one `String`, painted in one label, **overwritten by the very next
+  status message**. `Save failed: <e>` was visible until you did anything at all,
+  and then nothing on the machine remembered it. On a volume that stalls under
+  write load that is exactly the failure you most need to read back afterwards,
+  and it is the same argument v0.162.0 already won for the API: the only record
+  of a failure was the thing that made it. Asked for a check of "the app error
+  logs" and finding there were none, this is the answer.
+  Entries carry `op` (`save`, `history`, `backup`, `plugin`, `export`, `import`,
+  `restore`, `restart`, `ocr`, `snip`, `render`, `open`), the `error` as the
+  operator would read it, and an optional `subject` — a path, a backup
+  destination, a plugin name. 28 reporting sites now route through one `fail`
+  helper that writes to the status bar *and* the log. Refused for a scoped token,
+  like `/api/errors`.
+  **One implementation, not two.** `ErrorLog` became generic over its record
+  rather than being copied, so rotation, the JSON-lines file, the create-dir
+  dance and the remembered-once `file_error` are the audited ones; a second copy
+  of that is how the two drift until only one of them rotates.
+
+### Fixed
+- **Version history could fail in total silence.** `write_history_snapshot` had
+  five separate `return`s on error under a comment saying failures were
+  "best-effort and ignored", so snapshots could stop being written for weeks and
+  look exactly like a document that had not changed. It now returns its error and
+  the app records it — including from the background save thread, where the
+  snapshot's failure rides home with the save's own result because a worker
+  thread owns no log.
+- **Every failed backup destination is now its own log entry.** The status bar
+  says `Backup: 1/3 failed` and names only the first; which destination broke is
+  the part worth reading back, and the off-site copy is the likely one.
+- **`POST /api/cards/{cid}/move` with a bare `pos` now names `PATCH`.** It
+  answered the generic *"specify a placement"*, which sends the caller round
+  again: the error log has the pair, `{"pos":[…]}` refused at 15:45:53 and
+  `{"node":<current>,"pos":[…]}` refused twenty-one seconds later by the branch
+  that *does* name the right route. One intent, two round trips. `pos` alone is a
+  reposition, and the refusal says so.
+- **A table `insert_row` given `row` is told which field carries the index.**
+  `row` and `col` are legal fields on a table op — the cell ops read them — so
+  `deny_unknown_fields` cannot catch `{"op":"insert_row","row":4}`; the caller was
+  told only that `at` was missing, while the number they meant sat in the request
+  being ignored. Not accepted as an alias: `row` on a cell op addresses an
+  existing row and `at` on an insert names a gap between rows, and one name for
+  two meanings is how off-by-one edits happen. Both read straight off
+  `api-errors.log`.
+
 ## [0.164.0]
 
 ### Added

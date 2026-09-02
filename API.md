@@ -150,7 +150,8 @@ GET /api/instance
          "path":"/home/you/work.ron","port":7373,"lan":false,
          "lan_host":"192.168.0.101","lan_hosts":["192.168.0.101","100.64.100.6"],
          "nodes":42,"unsaved_changes":false,"stale_claims":0,
-         "channels":2,"channels_waiting":1,"stale_plugins":0,"api_errors":0}
+         "channels":2,"channels_waiting":1,"stale_plugins":0,"api_errors":0,
+         "app_errors":0}
 ```
 `document` is the file name (`"untitled"` for a never-saved document) and `path`
 is its full path, or `null` when untitled. `nodes` is the document's node count.
@@ -232,6 +233,16 @@ misreads a response leaves no trace at all. Above zero, read
 [`GET /api/errors`](#what-failed-the-error-log) — which calls, by whom, and
 what they were told — and mention what you find, because the operator has been
 relying on you to.
+
+**`app_errors` counts what the APP failed at this run** (v0.165.0) — a save that
+did not land, a version-history snapshot or a backup that could not be written, a
+plugin that would not run. It is the half `api_errors` structurally cannot see:
+**nobody called these**, so no agent got a response to misread and no caller
+exists to mention them. Until v0.165.0 they had no reader at all — each one was
+reported by assigning to the **status bar**, which is a single line that the very
+next status message erases, so a failed save while you were looking elsewhere
+left no trace anywhere on the machine. Above zero, read
+[`GET /api/app-errors`](#what-the-app-failed-at).
 
 ### Plugins
 
@@ -729,6 +740,11 @@ POST /api/nodes/{id}/cards/{cid}/move  {index:<n>}             absolute 0-based 
 POST /api/nodes/{id}/cards/{cid}/move  {to:"front"|"back"}     front = on top / laid out last
     → 200 {"card":<cid>, "index":<n>}    | 400 (bad/empty placement) | 404 (card not found)
 ```
+**`pos` is not a placement.** `move` with a bare `{pos:[x,y]}` and no `node` is a
+400 naming `PATCH /api/cards/{cid} {"pos":[x,y]}`, which is what moving a card
+around its own canvas actually is. This route orders a card *in its basket's
+list*, or sends it to another basket.
+
 Move a card to a **different** basket with `node` (and optionally `pos`), which
 takes precedence over the ordering fields above. A `node` naming the basket the
 card is already in is a **400, not a no-op reposition**: this op drops group and
@@ -926,6 +942,12 @@ POST /api/nodes/{id}/cards/{cid}/table  [{op, …}, {op, …}]   several, applie
 | `set_col_width` | `col`, `width` | set a column's pixel width (28–600) |
 | `autofit_cols` | `col`? | size columns to their content — every column, or just `col` |
 | `set_header` | `header` | set the header-row flag (bool) |
+
+**The insert/remove ops take `at`, never `row`/`col`.** Those two are the *cell*
+ops' arguments and address an existing line; `at` names the index to insert at or
+remove. Both are legal fields on the request, so `{"op":"insert_row","row":4}`
+parses — since v0.165.0 the refusal says which field carries the index instead of
+only reporting `at` missing while the number you meant sits in the request.
 
 Since v0.102.0 the arguments in that table are **required**, and an unknown
 field is a 400 naming it — the same rule as every other endpoint since v0.86.0,
@@ -2635,6 +2657,61 @@ response read at the wrong level. Same `epoch`/`seq`/`truncated` contract as the
 change log, so a client that already follows one needs nothing new for the
 other.
 
+### What the app failed at
+The error log above records what the **API** refused. This records what the
+**app** could not do — with no caller involved at all (v0.165.0).
+```
+GET /api/app-errors?since=<seq>&limit=<n>
+  → 200 {"epoch":…, "since":…, "count":N, "total":T, "retained":M,
+         "oldest":<seq|null>, "newest":<seq>, "truncated":false,
+         "file":"/home/you/.local/share/trellis/app-errors.log", "file_error":null,
+         "errors":[ … ]}
+  | 403 for a scoped token — the log is whole-instance
+```
+Each entry:
+
+| field | meaning |
+|---|---|
+| `seq` | this failure's own sequence number — **not** a document revision |
+| `ts` | unix seconds |
+| `op` | what was attempted: `save`, `history`, `backup`, `plugin`, `export`, `import`, `restore`, `restart`, `ocr`, `snip`, `render`, `open` |
+| `error` | the message, as the operator would read it in the status bar |
+| `subject` | what it was acting on, when there is one — a file path, a destination, a plugin name. Absent otherwise |
+
+```jsonc
+{"seq":3,"ts":1788361968,"op":"history",
+ "error":"Version history: could not write /media/veracrypt1/.Personal.ron.history/…",
+ "subject":"/media/veracrypt1/Personal.ron"}
+```
+
+**Why it exists.** Every one of these was previously reported by assigning to
+`status` — one `String`, painted in one label at the bottom of the window,
+**overwritten by the next status message**. `Save failed: <e>` was visible until
+you did anything at all, and then nothing on the machine remembered it. On a
+volume that stalls under write load that is precisely the failure you most need
+to be able to read back. It is the same argument the API error log already won in
+v0.162.0, applied to the other half of the app.
+
+**Version history in particular used to fail in total silence.** Its snapshot
+writer had five separate `return`s on error and a comment saying failures were
+"best-effort and ignored", so history could be dead for weeks and look exactly
+like a document that had not changed. It now returns its error, and the app
+records it — including from the background save thread, where the failure rides
+home with the save's own result because a worker thread owns no log.
+
+**Every failed backup destination is its own entry.** The status bar says
+`Backup: 1/3 failed` and names only the first; the off-site copy being the broken
+one is the case worth reading back later.
+
+**It is also a file**, on the same terms as the API log: one JSON object per line
+with `epoch` added, appended as each failure happens, at
+`<data-dir>/trellis/app-errors.log`, rotating once at 1 MB to `app-errors.log.1`.
+Both logs share one implementation, so rotation, the JSON-lines format and the
+remembered-once `file_error` behave identically.
+
+**Read both at read-in.** `api_errors` says agents were refused; `app_errors`
+says the app itself could not do something, and only this log will ever tell you.
+
 ## Scoped tokens
 
 Besides the instance key, the API accepts **scoped tokens**. They are ordinary
@@ -3099,6 +3176,23 @@ A 400 you did not notice is a card you think you wrote. The `request` excerpt is
 usually the whole diagnosis — `{"bg": null}` against a build older than v0.161.0,
 `{"body": ""}` from a response read at the wrong level — and `agent` says whose
 prompt needs the fix.
+
+**Then read the other log.** `app_errors` counts what the *app* failed at, which
+no caller can report because no caller was involved:
+
+```sh
+# A save that did not land, a version snapshot or backup that could not be
+# written, a plugin that would not run.
+curl -s -H "X-API-Key: $KEY" "$API/app-errors" | jq '.errors[] | {seq,op,error,subject}'
+
+# On disk for last week, same format as the API log.
+tail -n 20 ~/.local/share/trellis/app-errors.log | jq -c '{ts,op,error,subject}'
+```
+
+Before v0.165.0 these went to the status bar and nowhere else, so the next status
+message erased them. A `save` or `history` entry here is the one to raise with the
+operator immediately — it means the document or its version history is not being
+written, and the app looks entirely healthy from the UI.
 
 ### Everything else
 

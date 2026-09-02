@@ -479,7 +479,13 @@ drawn hollow in their accent where a resident card is a solid block.
   from**, and what they sent, counted as `api_errors` on `/api/instance` and
   mirrored to a per-instance `api-errors.log`, so a refused call is on record
   whether or not the agent that made it mentions it — and a caller that names
-  itself in nothing is still identified by its IP. An instance serves one document, so **the port
+  itself in nothing is still identified by its IP. **`GET /api/app-errors` is the
+  other half** — what the *app* failed at, with no caller involved: a save that
+  did not land, a version-history snapshot or a backup that could not be written,
+  a plugin that would not run. Those used to be reported to the status bar and
+  nowhere else, so the next status message erased them; they are now counted as
+  `app_errors` on `/api/instance` and appended to a per-instance
+  `app-errors.log`. An instance serves one document, so **the port
   addresses the document** — `GET /api/instance` reports which one is open, and
   edits are autosaved a couple of seconds later without anyone pressing Save.
   Enable it in **Tools → Settings**, where **Examples** gives you copy-paste

@@ -301,6 +301,14 @@ pub enum ApiRequest {
     // Which document this instance has open (and on which port), so an agent
     // driving several instances can check it has the right one.
     Instance,
+    /// What the **app** failed at this run — a save that did not land, a version
+    /// snapshot or backup that could not be written, a plugin that would not
+    /// run. The counterpart to [`ApiRequest::Errors`]-style API failures, and
+    /// app-intercepted because only the app loop holds the log.
+    ///
+    /// It exists because until v0.165.0 these were reported to the status bar
+    /// and nowhere else: one String, one label, erased by the next message.
+    AppErrors { since: u64, limit: usize },
     /// The installed plugins, each with the version the repo's release copy
     /// carries when that differs — because a plugin release does not install
     /// itself, and until this existed nothing anywhere said the running copy
@@ -1777,6 +1785,24 @@ impl TableOpInput {
                 need(self.col.is_some(), "col")
             }
             "insert_row" | "remove_row" | "insert_col" | "remove_col" => {
+                // `row`/`col` are legal fields on this struct — the cell ops
+                // read them — so `deny_unknown_fields` cannot catch them here,
+                // and a caller who wrote `{"op":"insert_row","row":4}` is told
+                // only that `at` is missing while the index they meant sits in
+                // the request being ignored. Say which field carries it. (Not
+                // accepted as an alias: `row` on a cell op addresses an
+                // existing row, `at` on an insert names a gap between rows, and
+                // one name for two meanings is how off-by-one edits happen.)
+                let sent = if self.op.ends_with("_row") { self.row } else { self.col };
+                let axis = if self.op.ends_with("_row") { "row" } else { "col" };
+                if self.at.is_none() && sent.is_some() {
+                    return Err(format!(
+                        "table op `{}` needs `at`, not `{axis}` — `{axis}` is read \
+                         only by the cell ops; `at` is the index to {} (nothing was applied)",
+                        self.op,
+                        if self.op.starts_with("insert") { "insert at" } else { "remove" },
+                    ));
+                }
                 need(self.at.is_some(), "at")
             }
             "set_col_width" => {
@@ -2782,6 +2808,13 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             },
         }),
         (Method::Get, ["api", "instance"]) => Ok(ApiRequest::Instance),
+        (Method::Get, ["api", "app-errors"]) => Ok(ApiRequest::AppErrors {
+            since: query_get(query, "since").and_then(|v| v.parse().ok()).unwrap_or(0),
+            limit: query_get(query, "limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(200)
+                .clamp(1, 2000),
+        }),
         (Method::Get, ["api", "plugins"]) => Ok(ApiRequest::Plugins),
         (Method::Get, ["api", "settings"]) => Ok(ApiRequest::SettingsGet),
         (Method::Post, ["api", "settings"]) => {
@@ -3970,10 +4003,22 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 };
             }
             if mv.before.is_none() && mv.after.is_none() && mv.index.is_none() && mv.to.is_none() {
-                return (
-                    false,
-                    ApiResponse::err(400, "specify a placement: before, after, index, or to:front|back"),
-                );
+                // `pos` alone is the commonest way to reach this branch, and it
+                // is not a placement at all: the caller means "put this card
+                // there on the canvas", which is a PATCH. Answering the generic
+                // message sends them round again — the error log has the pair,
+                // a bare `pos` refused here and the same call with `node` added
+                // refused twenty-one seconds later by the branch above, which
+                // does name the right route. Name it here too.
+                let msg = if mv.pos.is_some() {
+                    "`pos` alone is a reposition, not a placement — \
+                     PATCH /api/cards/{cid} {\"pos\":[x,y]}; move orders a card in \
+                     its basket (before, after, index, to:front|back) or sends it \
+                     to another one (node)"
+                } else {
+                    "specify a placement: before, after, index, or to:front|back"
+                };
+                return (false, ApiResponse::err(400, msg));
             }
             let index = if let Some(t) = mv.before.or(mv.after) {
                 let Some(tpos) = doc.card_index(node, t) else {
@@ -5226,6 +5271,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
         // the backup config + document file). This is only reached if that
         // interception is ever missed — report it rather than silently no-op.
         ApiRequest::Instance
+        | ApiRequest::AppErrors { .. }
         | ApiRequest::Plugins
         | ApiRequest::CubeOpen(_)
         | ApiRequest::CubeClose
@@ -6733,6 +6779,31 @@ mod tests {
         let (dirty, resp) = process(&mut doc, ApiRequest::Instance);
         assert!(!dirty);
         assert_eq!(resp.status, 500);
+        // The app's own error log lives on the App, not the Document, so it is
+        // intercepted the same way.
+        let (dirty, resp) =
+            process(&mut doc, ApiRequest::AppErrors { since: 0, limit: 200 });
+        assert!(!dirty);
+        assert_eq!(resp.status, 500);
+    }
+
+    /// `/api/app-errors` parses like `/api/errors` — same `since`/`limit`, same
+    /// clamp — and, naming no basket, is refused for a subtree-scoped token by
+    /// the default `target_node` rule rather than by a special case.
+    #[test]
+    fn the_app_error_route_parses_and_is_not_scope_neutral() {
+        let r = route(&Method::Get, "/api/app-errors", "since=7&limit=9000", "").unwrap();
+        let ApiRequest::AppErrors { since, limit } = r else { panic!("wrong request") };
+        assert_eq!(since, 7);
+        assert_eq!(limit, 2000, "limit is clamped, like the API error log's");
+        let r = route(&Method::Get, "/api/app-errors", "", "").unwrap();
+        let ApiRequest::AppErrors { since, limit } = r else { panic!("wrong request") };
+        assert_eq!((since, limit), (0, 200));
+        // Whole-instance: it names no node and is not on the neutral list, so a
+        // confined token cannot reach it — the same answer /api/errors gives.
+        let r = route(&Method::Get, "/api/app-errors", "", "").unwrap();
+        assert_eq!(target_node(&r), None);
+        assert!(!is_scope_neutral(&r));
     }
 
     #[test]
@@ -7713,6 +7784,55 @@ mod tests {
         assert!(!dirty);
         assert_eq!(resp.status, 400);
         assert!(resp.body.contains("PATCH"), "the refusal must name the tool that works: {}", resp.body);
+    }
+
+    /// A bare `pos` on move is a reposition, and the generic "specify a
+    /// placement" answer sends the caller round again. Read off the error log:
+    /// the same caller was refused `{"pos":[668,490]}` at 15:45:53 and
+    /// `{"node":<current>,"pos":[668,490]}` twenty-one seconds later — one
+    /// intent, two round trips, and only the second refusal named PATCH.
+    #[test]
+    fn a_bare_pos_move_names_patch_too() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let mv: MoveCardInput = serde_json::from_str(r#"{"pos":[50,60]}"#).unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::MoveCard { node: n, card: c, mv });
+        assert!(!dirty);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("PATCH"), "a bare pos must name PATCH: {}", resp.body);
+        // With no pos at all there is nothing to point at, so the old message stands.
+        let mv: MoveCardInput = serde_json::from_str("{}").unwrap();
+        let (_d, resp) = process(&mut doc, ApiRequest::MoveCard { node: n, card: c, mv });
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("specify a placement"), "{}", resp.body);
+        assert!(!resp.body.contains("PATCH"), "{}", resp.body);
+    }
+
+    /// `row`/`col` are legal fields on `TableOpInput`, so an insert/remove that
+    /// carries the index under the cell ops' name parses and is then refused
+    /// for a missing `at` while the number the caller meant sits in the request
+    /// being ignored. Read off the error log (`{"op":"insert_row","row":4}`).
+    #[test]
+    fn an_insert_row_given_row_is_told_which_field_carries_the_index() {
+        let with = |body: &str| {
+            serde_json::from_str::<TableOpInput>(body).unwrap().validate().unwrap_err()
+        };
+        let e = with(r#"{"op":"insert_row","row":4}"#);
+        assert!(e.contains("not `row`"), "{e}");
+        assert!(e.contains("`at`"), "{e}");
+        let e = with(r#"{"op":"remove_col","col":2}"#);
+        assert!(e.contains("not `col`"), "{e}");
+        // Nothing sent under either name: the plain message, with no field to name.
+        let e = with(r#"{"op":"insert_row"}"#);
+        assert_eq!(e, "table op `insert_row` needs `at`");
+        // And the op still works when addressed properly.
+        assert!(
+            serde_json::from_str::<TableOpInput>(r#"{"op":"insert_row","at":4}"#)
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
     }
 
     /// A subtree-scoped token is checked against the node a request *names*,

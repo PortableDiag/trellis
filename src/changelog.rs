@@ -387,6 +387,96 @@ pub fn request_excerpt(body: &str) -> Option<String> {
     Some(out)
 }
 
+/// What a rotating [`ErrorLog`] needs of the record it holds: somewhere to
+/// stamp the sequence number and time, and a chance to clean itself before it
+/// reaches memory *or* the file.
+///
+/// The trait exists so the log has ONE write path. When the app's own failures
+/// needed recording (v0.165.0) the alternative was a second copy of
+/// [`ErrorLog::write_line`] — rotation, JSON lines, the create-dir dance and the
+/// remembered-once file error — and a duplicate of that is how the two copies
+/// drift until only one of them rotates.
+pub trait LoggedError: Serialize + Clone {
+    fn stamp(&mut self, seq: u64, ts: u64);
+    fn seq(&self) -> u64;
+    /// Remove anything that must never reach a log file. Runs inside `push`, so
+    /// no call site can forget it. The default does nothing.
+    fn sanitize(&mut self) {}
+}
+
+impl LoggedError for ApiError {
+    fn stamp(&mut self, seq: u64, ts: u64) {
+        self.seq = seq;
+        self.ts = ts;
+    }
+    fn seq(&self) -> u64 {
+        self.seq
+    }
+    fn sanitize(&mut self) {
+        // One choke point for both copies: a credential a caller put in the
+        // query string never reaches memory OR the file. See `redact_query`.
+        self.path = redact_query(&self.path);
+    }
+}
+
+/// One failure by the **app itself** — a save that did not land, a history
+/// snapshot that could not be written, a backup or plugin that failed.
+///
+/// **Why this exists.** Until v0.165.0 every one of those was reported by
+/// assigning to the status bar: a single `String`, painted in a single label,
+/// **overwritten by the very next status message**. `Save failed: <e>` was
+/// visible until you did anything at all, and then there was no record of it
+/// anywhere — not in a file, not over the API. On a volume that stalls under
+/// write load, the one failure you most need to know about was the one designed
+/// to disappear. It is the same argument [`ApiError`] already won for the API in
+/// v0.162.0: the only record of a failure was the thing that made it.
+///
+/// Deliberately a **separate** record and a separate file from [`ApiError`].
+/// These are not HTTP: there is no status code, no caller and no request body,
+/// and mixing them would break `GET /api/errors`, whose contract is "every
+/// 4xx/5xx this API answered".
+#[derive(Clone, Debug, Serialize)]
+pub struct AppError {
+    pub seq: u64,
+    /// Unix seconds.
+    pub ts: u64,
+    /// What was being attempted, in the app's own words: `save`, `history`,
+    /// `backup`, `plugin`, `settings`, `restart`, `export`, `ocr`.
+    pub op: String,
+    /// The failure as the operator would read it.
+    pub error: String,
+    /// What it was acting on when there is one — a file path, a plugin name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+}
+
+impl AppError {
+    pub fn new(op: impl Into<String>, error: impl Into<String>) -> Self {
+        Self { seq: 0, ts: 0, op: op.into(), error: error.into(), subject: None }
+    }
+
+    pub fn about(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+}
+
+impl LoggedError for AppError {
+    fn stamp(&mut self, seq: u64, ts: u64) {
+        self.seq = seq;
+        self.ts = ts;
+    }
+    fn seq(&self) -> u64 {
+        self.seq
+    }
+}
+
+/// Where the app's own failure log lives: `<data-dir>/trellis/app-errors.log`,
+/// beside `api-errors.log`.
+pub fn app_error_log_path(data_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    error_log_path(data_dir).map(|p| p.with_file_name("app-errors.log"))
+}
+
 /// The on-disk log rotates at this size, once, to `<name>.1`. Two megabytes of
 /// failures is thousands of them; older than that is not worth a third file.
 const ERROR_FILE_ROTATE_BYTES: u64 = 1 << 20;
@@ -408,8 +498,8 @@ pub fn error_log_path(data_dir: Option<&std::path::Path>) -> Option<std::path::P
 /// follows the change log needs nothing new. The file answers *last week*: one
 /// JSON object per line, appended as each failure happens, so it survives a
 /// restart and a crash, and reads with `tail -f` or `jq`.
-pub struct ErrorLog {
-    entries: VecDeque<ApiError>,
+pub struct ErrorLog<E: LoggedError = ApiError> {
+    entries: VecDeque<E>,
     cap: usize,
     epoch: u64,
     next_seq: u64,
@@ -420,7 +510,7 @@ pub struct ErrorLog {
     file_error: Option<String>,
 }
 
-impl ErrorLog {
+impl<E: LoggedError> ErrorLog<E> {
     pub fn new(cap: usize, epoch: u64, file: Option<std::path::PathBuf>) -> Self {
         Self {
             entries: VecDeque::new(),
@@ -440,13 +530,12 @@ impl ErrorLog {
     /// Record one failure: stamps `seq` and `ts`, keeps it in memory, and
     /// appends it to the file. Nothing collapses — two identical failures are
     /// two failures, and the count is the point.
-    pub fn push(&mut self, mut e: ApiError) {
-        // One choke point for both copies: a credential a caller put in the
-        // query string never reaches memory OR the file. See `redact_query`.
-        e.path = redact_query(&e.path);
-        e.seq = self.next_seq;
+    pub fn push(&mut self, mut e: E) {
+        // One choke point for memory and file alike, so no call site can forget
+        // it — for an `ApiError` this is the query-string redaction.
+        e.sanitize();
+        e.stamp(self.next_seq, now_secs());
         self.next_seq += 1;
-        e.ts = now_secs();
         self.total += 1;
         self.write_line(&e);
         self.entries.push_back(e);
@@ -455,7 +544,7 @@ impl ErrorLog {
         }
     }
 
-    fn write_line(&mut self, e: &ApiError) {
+    fn write_line(&mut self, e: &E) {
         let Some(path) = self.file.clone() else { return };
         let result = (|| -> std::io::Result<()> {
             if let Some(dir) = path.parent() {
@@ -486,10 +575,10 @@ impl ErrorLog {
     /// Everything after `since`, oldest first, capped at `limit`; the `bool` is
     /// **truncated** — entries the caller needed have rotated out of memory.
     /// The file still has them.
-    pub fn since(&self, since: u64, limit: usize) -> (Vec<ApiError>, bool) {
-        let truncated = self.entries.front().is_some_and(|first| since + 1 < first.seq);
-        let out: Vec<ApiError> =
-            self.entries.iter().filter(|c| c.seq > since).take(limit).cloned().collect();
+    pub fn since(&self, since: u64, limit: usize) -> (Vec<E>, bool) {
+        let truncated = self.entries.front().is_some_and(|first| since + 1 < first.seq());
+        let out: Vec<E> =
+            self.entries.iter().filter(|c| c.seq() > since).take(limit).cloned().collect();
         (out, truncated)
     }
 
@@ -503,11 +592,11 @@ impl ErrorLog {
     }
 
     pub fn newest(&self) -> u64 {
-        self.entries.back().map(|c| c.seq).unwrap_or(0)
+        self.entries.back().map(|c| c.seq()).unwrap_or(0)
     }
 
     pub fn oldest(&self) -> Option<u64> {
-        self.entries.front().map(|c| c.seq)
+        self.entries.front().map(|c| c.seq())
     }
 
     pub fn file(&self) -> Option<&std::path::Path> {
@@ -748,6 +837,47 @@ mod tests {
         assert_eq!(lines[0]["request"], r#"{"body":""}"#);
         assert_eq!(lines[0]["remote"], "127.0.0.1", "the caller's address is on the disk copy too");
         assert_eq!(lines[2]["path"], "/api/nodes/1/cards?x=1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The app's own failures get a log of their own.** Same machinery — one
+    /// `write_line`, one rotation, one remembered file error — a different
+    /// record and a different file. Before v0.165.0 a failed save was reported
+    /// by assigning to the status bar and nowhere else, so the next status
+    /// message erased the only evidence it had happened.
+    #[test]
+    fn the_app_error_log_records_what_the_app_failed_at() {
+        let dir = std::env::temp_dir().join(format!("trellis-apperr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = app_error_log_path(Some(&dir)).unwrap();
+        assert!(file.ends_with("trellis/app-errors.log"), "{}", file.display());
+        assert_ne!(file, error_log_path(Some(&dir)).unwrap(), "its own file, beside the API's");
+
+        let mut l: ErrorLog<AppError> = ErrorLog::new(10, 5, Some(file.clone()));
+        l.push(AppError::new("save", "Save failed: Input/output error"));
+        l.push(
+            AppError::new("history", "Version history: could not write snapshot")
+                .about("/media/veracrypt1/Personal.ron"),
+        );
+        assert_eq!(l.total(), 2);
+        let (got, truncated) = l.since(0, 10);
+        assert!(!truncated);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].seq, 1);
+        assert_eq!(got[1].seq, 2);
+        assert!(got[0].ts > 1_700_000_000, "push stamps the time");
+
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&file)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["op"], "save");
+        assert_eq!(lines[0]["epoch"], 5);
+        assert!(lines[0].get("subject").is_none(), "no subject, no field");
+        assert_eq!(lines[1]["subject"], "/media/veracrypt1/Personal.ron");
+        assert!(lines[0].get("status").is_none(), "an app failure has no HTTP status");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
