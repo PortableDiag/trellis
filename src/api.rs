@@ -1470,6 +1470,17 @@ pub struct AddCardInput {
     /// RGB title-bar accent (array, hex, or name — see `de_color_opt`).
     #[serde(default, deserialize_with = "de_color_opt")]
     color: Option<[u8; 3]>,
+    /// A pattern instead of a flat accent — the same object `PATCH` takes,
+    /// through the same colour parser, so `{"from":"blue","to":"dark blue"}`
+    /// works here exactly as it does there.
+    ///
+    /// **A card can be born with one.** It could only be PATCHed on until
+    /// v0.171.0, which made every patterned card a create-then-PATCH pair for no
+    /// reason: `color` has always been accepted here, a fill goes exactly where a
+    /// flat colour goes, and the same argument already settled `channel` in
+    /// v0.163.0. `null` is simply no fill, since there is nothing yet to clear.
+    #[serde(default, deserialize_with = "de_fill_new")]
+    fill: Option<crate::model::Fill>,
     /// Base64 image bytes for an `image` card's first image (name = `title`).
     #[serde(default)]
     image_base64: Option<String>,
@@ -3346,6 +3357,18 @@ where
         serde_json::from_value(v).map_err(serde::de::Error::custom)?;
     fill.sanitize();
     Ok(Some(Some(fill)))
+}
+
+/// A fill on **create**: the same parsing as [`de_fill_clear`] without the
+/// clear, because a card that does not exist yet has nothing to clear. Sharing
+/// the body rather than the signature keeps the colour parser and the
+/// `sanitize` — including the photosensitivity cap on `speed` — in one place; a
+/// second copy is how a create path ends up accepting what a patch refuses.
+fn de_fill_new<'de, D>(d: D) -> Result<Option<crate::model::Fill>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(de_fill_clear(d)?.flatten())
 }
 
 /// Rewrite every colour-shaped member of a fill object through
@@ -5751,6 +5774,10 @@ fn add_one(doc: &mut Document, node: NodeId, input: AddCardInput) -> Result<u64,
                         if let Some(col) = input.color {
                             c.color = col;
                         }
+                        // Already sanitised by `de_fill_new`, which shares
+                        // `de_fill_clear`'s body — so the photosensitivity cap on
+                        // `speed` is the same one the patch path applies.
+                        c.fill = input.fill;
                         if let Some([w, h]) = input.size {
                             c.size = egui::vec2(w, h).max(egui::vec2(80.0, 60.0));
                         }
@@ -7550,6 +7577,65 @@ mod tests {
         doc.nodes.get_mut(&n).unwrap().feed = false;
         let (_, r) = process(&mut doc, ApiRequest::Autosort(n));
         assert_eq!(r.status, 200, "a canvas again: {}", r.body);
+    }
+
+    /// **A card can be born with a pattern, and the speed cap holds on create.**
+    ///
+    /// `fill` was a PATCH-only field, so every patterned card was a
+    /// create-then-PATCH pair for no reason — `color` has always been accepted on
+    /// create, and a fill goes exactly where a flat colour goes. Found while
+    /// testing the pattern border: the obvious create call was a 400.
+    ///
+    /// The cap matters more than the convenience: `speed` is a photosensitivity
+    /// limit, not a taste one, so a create path that skipped `sanitize` would be
+    /// a way around it.
+    #[test]
+    fn a_card_can_be_created_with_a_fill_and_the_speed_cap_still_applies() {
+        let mut doc = crate::model::Document::empty();
+        let n = doc.add_node(None, "n".into());
+
+        let (dirty, r) = process(
+            &mut doc,
+            route(
+                &Method::Post,
+                &format!("/api/nodes/{n}/cards"),
+                "",
+                r#"{"title":"striped","fill":{"pattern":"stripes","a":"orange","b":"dark red","speed":9.0}}"#,
+            )
+            .expect("create with a fill parses"),
+        );
+        assert_eq!(r.status, 201, "created: {}", r.body);
+        assert!(dirty);
+
+        let c = &doc.nodes[&n].cards[0];
+        let f = c.fill.as_ref().expect("the fill landed on the card");
+        match f {
+            crate::model::Fill::Stripes { speed, .. } => assert!(
+                *speed <= 0.5,
+                "the photosensitivity cap is applied on create too, not just on patch: {speed}"
+            ),
+            _ => panic!("wrong pattern stored"),
+        }
+
+        // A create without one is still a plain card, and a bad pattern is still
+        // refused rather than silently dropped.
+        let (_, r) = process(
+            &mut doc,
+            route(&Method::Post, &format!("/api/nodes/{n}/cards"), "", r#"{"title":"plain"}"#)
+                .expect("plain create parses"),
+        );
+        assert_eq!(r.status, 201);
+        assert!(doc.nodes[&n].cards[1].fill.is_none(), "no fill unless asked for");
+        assert!(
+            route(
+                &Method::Post,
+                &format!("/api/nodes/{n}/cards"),
+                "",
+                r#"{"title":"x","fill":{"pattern":"nonsense"}}"#
+            )
+            .is_err(),
+            "an unknown pattern is refused on create as it is on patch"
+        );
     }
 
     /// **The image upload names the field you actually sent.**

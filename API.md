@@ -623,7 +623,7 @@ for a search hit that matched a **node title** rather than a card.
 POST /api/nodes            {title, parent?}
   → 201 {"id":<new>}   | 400 if parent doesn't exist
 
-POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, color?, font_scale?, fit?, image_base64?, inline_images?, source?, channel?}
+POST /api/nodes/{id}/cards {kind?, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, color?, fill?, font_scale?, fit?, image_base64?, inline_images?, source?, channel?}
   → 201 {"id":<cid>}
 
 POST /api/nodes/{id}/cards [ {…}, {…} ]      the SAME endpoint, given an array
@@ -735,9 +735,23 @@ unrecognized color is a `400`, so a successful response means the color was
 applied.
 
 **Patterns** (v0.168.0) — a card or group takes a `fill`, and a node takes a
-`bg_fill`, painted where the flat color used to be:
+`bg_fill`, painted where the flat color used to be.
+
+**On a card that means the title bar *and the border*** (v0.171.0). A fill
+reached the title bar alone at first, which on a card that is mostly body is a
+strip you have to look for; the border is the part you see from across a basket.
+The pattern's geometry spans the **whole card** and only the edge band is drawn,
+so a gradient still runs corner to corner and stripes still travel at their own
+angle — you are seeing them through a frame, not four unrelated slivers. Every
+card style keeps its own outline, rules and corner marks, and `color` still
+drives every stroke.
+
+**`fill` is accepted on create as well as PATCH** (v0.171.0), through the same
+parser — so colour names and hex work identically and `speed` is capped the same
+way. Before that, every patterned card was a create-then-PATCH pair.
 
 ```jsonc
+POST  /api/nodes/{id}/cards {"title":"striped", "fill": {"pattern":"stripes","a":"orange","b":"dark red"}}
 PATCH /api/cards/{cid}   {"fill": {"pattern":"gradient","from":"blue","to":"dark blue","angle":45}}
 PATCH /api/cards/{cid}   {"fill": {"pattern":"stripes","a":"green","b":"dark green","angle":45,"width":14}}
 PATCH /api/cards/{cid}   {"fill": {"pattern":"corners","tl":"cyan","tr":"pink","br":"cyan","bl":"pink"}}

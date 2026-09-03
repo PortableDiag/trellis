@@ -2322,6 +2322,9 @@ fn card_ui(
 
     // The effective title-bar background (for picking a readable title color).
     let mut title_bg;
+    // The rounding this style's frame actually uses. A pattern border has to
+    // follow the frame it sits inside, and every style draws a different one.
+    let frame_r;
     // --- card frame, per theme ---------------------------------------------
     match env.style {
         CardStyle::Sticky => {
@@ -2334,6 +2337,7 @@ fn card_ui(
                 accent
             };
             title_bg = paper;
+            frame_r = r;
             p.rect_filled(rect, r, paper);
             p.rect_stroke(rect, r, egui::Stroke::new(1.0, darken(paper, 0.72)));
             // A faint divider under the title keeps it readable without a
@@ -2351,6 +2355,9 @@ fn card_ui(
             // corners beveled, and a bright accent edge. A brighter diagonal on
             // the top-right cut plays up the skew (content stays axis-aligned).
             title_bg = mix(panel, accent, 0.30);
+            // Square: the frame is a bevelled polygon, and a rounded band would
+            // sit proud of the two cut corners.
+            frame_r = 0.0;
             p.add(egui::Shape::convex_polygon(
                 bevel_diag(rect, bevel_c),
                 panel,
@@ -2374,6 +2381,7 @@ fn card_ui(
             // *title block* — the double rule under the title is the whole
             // convention, so it is drawn rather than implied by a fill.
             title_bg = mix(panel, accent, 0.18);
+            frame_r = 0.0;
             p.rect_filled(rect, 0.0, panel);
             p.rect_stroke(rect, 0.0, egui::Stroke::new(1.0 * zoom.max(0.6), accent));
             p.rect_filled(title_rect, 0.0, accent.gamma_multiply(0.16));
@@ -2406,6 +2414,7 @@ fn card_ui(
             // one detail that makes the theme read as a board rather than as
             // "green".
             title_bg = mix(panel, accent, 0.28);
+            frame_r = r * 0.5;
             p.rect_filled(rect, r * 0.5, panel);
             p.rect_stroke(rect, r * 0.5, egui::Stroke::new(1.4 * zoom.max(0.6), accent));
             p.rect_filled(title_rect, r * 0.5, accent.gamma_multiply(0.26));
@@ -2420,6 +2429,7 @@ fn card_ui(
             // trace over the graticule, with a brighter run under the title —
             // the beam, not a header bar.
             title_bg = panel;
+            frame_r = r;
             p.rect_filled(rect, r, panel.gamma_multiply(0.82));
             p.rect_stroke(rect, r, egui::Stroke::new(1.2 * zoom.max(0.6), accent));
             p.line_segment(
@@ -2432,6 +2442,7 @@ fn card_ui(
         }
         CardStyle::Normal => {
             title_bg = mix(panel, accent, 0.35);
+            frame_r = r;
             p.rect_filled(rect, r, panel);
             p.rect_stroke(rect, r, egui::Stroke::new(1.0, accent));
             p.rect_filled(title_rect, r, accent.gamma_multiply(0.35));
@@ -2458,6 +2469,12 @@ fn card_ui(
             t
         };
         paint_fill(&p, title_rect, r, f, mix(panel, accent, 0.35), zoom, t);
+        // **And around the whole card.** A fill used to reach the title bar
+        // alone, which on a card that is mostly body is a strip you have to look
+        // for — the operator reported the patterns as not appearing anywhere
+        // else. The border is the part of a card you see from across a basket,
+        // and it is what a colour was already for.
+        paint_fill_border(&p, rect, frame_r, f, accent, zoom, t);
         // Text contrast is judged against the fill's average, since the bar is
         // no longer one colour and no single sample would be right.
         let k = f.key_color();
@@ -4273,6 +4290,49 @@ fn snap_position(
 /// 6px radius the app uses, the corner sliver that shows is the base colour,
 /// which is the right colour to show. Doing it properly would mean tessellating
 /// a rounded path per fill, for a difference nobody can see.
+/// Paint a [`Fill`](crate::model::Fill) as a **band around the edge** of `rect`.
+///
+/// The pattern's geometry spans the whole card, and only the edge band is drawn —
+/// so a gradient still runs corner to corner and stripes still travel at their
+/// own angle, they are simply seen through a frame. Computing it over the band
+/// alone would restart the pattern on each of the four sides and give four
+/// unrelated slivers.
+///
+/// Four clipped calls rather than one ring, because a clip rectangle is a
+/// rectangle: egui has no ring clip, and painting the fill then covering the
+/// middle would have to know each style's body colour.
+pub(crate) fn paint_fill_border(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    rounding: f32,
+    fill: &crate::model::Fill,
+    base: egui::Color32,
+    zoom: f32,
+    time: f64,
+) {
+    // Thick enough to read as a border from across a basket, thin enough not to
+    // become the card. Scales with zoom like every other dimension here, with a
+    // floor so it never vanishes entirely when zoomed out.
+    let w = (4.0 * zoom).max(1.5);
+    if !rect.is_positive() || rect.width() <= w * 2.0 || rect.height() <= w * 2.0 {
+        return;
+    }
+    let inner = rect.shrink(w);
+    let bands = [
+        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), inner.top())),
+        egui::Rect::from_min_max(egui::pos2(rect.left(), inner.bottom()), rect.right_bottom()),
+        egui::Rect::from_min_max(egui::pos2(rect.left(), inner.top()), egui::pos2(inner.left(), inner.bottom())),
+        egui::Rect::from_min_max(egui::pos2(inner.right(), inner.top()), egui::pos2(rect.right(), inner.bottom())),
+    ];
+    for band in bands {
+        if !band.is_positive() {
+            continue;
+        }
+        let clipped = painter.with_clip_rect(band.intersect(painter.clip_rect()));
+        paint_fill(&clipped, rect, rounding, fill, base, zoom, time);
+    }
+}
+
 pub(crate) fn paint_fill(
     painter: &egui::Painter,
     rect: egui::Rect,

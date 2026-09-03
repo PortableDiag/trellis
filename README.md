@@ -38,7 +38,10 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   so no two cards come out the same. Painted as geometry rather than an image, so
   it stays sharp at any zoom; the flat color is kept underneath and is still what
   every outline and tree dot uses, so a document opened in an older build just
-  shows the plain color again. There is also **grain**, and any pattern with an
+  shows the plain color again. A card wears its pattern on **the title bar and
+  the border**, with the pattern running across the whole card and the border
+  showing you a band of it — so a gradient still runs corner to corner rather
+  than restarting on each side. There is also **grain**, and any pattern with an
   axis can **slowly drift** — capped well under the rate that is a
   photosensitivity risk, and only asking for frames while something moves. A card
   with a still pattern drifts **while it is emphasised** and stops when the

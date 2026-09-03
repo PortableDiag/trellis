@@ -6,6 +6,42 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.171.0]
+
+### Changed
+- **A pattern now runs around the card's border, not just its title bar.**
+  Reported by the operator: *"the new patterns dont appear anywhere but the title
+  bar"*. They were painted into `title_rect` alone — which on a card that is
+  mostly body is a strip you have to look for, when the border is the part you
+  actually see from across a basket, and is what a colour was already for.
+
+  **The pattern's geometry still spans the whole card**, and only the edge band
+  is drawn — so a gradient runs corner to corner and stripes travel at their own
+  angle, seen through a frame. Computing it over the band alone would restart the
+  pattern on each of the four sides and give four unrelated slivers. Drawn as
+  four clipped calls rather than one ring, because a clip rectangle is a
+  rectangle: egui has no ring clip, and painting the fill then covering the
+  middle would have to know each style's body colour.
+
+  Every card style keeps its own frame — the band follows the rounding that style
+  actually draws (square for Blueprint and Futuristic, half-round for Silkscreen),
+  and the outline, rules, corner ticks and pin-1 dot are all untouched. `color`
+  still drives every stroke, so a card with a fill is never left without an
+  outline colour.
+
+### Added
+- **A card can be born with a fill.** `fill` was PATCH-only, so every patterned
+  card was a create-then-PATCH pair for no reason — `color` has always been
+  accepted on create, and a fill goes exactly where a flat colour goes. The same
+  argument settled `channel` in v0.163.0. Found while testing the border: the
+  obvious create call was a 400.
+
+  It goes through **the same deserialiser as the patch**, sharing
+  `de_fill_clear`'s body rather than its signature, so colour names and hex work
+  identically and — the part that matters — `sanitize` runs, keeping the **0.5
+  cycles/sec photosensitivity cap** on `speed`. A create path with its own copy
+  of that parsing is how a create path ends up accepting what a patch refuses.
+
 ## [0.170.2]
 
 ### Fixed

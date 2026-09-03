@@ -9383,7 +9383,7 @@ impl TrellisApp {
                             "POST   /api/daily  {date?}                (a day's journal node, created on demand; opt-in per instance)",
                             "GET    /api/daily                         (is it on, and which node is the journal root)",
                             "POST   /api/daily/root {node}   /   DELETE /api/daily/root   (turn it on / off)",
-                            "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, fit?, image_base64?, inline_images?, source?, channel?}",
+                            "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, color?, fill?, fit?, image_base64?, inline_images?, source?, channel?}",
                             "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body? (REPLACES it — append adds), kind?, color?, fill?, font_scale?, fit?, pos?, z?, size?, items?, source?, emphasis?, emphasis_intensity?, emphasis_minutes?, …}",
                             "         COLORS: 44 swatches — 14 hues x 3 shades ('blue', 'light blue', 'dark blue'; either word order) + white/black, which take no shade word. Or hex/[r,g,b] for any of the 16.7M.",
                             "         fill = a PATTERN instead of the flat color, on a card or group:",
