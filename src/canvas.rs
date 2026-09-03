@@ -4432,17 +4432,23 @@ pub(crate) fn fill_menu(
             cols.remove(i);
         }
     });
+    // **The grid is inline, not behind "Add a color…".** It was a submenu, and
+    // picking a colour called `ui.close_menu()` — which in egui closes the whole
+    // chain, not the submenu — so every colour after the first meant navigating
+    // back in from the card menu. Reported by the operator, and correctly:
+    // building a list is repeated clicking, so nothing may close between clicks.
     if cols.len() < 6 {
-        ui.menu_button("Add a color…", |ui| {
-            if let Some(c) = swatch_grid(ui) {
-                cols.push(c);
-                ui.ctx().memory_mut(|m| m.data.insert_temp(id, cols.clone()));
-                ui.close_menu();
-            }
-        });
+        ui.label(egui::RichText::new("Add a color").small().weak());
+        if let Some(c) = swatch_grid(ui) {
+            cols.push(c);
+            ui.ctx().memory_mut(|m| m.data.insert_temp(id, cols.clone()));
+        }
     } else {
-        ui.add_enabled(false, egui::Button::new("Add a color…"))
-            .on_disabled_hover_text("Six is the most a pattern can cycle before the bands stop reading");
+        ui.label(
+            egui::RichText::new("Six colors is the most a pattern can cycle")
+                .small()
+                .weak(),
+        );
     }
     ui.ctx().memory_mut(|m| m.data.insert_temp(id, cols.clone()));
     ui.separator();
@@ -4580,7 +4586,11 @@ pub(crate) fn swatch_grid(ui: &mut egui::Ui) -> Option<[u8; 3]> {
     // Anything at all. The document has always stored a plain RGB triple and the
     // API has always accepted `#rrggbb`, so this adds no format — it only lets
     // the app reach what the file could already hold.
-    ui.menu_button("Custom…", |ui| {
+    // **A collapsing section, not a submenu.** `ui.close_menu()` closes the
+    // whole menu chain — egui has no "close just this level" — so a Custom
+    // picker nested as a submenu had to either close everything or leave itself
+    // open on top of its parent. Inline, it needs no close at all.
+    egui::CollapsingHeader::new("Custom…").id_salt("custom-swatch-head").show(ui, |ui| {
         let id = ui.id().with("custom-swatch");
         let mut c = ui
             .ctx()
@@ -4599,7 +4609,6 @@ pub(crate) fn swatch_grid(ui: &mut egui::Ui) -> Option<[u8; 3]> {
         });
         if ui.button("Use this color").clicked() {
             picked = Some(rgb);
-            ui.close_menu();
         }
     });
 

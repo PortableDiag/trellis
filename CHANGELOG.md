@@ -6,6 +6,21 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.169.1]
+
+### Fixed
+- **Picking a colour for a pattern closed the whole menu.** The swatch grid sat
+  behind an *"Add a color…"* submenu, and picking called `ui.close_menu()` —
+  which in egui closes the entire menu chain, not the submenu, because there is
+  no "close just this level". So every colour after the first meant navigating in
+  from the card menu again, which for a feature whose whole point is *building a
+  list* made it unusable. Reported by the operator.
+  The grid is now **inline** in the Pattern menu: click a colour, it joins the
+  list, nothing closes. The **Custom…** picker became a collapsing section for
+  the same reason — as a submenu it could only close everything or sit on top of
+  its parent. The menu now closes on exactly two things, both of which finish the
+  job: picking a pattern, and *No pattern*.
+
 ## [0.169.0]
 
 ### Added
