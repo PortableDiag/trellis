@@ -6,6 +6,64 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.170.0]
+
+### Fixed
+- **A table cell wraps inside its column, and the row grows to hold it.**
+  Reported by the operator against a 19x4 comparison table of prose: *"tables,
+  they suck to view when they have long strings … that is an example table with a
+  lot of important content and its a nightmare to read"*. Every cell was laid out
+  with `layout_no_wrap` and painted into a flat 24 px rect, so a cell longer than
+  its column showed its first few words and the rest was simply **clipped** — and
+  resizing the *card* did not help, because the column is what the text has to
+  fit. A cell now wraps at its column's width and a row is as tall as its tallest
+  cell.
+- **…and *Fit to content* now works on a table**, which the same report named:
+  *"currently fit to content doesnt even work on tables either"*. Both halves of
+  the measurement were wrong. Every row was counted at a flat 24 px whatever it
+  held, so the card came out far too short — 496 px for a table needing 2900. And
+  the width was clamped to `MAX_W` like a text card's, but **a table cannot
+  reflow to a narrower card**: its columns sit side by side, so that clamp did
+  not wrap anything, it hid the last columns. A table's width is now capped only
+  by what its columns can legitimately be.
+
+  The renderer and `fit_size` **move together**, which is the whole reason this
+  is one change: v0.128.2 shipped checklist *sizing* for a wrap the renderer did
+  not do and was reverted within the hour. `fit_size` estimates from the same
+  per-character widths `autofit_width` uses and errs **high** on purpose — a row
+  an eighth too tall has space under it, a row too short hides the end of a
+  sentence — and the canvas measures the real galleys. A test pins both, and that
+  the estimate never comes out under the render.
+
+### Added
+- **Fit columns to content, from the UI.** `autofit_cols` has existed since
+  v0.102.0 and was reachable **only over the API**, which is why the operator's
+  table looked unfixable from where they were sitting: right-click → *Fit columns
+  to content* on any table card, a **fit cols** button beside *+ row* / *+ col*
+  in the table toolbar, and *Fit this column to its content* / *Fit every column*
+  in a column's own context menu. The card menu puts it directly above *Fit to
+  content*, because that is the order: the columns decide how many lines a row
+  takes, so fitting the card first measures a shape nobody wants to read.
+- **The image upload names the field you actually sent.** `AddImageInput` and
+  `GroupCardInput` were the last two inputs in `api.rs` without
+  `deny_unknown_fields`, missed by the v0.86.0 sweep that made every other input
+  strict. The cost was specific and repeated: `POST …/images
+  {"image_base64": "…"}` had the unknown field silently dropped and came back
+  *missing field `data_base64`* — true, and no help at all to a caller looking
+  at the field they had just filled in. **Three failed uploads by two different
+  agents on three separate days**, every one the same guess, and the answer
+  never once mentioned what they had typed. It now says `unknown field
+  'image_base64'` and lists the fields there are. Read out of
+  `api-errors.log` on both instances.
+
+- **`col_widths` in a table card's JSON** — read-only, always present, one width
+  per column with the 110 px default filled in for a column nothing has sized.
+  Widths have been writable since v0.102.0 (`set_col_width`, `autofit_cols`) and
+  were **never readable**: an agent could size a column and not check it, and one
+  laying out a table was working from a number it had to assume. Found while
+  fitting a table over the API — autofit visibly changed the card's size while
+  the JSON went on saying `null`.
+
 ## [0.169.3]
 
 ### Fixed

@@ -99,6 +99,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `items` | checklist | `[{ "done": bool, "text": string }]` |
 | `image_name`, `image_names`, `bytes` | image | first/all image names + total byte count (read); set image bytes via the images sub-resource (below) |
 | `rows`, `header` | table | `rows` set: `[["a","b"],…]` bulk-replaces cell text (colors reset); get: cells as `{text,bg,fg}`. `header` (bool) toggles the header row. Fine-grained edits (cell colors, widths, row/col ops) use the table sub-resource (below) |
+| `col_widths` | table | **read-only**, always present: every column's pixel width, in order, with the 110px default filled in for a column nothing has sized. Set them with `set_col_width` / `autofit_cols`. They were writable and unreadable until v0.170.0, so an agent could size a column and never check it, and one laying out a table was working from a number it had to guess |
 | `chart` | table | how the table is drawn as a chart (`{kind,label_col,value_cols,show_table}`), or `null` for a plain grid. Set via the chart sub-resource (below) |
 | `strokes` | sketch | read: `[{color:[r,g,b], width, points:[[x,y],…]}, …]`. Edit via the sketch sub-resource (below) |
 | `touched` | all | unix seconds when this card last changed (read-only; omitted entirely if it never has). The document's only timestamp — unlike `/api/changes` it survives a restart |
@@ -1079,13 +1080,18 @@ stands at that point in the list — puts the table back as it was and answers 4
 naming the op (v0.163.4). Before that, such a failure stopped the loop and left
 the earlier ops in place, which a 46-op batch discovered the hard way.
 
-Columns are **110px** until something changes them, and cell text does not wrap —
-so a table built from `rows` clips anything longer than that. **`autofit_cols`
-after filling a table** and the columns size themselves to their longest cell
-(bounded at 600px, so one runaway cell can't produce an unusable card). Note that
-`"fit": true` on a table card sizes the card's *frame* around the widths the
-columns already have; it does not widen the columns. Fit the columns first, then
-the card:
+Columns are **110px** until something changes them, and **a cell wraps inside its
+column, taking its row down with it** (v0.170.0) — before that a cell was laid out
+on one endless line and simply clipped, so a table of prose showed the first few
+words of each cell and no amount of resizing the *card* helped, because the column
+is what the text has to fit. **`autofit_cols` after filling a table** and the
+columns size themselves to their longest cell (bounded at 600px, so one runaway
+cell can't produce an unusable card); anything still longer than that wraps.
+
+`"fit": true` on a table card sizes the card's *frame* — around the widths the
+columns already have, and around **the rows those widths wrap the cells to**. It
+does not widen the columns, so fit the columns first and the card second; the
+order matters, because the columns are what decide how many lines a row takes:
 
 ```bash
 curl -s -H "X-API-Key: $KEY" -d '{"op":"autofit_cols"}' $API/nodes/$NID/cards/1/table
@@ -2907,6 +2913,14 @@ you the right name immediately. (`pos` is the one above — a card's position is
 Before this, such a request returned **200** and did nothing, which is
 indistinguishable from success. If you are writing a client, this is the change
 most likely to surface a bug you already had.
+
+**Two inputs were missed by that sweep and joined it in v0.170.0**: the inline
+image upload (`POST …/cards/{cid}/images`) and the group-join body. The image one
+had a measurable cost — `{"image_base64": "…"}` had the unknown field dropped and
+came back *missing field `data_base64`*, which is true and no help at all to a
+caller looking at the field they just filled in. Three failed uploads by two
+agents on three separate days, all the same guess. If a field name is ever
+refused where it used to be ignored, that is this.
 
 ## Examples
 

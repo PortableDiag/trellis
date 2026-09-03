@@ -544,6 +544,11 @@ impl Default for ChartSpec {
 pub const FIT_MAX_H: f32 = 6000.0;
 
 pub const TABLE_DEFAULT_COL_W: f32 = 110.0;
+/// The shortest a row is drawn, and the height of every row that holds nothing
+/// longer than its column. Lives here rather than in `canvas.rs` because
+/// [`Card::fit_size`] has to agree with the renderer about it, and two copies of
+/// a number the two must agree on is how they stop agreeing.
+pub const TABLE_ROW_H: f32 = 24.0;
 /// Narrowest and widest a column may be set to, by drag, by `set_col_width`, or
 /// by autofit.
 pub const TABLE_MIN_COL_W: f32 = 28.0;
@@ -603,6 +608,44 @@ impl TableData {
             .map(|cell| cell_text_width(&cell.text))
             .fold(0.0_f32, f32::max);
         (widest + CELL_PAD).clamp(MIN_READABLE, TABLE_MAX_COL_W)
+    }
+
+    /// How tall row `r` is drawn, given that **a cell wraps inside its column**.
+    ///
+    /// A table cannot wrap between columns — they sit side by side — so the only
+    /// way a long cell is ever readable is to wrap it inside the width its column
+    /// has and let the row grow. Every row used to be a flat [`TABLE_ROW_H`] and
+    /// every cell was laid out on one unwrapped line, so a table of prose showed
+    /// the first few words of each cell and cut the rest off, and no amount of
+    /// resizing the *card* helped, because the column is what the text has to fit.
+    ///
+    /// This **estimates**, from the same per-character widths `autofit_width`
+    /// uses; the canvas lays out real galleys. They must agree, and the estimate
+    /// deliberately errs **high**: a row an eighth too tall has a little space
+    /// under it, a row too short hides the end of a sentence. Sizing that assumed
+    /// a wrap the renderer did not do is exactly how v0.128.2 shipped and was
+    /// reverted within the hour, which is why the render test moves with this.
+    pub fn row_height(&self, r: usize) -> f32 {
+        // The 4px inset each side of a cell, and the breathing room under a row.
+        const CELL_PAD_X: f32 = 8.0;
+        const CELL_PAD_Y: f32 = 6.0;
+        let line_h = TABLE_FONT_PX * 1.3;
+        let Some(row) = self.rows.get(r) else { return TABLE_ROW_H };
+        let mut lines: f32 = 1.0;
+        for (c, cell) in row.iter().enumerate() {
+            let wrap_w = (self.col_width(c) - CELL_PAD_X).max(TABLE_FONT_PX);
+            // Word wrapping only ever needs MORE lines than the text's total
+            // width divided by the column's, because a word that will not fit on
+            // the tail of a line moves down whole. The 1.15 is that slack.
+            let n = (cell_text_width(&cell.text) * 1.15 / wrap_w).ceil().max(1.0);
+            lines = lines.max(n);
+        }
+        (lines * line_h + CELL_PAD_Y).max(TABLE_ROW_H)
+    }
+
+    /// The height of the whole grid: every row at the height it is drawn.
+    pub fn grid_height(&self) -> f32 {
+        (0..self.rows.len()).map(|r| self.row_height(r)).sum()
     }
 
     /// A fresh `rows` x `cols` empty table.
@@ -1803,11 +1846,15 @@ impl Card {
                 (want_w, rows * line_h + per_item_pad + 28.0)
             }
             CardKind::Table { table } => {
-                let cols = table.rows.first().map(|r| r.len()).unwrap_or(0);
+                // **A row is not one line.** Every row was counted at a flat 24 px
+                // whatever it held, so fitting a table of prose produced a card
+                // far too short to show it — which, together with the `MAX_W`
+                // clamp below cutting the last columns off, is why *Fit to
+                // content* looked like it simply did not work on tables.
+                let cols = table.n_cols();
                 let cols_w: f32 = (0..cols).map(|c| table.col_width(c)).sum();
-                let rows = table.rows.len() as f32;
                 // + row-number handle; + column-letter strip
-                (20.0 + cols_w, 24.0 + rows * 24.0)
+                (20.0 + cols_w, 24.0 + table.grid_height())
             }
             CardKind::Sketch { strokes } => {
                 let mut maxx = 0.0f32;
@@ -1824,7 +1871,18 @@ impl Card {
 
         let w = (content_w + PAD * 2.0).max(title_w);
         let h = TITLE_H + PAD * 2.0 + content_h;
-        Some(egui::vec2(w.clamp(MIN_W, MAX_W), h.clamp(MIN_H, FIT_MAX_H)))
+        // **A table is the one kind that cannot reflow to a narrower card.** Text
+        // and checklists wrap, so clamping their width to `MAX_W` costs height and
+        // nothing else; a table's columns sit side by side, so the same clamp does
+        // not reflow anything — it hides the last columns. Its cap is the widest a
+        // table can legitimately be: every column autofitted to `TABLE_MAX_COL_W`.
+        let max_w = match &self.kind {
+            CardKind::Table { table } => {
+                (table.n_cols() as f32 * TABLE_MAX_COL_W + 20.0).max(MAX_W)
+            }
+            _ => MAX_W,
+        };
+        Some(egui::vec2(w.clamp(MIN_W, max_w), h.clamp(MIN_H, FIT_MAX_H)))
     }
 
     /// Display `(width, height)` of each inline image actually referenced by the
@@ -10242,6 +10300,57 @@ mod tests {
         assert!(long.x > short.x, "a long item still widens the card");
         // The width is clamped, which is precisely why the wrap happens at all.
         assert!(long.x <= 900.0, "width stays clamped to MAX_W: {}", long.x);
+    }
+
+    /// **Fit to content, on a table.** Reported by the operator on 2026-09-03
+    /// against a 19x4 table of prose: *"they suck to view when they have long
+    /// strings … currently fit to content doesnt even work on tables either"*.
+    ///
+    /// Both halves were wrong. Every row was counted at a flat 24 px whatever it
+    /// held, so the card came out far too short; and the width was clamped to
+    /// `MAX_W` like a text card's — but a table cannot reflow to a narrower card,
+    /// so that clamp did not wrap anything, it hid the last columns.
+    #[test]
+    fn fit_size_measures_a_table_by_the_rows_its_cells_wrap_to() {
+        let mk = |cell: &str| {
+            let mut t = TableData::from_values(
+                (0..19)
+                    .map(|_| vec!["Feature".into(), cell.into(), cell.into(), cell.into()])
+                    .collect(),
+            );
+            t.col_widths = vec![110.0, 110.0, 110.0, 110.0];
+            let mut c = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Table { table: t });
+            c.title = "comparison".into();
+            c.fit_size().expect("a table fits")
+        };
+        let short = mk("YES");
+        let long = mk("Self-contained HTML + CSS + JavaScript, stored verbatim, \
+                       which is far more than a 110px column shows on one line");
+
+        // Same row count, so the whole difference is the wrapping.
+        assert!(
+            long.y > short.y * 3.0,
+            "19 rows of wrapped prose must be far taller than 19 one-line rows: {} vs {}",
+            long.y,
+            short.y
+        );
+        // A concrete floor as well as a ratio: the old flat-24px maths produced
+        // 496 px here regardless of what the cells held, so a regression to it
+        // fails this outright.
+        assert!(long.y > 900.0, "room for the lines the cells wrap to: {}", long.y);
+
+        // And a wide table is not clamped to MAX_W, because narrowing it would
+        // cut columns off rather than reflow anything.
+        let mut wide = TableData::from_values(vec![vec!["a".into(); 6]]);
+        wide.col_widths = vec![400.0; 6];
+        let mut c = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Table { table: wide });
+        c.title = "wide".into();
+        let size = c.fit_size().expect("a table fits");
+        assert!(
+            size.x > 2400.0,
+            "six 400px columns need their full width, not MAX_W: {}",
+            size.x
+        );
     }
 
     #[test]

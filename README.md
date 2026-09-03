@@ -75,6 +75,12 @@ a lattice that supports branching growth — the tree *and* the weave in one.
 - **Table** — a small spreadsheet: inline cell editing, insert/delete/resize
   rows and columns (right-click the row/column handles), per-cell **background
   and font colors**, an optional header row, and **CSV/XLSX import & export**
+  — and **a long cell wraps inside its column** rather than being cut off at it,
+  so the row grows and a table of prose is readable. Right-click a table →
+  **Fit columns to content** (also a **fit cols** button on its toolbar, and per
+  column from the column's own menu) widens every column to its longest cell;
+  do that first, then **Fit to content** sizes the card around the rows those
+  widths wrap to
   (XLSX export keeps your colors). The copy button copies the table as CSV, and
   **right-click any cell** to copy that **cell, row or column** — to both the
   clipboard and the X11 primary selection, so middle-click paste works too.
@@ -248,7 +254,10 @@ drawn hollow in their accent where a resident card is a solid block.
   so its text/items/table are fully readable (no more unreadable little squares). Agents
   get the same via `"fit": true` on card create/update, and it gives the identical
   size either way. Text is measured as it actually renders — a Markdown heading is
-  taller than body text, and a long note is sized to fit rather than cut off.
+  taller than body text, and a long note is sized to fit rather than cut off. A
+  **table** is measured by the rows its cells wrap to, and is the one card that is
+  never narrowed to fit: its columns sit side by side, so narrowing it would hide
+  the last ones rather than reflow anything.
 - **Templates** — right-click a card → **Save as template** to reuse a card you make often
   (e.g. a *Today's Todos* checklist); right-click the canvas → **Insert template** to drop a
   fresh copy at the click point. Saving a template also puts a **master card** for it in a

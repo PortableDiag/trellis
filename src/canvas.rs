@@ -332,6 +332,8 @@ pub enum CanvasAction {
     TableInsertCol(CardId, usize),
     TableRemoveCol(CardId, usize),
     TableSetColWidth(CardId, usize, f32),
+    /// Size every column to what its cells hold. `None` for the whole table.
+    TableAutofitCols(CardId, Option<usize>),
     TableToggleHeader(CardId),
     /// Draw this table as a chart (`None` = back to a plain grid).
     TableSetChart(CardId, Option<crate::model::ChartSpec>),
@@ -4675,6 +4677,23 @@ fn card_menu(
         actions.push(CanvasAction::FitCard(card.id));
         ui.close_menu();
     }
+    // **A table needs its columns fitted before fitting the card means anything.**
+    // A cell wraps inside its column, so the column is what decides how many
+    // lines a row takes — fitting the card to 110px columns of prose gives a
+    // correct height for a shape nobody wants to read. Sat behind the API alone
+    // until now, which is why the operator's table looked unfixable from the UI.
+    if matches!(card.kind, CardKind::Table { .. })
+        && ui
+            .button("Fit columns to content")
+            .on_hover_text(
+                "Widen every column to its longest cell; anything still too long \
+                 wraps inside it. Do this before Fit to content.",
+            )
+            .clicked()
+    {
+        actions.push(CanvasAction::TableAutofitCols(card.id, None));
+        ui.close_menu();
+    }
     ui.separator();
     // --- how it looks ------------------------------------------------------
     ui.menu_button("Color", |ui| {
@@ -5218,7 +5237,7 @@ fn supports_edit(kind: &CardKind) -> bool {
     )
 }
 
-const TABLE_ROW_H: f32 = 24.0;
+use crate::model::TABLE_ROW_H;
 const TABLE_HANDLE_W: f32 = 20.0;
 
 /// The spreadsheet card body. Edit mode shows a toolbar (rows/cols, colors,
@@ -5555,6 +5574,41 @@ fn chart_ui(
     });
 }
 
+/// The width a cell's text wraps at, inside a column drawn `w` px wide.
+///
+/// The 4 px inset each side that the cell is painted with, and a little slack so
+/// a glyph never sits on the column rule.
+fn cell_wrap_w(w: f32, zoom: f32) -> f32 {
+    (w - 10.0 * zoom).max(8.0 * zoom)
+}
+
+/// How tall to draw a row: its tallest wrapped cell, never under [`TABLE_ROW_H`].
+///
+/// Measured from the real galleys, so it is what the row actually needs.
+/// [`crate::model::TableData::row_height`] estimates the same number for
+/// `fit_size` and errs high on purpose; the two agree about *whether* a cell
+/// wraps, which is the part that matters and the part the render test pins.
+fn row_height(
+    ui: &egui::Ui,
+    table: &crate::model::TableData,
+    row: &[crate::model::TableCell],
+    zoom: f32,
+) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let mut h: f32 = 0.0;
+    for (c, cell) in row.iter().enumerate() {
+        if cell.text.is_empty() {
+            continue;
+        }
+        let wrap_w = cell_wrap_w(table.col_width(c) * zoom, zoom);
+        let galley = ui.fonts(|f| {
+            f.layout(cell.text.clone(), font.clone(), egui::Color32::PLACEHOLDER, wrap_w)
+        });
+        h = h.max(galley.size().y);
+    }
+    (h + 6.0 * zoom).max(TABLE_ROW_H * zoom)
+}
+
 fn table_ui(
     ui: &mut egui::Ui,
     card: &Card,
@@ -5569,7 +5623,6 @@ fn table_ui(
     // uniformly with the card (the cell *text* is already scaled by the body's
     // font scaler; the cell rects/handles/spacing were not, which left the grid
     // full-size inside a shrinking frame). `cw(c)` is a column's on-screen width.
-    let row_h = TABLE_ROW_H * zoom;
     let handle_w = TABLE_HANDLE_W * zoom;
     let cw = |c: usize| table.col_width(c) * zoom;
 
@@ -5581,6 +5634,13 @@ fn table_ui(
             }
             if ui.small_button("+ col").clicked() {
                 actions.push(CanvasAction::TableInsertCol(id, cols));
+            }
+            if ui
+                .small_button("fit cols")
+                .on_hover_text("Size every column to its widest cell — long cells then wrap inside it")
+                .clicked()
+            {
+                actions.push(CanvasAction::TableAutofitCols(id, None));
             }
             let mut header = table.header;
             if ui.checkbox(&mut header, "header").changed() {
@@ -5693,6 +5753,19 @@ fn table_ui(
                         actions.push(CanvasAction::TableRemoveCol(id, c));
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui
+                        .button("Fit this column to its content")
+                        .on_hover_text("Widen it to its longest cell; longer cells wrap inside it")
+                        .clicked()
+                    {
+                        actions.push(CanvasAction::TableAutofitCols(id, Some(c)));
+                        ui.close_menu();
+                    }
+                    if ui.button("Fit every column").clicked() {
+                        actions.push(CanvasAction::TableAutofitCols(id, None));
+                        ui.close_menu();
+                    }
                 });
                 // Resize grip.
                 let (grip, gresp) =
@@ -5718,6 +5791,16 @@ fn table_ui(
     // --- the grid ---------------------------------------------------------
     let header_bg = ui.visuals().faint_bg_color;
     for (r, row) in table.rows.iter().enumerate() {
+        // **A cell wraps inside its column, so a row is as tall as its tallest
+        // cell.** Every cell used to be laid out unwrapped and painted into a
+        // flat 24 px rect, so a table of prose showed the first few words of each
+        // cell and clipped the rest — and resizing the *card* did not help,
+        // because a column is what the text has to fit. Measured from the real
+        // galleys rather than from the model's estimate: `fit_size` errs high on
+        // purpose, and a renderer that trusted it would leave a gap under every
+        // row. The two still have to agree about *whether* a cell wraps at all,
+        // which is what the render test pins.
+        let row_h = row_height(ui, table, row, zoom);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0 * zoom;
             if card.editing {
@@ -5811,12 +5894,19 @@ fn table_ui(
                     let segments = crate::model::wikilink_segments(&cell.text);
                     let has_link = segments.iter().any(|(_, t)| t.is_some());
                     let font = egui::TextStyle::Body.resolve(ui.style());
+                    // **Wrapped at the column's width**, not laid out on one
+                    // endless line and clipped. This is the whole fix: a column
+                    // is what a cell has to fit, so a cell that does not fit
+                    // wraps and takes its row down with it.
+                    let wrap_w = cell_wrap_w(w, zoom);
                     let galley = if !has_link {
-                        ui.fonts(|f| f.layout_no_wrap(cell.text.clone(), font.clone(), base))
+                        ui.fonts(|f| {
+                            f.layout(cell.text.clone(), font.clone(), base, wrap_w)
+                        })
                     } else {
                         let link_col = ui.visuals().hyperlink_color;
                         let mut job = egui::text::LayoutJob::default();
-                        job.wrap.max_width = f32::INFINITY;
+                        job.wrap.max_width = wrap_w;
                         for (text, target) in &segments {
                             job.append(
                                 text,
@@ -6570,6 +6660,67 @@ fn draw_grid(painter: &egui::Painter, rect: egui::Rect, view: TSTransform, color
 
 #[cfg(test)]
 mod tests {
+
+    /// **The renderer wraps a cell, and the row grows with it.**
+    ///
+    /// This is the half that must move with `TableData::row_height`, and the
+    /// reason it exists is on the record: v0.128.2 shipped checklist *sizing*
+    /// for a wrap the renderer did not do, and was reverted within the hour. A
+    /// height computed for a wrap that never happens is worse than no change at
+    /// all — it makes the card look right in the tests and wrong on the screen.
+    #[test]
+    fn a_long_cell_wraps_inside_its_column_and_takes_the_row_down_with_it() {
+        use crate::model::{TableCell, TableData, TABLE_ROW_H};
+        // Two frames: egui builds its glyph atlas lazily, so a galley measured
+        // in the very first frame of a fresh context comes back 0x0 and every
+        // row would "fit". Warm it up, then measure.
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label("warm the font atlas");
+            });
+        });
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let short = TableData::from_values(vec![vec!["hi".into(), "there".into()]]);
+                let long = TableData::from_values(vec![vec![
+                    "hi".into(),
+                    "a sentence far longer than any hundred-and-ten pixel column can \
+                     show on one line, which is exactly the table the operator called \
+                     a nightmare to read"
+                        .into(),
+                ]]);
+
+                let row_of = |ui: &egui::Ui, t: &TableData| -> f32 {
+                    let row: Vec<TableCell> = t.rows[0].clone();
+                    row_height(ui, t, &row, 1.0)
+                };
+
+                let s = row_of(ui, &short);
+                let l = row_of(ui, &long);
+                assert!(
+                    (s - TABLE_ROW_H).abs() < 1.0,
+                    "a cell that fits stays one row high: {s}"
+                );
+                assert!(l > s * 3.0, "a long cell wraps to several lines: {l} vs {s}");
+
+                // And widening the column takes the wrapping back out again —
+                // which is what makes autofit and a column drag worth anything.
+                let mut wide = long.clone();
+                wide.col_widths = vec![110.0, 600.0];
+                let w = row_of(ui, &wide);
+                assert!(w < l, "a wider column needs fewer lines: {w} vs {l}");
+
+                // The model's estimate agrees about *whether* it wraps, and errs
+                // high rather than short — a row too short hides the end of a
+                // sentence, which is the failure this whole change is about.
+                let est = long.row_height(0);
+                assert!(est >= l, "the estimate must not come out under the render: {est} vs {l}");
+                assert!(est < l * 2.5, "…nor wildly over it: {est} vs {l}");
+            });
+        });
+    }
+
     use super::*;
 
     fn range(r: &CCursorRange) -> (usize, usize) {

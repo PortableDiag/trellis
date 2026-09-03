@@ -1712,6 +1712,7 @@ struct DockInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GroupCardInput {
     /// The group the card should join.
     group: GroupId,
@@ -1727,7 +1728,15 @@ struct AddAttachmentInput {
     data_base64: String,
 }
 
+/// **Strict, like every other input** — these two were the last stragglers from
+/// the v0.86.0 rule, and this one cost real uploads. `{"image_base64": "…"}` was
+/// accepted as far as the parser, the unknown field silently dropped, and the
+/// answer was *missing field `data_base64`* — true, and no help at all to a
+/// caller staring at the field they had just filled in. Three failed uploads by
+/// two different agents on three separate days, all the same guess. It now says
+/// `unknown field 'image_base64'` and lists the ones there are.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddImageInput {
     #[serde(default)]
     name: String,
@@ -6044,6 +6053,15 @@ pub(crate) fn card_json(c: &Card) -> Value {
                 }),
                 None => Value::Null,
             };
+            // **The widths are readable, not just writable.** `set_col_width` and
+            // `autofit_cols` have always been able to change them, and nothing
+            // could ever read them back — so an agent that set a column could not
+            // check it, and one laying out a table had to guess what it was
+            // working from. Always present and always the full row: `col_width`
+            // falls back to the default for a column that has never been sized,
+            // and a caller reading a width wants the width, not a hole.
+            v["col_widths"] =
+                json!((0..table.n_cols()).map(|c| table.col_width(c)).collect::<Vec<_>>());
             v["rows"] = json!(table
                 .rows
                 .iter()
@@ -7443,6 +7461,88 @@ mod tests {
         let (_, s) = process(&mut doc, ApiRequest::Search("needle".into()));
         assert_eq!(s.status, 200);
         assert!(s.body.contains("needle"));
+    }
+
+    /// **The image upload names the field you actually sent.**
+    ///
+    /// `AddImageInput` and `GroupCardInput` were the last two inputs in this file
+    /// without `deny_unknown_fields`, missed by the v0.86.0 sweep. The cost was
+    /// specific: `{"image_base64": …}` had the unknown field dropped and came
+    /// back *missing field `data_base64`* — three failed uploads by two agents on
+    /// three separate days, every one of them the same guess, and the answer
+    /// never once mentioned the field they had typed.
+    #[test]
+    fn a_misnamed_image_field_is_named_rather_than_dropped() {
+        let err = match route(
+            &Method::Post,
+            "/api/cards/9/images",
+            "",
+            r#"{"image_base64": "aGk="}"#,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("a misnamed field was accepted"),
+        };
+        assert_eq!(err.0, 400);
+        assert!(err.1.contains("image_base64"), "names what was sent: {}", err.1);
+        assert!(err.1.contains("data_base64"), "and what was expected: {}", err.1);
+
+        // The right spelling still works, with and without the optional name.
+        assert!(route(&Method::Post, "/api/cards/9/images", "", r#"{"data_base64":"aGk="}"#).is_ok());
+        assert!(route(
+            &Method::Post,
+            "/api/cards/9/images",
+            "",
+            r#"{"name":"p.png","data_base64":"aGk="}"#
+        )
+        .is_ok());
+    }
+
+    /// **A column's width is readable, not only writable.**
+    ///
+    /// `set_col_width` and `autofit_cols` have been able to change widths since
+    /// v0.102.0 and nothing could ever read one back: the card JSON carried
+    /// `rows` and `header` and no widths at all. So an agent could size a column
+    /// and not check it, and one laying out a table was working from a number it
+    /// had to assume. Found while fitting a table over the API in v0.170.0 —
+    /// autofit visibly changed the card's size while the JSON kept saying `null`.
+    #[test]
+    fn a_tables_column_widths_come_back_in_its_json() {
+        let mut doc = crate::model::Document::empty();
+        let n = doc.add_node(None, "n".into());
+        let cid = doc
+            .add_card(
+                n,
+                egui::pos2(0.0, 0.0),
+                CardKind::Table {
+                    table: crate::model::TableData::from_values(vec![vec![
+                        "a".into(),
+                        "a much longer cell than the default column shows".into(),
+                    ]]),
+                },
+            )
+            .unwrap();
+
+        // A table nothing has sized still reports a width per column — the
+        // default, which is what it renders at. A hole would make the caller
+        // guess the very number they asked for.
+        let v = card_json(doc.card(n, cid).unwrap());
+        assert_eq!(
+            v["col_widths"],
+            json!([crate::model::TABLE_DEFAULT_COL_W, crate::model::TABLE_DEFAULT_COL_W]),
+            "every column reports a width: {}",
+            v["col_widths"]
+        );
+
+        // And after autofit the JSON says what actually changed.
+        assert!(doc.table_autofit_cols(n, cid, None));
+        let v = card_json(doc.card(n, cid).unwrap());
+        let w: Vec<f64> = serde_json::from_value(v["col_widths"].clone()).unwrap();
+        assert_eq!(w.len(), 2);
+        assert!(w[1] > w[0], "the wordy column is the wider one: {w:?}");
+        assert!(
+            w[1] > crate::model::TABLE_DEFAULT_COL_W as f64,
+            "autofit is visible in the read: {w:?}"
+        );
     }
 
     #[test]

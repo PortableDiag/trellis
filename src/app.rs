@@ -5381,6 +5381,7 @@ impl TrellisApp {
             CanvasAction::TableInsertCol(c, _) => upd(c, "table.insert_col"),
             CanvasAction::TableRemoveCol(c, _) => upd(c, "table.remove_col"),
             CanvasAction::TableSetColWidth(c, ..) => upd(c, "table.set_col_width"),
+            CanvasAction::TableAutofitCols(c, ..) => upd(c, "table.autofit_cols"),
             CanvasAction::TableToggleHeader(c) => upd(c, "table.set_header"),
             CanvasAction::TableSetChart(c, spec) => {
                 upd(c, if spec.is_some() { "chart" } else { "chart.clear" })
@@ -6255,6 +6256,9 @@ impl TrellisApp {
                 }
                 CanvasAction::TableSetColWidth(cid, c, w) => {
                     let _ = self.doc.table_set_col_width(node, cid, c, w);
+                }
+                CanvasAction::TableAutofitCols(cid, c) => {
+                    let _ = self.doc.table_autofit_cols(node, cid, c);
                 }
                 CanvasAction::TableSetChart(cid, spec) => {
                     if let Some(c) = self.doc.card_mut(node, cid) {
@@ -9167,7 +9171,7 @@ impl TrellisApp {
                                 ),
                             ),
                             (
-                                "Make that table readable (columns are 110px and don't wrap)",
+                                "Make that table readable (columns are 110px; a longer cell wraps inside one)",
                                 format!(
                                     "curl -H 'X-API-Key: {k}' -d '{{\"op\":\"autofit_cols\"}}' {a}/nodes/1/cards/1/table\n\
                                      curl -X PATCH -H 'X-API-Key: {k}' -d '{{\"fit\":true}}' {a}/nodes/1/cards/1   # then the frame"
@@ -9409,6 +9413,7 @@ impl TrellisApp {
                             "POST   /api/nodes/{id}/cards/{cid}/dock  {anchor}          (unstick: DELETE /api/nodes/{id}/cards/{cid}/dock)",
                             "POST   /api/nodes/{id}/cards/{cid}/group {group}           (remove: DELETE /api/nodes/{id}/cards/{cid}/group)",
                             "POST   /api/nodes/{id}/cards/{cid}/table {op, …}           (set_cell / insert_row / set_col_width / autofit_cols {col?} …)",
+                            "       a table card also reads back col_widths — one per column, the 110px default filled in",
                             "         …or send an ARRAY of ops, applied in order; a failure names which one",
                             "         set_rules {rules:[{col?,when,value,bg?,fg?}]}  colour cells by value (gt/lt/ge/le/eq/ne/contains/empty)",
                             "POST   /api/nodes/{id}/cards/{cid}/chart {kind, label_col?, value_cols?, show_table?}  (bar|line|scatter|pie; DELETE /api/nodes/{id}/cards/{cid}/chart = plain grid)",
