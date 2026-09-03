@@ -6,6 +6,18 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.169.2]
+
+### Changed
+- **The docs teach the palette and the patterns.** Settings → Endpoints now lists
+  `fill` and `bg_fill` with every pattern and its fields, `style` on a node, the
+  44-swatch palette and its shade words, and the two rules that are easy to get
+  wrong from a field list alone: colours *inside* a fill take names and hex like
+  anywhere else, and `speed` is capped for photosensitivity rather than taste. A
+  **Colors and patterns** entry joins the copy-paste Examples.
+  `GET /api/docs` needed nothing — it serves API.md itself, which is why that
+  file is the one place these are written once.
+
 ## [0.169.1]
 
 ### Fixed

@@ -9104,6 +9104,29 @@ impl TrellisApp {
                                 ),
                             ),
                             (
+                                "Colors and patterns",
+                                format!(
+                                    "# 44 swatches: 14 hues x 3 shades, plus white and black.\n\
+                                     # A shade word goes either side; white/black take none.\n\
+                                     curl -sX PATCH -H 'X-API-Key: {k}' -d '{{\"color\":\"dark teal\"}}' {a}/cards/1391\n\n\
+                                     # A PATTERN instead of the flat color. Names/hex work inside it too.\n\
+                                     curl -sX PATCH -H 'X-API-Key: {k}' \\\n\
+                                       -d '{{\"fill\":{{\"pattern\":\"gradient\",\"from\":\"blue\",\"to\":\"dark blue\",\"angle\":45}}}}' \\\n\
+                                       {a}/cards/1391\n\n\
+                                     # tiedye takes 2-6 colors; seed picks the crinkle, so two cards differ.\n\
+                                     curl -sX PATCH -H 'X-API-Key: {k}' \\\n\
+                                       -d '{{\"fill\":{{\"pattern\":\"tiedye\",\"colors\":[\"blue\",\"violet\",\"teal\"],\"seed\":11}}}}' \\\n\
+                                       {a}/cards/1391\n\n\
+                                     # The basket canvas is the biggest area, and grain stops it reading\n\
+                                     # as a void. A basket can set its card style too.\n\
+                                     curl -sX PATCH -H 'X-API-Key: {k}' \\\n\
+                                       -d '{{\"bg_fill\":{{\"pattern\":\"noise\",\"base\":\"#0d1b2a\",\"fleck\":\"#1b3a5c\"}},\"style\":\"blueprint\"}}' \\\n\
+                                       {a}/nodes/1\n\n\
+                                     # null clears, an ABSENT field leaves it alone.\n\
+                                     curl -sX PATCH -H 'X-API-Key: {k}' -d '{{\"fill\":null}}' {a}/cards/1391"
+                                ),
+                            ),
+                            (
                                 "The tree, then one basket, then one card",
                                 format!(
                                     "curl -H 'X-API-Key: {k}' {a}/tree\n\
@@ -9288,7 +9311,8 @@ impl TrellisApp {
                             "GET    /api/nodes",
                             "POST   /api/nodes               {parent?, title}",
                             "GET    /api/nodes/{id}",
-                            "PATCH  /api/nodes/{id}          {title?, color?, bg?, feed?}   (color/bg: a color sets, null clears, absent leaves alone; feed: read the basket newest-first in one computed column; the stored arrangement is untouched)",
+                            "PATCH  /api/nodes/{id}          {title?, color?, bg?, bg_fill?, style?, feed?}   (color/bg/bg_fill/style: a value sets, null clears, absent leaves alone; feed: read the basket newest-first in one computed column; the stored arrangement is untouched)",
+                            "         bg_fill = a PATTERN for the canvas · style = this basket's card style: normal|sticky|futuristic|blueprint|silkscreen|phosphor (a document field, unlike the app theme; unknown names are a 400 listing the valid ones)",
                             "DELETE /api/nodes/{id}",
                             "POST   /api/nodes/{id}/move     {before|after|index|to, parent?}",
                             "POST   /api/nodes/{id}/expand   {expanded, recursive?}",
@@ -9345,7 +9369,17 @@ impl TrellisApp {
                             "GET    /api/daily                         (is it on, and which node is the journal root)",
                             "POST   /api/daily/root {node}   /   DELETE /api/daily/root   (turn it on / off)",
                             "POST   /api/nodes/{id}/cards    {kind, title?, body?, lang?, items?, rows?, header?, pos?, z?, size?, fit?, image_base64?, inline_images?, source?, channel?}",
-                            "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body? (REPLACES it — append adds), kind?, color?, font_scale?, fit?, pos?, z?, size?, items?, source?, emphasis?, emphasis_intensity?, emphasis_minutes?, …}",
+                            "PATCH  /api/nodes/{id}/cards/{cid}       {title?, body? (REPLACES it — append adds), kind?, color?, fill?, font_scale?, fit?, pos?, z?, size?, items?, source?, emphasis?, emphasis_intensity?, emphasis_minutes?, …}",
+                            "         COLORS: 44 swatches — 14 hues x 3 shades ('blue', 'light blue', 'dark blue'; either word order) + white/black, which take no shade word. Or hex/[r,g,b] for any of the 16.7M.",
+                            "         fill = a PATTERN instead of the flat color, on a card or group:",
+                            "           {pattern:'gradient', from, to, angle?, speed?}      two colors fading into each other",
+                            "           {pattern:'stripes',  a, b, angle?, width?, speed?}   alternating bands",
+                            "           {pattern:'corners',  tl, tr, br, bl}                 a color per corner, blended through the middle",
+                            "           {pattern:'tiedye',   colors:[2..6], seed?, scale?, speed?}   a warped spiral; seed picks the crinkle",
+                            "           {pattern:'noise',    base, fleck, scale?, seed?, amount?}    grain, so a flat area reads as a surface",
+                            "         Colors INSIDE a fill take names/hex like anywhere else. null clears, absent leaves alone. `color` still drives every stroke (outline, tree dot, minimap).",
+                            "         speed animates gradient/stripes/tiedye, CAPPED at 0.5 cycles/sec both ways — a photosensitivity limit, clamped not refused. corners and noise never animate.",
+                            "         A card with a STILL fill drifts while it is emphasised and stops when the emphasis lapses — use emphasis, not permanent motion, to mean 'look at this'.",
                             "         source: mirror a file — text/code fill the body, TABLE cards fill cells from CSV/TSV; source:\"\" detaches",
                             "DELETE /api/nodes/{id}/cards/{cid}",
                             "POST   /api/nodes/{id}/cards/{cid}/move  {before|after|index|to} (or {node,pos?} → another basket)",
@@ -9353,7 +9387,7 @@ impl TrellisApp {
                             "POST   /api/nodes/{id}/cards/move        {cards:[ids], node, pos?, gap?}  (batch; whole list validated first)",
                             "POST   /api/nodes/{id}/cards/property    {cards:[ids], key, value}        (one property, many cards)",
                             "DELETE /api/nodes/{id}/cards/property    {cards:[ids], key}               (take it back off them; key in the BODY here)",
-                            "PATCH  /api/nodes/{id}/cards             {cards:[ids], color?, size?, fit?, font_scale?, z?, emphasis?…}",
+                            "PATCH  /api/nodes/{id}/cards             {cards:[ids], color?, fill?, size?, fit?, font_scale?, z?, emphasis?…}   (a fill is presentation, so the batch takes it)",
                             "         presentation only — title/body/items/rows/kind/lang/header/source are refused BY NAME (one card at a time)",
                             "DELETE /api/nodes/{id}/cards             {cards:[ids]}                    (validated in full first; no 'all' form)",
                             "POST   /api/nodes/{id}/desktop           (DESKTOP MODE — the whole basket becomes windows; DELETE brings it back)",
