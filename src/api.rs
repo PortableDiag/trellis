@@ -5212,13 +5212,53 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             (false, ApiResponse::ok(json!({ "node": node, "overlaps": pairs })))
         }
         ApiRequest::ResolveOverlaps(node) => {
-            if !doc.nodes.contains_key(&node) {
-                return (false, ApiResponse::err(404, "node not found"));
+            match doc.nodes.get(&node) {
+                None => return (false, ApiResponse::err(404, "node not found")),
+                // **A feed's arrangement is preserved, not maintained.** The flag
+                // promises the x/y layout underneath comes back untouched when it
+                // is switched off, and `canvas.rs` has dropped every drag-borne
+                // position write since v0.160.0 for exactly that reason — but the
+                // guard lived only there, so these two API routes walked straight
+                // through it. Caught by running this route on Session Handoffs
+                // during a routine post-write check: 40 cards silently rearranged
+                // in a basket where nothing renders their positions, repairing an
+                // overlap that is invisible and destroying an arrangement that is
+                // not. Refused rather than made a no-op, because a caller asking
+                // to fix a layout should be told the layout is not in use.
+                Some(n) if n.feed => {
+                    return (
+                        false,
+                        ApiResponse::err(
+                            409,
+                            "this basket is a feed — it renders as one computed column, so its \
+                             stored arrangement is preserved rather than maintained and there is \
+                             nothing here to unhide. Turn the feed off (PATCH /api/nodes/{id} \
+                             {\"feed\": false}) if you mean to work on the canvas underneath",
+                        ),
+                    )
+                }
+                Some(_) => {}
             }
             let moved = doc.resolve_overlaps(node);
             (moved > 0, ApiResponse::ok(json!({ "node": node, "moved": moved })))
         }
         ApiRequest::Autosort(node) => {
+            // Same guard, and the worse of the two: autosort *replaces* a layout
+            // with a grid rather than nudging it, so on a feed basket it would
+            // destroy the preserved arrangement outright and change nothing
+            // anyone can see.
+            if doc.nodes.get(&node).is_some_and(|n| n.feed) {
+                return (
+                    false,
+                    ApiResponse::err(
+                        409,
+                        "this basket is a feed — it renders as one computed column, and autosort \
+                         would replace the stored arrangement it is preserving with a grid, \
+                         visibly changing nothing. Turn the feed off (PATCH /api/nodes/{id} \
+                         {\"feed\": false}) first",
+                    ),
+                );
+            }
             if doc.autosort(node) {
                 (true, ApiResponse::ok(json!({ "sorted": node })))
             } else {
@@ -7461,6 +7501,55 @@ mod tests {
         let (_, s) = process(&mut doc, ApiRequest::Search("needle".into()));
         assert_eq!(s.status, 200);
         assert!(s.body.contains("needle"));
+    }
+
+    /// **A feed basket refuses the two routes that rewrite its layout.**
+    ///
+    /// `feed: true` promises the x/y arrangement underneath is preserved and
+    /// comes back untouched when the flag goes off. `canvas.rs` has dropped every
+    /// drag-borne position write since v0.160.0 for exactly that reason — but the
+    /// guard lived only there, so `POST …/overlaps` and `POST …/autosort` walked
+    /// straight through it. Found the hard way: a routine post-write check ran
+    /// `overlaps` on Session Handoffs and silently rearranged **40 cards** in a
+    /// basket where nothing renders their positions, repairing an overlap that is
+    /// invisible and destroying an arrangement that is not.
+    #[test]
+    fn a_feed_basket_refuses_the_routes_that_rewrite_its_arrangement() {
+        let mut doc = crate::model::Document::empty();
+        let n = doc.add_node(None, "log".into());
+        for i in 0..3 {
+            let cid = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+            doc.card_mut(n, cid).unwrap().title = format!("entry {i}");
+        }
+
+        // As a canvas both routes work, and overlapping cards at the same point
+        // are exactly what they are for.
+        let (dirty, r) = process(&mut doc, ApiRequest::ResolveOverlaps(n));
+        assert_eq!(r.status, 200, "a canvas resolves overlaps: {}", r.body);
+        assert!(dirty);
+        let (_, r) = process(&mut doc, ApiRequest::Autosort(n));
+        assert_eq!(r.status, 200, "a canvas autosorts: {}", r.body);
+
+        // Flip it to a feed and record the arrangement it now promises to keep.
+        doc.nodes.get_mut(&n).unwrap().feed = true;
+        let before: Vec<_> = doc.nodes[&n].cards.iter().map(|c| (c.id, c.pos)).collect();
+
+        for (req, what) in [
+            (ApiRequest::ResolveOverlaps(n), "overlaps"),
+            (ApiRequest::Autosort(n), "autosort"),
+        ] {
+            let (dirty, r) = process(&mut doc, req);
+            assert_eq!(r.status, 409, "{what} must be refused on a feed: {}", r.body);
+            assert!(!dirty, "{what} must not mark the document dirty");
+            assert!(r.body.contains("feed"), "the refusal says why: {}", r.body);
+        }
+        let after: Vec<_> = doc.nodes[&n].cards.iter().map(|c| (c.id, c.pos)).collect();
+        assert_eq!(before, after, "not one card moved");
+
+        // And turning the feed off hands the routes back.
+        doc.nodes.get_mut(&n).unwrap().feed = false;
+        let (_, r) = process(&mut doc, ApiRequest::Autosort(n));
+        assert_eq!(r.status, 200, "a canvas again: {}", r.body);
     }
 
     /// **The image upload names the field you actually sent.**

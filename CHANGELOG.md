@@ -6,6 +6,29 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.170.1]
+
+### Fixed
+- **A feed basket refuses the two routes that rewrite its arrangement.**
+  `feed: true` promises the x/y layout underneath is *preserved* — untouched, and
+  back exactly as it was the moment the flag goes off — and `canvas.rs` has
+  dropped every drag-borne position write since v0.160.0 to keep that promise.
+  **The guard lived only there**, so `POST /api/nodes/{id}/overlaps` and
+  `POST /api/nodes/{id}/autosort` walked straight through it.
+
+  Found the hard way, on the operator's own document: a routine post-write check
+  ran `overlaps` on *Session Handoffs* and silently rearranged **40 cards** —
+  repairing an overlap nothing renders, and destroying an arrangement that is
+  only invisible until someone turns the feed off. (Restored here from the
+  version-history snapshot taken 17 minutes earlier; 39 cards to within
+  0.002 px, the fortieth having been created after it.)
+
+  Both now answer **409** naming the reason. Refused rather than quietly made a
+  no-op, because a caller asking to fix a layout should be told the layout is not
+  in use. `GET …/overlaps` still answers — reading changes nothing. `autosort` is
+  the worse of the two and would have been the more expensive lesson: it
+  *replaces* a layout with a grid rather than nudging it.
+
 ## [0.170.0]
 
 ### Fixed

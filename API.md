@@ -1194,6 +1194,7 @@ Arrange a node's cards into a tidy, non-overlapping grid (the same as the app's
 **Tools → Autosort cards**). Cards are clustered by group; docking is cleared.
 ```
 POST /api/nodes/{id}/autosort  → 200 {"sorted":<id>}   | 404 (no node / no cards)
+                                                       | 409 (the basket is a feed)
 ```
 
 ### Overlapping cards
@@ -1203,10 +1204,23 @@ is the check to run after a batch of edits, and the repair.
 ```
 GET  /api/nodes/{id}/overlaps  → 200 {"node":<id>,"overlaps":[{"a":<cid>,"b":<cid>}, …]}
 POST /api/nodes/{id}/overlaps  → 200 {"node":<id>,"moved":<n>}
+                               | 409 (the basket is a feed)
 ```
 The repair **keeps the layout**: every card's `x` is preserved, so columns
 survive, and cards move down only far enough to stop overlapping, in the order
 they already sat in. A basket with no overlaps is not touched (`moved: 0`).
+
+**Both write routes are refused on a `feed` basket** with a **409** (v0.170.1).
+A feed renders as one computed column, so its stored x/y arrangement is
+*preserved* rather than maintained — that promise is the whole point of the flag,
+and `canvas.rs` has dropped every drag-borne position write since v0.160.0 to keep
+it. The guard lived only there, so these two walked through it: running
+`POST …/overlaps` on a feed basket silently rearranged **40 cards**, repairing an
+overlap nothing renders and destroying an arrangement that comes back the moment
+the flag goes off. Refused rather than made a no-op, because a caller asking to
+fix a layout should be told the layout is not in use. `GET …/overlaps` still
+answers — reading is free. Turn the feed off first if you mean the canvas
+underneath.
 
 This is not [autosort](#autosort), which throws the arrangement away and lays a
 grid — the wrong tool for a basket someone arranged on purpose. Cards that travel
