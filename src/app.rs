@@ -5247,6 +5247,7 @@ impl TrellisApp {
             TreeAction::SetBgFill(id, _) => {
                 ch(Op::Updated, *id).titled(title(id)).field("bg_fill")
             }
+            TreeAction::SetStyle(id, _) => ch(Op::Updated, *id).titled(title(id)).field("style"),
             TreeAction::MoveUp(id)
             | TreeAction::MoveDown(id)
             | TreeAction::MoveToTop(id)
@@ -5527,6 +5528,11 @@ impl TrellisApp {
                 TreeAction::SetBgFill(id, f) => {
                     if let Some(n) = self.doc.nodes.get_mut(&id) {
                         n.bg_fill = f;
+                    }
+                }
+                TreeAction::SetStyle(id, st) => {
+                    if let Some(n) = self.doc.nodes.get_mut(&id) {
+                        n.style = st;
                     }
                 }
                 TreeAction::ExportBasket(id, fmt, subs) => self.export_basket(id, fmt, subs),

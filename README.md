@@ -38,7 +38,15 @@ a lattice that supports branching growth — the tree *and* the weave in one.
   so no two cards come out the same. Painted as geometry rather than an image, so
   it stays sharp at any zoom; the flat color is kept underneath and is still what
   every outline and tree dot uses, so a document opened in an older build just
-  shows the plain color again.
+  shows the plain color again. There is also **grain**, and any pattern with an
+  axis can **slowly drift** — capped well under the rate that is a
+  photosensitivity risk, and only asking for frames while something moves. A card
+  with a still pattern drifts **while it is emphasised** and stops when the
+  emphasis lapses.
+- Right-click a basket → **Basket style**: the cards inside it take a chosen
+  style (Sticky note, Blueprint, Silkscreen, Phosphor…) instead of the app theme,
+  so one project can look like a different room. Unlike the theme, which is a
+  per-machine preference, this travels with the document.
 - Right-click → **Copy** a node's **id** (for the agent API, `/api/nodes/{id}`)
   or its **path** breadcrumb, so you can point an agent at the exact node
 - The basket's **id is the first line of that menu**, readable without copying

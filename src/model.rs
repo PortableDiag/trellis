@@ -121,6 +121,9 @@ pub enum Fill {
         to: [u8; 3],
         #[serde(default)]
         angle: f32,
+        /// Drift, in fill-widths per second. `0` is still. See [`Fill::speed`].
+        #[serde(default)]
+        speed: f32,
     },
     /// Alternating bands of two colours, `width` units apart, along `angle`.
     Stripes {
@@ -130,6 +133,26 @@ pub enum Fill {
         angle: f32,
         #[serde(default = "default_stripe_width")]
         width: f32,
+        /// Band drift, in widths per second. `0` is still.
+        #[serde(default)]
+        speed: f32,
+    },
+    /// A flat colour with a speckle of a second one — paper, concrete, grain.
+    ///
+    /// The same value noise tie-dye uses, thresholded instead of ramped. It
+    /// exists because a large flat area reads as a void: a basket canvas with a
+    /// little grain in it looks like a surface, and costs one more `Fill` arm
+    /// rather than an image.
+    Noise {
+        base: [u8; 3],
+        fleck: [u8; 3],
+        #[serde(default = "default_noise_scale")]
+        scale: f32,
+        #[serde(default)]
+        seed: u32,
+        /// How much of the fleck colour shows, 0.0–1.0.
+        #[serde(default = "default_noise_amount")]
+        amount: f32,
     },
     /// A colour per corner, blended across the middle — which is also how you
     /// get "corners one colour, sides another": set all four corners the same
@@ -151,12 +174,32 @@ pub enum Fill {
         seed: u32,
         #[serde(default = "default_tiedye_scale")]
         scale: f32,
+        /// Spiral rotation, in turns per second. `0` is still.
+        #[serde(default)]
+        speed: f32,
     },
 }
 
 fn default_tiedye_scale() -> f32 {
     70.0
 }
+
+fn default_noise_scale() -> f32 {
+    3.0
+}
+
+fn default_noise_amount() -> f32 {
+    0.35
+}
+
+/// The fastest a fill may animate, in cycles per second.
+///
+/// **This is a safety limit, not a taste one.** Flashing between roughly 3 and
+/// 60 Hz is a photosensitive-seizure risk, and a whole basket of animated cards
+/// is a large area of the screen. The emphasis halo already caps itself for the
+/// same reason and says so; this is the same rule applied to fills, enforced in
+/// [`Fill::sanitize`] so no caller — menu or API — can exceed it.
+pub const MAX_FILL_SPEED: f32 = 0.5;
 
 fn default_stripe_width() -> f32 {
     18.0
@@ -178,6 +221,16 @@ impl Fill {
                 }
                 colors.clone()
             }
+            // Weighted by how much of each actually shows, or a light grain
+            // would read as half its fleck colour.
+            Fill::Noise { base, fleck, amount, .. } => {
+                let a = amount.clamp(0.0, 1.0);
+                let mut out = [0u8; 3];
+                for i in 0..3 {
+                    out[i] = (base[i] as f32 * (1.0 - a) + fleck[i] as f32 * a) as u8;
+                }
+                return out;
+            }
         };
         let n = cols.len() as u32;
         let mut out = [0u8; 3];
@@ -187,17 +240,39 @@ impl Fill {
         out
     }
 
+    /// Whether this fill animates, so the canvas only asks for repaints when
+    /// something is actually moving. A still document must cost nothing.
+    pub fn is_animated(&self) -> bool {
+        match self {
+            Fill::Gradient { speed, .. }
+            | Fill::Stripes { speed, .. }
+            | Fill::TieDye { speed, .. } => *speed != 0.0,
+            // A corner blend has no axis to travel along, and noise that
+            // crawled would read as television static rather than as grain.
+            Fill::Corners { .. } | Fill::Noise { .. } => false,
+        }
+    }
+
     /// Clamp anything a caller can get wrong. A zero or negative stripe width is
     /// an infinite loop in the painter, and an angle is only meaningful mod 360.
     pub fn sanitize(&mut self) {
         match self {
-            Fill::Gradient { angle, .. } => *angle = angle.rem_euclid(360.0),
-            Fill::Stripes { angle, width, .. } => {
+            Fill::Gradient { angle, speed, .. } => {
+                *angle = angle.rem_euclid(360.0);
+                *speed = speed.clamp(-MAX_FILL_SPEED, MAX_FILL_SPEED);
+            }
+            Fill::Stripes { angle, width, speed, .. } => {
                 *angle = angle.rem_euclid(360.0);
                 *width = width.clamp(2.0, 400.0);
+                *speed = speed.clamp(-MAX_FILL_SPEED, MAX_FILL_SPEED);
             }
             Fill::Corners { .. } => {}
-            Fill::TieDye { colors, scale, .. } => {
+            Fill::Noise { scale, amount, .. } => {
+                *scale = scale.clamp(0.5, 60.0);
+                *amount = amount.clamp(0.0, 1.0);
+            }
+            Fill::TieDye { colors, scale, speed, .. } => {
+                *speed = speed.clamp(-MAX_FILL_SPEED, MAX_FILL_SPEED);
                 // Two is the fewest that can be a pattern at all; past six the
                 // bands are too thin to read as anything but noise. An empty
                 // list would divide by zero in the painter.
@@ -1939,6 +2014,18 @@ pub struct Node {
     /// that are obviously different rooms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bg_fill: Option<Fill>,
+    /// This basket's card style, overriding the app theme's, by name:
+    /// `normal`, `sticky`, `futuristic`, `blueprint`, `silkscreen`, `phosphor`.
+    ///
+    /// **A document field, unlike the app theme.** "The whole app looks like a
+    /// blueprint" is a preference belonging to this machine; "*this project*
+    /// looks like a blueprint" is a fact about the project, and should travel
+    /// with the document to the phone and through a backup. Stored as a string
+    /// so an unknown value from a newer build loads and is ignored rather than
+    /// failing the whole document — the same tolerance every other document
+    /// field has on read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
     /// When this was last changed, in unix seconds — the only timestamp Trellis
     /// stores. Nothing in the document carried a "when" before, so sorting by
     /// recent activity was impossible; the in-memory change log answers it within
@@ -3148,6 +3235,7 @@ impl Document {
                 color: None,
                 bg: None,
                 bg_fill: None,
+                style: None,
                 feed: false,
             },
         );
@@ -3181,6 +3269,7 @@ impl Document {
                 color: None,
                 bg: None,
                 bg_fill: None,
+                style: None,
                 feed: false,
             },
         );
@@ -7242,6 +7331,7 @@ impl Document {
             color: None,
             bg: None,
             bg_fill: None,
+            style: None,
             touched: None,
             feed: false,
         })
@@ -8016,12 +8106,12 @@ mod tests {
     /// whichever colour happened to be listed first.
     #[test]
     fn a_fill_reduces_to_one_colour_for_strokes_and_dots() {
-        let f = Fill::Stripes { a: [255, 0, 0], b: [0, 0, 255], angle: 0.0, width: 10.0 };
+        let f = Fill::Stripes { a: [255, 0, 0], b: [0, 0, 255], angle: 0.0, width: 10.0, speed: 0.0 };
         assert_eq!(f.key_color(), [127, 0, 127]);
         let f = Fill::Corners { tl: [40, 0, 0], tr: [40, 0, 0], br: [0, 0, 40], bl: [0, 0, 40] };
         assert_eq!(f.key_color(), [20, 0, 20]);
         // An empty tie-dye palette must not divide by zero on the way to a dot.
-        let f = Fill::TieDye { colors: vec![], seed: 1, scale: 70.0 };
+        let f = Fill::TieDye { colors: vec![], seed: 1, scale: 70.0, speed: 0.0 };
         assert_eq!(f.key_color(), [0x64, 0x74, 0x8b]);
     }
 
@@ -8031,18 +8121,22 @@ mod tests {
     /// 60 times a second.
     #[test]
     fn a_fill_is_clamped_on_the_way_in() {
-        let mut f = Fill::Stripes { a: [1, 1, 1], b: [2, 2, 2], angle: -90.0, width: 0.0 };
+        let mut f = Fill::Stripes { a: [1, 1, 1], b: [2, 2, 2], angle: -90.0, width: 0.0, speed: 9.0 };
         f.sanitize();
         match f {
-            Fill::Stripes { angle, width, .. } => {
+            Fill::Stripes { angle, width, speed, .. } => {
                 assert_eq!(angle, 270.0, "an angle is only meaningful mod 360");
                 assert!(width >= 2.0, "a zero-width stripe never advances");
+                assert_eq!(
+                    speed, MAX_FILL_SPEED,
+                    "speed is capped for photosensitivity, not taste"
+                );
             }
             _ => panic!(),
         }
         // One colour cannot cycle; it is doubled rather than refused, because a
         // one-colour tie-dye is a coherent thing to ask for by accident.
-        let mut f = Fill::TieDye { colors: vec![[9, 9, 9]], seed: 0, scale: 1.0 };
+        let mut f = Fill::TieDye { colors: vec![[9, 9, 9]], seed: 0, scale: 1.0, speed: 0.0 };
         f.sanitize();
         match &f {
             Fill::TieDye { colors, scale, .. } => {
@@ -8052,7 +8146,7 @@ mod tests {
             _ => panic!(),
         }
         // And an empty one gets a real default rather than painting nothing.
-        let mut f = Fill::TieDye { colors: vec![], seed: 0, scale: 1e9 };
+        let mut f = Fill::TieDye { colors: vec![], seed: 0, scale: 1e9, speed: 0.0 };
         f.sanitize();
         match &f {
             Fill::TieDye { colors, scale, .. } => {
@@ -8062,12 +8156,60 @@ mod tests {
             _ => panic!(),
         }
         // Past six the bands are thinner than the smoothing between them.
-        let mut f = Fill::TieDye { colors: vec![[0, 0, 0]; 12], seed: 0, scale: 70.0 };
+        let mut f = Fill::TieDye { colors: vec![[0, 0, 0]; 12], seed: 0, scale: 70.0, speed: 0.0 };
         f.sanitize();
         match &f {
             Fill::TieDye { colors, .. } => assert_eq!(colors.len(), 6),
             _ => panic!(),
         }
+    }
+
+    /// **Only fills with an axis to travel along animate**, and the cap is a
+    /// safety limit rather than a taste one: flashing between roughly 3 and
+    /// 60 Hz is a photosensitive-seizure risk, and a basket of animated cards is
+    /// a large part of the screen.
+    #[test]
+    fn only_some_fills_move_and_never_faster_than_the_cap() {
+        let still = Fill::Gradient { from: [1; 3], to: [2; 3], angle: 0.0, speed: 0.0 };
+        assert!(!still.is_animated());
+        let moving = Fill::Gradient { from: [1; 3], to: [2; 3], angle: 0.0, speed: 0.2 };
+        assert!(moving.is_animated());
+        // A corner blend has no axis; grain that crawled would be static.
+        assert!(!Fill::Corners { tl: [0; 3], tr: [0; 3], br: [0; 3], bl: [0; 3] }.is_animated());
+        assert!(!Fill::Noise {
+            base: [0; 3],
+            fleck: [1; 3],
+            scale: 3.0,
+            seed: 0,
+            amount: 0.3
+        }
+        .is_animated());
+
+        // The cap holds in both directions — a negative speed is a legitimate
+        // "drift the other way", not a way around the limit.
+        for speed in [50.0_f32, -50.0] {
+            let mut f = Fill::TieDye { colors: vec![[0; 3], [1; 3]], seed: 0, scale: 70.0, speed };
+            f.sanitize();
+            match f {
+                Fill::TieDye { speed, .. } => {
+                    assert!(speed.abs() <= MAX_FILL_SPEED, "uncapped: {speed}");
+                    assert_eq!(speed.signum(), if speed == 0.0 { speed.signum() } else { speed.signum() });
+                }
+                _ => panic!(),
+            }
+        }
+        assert!(MAX_FILL_SPEED <= 0.5, "well under the 3 Hz photosensitivity floor");
+    }
+
+    /// Grain's key colour is weighted by how much of the fleck actually shows,
+    /// or a light speckle would report as a half-and-half mix to every stroke
+    /// and tree dot that reads it.
+    #[test]
+    fn grain_reduces_to_mostly_its_base_colour() {
+        let f = Fill::Noise { base: [0, 0, 0], fleck: [200, 200, 200], scale: 3.0, seed: 0, amount: 0.25 };
+        assert_eq!(f.key_color(), [50, 50, 50]);
+        let none = Fill::Noise { base: [10, 20, 30], fleck: [255; 3], scale: 3.0, seed: 0, amount: 0.0 };
+        assert_eq!(none.key_color(), [10, 20, 30], "no fleck showing, no fleck in the average");
     }
 
     /// A shade word reads either side, and means nothing on its own or on a

@@ -79,6 +79,8 @@ pub enum ApiRequest {
         /// A pattern for the basket canvas. `Some(None)` clears it back to the
         /// flat `bg`; absent leaves it alone.
         bg_fill: Option<Option<crate::model::Fill>>,
+        /// Card style for this basket by name; `Some(None)` follows the theme.
+        style: Option<Option<String>>,
         feed: Option<bool>,
     },
     DeleteNode(NodeId),
@@ -900,7 +902,7 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
 
     Some(match req {
         ApiRequest::CreateNode { title, .. } => ch(E::Node, Op::Created, 0).titled(title.clone()),
-        ApiRequest::UpdateNode { id, title, color, bg, bg_fill, feed } => {
+        ApiRequest::UpdateNode { id, title, color, bg, bg_fill, style, feed } => {
             let mut c = ch(E::Node, Op::Updated, *id)
                 .titled(title.clone().unwrap_or_else(|| node_title(id)));
             if title.is_some() {
@@ -914,6 +916,9 @@ pub fn change_of(req: &ApiRequest, doc: &Document) -> Option<Change> {
             }
             if bg_fill.is_some() {
                 c = c.field("bg_fill");
+            }
+            if style.is_some() {
+                c = c.field("style");
             }
             if feed.is_some() {
                 c = c.field("feed");
@@ -1398,6 +1403,11 @@ struct UpdateNodeInput {
     /// it back to the flat colour, absent leaves it alone.
     #[serde(default, deserialize_with = "de_fill_clear")]
     bg_fill: Option<Option<crate::model::Fill>>,
+    /// This basket's card style, overriding the app theme: `normal`, `sticky`,
+    /// `futuristic`, `blueprint`, `silkscreen`, `phosphor`. `null` goes back to
+    /// following the theme; absent leaves it alone.
+    #[serde(default, deserialize_with = "de_string_clear")]
+    style: Option<Option<String>>,
     /// Read this basket as a feed — newest card first in one computed column,
     /// the stored arrangement untouched. Absent leaves it unchanged.
     #[serde(default)]
@@ -2323,6 +2333,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
                 color: i.color,
                 bg: i.bg,
                 bg_fill: i.bg_fill,
+                style: i.style,
                 feed: i.feed,
             })
         }
@@ -3226,6 +3237,20 @@ where
     color_from_value(&v).map(Some).map_err(serde::de::Error::custom)
 }
 
+/// A string, or `null` to clear it.
+///
+/// **A plain `#[serde(default)]` on an `Option<Option<T>>` collapses the two
+/// cases**: `null` deserialises to the outer `None`, which is the same value an
+/// absent field gets, so the clear silently becomes a no-op. `view` and the
+/// colour fields already carry custom deserialisers for exactly this; caught
+/// here by a test that sent `{"style": null}` and watched nothing happen.
+fn de_string_clear<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<String>::deserialize(d)?))
+}
+
 /// A fill, or `null` to clear it. Double-Option so "absent" and "clear" differ,
 /// exactly as `view` and `bg` do.
 ///
@@ -3254,7 +3279,15 @@ where
 /// Rewrite every colour-shaped member of a fill object through
 /// [`color_from_value`], so names and hex reach the strict `[u8;3]` fields.
 fn normalize_fill_colors(v: &mut Value) -> Result<(), String> {
-    const COLOR_KEYS: [&str; 8] = ["from", "to", "a", "b", "tl", "tr", "br", "bl"];
+    // **Every colour-shaped field of every pattern belongs here.** This is a
+    // list of strings, so the compiler cannot check it against `Fill`: adding
+    // `noise` and forgetting `base`/`fleck` made `{"base":"dark slate"}` a 400
+    // that told the caller to send an array — a second colour syntax for one
+    // nested field, which is the exact thing this function exists to prevent.
+    // `a_color_name_works_in_every_pattern` walks all of them so the next
+    // variant cannot slip through.
+    const COLOR_KEYS: [&str; 10] =
+        ["from", "to", "a", "b", "tl", "tr", "br", "bl", "base", "fleck"];
     let Some(obj) = v.as_object_mut() else {
         return Err("a fill must be an object with a \"pattern\"".to_string());
     };
@@ -3553,7 +3586,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             let id = doc.add_node(parent, title);
             (true, ApiResponse::created(json!({ "id": id })))
         }
-        ApiRequest::UpdateNode { id, title, color, bg, bg_fill, feed } => match doc.nodes.get_mut(&id) {
+        ApiRequest::UpdateNode { id, title, color, bg, bg_fill, style, feed } => match doc.nodes.get_mut(&id) {
             Some(n) => {
                 if let Some(t) = title {
                     n.title = t;
@@ -3566,6 +3599,30 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some(f) = bg_fill {
                     n.bg_fill = f;
+                }
+                if let Some(st) = style {
+                    // Validated here rather than stored blind: a name nothing
+                    // can draw would silently do nothing, which is the
+                    // 200-that-changed-nothing this API refuses everywhere else.
+                    if let Some(name) = &st {
+                        if crate::canvas::CardStyle::from_key(name).is_none() {
+                            let all: Vec<&str> = crate::canvas::CardStyle::ALL
+                                .iter()
+                                .map(|(s, _)| s.key())
+                                .collect();
+                            return (
+                                false,
+                                ApiResponse::err(
+                                    400,
+                                    &format!(
+                                        "unknown style {name:?} — one of {}, or null to follow the app theme",
+                                        all.join(", ")
+                                    ),
+                                ),
+                            );
+                        }
+                    }
+                    n.style = st;
                 }
                 if let Some(f) = feed {
                     n.feed = f;
@@ -5658,6 +5715,7 @@ fn node_json(n: &crate::model::Node) -> Value {
         // not one per card, so it costs nothing and a caller can tell "no
         // pattern" from "this build has no patterns" without a version check.
         "bg_fill": n.bg_fill,
+        "style": n.style,
         "feed": n.feed,
         "touched": n.touched,
         "groups": groups_json(n),
@@ -6905,7 +6963,7 @@ mod tests {
         assert!(dirty);
         assert_eq!(resp.status, 200);
         match doc.nodes[&n].cards[0].fill.as_ref().expect("fill set") {
-            Fill::Gradient { from, to, angle } => {
+            Fill::Gradient { from, to, angle, .. } => {
                 assert_eq!(*from, [0x3b, 0x82, 0xf6], "the name resolved");
                 assert_eq!(*to, [0x8b, 0x5c, 0xf6], "the hex resolved");
                 assert_eq!(*angle, 45.0);
@@ -6935,7 +6993,7 @@ mod tests {
             r##"{"fill":{"pattern":"tiedye","colors":["red","dark violet","#14b8a6"],"seed":7}}"##,
         );
         match doc.nodes[&n].cards[0].fill.as_ref().unwrap() {
-            Fill::TieDye { colors, seed, scale } => {
+            Fill::TieDye { colors, seed, scale, .. } => {
                 assert_eq!(colors.len(), 3);
                 assert_eq!(colors[0], [0xef, 0x44, 0x44], "a name inside the list resolved");
                 assert_eq!(colors[2], [0x14, 0xb8, 0xa6], "and a hex");
@@ -7006,12 +7064,114 @@ mod tests {
                 color: None,
                 bg: None,
                 bg_fill: i.bg_fill,
+                style: None,
                 feed: None,
             },
         );
         let (_d, resp) = process(&mut doc, ApiRequest::GetNode(n));
         let v: Value = serde_json::from_str(&resp.body).unwrap();
         assert_eq!(v["bg_fill"]["pattern"], "stripes", "{}", resp.body);
+    }
+
+    /// **A colour name must work in EVERY pattern, in every field.** The
+    /// normaliser is a list of key strings the compiler cannot check against
+    /// `Fill`: `noise` shipped with `base`/`fleck` missing from it, so a name
+    /// there was a 400 telling the caller to send an array — a second colour
+    /// syntax for one nested field. This walks every pattern so the next variant
+    /// cannot slip through the same gap.
+    #[test]
+    fn a_color_name_works_in_every_pattern() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let c = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        // Every variant, with a NAME in every colour slot it has.
+        for body in [
+            r#"{"fill":{"pattern":"gradient","from":"red","to":"blue"}}"#,
+            r#"{"fill":{"pattern":"stripes","a":"red","b":"blue"}}"#,
+            r#"{"fill":{"pattern":"corners","tl":"red","tr":"blue","br":"teal","bl":"pink"}}"#,
+            r#"{"fill":{"pattern":"tiedye","colors":["red","blue"]}}"#,
+            r#"{"fill":{"pattern":"noise","base":"red","fleck":"blue"}}"#,
+        ] {
+            let p: UpdateCardInput = serde_json::from_str(body)
+                .unwrap_or_else(|e| panic!("a name must parse here: {body}\n{e}"));
+            let (_d, resp) =
+                process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch: p });
+            assert_eq!(resp.status, 200, "{body} -> {}", resp.body);
+            // And it resolved to the real RGB, not to something defaulted.
+            let f = doc.nodes[&n].cards[0].fill.as_ref().unwrap();
+            let json = serde_json::to_value(f).unwrap();
+            assert!(
+                json.to_string().contains("239"),
+                "red should be [239,68,68] somewhere in {json}"
+            );
+        }
+        // Hex too, in the field that was missing.
+        let p: UpdateCardInput =
+            serde_json::from_str(r##"{"fill":{"pattern":"noise","base":"#0d1b2a","fleck":"#1b3a5c"}}"##)
+                .unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: n, card: c, patch: p });
+        match doc.nodes[&n].cards[0].fill.as_ref().unwrap() {
+            crate::model::Fill::Noise { base, fleck, .. } => {
+                assert_eq!(*base, [0x0d, 0x1b, 0x2a]);
+                assert_eq!(*fleck, [0x1b, 0x3a, 0x5c]);
+            }
+            _ => panic!("wrong pattern"),
+        }
+    }
+
+    /// **A basket carries its own card style, and an unknown name is refused.**
+    /// Storing a name nothing can draw would be a 200 that changed nothing
+    /// visible — the failure this API refuses everywhere else.
+    #[test]
+    fn a_basket_style_is_validated_and_clears_to_the_theme() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "N".into());
+        let patch = |doc: &mut Document, body: &str| {
+            let i: UpdateNodeInput = serde_json::from_str(body).unwrap();
+            process(
+                doc,
+                ApiRequest::UpdateNode {
+                    id: n,
+                    title: None,
+                    color: None,
+                    bg: None,
+                    bg_fill: None,
+                    style: i.style,
+                    feed: None,
+                },
+            )
+        };
+        let (dirty, resp) = patch(&mut doc, r#"{"style":"blueprint"}"#);
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
+        assert_eq!(doc.nodes[&n].style.as_deref(), Some("blueprint"));
+
+        // Refused, and the refusal lists what would have worked.
+        let (dirty, resp) = patch(&mut doc, r#"{"style":"art deco"}"#);
+        assert!(!dirty, "a refused style must not dirty the document");
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("art deco"), "{}", resp.body);
+        assert!(resp.body.contains("blueprint"), "name the valid ones: {}", resp.body);
+        assert_eq!(doc.nodes[&n].style.as_deref(), Some("blueprint"), "unchanged");
+
+        // null goes back to following the app theme.
+        patch(&mut doc, r#"{"style":null}"#);
+        assert!(doc.nodes[&n].style.is_none());
+
+        // Every name the menu offers is a name the API takes, so the two lists
+        // cannot drift apart.
+        for (st, _) in crate::canvas::CardStyle::ALL {
+            let body = format!(r#"{{"style":"{}"}}"#, st.key());
+            assert_eq!(patch(&mut doc, &body).1.status, 200, "{}", st.key());
+            assert_eq!(
+                crate::canvas::CardStyle::from_key(st.key()),
+                Some(st),
+                "{} must round-trip",
+                st.key()
+            );
+        }
+        // And an unrecognised stored name falls back rather than failing.
+        assert_eq!(crate::canvas::CardStyle::from_key("from-a-newer-build"), None);
     }
 
     /// A basket's pattern rides on the node patch with the same rules, and lands
@@ -7031,6 +7191,7 @@ mod tests {
                 color: None,
                 bg: None,
                 bg_fill: i.bg_fill,
+                style: None,
                 feed: None,
             },
         );
@@ -7047,6 +7208,7 @@ mod tests {
                 color: None,
                 bg: None,
                 bg_fill: i.bg_fill,
+                style: None,
                 feed: None,
             },
         );
@@ -7089,7 +7251,7 @@ mod tests {
         // Flip it to a feed and read it back — the flag is a document edit.
         let (dirty, up) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: None, color: None, bg: None, bg_fill: None, feed: Some(true) },
+            ApiRequest::UpdateNode { id, title: None, color: None, bg: None, bg_fill: None, style: None, feed: Some(true) },
         );
         assert!(dirty);
         assert_eq!(up.status, 200);
@@ -7098,7 +7260,7 @@ mod tests {
 
         let (_, up) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: Some("Renamed".into()), color: None, bg: None, bg_fill: None, feed: None },
+            ApiRequest::UpdateNode { id, title: Some("Renamed".into()), color: None, bg: None, bg_fill: None, style: None, feed: None },
         );
         assert_eq!(up.status, 200);
         assert_eq!(doc.nodes[&id].title, "Renamed");
@@ -7116,7 +7278,7 @@ mod tests {
         let i: UpdateNodeInput = serde_json::from_str(r#"{"bg":"red"}"#).unwrap();
         let (dirty, resp) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: None, color: None, bg: i.bg, bg_fill: None, feed: None },
+            ApiRequest::UpdateNode { id, title: None, color: None, bg: i.bg, bg_fill: None, style: None, feed: None },
         );
         assert!(dirty);
         assert_eq!(resp.status, 200);
@@ -7143,7 +7305,7 @@ mod tests {
         assert!(i.color.is_none() && i.bg.is_none());
         let (_, resp) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: i.title, color: i.color, bg: i.bg, bg_fill: None, feed: None },
+            ApiRequest::UpdateNode { id, title: i.title, color: i.color, bg: i.bg, bg_fill: None, style: None, feed: None },
         );
         assert_eq!(resp.status, 200);
         assert_eq!(doc.nodes[&id].color, Some([1, 2, 3]));
@@ -7155,7 +7317,7 @@ mod tests {
         assert_eq!(i.bg, Some(None));
         let (dirty, resp) = process(
             &mut doc,
-            ApiRequest::UpdateNode { id, title: None, color: i.color, bg: i.bg, bg_fill: None, feed: None },
+            ApiRequest::UpdateNode { id, title: None, color: i.color, bg: i.bg, bg_fill: None, style: None, feed: None },
         );
         assert!(dirty);
         assert_eq!(resp.status, 200);

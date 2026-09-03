@@ -49,6 +49,8 @@ pub enum TreeAction {
     SetBg(NodeId, Option<[u8; 3]>),
     /// A pattern for the basket canvas, or `None` for the flat color.
     SetBgFill(NodeId, Option<crate::model::Fill>),
+    /// This basket's card style by name, or `None` to follow the app theme.
+    SetStyle(NodeId, Option<String>),
     /// Drag & drop: put `moved` before/after `target` (adopting its parent).
     Reorder { moved: NodeId, target: NodeId, before: bool },
     /// Toggle reorder mode (nodes draggable) on/off.
@@ -481,6 +483,24 @@ fn node_ui(
                 ui.menu_button("Basket pattern", |ui| {
                     if let Some(f) = crate::canvas::fill_menu(ui, node.bg_fill.as_ref()) {
                         actions.push(TreeAction::SetBgFill(id, f));
+                    }
+                });
+                ui.menu_button("Basket style", |ui| {
+                    ui.label(
+                        egui::RichText::new("Overrides the app theme, for this basket only")
+                            .small()
+                            .weak(),
+                    );
+                    let cur = node.style.as_deref();
+                    if ui.radio(cur.is_none(), "Follow the app theme").clicked() {
+                        actions.push(TreeAction::SetStyle(id, None));
+                        ui.close_menu();
+                    }
+                    for (st, label) in crate::canvas::CardStyle::ALL {
+                        if ui.radio(cur == Some(st.key()), label).clicked() {
+                            actions.push(TreeAction::SetStyle(id, Some(st.key().to_string())));
+                            ui.close_menu();
+                        }
                     }
                 });
                 ui.separator();

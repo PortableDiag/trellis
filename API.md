@@ -715,12 +715,45 @@ PATCH /api/nodes/{id}    {"bg_fill": {"pattern":"gradient","from":"#101828","to"
 | `stripes` | `a`, `b`, `angle?`, `width?` | alternating bands, `width` in canvas units |
 | `corners` | `tl`, `tr`, `br`, `bl` | a color per corner, blended through the middle |
 | `tiedye` | `colors` (2–6), `seed?`, `scale?` | a warped spiral cycling the palette |
+| `noise` | `base`, `fleck`, `scale?`, `seed?`, `amount?` | grain: a flat colour speckled with a second |
+
+**Motion** (v0.169.0) — `gradient`, `stripes` and `tiedye` take a `speed`: the
+fade drifts along its axis, the bands travel, the spiral turns. `0` is still.
+
+`speed` is **capped at 0.5 cycles per second, in both directions**, and that is a
+safety limit rather than a taste one: flashing between roughly 3 and 60 Hz is a
+photosensitive-seizure risk and a basket of animated cards is a large part of the
+screen. A larger value is clamped, not refused. `corners` and `noise` never
+animate — one has no axis to travel along, and grain that crawled would read as
+television static.
+
+**A card with a *still* pattern drifts while it is emphasised**, and stops when
+the emphasis lapses. Emphasis already means "look at this" and already expires on
+its own, so this borrows it rather than adding a second thing to remember to turn
+off. A fill with its own `speed` keeps that speed — an explicit choice outranks
+the automatic one.
 
 `angle` is degrees clockwise from left-to-right. **Colors inside a fill go
 through the same parser as every other color**, so names, hex and `[r,g,b]` all
 work — you should never have to learn a second color syntax because the field is
 nested. `seed` picks tie-dye's crinkle, so two cards with the same colors are not
 the same picture.
+
+**A basket can also set its card style** (v0.169.0), overriding the app theme for
+the cards inside it:
+
+```
+PATCH /api/nodes/{id}  {"style": "blueprint"}   → normal | sticky | futuristic
+                                                  | blueprint | silkscreen | phosphor
+PATCH /api/nodes/{id}  {"style": null}          → follow the app theme again
+```
+
+An unknown name is a **400 listing the valid ones**, not a stored value nothing
+can draw. Unlike the app theme — which is app config, per instance, because "the
+whole app looks like a blueprint" belongs to this machine — a basket's style is a
+**document** field: "*this project* looks like a blueprint" is a fact about the
+project, and travels with the document to the phone and through a backup. A name
+from a newer build falls back to the theme rather than failing the load.
 
 **A fill is a field beside `color`, not a replacement.** `color` is still what
 every *stroke* uses — the card outline, the tree's tag dot, minimap marks — and a

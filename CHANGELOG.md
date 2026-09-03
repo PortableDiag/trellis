@@ -6,6 +6,51 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.169.0]
+
+### Added
+- **Fills can move.** `gradient`, `stripes` and `tiedye` take a `speed`: the fade
+  drifts along its axis, the bands travel, the spiral turns. In the app it is a
+  single **Slowly drifting** tick in the Pattern menu that applies to whichever
+  preset you then click — the question people have is "should this move at all",
+  not "at what rate", and a speed per preset would have been eight sliders.
+  **Capped at 0.5 cycles per second, both directions, and that is a safety limit
+  rather than a taste one**: flashing between roughly 3 and 60 Hz is a
+  photosensitive-seizure risk, and a whole basket of animated cards is a large
+  part of the screen. Enforced in `Fill::sanitize`, so neither the menu nor the
+  API can exceed it. The emphasis halo already capped itself for this reason;
+  this is the same rule.
+  Each pattern animates in a way that **loops seamlessly** — the fade uses a
+  triangle wave rather than a saw (a saw jumps at the wrap), stripes travel by
+  whole bands, and the spiral is periodic in a full turn. The canvas asks for
+  repaints **only while something is actually moving**, so a still document costs
+  nothing.
+- **A still pattern drifts while its card is emphasised, and stops when the
+  emphasis lapses.** Emphasis already means "look at this" and already expires on
+  its own, so this borrows it rather than adding a second thing to remember to
+  turn off. A fill with its own `speed` keeps it — an explicit choice outranks
+  the automatic one. Slower than the halo pulse, so the two read as one thing.
+- **`noise`: grain.** A flat colour speckled with a second, on the same value
+  noise tie-dye uses but thresholded rather than ramped. A large flat area reads
+  as a void; a little grain makes it read as a surface. Its `key_color` is
+  weighted by how much fleck actually shows, so a light speckle does not report
+  as a half-and-half mix to every stroke that reads it.
+- **A basket can set its own card style**, overriding the app theme for the cards
+  inside it: `PATCH /api/nodes/{id} {"style":"blueprint"}`, or right-click →
+  **Basket style**. Unlike the app theme — app config, per instance, because "the
+  whole app looks like a blueprint" belongs to this machine — this is a
+  **document** field: "*this project* looks like a blueprint" is a fact about the
+  project and travels with the document. An unknown name is a 400 listing the
+  valid ones rather than a stored value nothing can draw; a name from a newer
+  build falls back to the theme rather than failing the load.
+
+### Fixed
+- **`{"style": null}` did not clear.** A plain `#[serde(default)]` on an
+  `Option<Option<T>>` collapses the two cases — `null` deserialises to the outer
+  `None`, the same value an absent field gets — so the clear was a silent no-op.
+  `view` and the colour fields already carried custom deserialisers for exactly
+  this. Caught by a test that sent it and watched nothing happen.
+
 ## [0.168.0]
 
 ### Added

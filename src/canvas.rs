@@ -97,7 +97,7 @@ pub struct Env<'a> {
 /// `Silkscreen` is a board part with a pin-1 mark, `Phosphor` is a trace on an
 /// instrument — no fill at all, because a scope draws light, it does not paint
 /// surfaces.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CardStyle {
     Normal,
     Sticky,
@@ -105,6 +105,43 @@ pub enum CardStyle {
     Blueprint,
     Silkscreen,
     Phosphor,
+}
+
+impl CardStyle {
+    /// The document-facing name, and the one the API and the menu use.
+    pub fn key(self) -> &'static str {
+        match self {
+            CardStyle::Normal => "normal",
+            CardStyle::Sticky => "sticky",
+            CardStyle::Futuristic => "futuristic",
+            CardStyle::Blueprint => "blueprint",
+            CardStyle::Silkscreen => "silkscreen",
+            CardStyle::Phosphor => "phosphor",
+        }
+    }
+
+    /// Parse a stored name. `None` for anything unrecognised, so a basket saved
+    /// by a newer build falls back to the app theme instead of failing to load.
+    pub fn from_key(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "normal" => CardStyle::Normal,
+            "sticky" => CardStyle::Sticky,
+            "futuristic" => CardStyle::Futuristic,
+            "blueprint" => CardStyle::Blueprint,
+            "silkscreen" => CardStyle::Silkscreen,
+            "phosphor" => CardStyle::Phosphor,
+            _ => return None,
+        })
+    }
+
+    pub const ALL: [(CardStyle, &'static str); 6] = [
+        (CardStyle::Normal, "Normal"),
+        (CardStyle::Sticky, "Sticky note"),
+        (CardStyle::Futuristic, "Futuristic"),
+        (CardStyle::Blueprint, "Blueprint"),
+        (CardStyle::Silkscreen, "Silkscreen"),
+        (CardStyle::Phosphor, "Phosphor"),
+    ];
 }
 
 /// The default accent a fresh card is created with (`model::Card::new`). In the
@@ -500,8 +537,34 @@ pub fn ui(
     // **Zoom is deliberately 1.0 here.** A stripe on a *card* is part of the
     // card and should shrink with it; the canvas is the room, so its bands stay
     // put as you zoom around inside it.
+    // **This basket's own card style wins over the app theme.** The theme is a
+    // preference belonging to this machine; a basket's style belongs to the
+    // project and travels with the document. An unrecognised name falls through
+    // to the theme rather than failing.
+    let env = &mut *env;
+    if let Some(s) = node.style.as_deref().and_then(CardStyle::from_key) {
+        env.style = s;
+        env.glow = matches!(s, CardStyle::Futuristic | CardStyle::Phosphor);
+    }
+
+    // One clock for every animated fill in this basket, so a card and the
+    // canvas behind it never drift apart by a frame.
+    let now = ui.input(|i| i.time);
     if let Some(f) = &node.bg_fill {
-        paint_fill(&painter, canvas_rect, 0.0, f, bg, 1.0);
+        paint_fill(&painter, canvas_rect, 0.0, f, bg, 1.0, now);
+    }
+    // **Only ask for frames when something actually moves.** A still document
+    // must cost nothing; egui otherwise sleeps until an input arrives.
+    let animated = node.bg_fill.as_ref().is_some_and(|f| f.is_animated())
+        || node.groups.iter().any(|g| g.fill.as_ref().is_some_and(|f| f.is_animated()))
+        || node.cards.iter().any(|c| {
+            c.fill.as_ref().is_some_and(|f| f.is_animated())
+                || (c.fill.is_some()
+                    && c.live_emphasis(crate::changelog::now_secs() as i64)
+                        != crate::model::Emphasis::None)
+        });
+    if animated {
+        ui.ctx().request_repaint();
     }
     draw_grid(&painter, canvas_rect, *view, ui.visuals().weak_text_color());
 
@@ -982,7 +1045,7 @@ pub fn ui(
         );
         bg.rect_filled(header, 4.0 * zoom, gcol.gamma_multiply(0.9));
         if let Some(f) = &group.fill {
-            paint_fill(&bg, header, 4.0 * zoom, f, gcol.gamma_multiply(0.9), zoom);
+            paint_fill(&bg, header, 4.0 * zoom, f, gcol.gamma_multiply(0.9), zoom, now);
         }
         let label = if group.title.is_empty() { "Group" } else { group.title.as_str() };
         bg.text(
@@ -2223,7 +2286,21 @@ fn card_ui(
     // when they disagree, the specific one wins. Every style keeps its outline,
     // its rules and its pin-1 dot — only the flat title band is replaced.
     if let Some(f) = &card.fill {
-        paint_fill(&p, title_rect, r, f, mix(panel, accent, 0.35), zoom);
+        // **A still pattern drifts while the card is emphasised.** Emphasis
+        // already means "look at this" and already expires on its own, so
+        // borrowing it costs no new state and no new way to forget: the card
+        // stops moving when the emphasis lapses. A fill with its own `speed`
+        // keeps that speed — an explicit choice outranks the automatic one.
+        let live = card.live_emphasis(crate::changelog::now_secs() as i64);
+        let t = ui.input(|i| i.time);
+        let t = if !f.is_animated() && live != crate::model::Emphasis::None {
+            // Well under the 3 Hz photosensitivity floor, and slower than the
+            // halo pulse so the two read as one thing rather than two.
+            t * 0.12
+        } else {
+            t
+        };
+        paint_fill(&p, title_rect, r, f, mix(panel, accent, 0.35), zoom, t);
         // Text contrast is judged against the fill's average, since the bar is
         // no longer one colour and no single sample would be right.
         let k = f.key_color();
@@ -4034,6 +4111,7 @@ pub(crate) fn paint_fill(
     fill: &crate::model::Fill,
     base: egui::Color32,
     zoom: f32,
+    time: f64,
 ) {
     use crate::model::Fill;
     if !rect.is_positive() {
@@ -4045,7 +4123,7 @@ pub(crate) fn paint_fill(
     let c = |rgb: [u8; 3]| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
 
     match fill {
-        Fill::Gradient { from, to, angle } => {
+        Fill::Gradient { from, to, angle, speed } => {
             // Colour each corner by where it falls along the gradient axis, so
             // the interpolation egui already does between vertices IS the fade.
             let (dx, dy) = angle_unit(*angle);
@@ -4056,9 +4134,15 @@ pub(crate) fn paint_fill(
                 proj.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
             );
             let span = (hi - lo).max(f32::EPSILON);
+            // Drift: the ramp slides along its own axis and wraps, so a moving
+            // fade is seamless rather than sweeping back to the start. A
+            // triangle wave, not a saw — a saw jumps at the wrap.
+            let phase = (time as f32 * *speed).rem_euclid(2.0);
+            let shift = if phase <= 1.0 { phase } else { 2.0 - phase };
             let mut mesh = egui::Mesh::default();
             for (i, pos) in corners.iter().enumerate() {
-                let t = (proj[i] - lo) / span;
+                let t = ((proj[i] - lo) / span + shift).rem_euclid(2.0);
+                let t = if t <= 1.0 { t } else { 2.0 - t };
                 mesh.colored_vertex(*pos, lerp_color(c(*from), c(*to), t));
             }
             mesh.add_triangle(0, 1, 2);
@@ -4090,7 +4174,7 @@ pub(crate) fn paint_fill(
             }
             p.add(mesh);
         }
-        Fill::Stripes { a, b, angle, width } => {
+        Fill::Stripes { a, b, angle, width, speed } => {
             // Bands perpendicular to the axis. Drawn as quads long enough to
             // cover the rect at any rotation — the diagonal is the worst case.
             let (dx, dy) = angle_unit(*angle);
@@ -4098,11 +4182,14 @@ pub(crate) fn paint_fill(
             let w = (width.max(2.0)) * zoom.max(0.05);
             let center = rect.center();
             let reach = rect.size().length(); // >= half-diagonal, at any angle
-            let n = (reach / w).ceil() as i32 + 1;
+            let n = (reach / w).ceil() as i32 + 2;
+            // Bands travel along the axis by whole-band steps, so the pattern is
+            // identical every two bands and the motion never shows a seam.
+            let drift = (time as f32 * *speed * 2.0 * w).rem_euclid(2.0 * w);
             let mut mesh = egui::Mesh::default();
             for i in -n..=n {
                 let col = if i.rem_euclid(2) == 0 { c(*a) } else { c(*b) };
-                let s0 = i as f32 * w;
+                let s0 = i as f32 * w + drift;
                 let s1 = s0 + w;
                 // Quad: [s0,s1] along the axis, +/- reach along the band.
                 let quad = [
@@ -4120,7 +4207,44 @@ pub(crate) fn paint_fill(
             }
             p.add(mesh);
         }
-        Fill::TieDye { colors, seed, scale } => {
+        Fill::Noise { base: bcol, fleck, scale, seed, amount } => {
+            // Grain, on the same vertex-grid trick as tie-dye but thresholded
+            // rather than ramped: a large flat area reads as a void, and a
+            // little speckle makes it read as a surface. `scale` here is
+            // *frequency* — bigger means finer grain — because that is what you
+            // are actually choosing when you look at it.
+            let (b0, f0) = (c(*bcol), c(*fleck));
+            let amt = amount.clamp(0.0, 1.0);
+            let nx = (rect.width() / 5.0).ceil().clamp(6.0, 90.0) as usize;
+            let ny = (rect.height() / 5.0).ceil().clamp(6.0, 90.0) as usize;
+            let freq = scale.max(0.1) / 24.0;
+            let mut mesh = egui::Mesh::default();
+            for iy in 0..=ny {
+                for ix in 0..=nx {
+                    let px = rect.left() + rect.width() * ix as f32 / nx as f32;
+                    let py = rect.top() + rect.height() * iy as f32 / ny as f32;
+                    // Two octaves, folded to 0..1, then eased so most of the
+                    // area stays the base colour and the fleck is a minority —
+                    // otherwise "35% fleck" looks like a 50/50 mix.
+                    let n1 = value_noise(px * freq, py * freq, *seed);
+                    let n2 = value_noise(px * freq * 2.7, py * freq * 2.7, seed ^ 0x5bf0);
+                    let v = ((n1 * 0.7 + n2 * 0.3) * 0.5 + 0.5).clamp(0.0, 1.0);
+                    let t = (v * v) * amt;
+                    mesh.colored_vertex(egui::pos2(px, py), lerp_color(b0, f0, t));
+                }
+            }
+            let w = nx + 1;
+            for iy in 0..ny {
+                for ix in 0..nx {
+                    let i = (iy * w + ix) as u32;
+                    let (v0, v1, v2, v3) = (i, i + 1, i + 1 + w as u32, i + w as u32);
+                    mesh.add_triangle(v0, v1, v2);
+                    mesh.add_triangle(v0, v2, v3);
+                }
+            }
+            p.add(mesh);
+        }
+        Fill::TieDye { colors, seed, scale, speed } => {
             // **A grid of coloured vertices, not a texture.** The other patterns
             // are four vertices because a flat ramp needs no more; a spiral is
             // curved, so it needs enough vertices that egui's linear
@@ -4145,7 +4269,11 @@ pub(crate) fn paint_fill(
                     let px = rect.left() + rect.width() * ix as f32 / nx as f32;
                     let py = rect.top() + rect.height() * iy as f32 / ny as f32;
                     let pos = egui::pos2(px, py);
-                    mesh.colored_vertex(pos, tiedye_at(pos, center, s, *seed, &cols));
+                    // Rotating the spiral is one term added to the angle —
+                    // the pattern is periodic in a full turn, so it loops
+                    // perfectly with no seam to hide.
+                    let turn = time as f32 * *speed;
+                    mesh.colored_vertex(pos, tiedye_at(pos, center, s, *seed, &cols, turn));
                 }
             }
             let w = nx + 1;
@@ -4174,6 +4302,7 @@ fn tiedye_at(
     scale: f32,
     seed: u32,
     cols: &[egui::Color32],
+    turn: f32,
 ) -> egui::Color32 {
     let d = p - center;
     let r = d.length() / scale;
@@ -4181,7 +4310,7 @@ fn tiedye_at(
     // Two octaves is enough to look hand-made and cheap enough to run per vertex.
     let warp = 0.30 * value_noise(p.x / scale * 1.7, p.y / scale * 1.7, seed)
         + 0.15 * value_noise(p.x / scale * 4.1, p.y / scale * 4.1, seed ^ 0x9e37);
-    let t = (r + ang + warp).rem_euclid(1.0);
+    let t = (r + ang + warp + turn).rem_euclid(1.0);
     let n = cols.len();
     let x = t * n as f32;
     let i = (x.floor() as usize) % n;
@@ -4278,6 +4407,7 @@ pub(crate) fn fill_menu(
             Some(Fill::Stripes { a, b, .. }) => vec![*a, *b],
             Some(Fill::Corners { tl, tr, br, bl }) => vec![*tl, *tr, *br, *bl],
             Some(Fill::TieDye { colors, .. }) => colors.clone(),
+            Some(Fill::Noise { base, fleck, .. }) => vec![*base, *fleck],
             None => vec![[0x3b, 0x82, 0xf6], [0x8b, 0x5c, 0xf6]],
         };
     }
@@ -4328,7 +4458,8 @@ pub(crate) fn fill_menu(
         ui.horizontal(|ui| {
             let (rect, resp) =
                 ui.allocate_exact_size(egui::vec2(52.0, 18.0), egui::Sense::click());
-            paint_fill(ui.painter(), rect, 3.0, &f, egui::Color32::from_rgb(a[0], a[1], a[2]), 1.0);
+            let t = ui.input(|i| i.time);
+            paint_fill(ui.painter(), rect, 3.0, &f, egui::Color32::from_rgb(a[0], a[1], a[2]), 1.0, t);
             ui.painter()
                 .rect_stroke(rect, 3.0, egui::Stroke::new(1.0, egui::Color32::from_gray(90)));
             if resp.clicked() || ui.button(name).clicked() {
@@ -4337,12 +4468,45 @@ pub(crate) fn fill_menu(
             }
         });
     };
-    preset(ui, "Fade →", Fill::Gradient { from: a, to: b, angle: 0.0 }, &mut out);
-    preset(ui, "Fade ↓", Fill::Gradient { from: a, to: b, angle: 90.0 }, &mut out);
-    preset(ui, "Fade ↘", Fill::Gradient { from: a, to: b, angle: 45.0 }, &mut out);
-    preset(ui, "Stripes |", Fill::Stripes { a, b, angle: 0.0, width: 18.0 }, &mut out);
-    preset(ui, "Stripes /", Fill::Stripes { a, b, angle: 45.0, width: 18.0 }, &mut out);
-    preset(ui, "Stripes —", Fill::Stripes { a, b, angle: 90.0, width: 18.0 }, &mut out);
+    // **Motion is a tick, not a slider, and it applies to whichever pattern you
+    // then pick.** A speed field per preset would be eight sliders; the question
+    // people actually have is "should this move at all".
+    let mv = ui.id().with("fill-move");
+    let mut moving = ui.ctx().memory(|m| m.data.get_temp::<bool>(mv).unwrap_or(false));
+    if ui
+        .checkbox(&mut moving, "Slowly drifting")
+        .on_hover_text(
+            "A slow drift, well under the rate that is a photosensitivity risk. \
+             Corners and grain do not move: one has no axis to travel along, and \
+             the other would read as television static.",
+        )
+        .changed()
+    {
+        ui.ctx().memory_mut(|m| m.data.insert_temp(mv, moving));
+    }
+    ui.ctx().memory_mut(|m| m.data.insert_temp(mv, moving));
+    // A quarter of the cap: visible if you watch, invisible if you are reading.
+    let sp = if moving { crate::model::MAX_FILL_SPEED * 0.25 } else { 0.0 };
+    ui.separator();
+
+    preset(ui, "Fade →", Fill::Gradient { from: a, to: b, angle: 0.0, speed: sp }, &mut out);
+    preset(ui, "Fade ↓", Fill::Gradient { from: a, to: b, angle: 90.0, speed: sp }, &mut out);
+    preset(ui, "Fade ↘", Fill::Gradient { from: a, to: b, angle: 45.0, speed: sp }, &mut out);
+    preset(ui, "Stripes |", Fill::Stripes { a, b, angle: 0.0, width: 18.0, speed: sp }, &mut out);
+    preset(ui, "Stripes /", Fill::Stripes { a, b, angle: 45.0, width: 18.0, speed: sp }, &mut out);
+    preset(ui, "Stripes —", Fill::Stripes { a, b, angle: 90.0, width: 18.0, speed: sp }, &mut out);
+    preset(
+        ui,
+        "Grain",
+        Fill::Noise { base: a, fleck: b, scale: 3.0, seed: 7, amount: 0.35 },
+        &mut out,
+    );
+    preset(
+        ui,
+        "Grain — coarse",
+        Fill::Noise { base: a, fleck: b, scale: 1.2, seed: 7, amount: 0.5 },
+        &mut out,
+    );
     preset(
         ui,
         "Corners",
@@ -4356,13 +4520,13 @@ pub(crate) fn fill_menu(
     preset(
         ui,
         &format!("Tie dye ({} colors)", cols.len()),
-        Fill::TieDye { colors: cols.clone(), seed, scale: 70.0 },
+        Fill::TieDye { colors: cols.clone(), seed, scale: 70.0, speed: sp },
         &mut out,
     );
     preset(
         ui,
         "Tie dye — tight",
-        Fill::TieDye { colors: cols.clone(), seed, scale: 32.0 },
+        Fill::TieDye { colors: cols.clone(), seed, scale: 32.0, speed: sp },
         &mut out,
     );
     ui.separator();
