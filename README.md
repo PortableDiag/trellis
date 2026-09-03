@@ -250,6 +250,11 @@ drawn hollow in their accent where a resident card is a solid block.
   frames them: zoom and pan so the selection's bounding box fills the canvas.
 - **Autosort** — **Tools → Autosort cards** first **auto-sizes** every card to fit
   its content, then lays the whole basket out in a tidy, non-overlapping grid.
+- **Zoomed out, cards keep their shape.** Below about 45% a card stops laying out
+  its text and draws the *shape* of its content instead — paragraphs as ragged
+  bars, a checklist as boxes and bars, a table as its actual grid with the cell
+  colours kept. You can still tell a full card from an empty one, and a pass/fail
+  table still reads as red and green, from right across a basket.
 - **Fit to content** — right-click a card → **Fit to content** resizes just that card
   so its text/items/table are fully readable (no more unreadable little squares). Agents
   get the same via `"fit": true` on card create/update, and it gives the identical

@@ -2078,6 +2078,161 @@ pub fn desktop_card_ui(
     r.drag_started()
 }
 
+/// A card's content, drawn as **shape without text**, for zooms below
+/// [`DETAIL_ZOOM`].
+///
+/// The point of the level-of-detail threshold is to stop laying out Markdown that
+/// renders as an illegible smear; the point of *this* is that "illegible" and
+/// "absent" must not look the same. A card with three lines, a card with forty,
+/// a checklist and a table are all still distinguishable at 30% zoom — which is
+/// what you are zoomed out to see.
+///
+/// **Cheap by construction**: line *counts* and string lengths, never a galley.
+/// Nothing here measures text, so it costs a few rects per card against the
+/// dozens of shaped glyph runs it replaces.
+fn paint_content_texture(
+    p: &egui::Painter,
+    body: egui::Rect,
+    card: &Card,
+    zoom: f32,
+    text_col: egui::Color32,
+) {
+    p.extend(content_texture(body, card, zoom, text_col));
+}
+
+/// The shapes [`paint_content_texture`] draws — split out so the one distinction
+/// this exists to restore (a card with content does not look like an empty one)
+/// can be asserted without a painter.
+fn content_texture(
+    body: egui::Rect,
+    card: &Card,
+    zoom: f32,
+    text_col: egui::Color32,
+) -> Vec<egui::Shape> {
+    // Faint enough to read as texture rather than content, and it has to survive
+    // both themes — this is the same colour the text would have been.
+    let ink = text_col.gamma_multiply(0.32);
+    let line_h = (13.0 * zoom).max(1.0);
+    let bar_h = (line_h * 0.5).max(0.75);
+    let max_rows = ((body.height() / line_h).floor() as usize).max(1);
+
+    // One bar per line, its width tracking the line's own length so a paragraph
+    // reads as a paragraph — ragged, with a short last line — rather than a
+    // barcode.
+    let bars = |lines: Vec<usize>| {
+        let longest = lines.iter().copied().max().unwrap_or(1).max(1) as f32;
+        let mut shapes = Vec::new();
+        for (i, len) in lines.iter().take(max_rows).enumerate() {
+            if *len == 0 {
+                continue; // a blank line is blank
+            }
+            let w = (body.width() * (*len as f32 / longest)).clamp(2.0, body.width());
+            let y = body.top() + i as f32 * line_h;
+            shapes.push(egui::Shape::rect_filled(
+                egui::Rect::from_min_size(egui::pos2(body.left(), y), egui::vec2(w, bar_h)),
+                0.0,
+                ink,
+            ));
+        }
+        shapes
+    };
+
+    let shapes: Vec<egui::Shape> = match &card.kind {
+        // A long line wraps, so it is not one bar: split it into full-width runs
+        // plus a remainder, which is what makes a wall of prose look like one.
+        CardKind::Text | CardKind::Code { .. } => {
+            let per_line = ((body.width() / (6.0 * zoom).max(1.0)) as usize).max(8);
+            let mut lens = Vec::new();
+            for l in card.body.lines() {
+                let n = l.chars().count();
+                if n == 0 {
+                    lens.push(0);
+                    continue;
+                }
+                let mut left = n;
+                while left > per_line {
+                    lens.push(per_line);
+                    left -= per_line;
+                }
+                lens.push(left);
+                if lens.len() > max_rows {
+                    break;
+                }
+            }
+            bars(lens)
+        }
+        CardKind::Checklist { items } => {
+            let mut shapes = Vec::new();
+            let box_w = (line_h * 0.55).max(1.0);
+            let longest =
+                items.iter().map(|i| i.text.chars().count()).max().unwrap_or(1).max(1) as f32;
+            for (i, item) in items.iter().take(max_rows).enumerate() {
+                let y = body.top() + i as f32 * line_h;
+                // The checkbox is the thing that says "this is a list".
+                shapes.push(egui::Shape::rect_stroke(
+                    egui::Rect::from_min_size(egui::pos2(body.left(), y), egui::vec2(box_w, box_w)),
+                    0.0,
+                    egui::Stroke::new(0.75, ink),
+                ));
+                let avail = body.width() - box_w * 1.6;
+                let w = (avail * (item.text.chars().count() as f32 / longest)).clamp(2.0, avail);
+                shapes.push(egui::Shape::rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(body.left() + box_w * 1.6, y),
+                        egui::vec2(w, bar_h),
+                    ),
+                    0.0,
+                    ink,
+                ));
+            }
+            shapes
+        }
+        // A table draws its actual grid, which is both cheap and the most
+        // recognisable thing on a zoomed-out canvas. Cell colours are kept —
+        // a pass/fail table reads as red and green from right across the basket,
+        // which is exactly why anyone colours one.
+        CardKind::Table { table } => {
+            let cols = table.n_cols().max(1);
+            let total_w: f32 = (0..cols).map(|c| table.col_width(c)).sum::<f32>().max(1.0);
+            let rows = table.rows.len().max(1);
+            let row_h = (body.height() / rows as f32).max(0.75);
+            let mut shapes = Vec::new();
+            for (r, row) in table.rows.iter().enumerate() {
+                let y = body.top() + r as f32 * row_h;
+                if y > body.bottom() {
+                    break;
+                }
+                let mut x = body.left();
+                for (c, cell) in row.iter().enumerate() {
+                    let w = body.width() * table.col_width(c) / total_w;
+                    let cr = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, row_h));
+                    let fill = match cell.bg {
+                        Some([rr, gg, bb]) => egui::Color32::from_rgb(rr, gg, bb),
+                        None if table.header && r == 0 => ink,
+                        None => egui::Color32::TRANSPARENT,
+                    };
+                    if fill != egui::Color32::TRANSPARENT {
+                        shapes.push(egui::Shape::rect_filled(cr, 0.0, fill));
+                    }
+                    shapes.push(egui::Shape::rect_stroke(
+                        cr,
+                        0.0,
+                        egui::Stroke::new(0.5, ink),
+                    ));
+                    x += w;
+                }
+            }
+            shapes
+        }
+        // An image or a sketch is a picture: a filled block says "picture" more
+        // honestly than lines of fake text would.
+        CardKind::Image { .. } | CardKind::Sketch { .. } => {
+            vec![egui::Shape::rect_filled(body, 1.0, ink.gamma_multiply(0.6))]
+        }
+    };
+    shapes
+}
+
 fn card_ui(
     ui: &mut egui::Ui,
     card: &Card,
@@ -2577,10 +2732,22 @@ fn card_ui(
         egui::pos2(rect.min.x + pad, rect.min.y + title_h + 4.0 * zoom),
         rect.max - egui::vec2(pad, pad),
     );
-    // Level of detail: zoomed out far enough that the body is a grey texture
-    // rather than text, draw the title bar alone. `MIN_ZOOM` is 0.2, so this is a
-    // range you can actually reach.
+    // Level of detail: zoomed out far enough that the body would be a grey texture
+    // rather than text, **draw the texture** instead of laying out real Markdown.
+    // `MIN_ZOOM` is 0.2, so this is a range you can actually reach.
+    //
+    // It used to draw nothing at all — which is not what this comment said, and
+    // not what it looks like. Titles stay crisp well below the threshold, so a
+    // whole basket came out as a grid of labelled **empty boxes**, and the
+    // operator reported it as cards going blank. A card with content and a card
+    // with none looked identical, which is the one distinction being zoomed out
+    // is for. Stand-in geometry costs a handful of rects per card — far less than
+    // the Markdown layout the threshold exists to skip — and keeps the shape of
+    // the content readable, which is what you navigate by.
     if zoom < DETAIL_ZOOM {
+        if body_rect.height() > 3.0 {
+            paint_content_texture(&p, body_rect, card, zoom, ui.visuals().text_color());
+        }
         // The bottom edge still says there is more here than the strip shows.
         p.line_segment(
             [
@@ -6660,6 +6827,64 @@ fn draw_grid(painter: &egui::Painter, rect: egui::Rect, view: TSTransform, color
 
 #[cfg(test)]
 mod tests {
+
+    /// **A card with content must not look like an empty one when zoomed out.**
+    ///
+    /// Below `DETAIL_ZOOM` the body used to draw *nothing* — which is not what
+    /// its own comment claimed ("a grey texture") and not what it looked like.
+    /// Titles stay crisp well below the threshold, so a whole basket came out as
+    /// a grid of labelled empty boxes and the operator reported it as cards going
+    /// blank. Telling a full card from an empty one is the entire job of being
+    /// zoomed out.
+    #[test]
+    fn a_zoomed_out_card_still_shows_that_it_has_content() {
+        use crate::model::{ChecklistItem, TableData};
+        let body = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 120.0));
+        let ink = egui::Color32::WHITE;
+        let n = |c: &Card| content_texture(body, c, 0.35, ink).len();
+
+        let mut empty = Card::new(1, egui::pos2(0.0, 0.0), CardKind::Text);
+        empty.title = "titled but blank".into();
+        assert_eq!(n(&empty), 0, "an empty card draws nothing — that is the signal");
+
+        let mut prose = Card::new(2, egui::pos2(0.0, 0.0), CardKind::Text);
+        prose.body = "one line\n\nand a much longer second paragraph that has to wrap \
+                      several times over before it runs out of words to say"
+            .into();
+        assert!(n(&prose) > 2, "prose draws a bar per wrapped line: {}", n(&prose));
+
+        let list = Card::new(
+            3,
+            egui::pos2(0.0, 0.0),
+            CardKind::Checklist {
+                items: (0..4)
+                    .map(|i| ChecklistItem { id: i, text: "an item".into(), done: false })
+                    .collect(),
+            },
+        );
+        // A box and a bar per item, so a list is distinguishable from a paragraph.
+        assert_eq!(n(&list), 8, "checkbox + bar per item: {}", n(&list));
+
+        let table = Card::new(
+            4,
+            egui::pos2(0.0, 0.0),
+            CardKind::Table {
+                table: TableData::from_values(vec![
+                    vec!["h1".into(), "h2".into()],
+                    vec!["a".into(), "b".into()],
+                ]),
+            },
+        );
+        assert!(n(&table) >= 4, "a table draws its grid: {}", n(&table));
+
+        // And a long card is not clipped into looking short: bounded by the body,
+        // never by the content.
+        let mut long = Card::new(5, egui::pos2(0.0, 0.0), CardKind::Text);
+        long.body = (0..500).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        assert!(n(&long) <= 120, "bounded by the rect it draws into: {}", n(&long));
+        assert!(n(&long) > 4, "…but still clearly full: {}", n(&long));
+    }
+
 
     /// **The renderer wraps a cell, and the row grows with it.**
     ///

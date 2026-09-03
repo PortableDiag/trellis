@@ -6,6 +6,30 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.170.2]
+
+### Fixed
+- **Zoomed out, a card with content looked exactly like an empty one.** Below
+  `DETAIL_ZOOM` (45%, since v0.139.0) a card draws its title bar alone — the
+  point being to skip laying out Markdown that renders as an illegible smear.
+  But the comment said the body becomes *"a grey texture"* and the code drew
+  **nothing at all**, and titles stay perfectly crisp well below the threshold.
+  So a whole basket came out as a grid of labelled **empty boxes**. Reported by
+  the operator as cards going blank when zooming out.
+
+  The body now draws the texture the comment always promised: **shape without
+  text**. Prose is a bar per wrapped line, ragged with a short last line, so a
+  paragraph reads as a paragraph; a checklist is a box and a bar per item, so it
+  is distinguishable from prose at a glance; a table draws its **actual grid**,
+  keeping cell colours, so a pass/fail table reads as red and green from right
+  across the basket — which is why anyone colours one; an image or sketch is a
+  filled block. **A genuinely empty card stays blank**, which is now information
+  rather than a rendering fault.
+
+  **Cheap by construction** — line *counts* and string lengths, never a galley.
+  Nothing measures text, so it costs a handful of rects against the dozens of
+  shaped glyph runs it replaces, and the threshold keeps doing its job.
+
 ## [0.170.1]
 
 ### Fixed
