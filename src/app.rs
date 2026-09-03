@@ -8524,6 +8524,17 @@ impl TrellisApp {
                 .weak()
                 .small(),
             );
+            ui.label(
+                egui::RichText::new(
+                    "Four paths answer without it, and none of them returns document \
+                     content: /api/health, /open/… (focuses this window), /go/… (hands \
+                     the reader's own device to a trellis:// link) and /favicon.ico, \
+                     which a browser asks for on its own whenever it loads one of those \
+                     pages.",
+                )
+                .weak()
+                .small(),
+            );
         }
         if self.api_lan {
             ui.label(

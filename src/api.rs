@@ -2034,6 +2034,24 @@ fn handle(
         return ApiResponse { status: 204, body: String::new(), content_type: JSON };
     }
 
+    // A browser asks for `/favicon.ico` on its own, unprompted, the moment it
+    // loads *any* page this server serves — and `/go/...` exists precisely so
+    // that a phone can load one. Until now that request was answered `401` and
+    // therefore **written to the error log**, which is supposed to be all
+    // signal. Three sessions in a row reported "an unidentified client polling
+    // the instance unauthenticated" and listed `/favicon.ico` and `/` among its
+    // calls: the server was filing its own pages as an intruder, and the noise
+    // sent two of those sessions chasing it.
+    //
+    // `204`, without a key, for the same reason `/open/...` needs none — a
+    // browser cannot send one, and there is nothing here to protect. No icon is
+    // served because a response body is a `String` and the app icon is a PNG;
+    // *no content* is the honest answer and, unlike a 404, it is not a refusal
+    // to record.
+    if method == Method::Get && path == "/favicon.ico" {
+        return ApiResponse { status: 204, body: String::new(), content_type: JSON };
+    }
+
     // Everything but health requires a credential: the instance's own key, or a
     // token minted for a plugin. A plugin token carries a scope, and the half of
     // it that can be judged without the document — read-only — is enforced right
@@ -2933,14 +2951,59 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
         // docs (error log, 2026-08-29) — every one of them a route this API does
         // not have, and the answer said only that. `GET /api/docs` is the manual
         // for the build that is answering, so the answer says so.
+        //
+        // Where the miss is a *known* one, the answer names the neighbouring
+        // route that does exist, because the log shows what a caller does with
+        // "no route": it guesses again. `POST /api/cards` was tried twice in a
+        // row with the basket sitting in the body, losing a batch create both
+        // times.
         _ => Err((
             404,
-            format!(
-                "no route for {:?} {} — the reference for this build is \
-                 GET /api/docs (?section=Examples to narrow it)",
-                method, path
-            ),
+            match near_miss(method, seg.as_slice()) {
+                Some(hint) => format!("no route for {:?} {} — {}", method, path, hint),
+                None => format!(
+                    "no route for {:?} {} — the reference for this build is \
+                     GET /api/docs (?section=Examples to narrow it)",
+                    method, path
+                ),
+            },
         )),
+    }
+}
+
+/// The route a caller meant, for the misses that have actually been made.
+///
+/// Every entry here is a real call read out of `<data-dir>/trellis/api-errors.log`.
+/// A 404 that says only "no route" is correct and useless: the caller cannot tell
+/// whether the thing does not exist or is spelled differently, so they guess
+/// again — which is what the log records them doing.
+///
+/// **Not written as route-table arms.** The endpoint-parity tests read this file
+/// for lines beginning `(Method::`, and would rightly demand that API.md and
+/// Settings → Endpoints document a route that does not exist. Matching on the
+/// segments alone keeps these out of the route table, which is where they belong:
+/// they are error messages, not endpoints.
+fn near_miss(method: &Method, seg: &[&str]) -> Option<&'static str> {
+    let get = *method == Method::Get;
+    let post = *method == Method::Post;
+    match seg {
+        // Guessed twice on 2026-08-31, both times with `{"node":…,"cards":[…]}`
+        // in the body. There is no whole-document create: a card has to be born
+        // somewhere, and the basket is a path segment rather than a field.
+        ["api", "cards"] if post => Some(
+            "a new card is addressed by its basket: POST /api/nodes/{id}/cards, \
+             which takes one card object or an array of them. The whole-document \
+             card routes are reads and property writes only \
+             (GET /api/cards?ids=…, POST/DELETE /api/cards/property)",
+        ),
+        // Tried on 2026-08-30 after an image was posted successfully. An inline
+        // image is one of a list, so reading one needs the index.
+        ["api", "cards", _, "image"] | ["api", "nodes", _, "cards", _, "image"] if get => Some(
+            "an inline image is one of a list, so it is addressed by index: \
+             GET /api/cards/{cid}/images/{idx} — POST …/images adds one \
+             and DELETE …/images/{idx} removes it",
+        ),
+        _ => None,
     }
 }
 
@@ -6758,6 +6821,40 @@ mod tests {
         };
         assert_eq!(code(r#"{"titel":"typo"}"#, "/api/nodes/1/cards"), 400);
         assert_eq!(code(r#"{"title":"ok","colour":"red"}"#, "/api/nodes"), 400);
+    }
+
+    /// A 404 for a route that has a *neighbour* names the neighbour.
+    ///
+    /// Both cases are real calls out of `api-errors.log`. Without the hint the
+    /// caller reads "no route", concludes the feature is missing, and guesses
+    /// again — `POST /api/cards` was tried twice in a row, losing a batch create
+    /// each time, and `GET …/image` was tried right after an image had been
+    /// posted successfully.
+    #[test]
+    fn a_near_miss_404_names_the_route_that_exists() {
+        let msg = |m: &Method, path: &str| match route(m, path, "", "") {
+            Err((404, msg)) => msg,
+            Err((code, msg)) => panic!("expected a 404 for {path}, got {code}: {msg}"),
+            Ok(_) => panic!("expected a 404 for {path}, got a route"),
+        };
+
+        let m = msg(&Method::Post, "/api/cards");
+        assert!(m.contains("POST /api/nodes/{id}/cards"), "names the create route: {m}");
+
+        let m = msg(&Method::Get, "/api/cards/9/image");
+        assert!(m.contains("/images/{idx}"), "names the indexed read: {m}");
+        // The node-addressed twin misses the same way.
+        let m = msg(&Method::Get, "/api/nodes/1/cards/9/image");
+        assert!(m.contains("/images/{idx}"), "and so does the node-addressed form: {m}");
+
+        // A route with no neighbour still points at the manual, unchanged.
+        let m = msg(&Method::Get, "/api/openapi");
+        assert!(m.contains("GET /api/docs"), "the general answer is untouched: {m}");
+
+        // And a near miss must never shadow a route that exists: these are the
+        // spellings the hints point *at*.
+        assert!(route(&Method::Get, "/api/cards/9/images/0", "", "").is_ok());
+        assert!(route(&Method::Get, "/api/cards", "ids=1,2", "").is_ok());
     }
 
     /// The flip side, and the reason this is worth a test rather than a glance:

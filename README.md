@@ -499,7 +499,11 @@ drawn hollow in their accent where a resident card is a solid block.
   from**, and what they sent, counted as `api_errors` on `/api/instance` and
   mirrored to a per-instance `api-errors.log`, so a refused call is on record
   whether or not the agent that made it mentions it — and a caller that names
-  itself in nothing is still identified by its IP. **`GET /api/app-errors` is the
+  itself in nothing is still identified by its IP. Everything in that log is a
+  real refusal: `/favicon.ico`, which a browser asks for unprompted whenever it
+  opens a `/go/…` link, is answered `204` **without a key** rather than 401'd
+  into the log, and a 404 for a route that has a near neighbour names the
+  neighbour instead of leaving the caller to guess again. **`GET /api/app-errors` is the
   other half** — what the *app* failed at, with no caller involved: a save that
   did not land, a version-history snapshot or a backup that could not be written,
   a plugin that would not run. Those used to be reported to the status bar and

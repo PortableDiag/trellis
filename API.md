@@ -33,7 +33,7 @@ See `trellis --help`.
 
 ## Authentication
 
-Every endpoint except `GET /api/health` requires the key, sent as either header:
+Every endpoint requires the key, sent as either header:
 
 ```
 X-API-Key: <key>
@@ -42,6 +42,26 @@ Authorization: Bearer <key>
 
 - No/empty key configured → `403 {"error":"API disabled: set a key in Settings"}`
 - Wrong key → `401 {"error":"missing or invalid API key"}`
+
+**The complete list of paths that answer without a key** — four, and none of them
+returns document content:
+
+| path | why |
+|---|---|
+| `GET /api/health` | liveness, so a watchdog needs no credential |
+| `GET /open/card\|node\|group/{id}` | navigation only: it focuses this window and answers `{"opened":…}`. A keyless route that could read cards by walking ids would be a hole, so it returns none |
+| `GET /go/card\|node\|group/{id}` | the page that hands the **reader's own device** to a `trellis://` link. A link nobody can click buys nothing; it carries no more than the target's title |
+| `GET /favicon.ico` | `204`. A browser asks for it unprompted on any page this server serves — and `/go/…` exists so a phone can load one (v0.169.3) |
+| `OPTIONS` (any path) | the CORS preflight, which a browser sends without headers |
+
+**`/favicon.ico` is answered rather than refused because of the error log**
+(v0.169.3). It used to 401, which meant every browser that opened a `/go/…` link
+wrote a refusal into `api-errors.log` — a log whose whole value is that
+everything in it is worth reading. Three sessions in a row reported "an
+unidentified client polling the instance unauthenticated" and listed
+`/favicon.ico` among its calls: the server was filing its own pages as an
+intruder. `204` rather than an icon because a response body is text, and rather
+than a `404` because a 404 is a refusal and would be logged too.
 
 ## Data model
 
@@ -385,7 +405,8 @@ GET /open/card/{cid} · /open/node/{id} · /open/group/{gid}   [no key; not unde
   → 200 {"opened":"card 1391"}   | 404 (no such target)  | 409 (?doc= mismatch)
         what a `trellis://` link resolves to. Navigation only — it focuses the
         window and reveals the target, and deliberately returns no document
-        content, because it is the one route that answers without a key.
+        content, because it answers without a key (see **Authentication** for
+        the full list of routes that do).
 
 GET /go/card/{cid} · /go/node/{id} · /go/group/{gid}          [no key; not under /api]
   → 200 <html>   | 404 (no such target)
@@ -554,6 +575,20 @@ GET /api/docs[?section=<name>]
         Allowed at **any** scope, including a token confined to a basket: it is
         static text with no document content in it, and an agent that cannot read
         how the API works is not confined, just broken.
+
+        **A 404 for a route that does not exist points here** — and where the
+        miss is a *known* one, it names the neighbour instead (v0.169.3). Both
+        hints are calls read out of a live `api-errors.log`, because what a
+        caller does with a bare "no route" is guess again:
+
+        - `POST /api/cards` → *a new card is addressed by its basket:
+          `POST /api/nodes/{id}/cards`*. There is no whole-document create; the
+          whole-document card routes are reads and property writes only. Tried
+          twice in a row with `{"node":…,"cards":[…]}` in the body, losing a
+          batch create each time.
+        - `GET /api/cards/{cid}/image` → *an inline image is one of a list, so it
+          is addressed by index: `GET /api/cards/{cid}/images/{idx}`*. Tried
+          immediately after an image had been posted successfully.
 
 GET /api/search?q=<text>
   → 200 {"hits":[ {node,card,node_title,snippet} ]}                   (case-insensitive)
@@ -1673,7 +1708,8 @@ the wrong port lands on a real card that is not the one meant.
 **`/open/...` is unauthenticated and navigation-only.** It focuses a window and
 answers `{"opened":…}` or a 404; it never returns document content, because a
 route with no key that could read cards by walking ids would be a hole. It sits
-deliberately outside `/api`.
+deliberately outside `/api`. The **Authentication** section lists every route
+that answers without a key.
 
 **Registration.** `trellis://` needs the desktop to know the scheme. Trellis
 registers itself on a new install, and again if the binary moves; *Settings →

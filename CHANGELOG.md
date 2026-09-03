@@ -6,6 +6,47 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.169.3]
+
+### Fixed
+- **The error log was filing the app's own pages as an intruder.** A browser asks
+  for `/favicon.ico` on its own, unprompted, the moment it loads *any* page this
+  server serves — and `/go/…` exists precisely so that a phone can load one. That
+  request had no key, because a browser cannot send one, so it was answered `401`
+  and **written to `api-errors.log`**: a log whose entire value is that
+  everything in it is worth reading. Three sessions in a row reported "an
+  unidentified client polling the instance unauthenticated" and listed
+  `/favicon.ico` and `/` among its calls, and two of them spent time chasing it.
+  `/favicon.ico` now answers **`204`, without a key**, joining `/api/health`,
+  `/open/…` and `/go/…` — none of which returns document content. `204` rather
+  than an icon because a response body is text and the app icon is a PNG; `204`
+  rather than `404` because a 404 is a refusal and would be logged just the same.
+
+### Changed
+- **A 404 for a route with a neighbour names the neighbour.** `GET /api/docs` is
+  still the general answer, but two misses are known ones, both read out of a
+  live error log — because what a caller does with a bare *"no route"* is guess
+  again:
+  - `POST /api/cards` → *a new card is addressed by its basket:
+    `POST /api/nodes/{id}/cards`, which takes one card or an array.* There is no
+    whole-document create; the whole-document card routes are reads and property
+    writes. It was tried **twice in a row** with `{"node":…,"cards":[…]}` in the
+    body, losing a batch create each time.
+  - `GET /api/cards/{cid}/image` (and its node-addressed twin) → *an inline image
+    is one of a list, so it is addressed by index:
+    `GET /api/cards/{cid}/images/{idx}`.* Tried immediately after an image had
+    been posted successfully.
+
+  Written as a lookup beside the route table rather than as arms **in** it: the
+  endpoint-parity tests read this file for route arms and would rightly demand
+  that API.md and Settings → Endpoints document a route that does not exist.
+  These are error messages, not endpoints.
+- **API.md said only `GET /api/health` answers without a key**, which had not
+  been true since v0.122.0 — `/open/…` and `/go/…` were documented as keyless
+  three hundred lines further down, and each described itself as *the* one route
+  that did. The **Authentication** section now carries the complete list in one
+  table, and both later passages point at it.
+
 ## [0.169.2]
 
 ### Changed
