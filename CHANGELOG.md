@@ -6,6 +6,40 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.172.3]
+
+### Fixed
+- **A failed table op named two causes, and neither was the one that happened.**
+  *"not a table, or index out of range"* was a single string shared by every op,
+  so a caller had to guess between two possibilities — and the case that actually
+  occurred was a **third one the message never offered**. Live, twice, 28 seconds
+  apart: `POST /api/nodes/119/cards/2071/table {"op":"autofit_cols"}`. Card 2071
+  is a perfectly good table; it lives in basket **469**, and the caller had the
+  wrong basket. Half the message was impossible as well — an `autofit_cols` with
+  no `col` has no index to be out of range.
+
+  The failure now says which of the three it is: **there is no card {cid} in
+  basket {node} — it lives in basket {home}** (naming the real home when the card
+  exists elsewhere), **card {cid} is a {kind} card, not a table**, or **an index
+  is out of range for the table as it stands at that point in the list**. Naming
+  the home is not a leak: any caller holding an unconfined key can already ask
+  `GET /api/cards/{cid}`, and a confined token never reaches this code — its
+  scope is checked first.
+- **The commonest 404 guess of all had no near-miss hint.** `near_miss` covered
+  two exotic misses and not the **singular** form: `/api/card/2197`,
+  `/api/card/2210` and `/api/node/487` were each answered by the generic 404 when
+  the route was one character away. `card`/`node`/`group` now name their plural.
+  So does `/api/basket(s)`, which is the vocabulary trap rather than a typo —
+  everything a person reads calls it a **basket** and the API has always called it
+  a `node`.
+- **Four routes were missing from Settings → Endpoints.** v0.172.2's panel lines
+  abbreviated the indexed image routes as `…/images/{idx}`, and
+  `every_route_appears_in_the_endpoints_panel` — the test that exists so the panel
+  moves with the route — was not re-run after that edit. The routes worked; the
+  test suite on that tag is red. Written out in full, and the suite is green
+  again. Recorded rather than quietly corrected: the panel is a documentation
+  surface with a test precisely because it drifts.
+
 ## [0.172.2]
 
 ### Added

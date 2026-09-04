@@ -3028,6 +3028,40 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
 /// Settings → Endpoints document a route that does not exist. Matching on the
 /// segments alone keeps these out of the route table, which is where they belong:
 /// they are error messages, not endpoints.
+/// Why a table op just failed, said precisely.
+///
+/// Every table op returns a bare `bool`, so the failure message named two
+/// possible causes — *"not a table, or index out of range"* — and the caller had
+/// to guess between them. It named neither of the two that actually happen most.
+/// Seen live: `POST /api/nodes/119/cards/2071/table {"op":"autofit_cols"}`,
+/// refused twice 28 seconds apart, because card 2071 is a perfectly good table
+/// **in basket 469** — the caller had the wrong basket, which the message did not
+/// offer as a possibility at all. An `autofit_cols` with no `col` cannot have an
+/// index out of range either, so half the message was impossible to begin with.
+///
+/// The card's real home is named when it has one. That is not a leak: any caller
+/// holding an unconfined key can already ask `GET /api/cards/{cid}`, and a
+/// confined token never reaches this code — its scope is checked first.
+fn table_op_reason(doc: &Document, node: NodeId, card: u64) -> String {
+    match doc.card(node, card) {
+        Some(c) => match &c.kind {
+            CardKind::Table { .. } => "an index is out of range for the table as it stands at \
+                                       that point in the list"
+                .to_string(),
+            other => format!(
+                "card {card} is a {} card, not a table",
+                other.label().to_lowercase()
+            ),
+        },
+        None => match doc.locate_card(card) {
+            Some(home) => format!(
+                "there is no card {card} in basket {node} — it lives in basket {home}"
+            ),
+            None => format!("there is no card {card} in basket {node}"),
+        },
+    }
+}
+
 fn near_miss(method: &Method, seg: &[&str]) -> Option<&'static str> {
     let get = *method == Method::Get;
     let post = *method == Method::Post;
@@ -3047,6 +3081,22 @@ fn near_miss(method: &Method, seg: &[&str]) -> Option<&'static str> {
             "an image is one of a list: GET /api/cards/{cid}/images lists them \
              (names and sizes) and GET …/images/{idx} reads one — POST …/images \
              adds one and DELETE …/images/{idx} removes it",
+        ),
+        // **The most obvious near miss of all, and it was not covered.** Three
+        // singular guesses in the live error log (`/api/card/2197`,
+        // `/api/card/2210`, `/api/node/487`), each answered by the generic 404
+        // when the route was one character away.
+        ["api", "card", ..] => Some(
+            "the plural is the route: /api/cards/{cid} finds a card from its id \
+             alone, and /api/nodes/{id}/cards/{cid} addresses it in its basket",
+        ),
+        ["api", "node", ..] => Some("the plural is the route: /api/nodes/{id}"),
+        ["api", "group", ..] => Some("the plural is the route: /api/groups/{gid}"),
+        // The vocabulary trap: everything a person reads calls it a BASKET, and
+        // the API has always called it a node. Guessed on 2026-08-29.
+        ["api", "basket", ..] | ["api", "baskets", ..] => Some(
+            "a basket is a `node` in this API: GET /api/nodes/{id} for one, \
+             GET /api/tree for the whole tree",
         ),
         _ => None,
     }
@@ -4987,10 +5037,11 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                         ApiResponse::err(
                             400,
                             &format!(
-                                "table op {}/{} ({name}) failed (not a table, or index out of \
-                                 range); nothing was applied — the {} earlier op(s) were undone",
+                                "table op {}/{} ({name}) failed: {}; nothing was applied — the \
+                                 {} earlier op(s) were undone",
                                 i + 1,
                                 total,
+                                table_op_reason(doc, node, card),
                                 i
                             ),
                         ),
@@ -8159,6 +8210,69 @@ mod tests {
 
         let (_d, r3) = process(&mut doc, ApiRequest::ListImages { node: nid, card: 99999 });
         assert_eq!(r3.status, 404);
+    }
+
+    /// **A failed table op says which of the three things went wrong.** The
+    /// message used to name two causes — "not a table, or index out of range" —
+    /// and neither was the one that actually happened live: card 2071 is a good
+    /// table in basket 469, and the caller addressed it through basket 119.
+    /// Refused twice, 28 seconds apart, with no way to learn that from the text.
+    #[test]
+    fn a_failed_table_op_names_the_real_reason() {
+        let mut doc = Document::empty();
+        let home = doc.add_node(None, "home".into());
+        let other = doc.add_node(None, "elsewhere".into());
+        let tid = doc
+            .add_card(home, egui::pos2(0.0, 0.0), CardKind::Table { table: crate::model::TableData::empty(2, 2) })
+            .unwrap();
+        let text = doc.add_card(home, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        // Right card, wrong basket — the case that actually happened.
+        let op: TableOpInput = serde_json::from_str(r#"{"op":"autofit_cols"}"#).unwrap();
+        let (dirty, resp) =
+            process(&mut doc, ApiRequest::TableOp { node: other, card: tid, ops: vec![op] });
+        assert!(!dirty);
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains(&format!("no card {tid} in basket {other}")), "{}", resp.body);
+        assert!(resp.body.contains(&format!("lives in basket {home}")), "names the real home: {}", resp.body);
+
+        // A card that exists here but is the wrong kind names the kind.
+        let op: TableOpInput = serde_json::from_str(r#"{"op":"autofit_cols"}"#).unwrap();
+        let (_d, resp) =
+            process(&mut doc, ApiRequest::TableOp { node: home, card: text, ops: vec![op] });
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("not a table"), "{}", resp.body);
+        assert!(resp.body.contains("text card"), "names what it IS: {}", resp.body);
+
+        // A real table with a bad index says so, and no longer offers "not a
+        // table" as a possibility the caller has to rule out.
+        let op: TableOpInput = serde_json::from_str(r#"{"op":"remove_row","at":99}"#).unwrap();
+        let (_d, resp) =
+            process(&mut doc, ApiRequest::TableOp { node: home, card: tid, ops: vec![op] });
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("index is out of range"), "{}", resp.body);
+        assert!(!resp.body.contains("not a table"), "no longer a guess: {}", resp.body);
+    }
+
+    /// The singular forms were the commonest guess in the live 404 log and the
+    /// only ones the near-miss table did not cover.
+    #[test]
+    fn a_singular_route_names_its_plural() {
+        for (path, want) in [
+            ("/api/card/2197", "/api/cards/{cid}"),
+            ("/api/node/487", "/api/nodes/{id}"),
+            ("/api/group/146", "/api/groups/{gid}"),
+            ("/api/baskets", "a basket is a `node`"),
+        ] {
+            let Err(err) = route(&Method::Get, path, "", "") else {
+                panic!("{path} should not be a route");
+            };
+            assert_eq!(err.0, 404, "{path}");
+            assert!(err.1.contains(want), "{path} → {}", err.1);
+        }
+        // The plurals themselves are still real routes, not near misses.
+        assert!(matches!(route(&Method::Get, "/api/cards/2197", "", ""), Ok(_)));
+        assert!(matches!(route(&Method::Get, "/api/nodes/487", "", ""), Ok(_)));
     }
 
     #[test]
