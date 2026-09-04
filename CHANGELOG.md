@@ -6,6 +6,29 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.171.2]
+
+### Fixed
+- **`verify::` was checked as a date and never cut down to one.** There were two
+  lists of "date keys" and they did not agree: `extract_properties` truncated
+  `due`/`start`/`date` to their first token, while `property_problems` validated
+  `due`/`start`/**`verify`**. So a line written the way the docs recommend —
+  `verify:: 2026-09-02 · check:: <command>` — took the **whole tail** as its
+  value, failed to parse, and was reported as a broken date while being perfectly
+  well written. **Seven on one card** in the operator's work document, and the
+  reason its claims never reached *View → Claims*.
+
+  Worse than the false report: `property_value_span` shared the short list, so
+  `POST …/cards/{cid}/property {"key":"verify"}` would have rewritten the value
+  **through the `check::` that followed it** — a reschedule that silently ate the
+  command beside it. A test now pins that the writable span is the date alone and
+  the command survives.
+
+  One `DATE_KEYS` constant is now used by all three sites. `date` joins the
+  validated set at the same time, for the same reason: a `date::` nobody can read
+  is exactly as broken as a `due::` nobody can read. Two lists that have to agree
+  is how they stop agreeing.
+
 ## [0.171.1]
 
 ### Fixed

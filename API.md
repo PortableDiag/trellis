@@ -1757,7 +1757,11 @@ explicit controls. It will **not** overwrite a working registration, so a
 development build cannot hijack the handler. The `http://127.0.0.1` form needs
 none of this and works today — which is why it exists.
 
-**A date property stops at the date.** `due`, `start` and `date` take the first
+**A date property stops at the date.** `due`, `start`, `date` and **`verify`**
+(the last added in v0.171.2 — it was validated as a date but never truncated to
+one, so `verify:: 2026-09-02 · check:: <command>`, the shape these docs
+recommend, took the whole tail and was reported broken while being perfectly well
+written) take the first
 token of their value, because a date has no spaces. Write
 `due:: 2026-08-15 — still blocked` and the date is `2026-08-15`; the prose after
 it is ignored rather than swallowing the value. Before v0.94.0 the whole tail was

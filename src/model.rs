@@ -6037,6 +6037,26 @@ fn is_code_fence(line: &str) -> bool {
 /// two properties under one key — an API setter that only recognised
 /// line-initial properties appended a standalone `status:: done` while the
 /// Kanban kept counting the inline `status:: doing` it had missed.
+/// The property keys whose value is a **calendar date**, and which therefore
+/// stop at the first token.
+///
+/// **One list, used by everything that cares.** There were two, and they did not
+/// agree: `extract_properties` truncated `due`/`start`/`date`, while
+/// `property_problems` validated `due`/`start`/`verify`. So `verify` was checked
+/// as a date and never truncated to one — every `verify:: 2026-09-02 · check:: …`
+/// line (a date and a command, which is the shape the docs recommend) took the
+/// whole tail as its value, failed to parse, and was reported as a broken date
+/// while being perfectly well written. Seven on one live card.
+///
+/// Worse than the report: [`property_value_span`] shared the short list, so
+/// `POST …/cards/{cid}/property {"key":"verify"}` would have replaced the value
+/// **through the `check::` that followed it** — a write that silently ate the
+/// command beside it.
+///
+/// `date` joins the validated set for the same reason: a `date::` that cannot be
+/// read is exactly as broken as a `due::` that cannot.
+pub(crate) const DATE_KEYS: [&str; 4] = ["due", "start", "date", "verify"];
+
 fn property_marks(line: &str) -> Vec<(usize, usize, usize, u8)> {
     let b = line.as_bytes();
     let mut marks: Vec<(usize, usize, usize, u8)> = Vec::new();
@@ -6092,7 +6112,7 @@ fn property_value_span(line: &str, key: &str) -> Option<(usize, usize, usize)> {
     let mi = marks.iter().position(|&(ks, ci, _, _)| line[ks..ci].to_lowercase() == key)?;
     let (ks, _, vs, _) = marks[mi];
     let mut ve = property_value_end(line, &marks, mi);
-    if matches!(key, "due" | "start" | "date") {
+    if DATE_KEYS.contains(&key) {
         if let Some(tok) = line[vs..ve].split_whitespace().next() {
             let ts = vs + line[vs..ve].find(tok).unwrap();
             ve = ts + tok.len();
@@ -6129,7 +6149,7 @@ pub(crate) fn extract_properties(text: &str) -> Vec<(String, String)> {
             let key = line[ks..ci].to_lowercase();
             let ve = property_value_end(line, &marks, mi);
             let mut value = line[vs..ve].trim().to_string();
-            // **A date is one token.** `due`, `start` and `date` hold a calendar
+            // **A date is one token.** Every key in `DATE_KEYS` holds a calendar
             // date, so a value running to the end of the line is always a
             // sentence that happens to begin with one — `due:: 2026-08-15 — RUN
             // 1 DONE 8/12: …` is a real line from a real checklist. Taking the
@@ -6139,8 +6159,9 @@ pub(crate) fn extract_properties(text: &str) -> Vec<(String, String)> {
             // the panel to the full width of the window.
             //
             // Only these keys. A free-text property (`status:: in progress`,
-            // `owner:: Jane Doe`) legitimately has spaces in it.
-            if matches!(key.as_str(), "due" | "start" | "date") {
+            // `owner:: Jane Doe`) legitimately has spaces in it — and `check::`,
+            // which sits beside `verify::` and holds a whole shell command.
+            if DATE_KEYS.contains(&key.as_str()) {
                 if let Some(first) = value.split_whitespace().next() {
                     value = first.to_string();
                 }
@@ -6489,7 +6510,7 @@ impl Document {
     /// `owner:: ada` is not wrong, it is just a value — flagging every key this
     /// app has no opinion about would bury the three that matter.
     pub fn property_problems(&self) -> Vec<PropertyProblem> {
-        const DATED: [&str; 3] = ["due", "start", "verify"];
+        const DATED: [&str; 4] = DATE_KEYS;
         let mut out = Vec::new();
         let mut check = |node: &Node, card: &Card, item: Option<u64>, hay: &str| {
             for (k, v) in extract_properties(hay) {
@@ -9636,6 +9657,51 @@ mod tests {
     /// A `due::` that is not a date makes a card **look** scheduled while never
     /// reaching the Agenda, and nothing said why. That is v0.120.1's finding, and
     /// this is the surface that answers it.
+        /// **`verify` is a date key everywhere, or in no useful sense at all.**
+    ///
+    /// There were two lists: `extract_properties` truncated `due`/`start`/`date`,
+    /// `property_problems` validated `due`/`start`/`verify`. So `verify` was
+    /// judged as a date and never cut to one — and
+    /// `verify:: 2026-09-02 · check:: <command>`, which is the shape the docs
+    /// recommend, took the whole tail, failed to parse, and was reported broken
+    /// while being perfectly well written. Seven of them on one live card.
+    #[test]
+    fn a_verify_date_stops_at_the_date_like_every_other_date_key() {
+        // The exact line shape from the live document that reported the problem.
+        let line = "verify:: 2026-09-02 · check:: cd ~/gits/dry-v2 && npx vitest run";
+        let props = extract_properties(line);
+        let get = |k: &str| props.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        assert_eq!(get("verify").as_deref(), Some("2026-09-02"), "the date, and only the date");
+        // The command beside it keeps its spaces: `check` is free text.
+        assert_eq!(
+            get("check").as_deref(),
+            Some("cd ~/gits/dry-v2 && npx vitest run"),
+            "a free-text property is untouched by the date rule"
+        );
+
+        // Every date key behaves the same way, which is the point of one list.
+        for k in crate::model::DATE_KEYS {
+            let l = format!("{k}:: 2026-09-02 — trailing prose that is not a date");
+            let p = extract_properties(&l);
+            assert_eq!(
+                p.iter().find(|(a, _)| a == k).map(|(_, v)| v.as_str()),
+                Some("2026-09-02"),
+                "{k} must stop at the date"
+            );
+        }
+
+        // And a WRITE to it replaces the date without eating the command after
+        // it — before this, the span ran through the `check::`.
+        let (_, vs, ve) = property_value_span(line, "verify").expect("verify is on the line");
+        assert_eq!(&line[vs..ve], "2026-09-02", "the writable span is the date alone");
+        let rewritten = format!("{}{}{}", &line[..vs], "2026-12-31", &line[ve..]);
+        assert_eq!(
+            rewritten,
+            "verify:: 2026-12-31 · check:: cd ~/gits/dry-v2 && npx vitest run",
+            "the command beside it survives a reschedule"
+        );
+    }
+
     #[test]
     fn an_unreadable_date_property_is_reported() {
         let mut doc = Document::empty();
