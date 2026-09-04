@@ -593,6 +593,11 @@ GET /api/docs[?section=<name>]
 
 GET /api/search?q=<text>
   → 200 {"hits":[ {node,card,node_title,snippet} ]}                   (case-insensitive)
+        **Ranked** (v0.171.1), not in document order: a basket whose *title*
+        matches, then a card *title* match, then a *body* match — newest first
+        (`touched`) inside each rank, ids breaking the rest. Until then it came
+        out of `HashMap` iteration, so it was arbitrary and could differ after a
+        restart. `card` is `null` on a basket-title hit.
 ```
 Note: `tree` and `nodes` report `cards` as a **count**; `GET /api/nodes/{id}`
 returns the **full card objects**.

@@ -6,6 +6,35 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.171.1]
+
+### Fixed
+- **Search results came back in hash order.** `Document::search` walked
+  `self.nodes.values()` — a `HashMap` — so the order was arbitrary and free to
+  come out differently after a restart. That is the same defect wiki-link
+  resolution carried until v0.121.0, and it is worse in a result list: a reader
+  has no way to tell an unranked list from a ranked one, so they read the top of
+  it as the best answer.
+
+  Ranked now, by what a person means by *the right one*: a **basket** whose title
+  matches, then a **card title** match (the thing is *about* the term), then a
+  **body** match (the term merely appears in it) — and **newest first** within
+  each rank, on `touched`, which is what every other list in the app already
+  means by newest. Ids break the remaining ties, so the order is total and never
+  shuffles. `GET /api/search` gets the same order.
+- **The matched text is picked out of the snippet.** A result list exists to
+  answer "is this the one?", and the word that made it a result was rendered in
+  exactly the same dim grey as the context around it — so finding the match
+  inside the match was a reading exercise. Reported by the operator against a
+  `UUIDv7` search: seven hits, the term invisible in every one.
+
+  It is marked rather than recoloured, which survives both themes and any accent,
+  and the matching is **case-insensitive** — the same way the hit was found, so a
+  search for `uuidv7` marks `UUIDv7`. A highlight that disagreed with the result
+  would leave the reader trusting neither. Applied in Search, Find cards and the
+  tag list; the snippet slices fall back to plain rather than panicking if
+  lowercasing ever shifts a byte offset.
+
 ## [0.171.0]
 
 ### Changed

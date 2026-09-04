@@ -4494,33 +4494,66 @@ impl Document {
     }
 
     /// Collect (node, card, snippet) matches for a case-insensitive query.
+    ///
+    /// **Ordered, and deliberately so.** `self.nodes` is a `HashMap`, so walking
+    /// its values gave results in *hash order*: arbitrary, and free to come out
+    /// differently after a restart. That is the same defect wiki-link resolution
+    /// carried until v0.121.0, and it is worse in a result list — the reader has
+    /// no way to tell an unranked list from a ranked one, so they read the top of
+    /// it as the best answer.
+    ///
+    /// The rank is what a person means by "the right one":
+    ///
+    /// 1. a **basket** whose title matches — a whole container named that;
+    /// 2. a **card title** match — the thing is *about* the term;
+    /// 3. a **body** match — the term merely appears in it.
+    ///
+    /// then **newest first** inside each rank, on `touched`, which is what every
+    /// other list in the app (feeds, `End`) already means by newest. Ids break
+    /// the remaining ties, so the order is total and never shuffles between runs.
     pub fn search(&self, query: &str) -> Vec<SearchHit> {
         let q = query.to_lowercase();
         let mut hits = Vec::new();
         if q.is_empty() {
             return hits;
         }
+        // (rank, newest, node id, card id) — sorted off, then dropped.
+        let mut keyed: Vec<((u8, std::cmp::Reverse<u64>, NodeId, CardId), SearchHit)> = Vec::new();
         for node in self.nodes.values() {
             if node.title.to_lowercase().contains(&q) {
-                hits.push(SearchHit {
-                    node: node.id,
-                    card: None,
-                    node_title: node.title.clone(),
-                    snippet: "(title)".to_string(),
-                });
+                keyed.push((
+                    (0, std::cmp::Reverse(node.touched.unwrap_or(0)), node.id, 0),
+                    SearchHit {
+                        node: node.id,
+                        card: None,
+                        node_title: node.title.clone(),
+                        snippet: "(title)".to_string(),
+                    },
+                ));
             }
             for card in &node.cards {
                 let hay = format!("{} {}", card.title, searchable_body(card));
                 if let Some(pos) = hay.to_lowercase().find(&q) {
-                    hits.push(SearchHit {
-                        node: node.id,
-                        card: Some(card.id),
-                        node_title: node.title.clone(),
-                        snippet: snippet_around(&hay, pos, q.len()),
-                    });
+                    let in_title = card.title.to_lowercase().contains(&q);
+                    keyed.push((
+                        (
+                            if in_title { 1 } else { 2 },
+                            std::cmp::Reverse(card.touched.unwrap_or(0)),
+                            node.id,
+                            card.id,
+                        ),
+                        SearchHit {
+                            node: node.id,
+                            card: Some(card.id),
+                            node_title: node.title.clone(),
+                            snippet: snippet_around(&hay, pos, q.len()),
+                        },
+                    ));
                 }
             }
         }
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        hits.extend(keyed.into_iter().map(|(_, h)| h));
         hits
     }
 
@@ -10695,6 +10728,56 @@ mod tests {
         );
         let back: Card = ron::from_str(&encoded).unwrap();
         assert_eq!(back.kind.images()[0].0.len(), 60_000);
+    }
+
+        /// **Search results are ranked, and the order never shuffles.**
+    ///
+    /// `self.nodes` is a `HashMap`, so the old walk returned hits in *hash
+    /// order* — arbitrary, and free to come out differently after a restart.
+    /// A reader has no way to tell an unranked list from a ranked one, so they
+    /// read the top of it as the best answer. Reported by the operator against a
+    /// `UUIDv7` search.
+    #[test]
+    fn search_ranks_titles_over_bodies_and_is_stable() {
+        let mut doc = Document::empty();
+        let other = doc.add_node(None, "Somewhere else".into());
+        let named = doc.add_node(None, "UUIDv7 notes".into());
+        doc.nodes.get_mut(&named).unwrap().touched = Some(10);
+
+        let mk = |doc: &mut Document, node, title: &str, body: &str, touched| {
+            let cid = doc.add_card(node, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+            let c = doc.card_mut(node, cid).unwrap();
+            c.title = title.into();
+            c.body = body.into();
+            c.touched = Some(touched);
+            cid
+        };
+        // Two body-only hits, the second more recently touched.
+        let old_body = mk(&mut doc, other, "Concept Diagrams", "one stable id (UUIDv7)", 100);
+        let new_body = mk(&mut doc, other, "Dry v2", "P7 ids, UUIDv7 ids + slugs", 200);
+        // A title hit, deliberately the OLDEST, so rank has to beat recency.
+        let title_hit = mk(&mut doc, other, "UUIDv7 rollout", "nothing in the body", 1);
+
+        let hits = doc.search("uuidv7");
+        assert_eq!(hits.len(), 4, "the basket, the title hit and both body hits");
+
+        // 1. the basket named for it, 2. the card titled for it, 3. bodies newest first.
+        assert_eq!(hits[0].card, None, "a basket whose title matches comes first");
+        assert_eq!(hits[0].node, named);
+        assert_eq!(hits[1].card, Some(title_hit), "a title match outranks any body match");
+        assert_eq!(hits[2].card, Some(new_body), "then bodies, newest first");
+        assert_eq!(hits[3].card, Some(old_body));
+
+        // Lowercase query, mixed-case content: the search that found it is the
+        // same one the highlight has to agree with.
+        assert_eq!(doc.search("UUIDV7").len(), 4, "case-insensitive either way");
+
+        // And it is a total order: same input, same output, every time.
+        let once: Vec<_> = doc.search("uuidv7").iter().map(|h| (h.node, h.card)).collect();
+        for _ in 0..5 {
+            let again: Vec<_> = doc.search("uuidv7").iter().map(|h| (h.node, h.card)).collect();
+            assert_eq!(once, again, "the order must not depend on hash iteration");
+        }
     }
 
     #[test]

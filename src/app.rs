@@ -1488,6 +1488,60 @@ struct ChannelEdit {
     error: Option<String>,
 }
 
+/// A search snippet with the matched text **picked out of it**.
+///
+/// A result list exists to answer "is this the one?", and the word that made it a
+/// result was rendered in exactly the same dim grey as the twenty characters of
+/// context around it — so finding the match inside the match was a reading
+/// exercise. Reported by the operator against a `UUIDv7` search: seven hits, the
+/// term invisible in every one.
+///
+/// Case-insensitive, matching the way [`Document::search`] found the hit in the
+/// first place — a search for `uuidv7` must highlight `UUIDv7`, or the highlight
+/// disagrees with the result and the reader trusts neither. An empty needle
+/// highlights nothing rather than everything.
+fn snippet_with_match(ui: &mut egui::Ui, snippet: &str, needle: &str) {
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let dim = ui.visuals().weak_text_color();
+    let needle = needle.trim();
+    if needle.is_empty() {
+        ui.small(snippet);
+        return;
+    }
+    let hay = snippet.to_lowercase();
+    let pin = needle.to_lowercase();
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    let plain = egui::TextFormat { font_id: small.clone(), color: dim, ..Default::default() };
+    let hot = egui::TextFormat {
+        font_id: small,
+        color: ui.visuals().strong_text_color(),
+        // A highlighter mark rather than a colour swap: it survives both themes
+        // and every accent a card might carry, and it is what a reader scanning
+        // a list is already looking for.
+        background: ui.visuals().selection.bg_fill.gamma_multiply(0.55),
+        ..Default::default()
+    };
+    let mut at = 0usize;
+    while let Some(rel) = hay[at..].find(&pin) {
+        let start = at + rel;
+        let end = start + pin.len();
+        // `find` works on the lowercased copy; slice the ORIGINAL at the same
+        // byte offsets so the highlight shows the text as it was written. Both
+        // strings are only guaranteed to share offsets while lowercasing does not
+        // change length, so a slice that would split a char falls back to plain
+        // rather than panicking.
+        if !snippet.is_char_boundary(start) || !snippet.is_char_boundary(end) {
+            break;
+        }
+        job.append(&snippet[at..start], 0.0, plain.clone());
+        job.append(&snippet[start..end], 0.0, hot.clone());
+        at = end;
+    }
+    job.append(&snippet[at..], 0.0, plain);
+    ui.label(job);
+}
+
 impl TrellisApp {
     pub fn new(cc: &eframe::CreationContext<'_>, startup: Startup) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -9948,7 +10002,7 @@ impl TrellisApp {
                             {
                                 jump = Some((hit.node, hit.card));
                             }
-                            ui.small(hit.snippet);
+                            snippet_with_match(ui, &hit.snippet, &self.search_query);
                         });
                         ui.separator();
                     }
@@ -10250,7 +10304,7 @@ impl TrellisApp {
                             {
                                 jump = Some((hit.node, hit.card));
                             }
-                            ui.small(hit.snippet);
+                            snippet_with_match(ui, &hit.snippet, &tag);
                             ui.separator();
                         }
                     });
@@ -10445,7 +10499,7 @@ impl TrellisApp {
                     {
                         jump = Some((hit.node, hit.card));
                     }
-                    ui.small(hit.snippet);
+                    snippet_with_match(ui, &hit.snippet, txt);
                     ui.separator();
                 }
             });
