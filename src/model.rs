@@ -2122,11 +2122,28 @@ impl TableData {
     /// that runs every few seconds, which would re-flatten the columns
     /// continuously while someone was trying to read them.
     pub fn fill_values(&mut self, values: Vec<Vec<String>>) {
-        let cols = values.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
-        let mut rows: Vec<Vec<TableCell>> = values
+        self.fill_cells(
+            values
+                .into_iter()
+                .map(|r| r.into_iter().map(TableCell::new).collect())
+                .collect(),
+        )
+    }
+
+    /// [`TableData::fill_values`] for rows that already carry their own colours
+    /// — the shape a table **reads back as**.
+    ///
+    /// `GET` has always returned a cell as `{text, bg, fg}` while the write side
+    /// took a bare string, so the one thing a caller naturally does — read a
+    /// table, change a cell, send it back — was a 400 (*invalid type: map,
+    /// expected a string*). Seen twice in one afternoon in the live error log.
+    /// A read shape that cannot be written is the same defect `col_widths` had
+    /// in mirror image, and it is fixed the same way: by making the two agree.
+    pub fn fill_cells(&mut self, cells: Vec<Vec<TableCell>>) {
+        let cols = cells.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
+        let mut rows: Vec<Vec<TableCell>> = cells
             .into_iter()
-            .map(|r| {
-                let mut row: Vec<TableCell> = r.into_iter().map(TableCell::new).collect();
+            .map(|mut row| {
                 row.resize(cols, TableCell::default());
                 row
             })

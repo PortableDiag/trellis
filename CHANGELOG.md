@@ -6,6 +6,34 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.172.1]
+
+### Fixed
+- **A table could be read, but not read *back*.** `GET` has always answered a
+  table's `rows` as cell objects — `{"text":…,"bg":…,"fg":…}` — while the write
+  side declared `Vec<Vec<String>>`. So the one thing a caller naturally does,
+  send back what it was just given with a cell changed, was **400 · invalid
+  type: map, expected a string**. Two callers hit it in one afternoon in the
+  live error log, on the same card. A shape the API hands out has to be a shape
+  it accepts; this is the `col_widths` defect in mirror image (readable and
+  unwritable rather than writable and unreadable), and it is fixed the same way
+  — by making the two agree.
+
+  A cell may now be a bare value **or** that object, on `PATCH` and on create,
+  through one deserialiser. A bare string means exactly what it always did, and
+  a number or bool is taken for its text rather than refused — `["Q1", 1000]` is
+  what anyone writing a row types, the same reasoning `CellRule::value` already
+  carries. An unknown field inside a cell is still a 400 naming it (the v0.86.0
+  rule).
+- **A `rows` write no longer flattens the table it rewrites.** It rebuilt the
+  `TableData` from scratch and handed the chart spec back afterwards, which
+  meant changing one word also reset the **column widths**, the **header flag**
+  and the **formatting rules** of a deliberately laid-out table. `rows` replaces
+  the *data*; the widths, the header, the chart and the rules are settings **on**
+  that data. `TableData::fill_values` already existed for exactly this
+  distinction and the `source` refresh was its only caller — the API path now
+  uses it too, so the two ways a table gets refilled finally agree.
+
 ## [0.172.0]
 
 ### Fixed

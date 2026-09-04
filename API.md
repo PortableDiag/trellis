@@ -98,7 +98,7 @@ A document is a **tree of nodes**. Each node has a **basket** of **cards**.
 | `lang` | code | syntax-highlight language, e.g. `"rust"` |
 | `items` | checklist | `[{ "done": bool, "text": string }]` |
 | `image_name`, `image_names`, `bytes` | image | first/all image names + total byte count (read); set image bytes via the images sub-resource (below) |
-| `rows`, `header` | table | `rows` set: `[["a","b"],…]` bulk-replaces cell text (colors reset); get: cells as `{text,bg,fg}`. `header` (bool) toggles the header row. Fine-grained edits (cell colors, widths, row/col ops) use the table sub-resource (below) |
+| `rows`, `header` | table | `rows` set: `[["a","b"],…]` bulk-replaces the cells; get: cells as `{text,bg,fg}` — **and that object is accepted on write too**, so a table can be read, changed and sent back (v0.172.0). Everything that is a setting *on* the data survives the write: column widths, header flag, chart spec, formatting rules. `header` (bool) toggles the header row. Fine-grained edits (cell colors, widths, row/col ops) use the table sub-resource (below) |
 | `col_widths` | table | **read-only**, always present: every column's pixel width, in order, with the 110px default filled in for a column nothing has sized. Set them with `set_col_width` / `autofit_cols`. They were writable and unreadable until v0.170.0, so an agent could size a column and never check it, and one laying out a table was working from a number it had to guess |
 | `chart` | table | how the table is drawn as a chart (`{kind,label_col,value_cols,show_table}`), or `null` for a plain grid. Set via the chart sub-resource (below) |
 | `strokes` | sketch | read: `[{color:[r,g,b], width, points:[[x,y],…]}, …]`. Edit via the sketch sub-resource (below) |
@@ -674,7 +674,8 @@ and items alone. `kind: "checklist"` with a `body` carrying `due:: …` used to 
 line as an **item** instead. The same check applies to `PATCH`, on the kind the card
 *will be* — `{"kind":"text","body":"…"}` converts the card and keeps the body, which
 is a legitimate call and unaffected. `rows` fills a **table** card's cells row by row (`[["a","b"],…]`,
-ragged rows padded to the widest) and `header` styles its first row — so a
+ragged rows padded to the widest; a cell may also be the `{text,bg,fg}` object a
+table reads back as) and `header` styles its first row — so a
 populated table, and a chart drawn from it, take one call instead of three. `image_base64` gives an `image` card its first image (base64 file
 bytes; the `title` becomes its name). `inline_images` embeds images **inside a
 text card's body**: pass an array of base64 file bytes, then reference each in
@@ -717,8 +718,11 @@ every other field; overrides `size`); `font_scale` sizes text/code body font (1.
 keeps its text under `card.body`, and a `body` built from the wrong level is a
 blank card with your one line on it. To add to a card, `…/append` (below) never
 sends the body back at all. `lang` applies to code cards, `items` replaces a checklist's items (send them in
-the desired order to **reorder** a checklist), `rows` bulk-replaces a table's cell
-text, `header` toggles a table's header row, `inline_images` replaces the text
+the desired order to **reorder** a checklist), `rows` bulk-replaces a table's cells
+(each cell a bare value **or** the `{text,bg,fg}` object `GET` hands back, so
+read-modify-write works; the column widths, header flag, chart and formatting
+rules are settings *on* the data and survive it), `header` toggles a table's
+header row, `inline_images` replaces the text
 card's embedded inline images (same base64 + `![](trellis:N)` scheme as create).
 A `body` is refused for the kinds that cannot show one, judged on the kind the card
 **will be** after the patch (see create, above). **`kind` converts the card to

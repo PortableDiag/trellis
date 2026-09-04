@@ -1427,11 +1427,12 @@ pub struct AddCardInput {
     lang: Option<String>,
     #[serde(default)]
     items: Option<Vec<ChecklistItemInput>>,
-    /// Cell text for a `table` card, row by row — so a populated table (and a
-    /// chart drawn from it) can be created in one call instead of create-then-
-    /// PATCH. Ragged rows are padded to the widest.
+    /// Cells for a `table` card, row by row — so a populated table (and a chart
+    /// drawn from it) can be created in one call instead of create-then-PATCH.
+    /// Ragged rows are padded to the widest. A cell is a bare value or the
+    /// `{text, bg, fg}` object a table reads back as — see [`CellIn`].
     #[serde(default)]
-    rows: Option<Vec<Vec<String>>>,
+    rows: Option<Vec<Vec<CellIn>>>,
     /// Style the first row as a header (table cards; default true).
     #[serde(default)]
     header: Option<bool>,
@@ -1605,9 +1606,16 @@ pub struct UpdateCardInput {
     /// Replacement checklist items (checklist cards only).
     #[serde(default)]
     items: Option<Vec<ChecklistItemInput>>,
-    /// Replacement cell values (table cards only); colors reset.
+    /// Replacement cells (table cards only). A cell is a bare value or the
+    /// `{text, bg, fg}` object a table reads back as — see [`CellIn`].
+    ///
+    /// This replaces the **data**. Everything that is a setting *on* that data
+    /// survives: the column widths, the header flag, the chart spec and the
+    /// formatting rules. Only the chart used to, and rebuilding the table from
+    /// scratch to change one word silently flattened the columns of a
+    /// deliberately-laid-out table and dropped its conditional formatting.
     #[serde(default)]
-    rows: Option<Vec<Vec<String>>>,
+    rows: Option<Vec<Vec<CellIn>>>,
     /// Convert the card to another kind: `text`/`code`/`checklist`/`table`/`image`.
     /// Existing body/items/table are kept when compatible; a new kind starts empty.
     #[serde(default)]
@@ -3343,6 +3351,61 @@ where
 /// happens to be nested. The fill is `sanitize`d on the way in: a zero stripe
 /// width would be an infinite loop in the painter, and an angle is only
 /// meaningful mod 360.
+/// One table cell on the way **in**: a bare value, or the object a table reads
+/// back as.
+///
+/// `GET` has always answered `rows` as `[{"text":…,"bg":…,"fg":…}]` while the
+/// write side declared `Vec<Vec<String>>`, so read-modify-write — send back what
+/// you were just given, with one cell changed — failed with *invalid type: map,
+/// expected a string*. Two callers hit it in one afternoon in the live error
+/// log. A shape the API hands out has to be a shape it accepts.
+///
+/// A scalar keeps working exactly as before, and a number or bool is taken for
+/// its text rather than refused, for the same reason `CellRule::value` accepts
+/// one: `["Q1", 1000]` is what anyone writing a row types.
+#[derive(Clone)]
+struct CellIn(crate::model::TableCell);
+
+impl<'de> serde::Deserialize<'de> for CellIn {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Obj {
+            #[serde(default)]
+            text: Option<String>,
+            #[serde(default)]
+            bg: Option<[u8; 3]>,
+            #[serde(default)]
+            fg: Option<[u8; 3]>,
+        }
+        Ok(CellIn(match Value::deserialize(d)? {
+            Value::Object(map) => {
+                let o: Obj = serde_json::from_value(Value::Object(map))
+                    .map_err(|e| D::Error::custom(format!(
+                        "a table cell is a value, or {{text, bg, fg}} — the shape GET returns: {e}"
+                    )))?;
+                crate::model::TableCell {
+                    text: o.text.unwrap_or_default(),
+                    bg: o.bg,
+                    fg: o.fg,
+                }
+            }
+            Value::String(t) => crate::model::TableCell::new(t),
+            Value::Null => crate::model::TableCell::default(),
+            other => crate::model::TableCell::new(other.to_string()),
+        }))
+    }
+}
+
+/// The rows of a table on the way in, as cells the model can take.
+fn cells_in(rows: Vec<Vec<CellIn>>) -> Vec<Vec<crate::model::TableCell>> {
+    rows.into_iter().map(|r| r.into_iter().map(|c| c.0).collect()).collect()
+}
+
 fn de_fill_clear<'de, D>(d: D) -> Result<Option<Option<crate::model::Fill>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -4112,12 +4175,16 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 }
                 if let Some(rows) = patch.rows {
                     if let CardKind::Table { table } = &mut c.kind {
-                        // `rows` replaces the *data*; the chart is a view setting
-                        // on that data, so refilling a table must not silently
-                        // turn its chart back into a grid.
-                        let chart = table.chart.take();
-                        *table = crate::model::TableData::from_values(rows);
-                        table.chart = chart;
+                        // `rows` replaces the *data*. Everything that is a
+                        // setting ON that data stays: the chart spec, the
+                        // formatting rules, the column widths, the header flag.
+                        // This used to rebuild the table from scratch and hand
+                        // the chart back afterwards, which meant changing one
+                        // word flattened a deliberately-sized table's columns
+                        // and quietly dropped its conditional formatting —
+                        // `fill_values` already existed for exactly this and
+                        // the `source` refresh was the only caller using it.
+                        table.fill_cells(cells_in(rows));
                     }
                 }
                 if let Some(items) = patch.items {
@@ -5730,7 +5797,11 @@ fn add_one(doc: &mut Document, node: NodeId, input: AddCardInput) -> Result<u64,
                 },
                 "table" => {
                     let mut t = match input.rows.clone() {
-                        Some(rows) if !rows.is_empty() => crate::model::TableData::from_values(rows),
+                        Some(rows) if !rows.is_empty() => {
+                            let mut t = crate::model::TableData::empty(0, 0);
+                            t.fill_cells(cells_in(rows));
+                            t
+                        }
                         _ => crate::model::TableData::empty(3, 3),
                     };
                     if let Some(h) = input.header {
@@ -7909,6 +7980,76 @@ mod tests {
         process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
         let CardKind::Checklist { items } = &doc.nodes[&nid].cards[0].kind else { panic!() };
         assert_eq!(items[0].text, "a");
+    }
+
+    /// **A table can be read, changed and written back.** `GET` answers a cell
+    /// as `{text, bg, fg}`; the write side took only a bare string, so sending
+    /// back what you were just given was *invalid type: map, expected a string*
+    /// — hit twice in one afternoon in the live error log. And a `rows` rewrite
+    /// rebuilt the table from scratch, so changing one word flattened a
+    /// deliberately-sized table's columns and dropped its formatting rules.
+    #[test]
+    fn a_table_round_trips_through_rows() {
+        use crate::model::{CellRule, TableData};
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let mut t = TableData::from_values(vec![
+            vec!["Editor".into(), "Dark".into()],
+            vec!["Caleb".into(), "4".into()],
+        ]);
+        t.col_widths = vec![240.0, 90.0];
+        t.header = false;
+        let cid = doc
+            .add_card(nid, egui::pos2(0.0, 0.0), CardKind::Table { table: t })
+            .unwrap();
+
+        // The shape GET hands back, with one cell edited and one hand-coloured.
+        let patch: UpdateCardInput = serde_json::from_str(
+            r#"{"rows":[[{"text":"Editor","bg":null,"fg":null},{"text":"Dark","bg":null,"fg":null}],
+                        [{"text":"Silas","bg":[9,9,9],"fg":null},{"text":"2","bg":null,"fg":null}]]}"#,
+        )
+        .unwrap();
+        let (dirty, resp) = process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        assert!(dirty);
+        assert_eq!(resp.status, 200, "the read shape is accepted on write");
+        let CardKind::Table { table } = &doc.nodes[&nid].cards[0].kind else { panic!() };
+        assert_eq!(table.rows[1][0].text, "Silas");
+        assert_eq!(table.rows[1][0].bg, Some([9, 9, 9]), "a cell's own colour rides in");
+        assert_eq!(table.col_widths, vec![240.0, 90.0], "a deliberate layout survives");
+        assert!(!table.header, "the header flag is a setting, not data");
+
+        // Formatting rules survive too — and go on ruling, which is why the
+        // hand-set colour above was checked on a table that had none: a rule
+        // deliberately clears the cells it does not match.
+        let CardKind::Table { table } = &mut doc.nodes.get_mut(&nid).unwrap().cards[0].kind
+        else {
+            panic!()
+        };
+        table.rules = vec![CellRule {
+            col: Some(1),
+            when: "gt".into(),
+            value: "3".into(),
+            bg: Some([1, 2, 3]),
+            fg: None,
+        }];
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"rows":[["Editor","Dark"],["Silas","9"]]}"#).unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        let CardKind::Table { table } = &doc.nodes[&nid].cards[0].kind else { panic!() };
+        assert_eq!(table.rules.len(), 1, "formatting rules survive a data write");
+        assert_eq!(table.rows[1][1].bg, Some([1, 2, 3]), "and are re-applied to it");
+
+        // A bare string still means exactly what it always did.
+        let patch: UpdateCardInput =
+            serde_json::from_str(r#"{"rows":[["a","b"],["c",12]]}"#).unwrap();
+        process(&mut doc, ApiRequest::UpdateCard { node: nid, card: cid, patch });
+        let CardKind::Table { table } = &doc.nodes[&nid].cards[0].kind else { panic!() };
+        assert_eq!(table.rows[0][0].text, "a");
+        assert_eq!(table.rows[0][0].bg, None, "a bare string carries no colour");
+        assert_eq!(table.rows[1][1].text, "12", "a number is its text, not a refusal");
+
+        // A cell object with a field that does not exist is still a 400.
+        assert!(serde_json::from_str::<UpdateCardInput>(r#"{"rows":[[{"txet":"a"}]]}"#).is_err());
     }
 
     #[test]
