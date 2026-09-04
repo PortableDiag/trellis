@@ -277,6 +277,14 @@ pub enum ApiRequest {
     /// given agent is addressed in, or to one project.
     ChannelList { agent: Option<String>, project: Option<NodeId> },
     ListAttachments { node: NodeId, card: u64 },
+    /// `GET …/cards/{cid}/images` — what pictures this card carries.
+    ///
+    /// The read half of `POST …/images`, which shipped without one: a caller
+    /// that had just posted an image had no way to ask what was there, and four
+    /// `GET …/images` calls were refused as 404s in one day in the live error
+    /// log. Names and **sizes**, never bytes — the same rule
+    /// [`ApiRequest::ListAttachments`] follows, and for the same reason.
+    ListImages { node: NodeId, card: u64 },
     GetAttachment { node: NodeId, card: u64, index: usize },
     AddAttachment { node: NodeId, card: u64, name: String, bytes: Vec<u8> },
     RemoveAttachment { node: NodeId, card: u64, index: usize },
@@ -538,6 +546,7 @@ pub enum CardOp {
     Say { from: String, text: String },
     ReadChannel { since: u64 },
     ListAttachments,
+    ListImages,
     AddAttachment { name: String, bytes: Vec<u8> },
     GetAttachment { index: usize },
     RemoveAttachment { index: usize },
@@ -586,6 +595,7 @@ pub fn resolve_by_card(node: NodeId, card: u64, op: CardOp) -> ApiRequest {
         CardOp::Say { from, text } => ApiRequest::ChannelSay { node, card, from, text },
         CardOp::ReadChannel { since } => ApiRequest::ChannelRead { node, card, since },
         CardOp::ListAttachments => ApiRequest::ListAttachments { node, card },
+        CardOp::ListImages => ApiRequest::ListImages { node, card },
         CardOp::AddAttachment { name, bytes } => {
             ApiRequest::AddAttachment { node, card, name, bytes }
         }
@@ -809,6 +819,7 @@ pub fn target_node(req: &ApiRequest) -> Option<NodeId> {
         | ApiRequest::ExportCard { node, .. }
         | ApiRequest::ChannelSay { node, .. }
         | ApiRequest::ChannelRead { node, .. }
+        | ApiRequest::ListImages { node, .. }
         | ApiRequest::ListAttachments { node, .. }
         | ApiRequest::GetAttachment { node, .. }
         | ApiRequest::AddAttachment { node, .. }
@@ -2549,6 +2560,9 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             card: pid(cid)?,
             op: CardOp::RemoveAttachment { index: index_seg(idx)? },
         }),
+        (Method::Get, ["api", "cards", cid, "images"]) => {
+            Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::ListImages })
+        }
         (Method::Post, ["api", "cards", cid, "images"]) => {
             let (name, bytes) = image_input(body)?;
             Ok(ApiRequest::ByCard { card: pid(cid)?, op: CardOp::AddImage { name, bytes } })
@@ -2810,6 +2824,9 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
                 index: index_seg(idx)?,
             })
         }
+        (Method::Get, ["api", "nodes", nid, "cards", cid, "images"]) => {
+            Ok(ApiRequest::ListImages { node: pid(nid)?, card: pid(cid)? })
+        }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "images"]) => {
             let (name, bytes) = image_input(body)?;
             Ok(ApiRequest::AddImage { node: pid(nid)?, card: pid(cid)?, name, bytes })
@@ -3027,9 +3044,9 @@ fn near_miss(method: &Method, seg: &[&str]) -> Option<&'static str> {
         // Tried on 2026-08-30 after an image was posted successfully. An inline
         // image is one of a list, so reading one needs the index.
         ["api", "cards", _, "image"] | ["api", "nodes", _, "cards", _, "image"] if get => Some(
-            "an inline image is one of a list, so it is addressed by index: \
-             GET /api/cards/{cid}/images/{idx} — POST …/images adds one \
-             and DELETE …/images/{idx} removes it",
+            "an image is one of a list: GET /api/cards/{cid}/images lists them \
+             (names and sizes) and GET …/images/{idx} reads one — POST …/images \
+             adds one and DELETE …/images/{idx} removes it",
         ),
         _ => None,
     }
@@ -5241,6 +5258,41 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 (true, ApiResponse::ok(json!({ "card": card, "removed": index })))
             } else {
                 (false, ApiResponse::err(404, "card/attachment not found"))
+            }
+        }
+        ApiRequest::ListImages { node, card } => {
+            match doc.nodes.get(&node).and_then(|n| n.cards.iter().find(|c| c.id == card)) {
+                Some(c) => (
+                    false,
+                    ApiResponse::ok(json!({
+                        "card": card,
+                        // Exactly what `GET …/images/{idx}` can fetch, in the
+                        // same order — a listing whose indices addressed a
+                        // different list would be worse than no listing.
+                        "images": c.kind.images().iter().enumerate().map(|(i, (d, n))| json!({
+                            "index": i,
+                            "name": n,
+                            // The size, not the bytes. A card can carry
+                            // megabytes of picture, and a listing that dragged
+                            // them through the response would cost more than
+                            // reading the one you wanted.
+                            "bytes": d.len(),
+                        })).collect::<Vec<_>>(),
+                        // Images pasted into a body are pictures on this card
+                        // too, and on a real document they are most of its
+                        // size — so they are reported rather than hidden. They
+                        // carry no `index` because `…/images/{idx}` does not
+                        // address them: they are reached through the body's
+                        // `![](trellis:N)` markers, and giving them a second
+                        // meaning for the same index would break the route
+                        // that already works.
+                        "inline_images": c.inline_images.iter().map(|e| json!({
+                            "name": e.name,
+                            "bytes": e.data.len(),
+                        })).collect::<Vec<_>>(),
+                    })),
+                ),
+                None => (false, ApiResponse::err(404, "card not found")),
             }
         }
         ApiRequest::GetImage { node, card, index } => {
@@ -8052,6 +8104,63 @@ mod tests {
         assert!(serde_json::from_str::<UpdateCardInput>(r#"{"rows":[[{"txet":"a"}]]}"#).is_err());
     }
 
+    /// **`POST …/images` shipped without a read half.** A caller that had just
+    /// posted an image had no way to ask what the card carried, and four
+    /// `GET …/images` calls were refused as 404s in one day in the live error
+    /// log. The listing indexes exactly what `…/images/{idx}` can fetch, and
+    /// reports inline body images separately because they carry no such index.
+    #[test]
+    fn a_cards_images_can_be_listed() {
+        use crate::model::ImageEntry;
+        let mut doc = Document::empty();
+        let nid = doc.add_node(None, "n".into());
+        let cid = doc
+            .add_card(
+                nid,
+                egui::pos2(0.0, 0.0),
+                CardKind::Image {
+                    data: vec![1, 2, 3],
+                    name: "one.png".into(),
+                    extra: vec![ImageEntry { data: vec![4, 5], name: "two.png".into() }],
+                    ocr: String::new(),
+                },
+            )
+            .unwrap();
+        doc.card_mut(nid, cid).unwrap().inline_images =
+            vec![ImageEntry { data: vec![9; 7], name: "pasted.png".into() }];
+
+        let (dirty, resp) = process(&mut doc, ApiRequest::ListImages { node: nid, card: cid });
+        assert!(!dirty, "a listing changes nothing");
+        assert_eq!(resp.status, 200);
+        let v: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
+        let imgs = v["images"].as_array().unwrap();
+        assert_eq!(imgs.len(), 2);
+        assert_eq!(imgs[0]["index"], 0);
+        assert_eq!(imgs[0]["name"], "one.png");
+        assert_eq!(imgs[0]["bytes"], 3, "the size, never the bytes");
+        assert!(imgs[0].get("base64").is_none(), "a listing must not carry pictures");
+        assert_eq!(imgs[1]["name"], "two.png");
+        // The indices address the same list `…/images/{idx}` reads.
+        let (_d, one) = process(&mut doc, ApiRequest::GetImage { node: nid, card: cid, index: 1 });
+        let g: serde_json::Value = serde_json::from_str(&one.body).unwrap();
+        assert_eq!(g["name"], "two.png");
+
+        let inline = v["inline_images"].as_array().unwrap();
+        assert_eq!(inline.len(), 1);
+        assert_eq!(inline[0]["bytes"], 7);
+        assert!(inline[0].get("index").is_none(), "no index: the indexed route does not address these");
+
+        // A card with no pictures answers two empty lists, not a 404.
+        let plain = doc.add_card(nid, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        let (_d, r2) = process(&mut doc, ApiRequest::ListImages { node: nid, card: plain });
+        assert_eq!(r2.status, 200);
+        let v2: serde_json::Value = serde_json::from_str(&r2.body).unwrap();
+        assert!(v2["images"].as_array().unwrap().is_empty());
+
+        let (_d, r3) = process(&mut doc, ApiRequest::ListImages { node: nid, card: 99999 });
+        assert_eq!(r3.status, 404);
+    }
+
     #[test]
     fn table_ops_via_api() {
         let mut doc = Document::empty();
@@ -9335,6 +9444,7 @@ mod tests {
             (Method::Post, "/api/cards/9/attachments", "", r#"{"name":"a.txt","data_base64":"aGk="}"#),
             (Method::Get, "/api/cards/9/attachments/0", "", ""),
             (Method::Delete, "/api/cards/9/attachments/0", "", ""),
+            (Method::Get, "/api/cards/9/images", "", ""),
             (Method::Post, "/api/cards/9/images", "", r#"{"data_base64":"aGk="}"#),
             (Method::Get, "/api/cards/9/images/0", "", ""),
             (Method::Delete, "/api/cards/9/images/0", "", ""),

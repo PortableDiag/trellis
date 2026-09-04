@@ -6,6 +6,33 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.172.2]
+
+### Added
+- **`GET /api/cards/{cid}/images` — what pictures a card carries.** `POST …/images`
+  shipped without a read half: a caller that had just posted an image had no way
+  to ask what the card held, and **four `GET …/images` calls were refused as 404s
+  in one day** in the live error log, by an agent on the work instance. The
+  attachment routes have had a listing since v0.123.0; the image routes are the
+  same shape and simply never got one.
+
+  Names and **sizes**, never bytes — the same rule the attachment listing follows,
+  and for the same reason: a card can hold megabytes of picture, and a listing
+  that dragged them through the response would cost more than reading the one you
+  wanted. The `images` array is exactly what `…/images/{idx}` can fetch, in the
+  same order, because a listing whose indices addressed a different list would be
+  worse than no listing at all.
+
+  `inline_images` — pictures pasted into a **body** — are reported alongside,
+  because on a real document they are most of its size (see `image_bytes`,
+  v0.172.0). They carry no `index`: `…/images/{idx}` does not address them, and
+  giving them a second meaning for the same index would break the route that
+  already works. Both card- and node-addressed forms; a card with no pictures
+  answers two empty lists rather than a 404.
+
+  The 404 hint for the singular `…/image` now names the listing as well as the
+  indexed read.
+
 ## [0.172.1]
 
 ### Fixed

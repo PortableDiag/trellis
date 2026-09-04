@@ -519,6 +519,7 @@ GET    /api/cards/{cid}/attachments
 POST   /api/cards/{cid}/attachments        {name, data_base64}
 GET    /api/cards/{cid}/attachments/{idx}
 DELETE /api/cards/{cid}/attachments/{idx}
+GET    /api/cards/{cid}/images
 POST   /api/cards/{cid}/images             {data_base64, name?}
 GET    /api/cards/{cid}/images/{idx}
 DELETE /api/cards/{cid}/images/{idx}
@@ -598,9 +599,12 @@ GET /api/docs[?section=<name>]
           whole-document card routes are reads and property writes only. Tried
           twice in a row with `{"node":…,"cards":[…]}` in the body, losing a
           batch create each time.
-        - `GET /api/cards/{cid}/image` → *an inline image is one of a list, so it
-          is addressed by index: `GET /api/cards/{cid}/images/{idx}`*. Tried
-          immediately after an image had been posted successfully.
+        - `GET /api/cards/{cid}/image` → *an image is one of a list:
+          `GET /api/cards/{cid}/images` lists them and `…/images/{idx}` reads
+          one*. Tried immediately after an image had been posted successfully.
+        - `GET /api/cards/{cid}/images` → **404, four times in one day** (v0.172.2
+          added it). `POST …/images` had shipped without a read half, so a caller
+          that had just posted an image had no way to ask what the card held.
 
 GET /api/search?q=<text>
   → 200 {"hits":[ {node,card,node_title,snippet} ]}                   (case-insensitive)
@@ -1148,6 +1152,17 @@ POST /api/nodes/{id}/cards/{cid}/sketch  {op, …}
 Attach or remove image bytes on an `image` card (grid layout; first image is the
 primary). Bytes are png/jpeg/gif/bmp/webp.
 ```
+GET    /api/nodes/{id}/cards/{cid}/images
+  → 200 {card, images:[{index,name,bytes}], inline_images:[{name,bytes}]}   | 404
+  What this card carries. **Names and sizes, never bytes** — the same rule the
+  attachment listing follows: a card can hold megabytes of picture, and a listing
+  that dragged them through the response would cost more than reading the one you
+  wanted. `images` is exactly what `…/images/{idx}` can fetch, in the same order.
+  `inline_images` are pictures pasted into a **body**; they are reported because on
+  a real document they are most of its size (see `image_bytes` on `/api/instance`),
+  and they carry no `index` because `…/images/{idx}` does not address them — they
+  are reached through the body's `![](trellis:N)` markers.
+
 POST   /api/nodes/{id}/cards/{cid}/images        {data_base64, name?}
   → 201 {<updated card>}   | 400 (bad base64)  | 404 (not an image card)
 
