@@ -3234,6 +3234,37 @@ impl Document {
             .sum()
     }
 
+    /// Total bytes of every **image** in the document — the pictures on Image
+    /// cards (primary and grid) plus every image pasted inline into a card body.
+    ///
+    /// The twin of [`Document::attachment_bytes`], and here for the same reason:
+    /// the document is written **whole** on every save, so this is paid on each
+    /// autosave, copied into every version-history snapshot and into every
+    /// backup archive. It was the invisible half — measured on a live work
+    /// document, images were **40 MB of a 46 MB** file while `attachment_bytes`
+    /// reported `0`, so the one number an operator could see said the document
+    /// cost nothing. A save that takes seconds has a cause, and this names it.
+    ///
+    /// Raw bytes, not the serialised size: images are stored base64, which costs
+    /// 1.33x this on disk before gzip (and image data barely gzips at all).
+    pub fn image_bytes(&self) -> u64 {
+        self.nodes
+            .values()
+            .flat_map(|n| n.cards.iter())
+            .map(|c| {
+                let inline: u64 = c.inline_images.iter().map(|i| i.data.len() as u64).sum();
+                let own = match &c.kind {
+                    CardKind::Image { data, extra, .. } => {
+                        data.len() as u64
+                            + extra.iter().map(|e| e.data.len() as u64).sum::<u64>()
+                    }
+                    _ => 0,
+                };
+                inline + own
+            })
+            .sum()
+    }
+
     /// Remove the `idx`th image (display order) from an Image card. Removing
     /// the primary image promotes the next `extra` entry into its place.
     pub fn remove_image(&mut self, node: NodeId, card: CardId, idx: usize) -> bool {
@@ -10296,6 +10327,7 @@ mod tests {
         assert_eq!(doc.add_attachment(n, cid, bytes.clone(), "spec.pdf".into()), Some(0));
         assert!(!doc.card(n, cid).unwrap().is_empty(), "a file is content");
         assert_eq!(doc.attachment_bytes(), bytes.len() as u64);
+        assert_eq!(doc.image_bytes(), 0, "a file is not an image");
 
         let a = doc.attachment(n, cid, 0).unwrap();
         assert_eq!(a.name, "spec.pdf");
@@ -11784,6 +11816,52 @@ mod tests {
 
         let sketch = mk(&mut doc, CardKind::Sketch { strokes: vec![] });
         assert!(doc.card(n, sketch).unwrap().is_empty());
+    }
+
+    /// **The bigger half of what a document costs, and it used to be invisible.**
+    /// `attachment_bytes` reported `0` on a live 46 MB work document whose images
+    /// were 40 MB of it — so the only number on `/api/instance` said the document
+    /// cost nothing while every autosave serialised, gzipped and wrote 30 MB.
+    /// Counted from all three places an image can live.
+    #[test]
+    fn image_bytes_counts_every_place_an_image_lives() {
+        let mut doc = Document::empty();
+        let n = doc.add_node(None, "n".into());
+        assert_eq!(doc.image_bytes(), 0);
+
+        // An Image card's primary picture…
+        let primary = png_bytes(8, 8);
+        let cid = doc
+            .add_card(
+                n,
+                egui::pos2(0.0, 0.0),
+                CardKind::Image {
+                    data: primary.clone(),
+                    name: "one.png".into(),
+                    extra: vec![],
+                    ocr: String::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(doc.image_bytes(), primary.len() as u64);
+
+        // …the further ones in its grid…
+        let second = png_bytes(16, 16);
+        if let Some(CardKind::Image { extra, .. }) = doc.card_mut(n, cid).map(|c| &mut c.kind) {
+            extra.push(ImageEntry { data: second.clone(), name: "two.png".into() });
+        }
+        assert_eq!(doc.image_bytes(), (primary.len() + second.len()) as u64);
+
+        // …and an image pasted inline into an ordinary card's body.
+        let inline = png_bytes(4, 4);
+        let text = doc.add_card(n, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+        doc.card_mut(n, text).unwrap().inline_images =
+            vec![ImageEntry { data: inline.clone(), name: "pasted.png".into() }];
+        assert_eq!(
+            doc.image_bytes(),
+            (primary.len() + second.len() + inline.len()) as u64
+        );
+        assert_eq!(doc.attachment_bytes(), 0, "an image is not a file attachment");
     }
 
 }

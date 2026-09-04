@@ -6,6 +6,50 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.172.0]
+
+### Fixed
+- **The autosave debounce did not know what a save costs.** Two seconds of idle
+  is right for a document that saves in milliseconds. On the operator's live
+  work document it was not: **46 MB** of RON, **40 MB of it images**, taking
+  ~1.5 s of CPU to serialise and gzip and writing **30 MB** to disk every time.
+  With a flat 2 s window the app spent most of every working minute saving —
+  one 30 MB write finishing just in time for the next pause in typing to start
+  another — and every third minute it also read 30 MB back and wrote another
+  30 MB version-history snapshot. That is the lag reported live, and it gets
+  worse exactly as a document becomes more valuable.
+
+  The idle window now grows with the **measured** duration of the last save:
+  `last save x 5`, floored at the old 2 s and capped at 30 s. A cheap document
+  is untouched — the floor wins, and nothing about the old behaviour changes.
+  An expensive one settles at roughly one save per six of its own durations, so
+  saving is a small fraction of the machine instead of most of it. The cap is
+  deliberate: a debounce is not a way to stop saving, and past it the answer is
+  a smaller document rather than a longer wait.
+
+  Measured, not guessed. The other suspect — re-rendering that basket's cards —
+  was timed first and came to **190 µs a frame** for the whole basket
+  (transforms 148 µs, Markdown parse 41 µs, on the real 29 KB of card bodies),
+  which is nothing. The comment on the save path claiming the UI-thread document
+  clone is "cheap" is now the measured **24 ms** instead: cheap *relative to the
+  save*, not cheap.
+
+### Added
+- **`image_bytes` on `GET /api/instance`.** `attachment_bytes` has been there
+  since v0.123.0 to make the cost of embedded files visible, because the
+  document is written **whole** on every save. Pictures were never counted — so
+  on a document that was 40 MB of images out of 46 MB, the one number an
+  operator could see reported `0`, and said the document cost nothing while
+  every autosave was gzipping and writing 30 MB of it.
+
+  Counted from all three places an image can live: an Image card's primary
+  picture, the further ones in its grid, and anything pasted inline into an
+  ordinary card's body. Raw bytes — on disk they are base64 (1.33x) inside a
+  gzip that barely compresses image data at all, and they are copied into every
+  version-history snapshot and every backup archive as well. A document whose
+  save takes seconds has a cause, and it is nearly always one of these two
+  numbers.
+
 ## [0.171.2]
 
 ### Fixed

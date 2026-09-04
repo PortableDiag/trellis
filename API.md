@@ -170,7 +170,8 @@ GET /api/instance
   → 200 {"app":"trellis","version":"0.65.1","document":"work.ron",
          "path":"/home/you/work.ron","port":7373,"lan":false,
          "lan_host":"192.168.0.101","lan_hosts":["192.168.0.101","100.64.100.6"],
-         "nodes":42,"unsaved_changes":false,"stale_claims":0,
+         "nodes":42,"attachment_bytes":0,"image_bytes":0,
+         "unsaved_changes":false,"stale_claims":0,
          "channels":2,"channels_waiting":1,"stale_plugins":0,"api_errors":0,
          "app_errors":0}
 ```
@@ -180,7 +181,17 @@ Unlike `/api/health` this needs the key, since it reveals a file path.
 
 `attachment_bytes` is the total size of every file embedded in the document — what
 the attachments cost on each whole-document save, and otherwise invisible until a
-backup gets slow.
+backup gets slow. `image_bytes` is the same bill for **pictures**: an Image card's
+primary and grid images plus anything pasted inline into a body. It is usually the
+larger of the two by far — on a live 46 MB work document the images were **40 MB**
+of it while `attachment_bytes` read `0`, so the one visible number said the
+document cost nothing.
+
+Both are **raw** bytes. On disk they are base64 (1.33x) inside a gzip that barely
+compresses image data at all, and the whole document is rewritten on **every**
+autosave, copied into **every** version-history snapshot and into **every** backup
+archive. A document whose save takes seconds has a cause, and it is nearly always
+one of these two numbers.
 
 `lan_host` is an address **another device on the network** can reach this instance
 on, and `lan_hosts` is every candidate, best first. Both are `null`/empty when LAN

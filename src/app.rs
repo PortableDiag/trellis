@@ -165,6 +165,24 @@ const HISTORY_GAP_KEY: &str = "history_gap_mins";
 /// How long the document must be idle (no further changes) before an autosave
 /// fires — so continuous editing (e.g. dragging a card) never saves mid-gesture.
 const AUTOSAVE_IDLE: Duration = Duration::from_secs(2);
+/// **A save costs what it costs, and the debounce has to know.** Two seconds is
+/// right for a document that saves in milliseconds. On a large one it is not: a
+/// live work document of 46 MB (40 MB of it images) takes ~1.5 s of CPU to
+/// serialise and gzip and writes 30 MB to disk, so a flat 2 s debounce meant the
+/// app spent most of every working minute saving — one 30 MB write finishing
+/// just in time for the next pause to start another. That is the lag the
+/// operator reported, and it gets worse exactly as a document gets more
+/// valuable.
+///
+/// So the idle window grows with the **measured** cost of the last save:
+/// `last save x AUTOSAVE_SAVE_MULTIPLE`, floored at [`AUTOSAVE_IDLE`] and capped
+/// at [`AUTOSAVE_IDLE_MAX`]. A cheap document is untouched (the floor wins); an
+/// expensive one settles at roughly one save per six of its own durations, so
+/// saving stays a small fraction of the machine instead of most of it. The cap
+/// is there because a debounce is not a way to stop saving — beyond it the
+/// answer is a smaller document, not a longer wait.
+const AUTOSAVE_SAVE_MULTIPLE: u32 = 5;
+const AUTOSAVE_IDLE_MAX: Duration = Duration::from_secs(30);
 
 /// Selectable themes, listed under **View → Themes**. `Trellis` is the default
 /// signature look (dark chrome + black grid); Light/Terminal Green are alternate
@@ -1090,8 +1108,11 @@ pub struct TrellisApp {
     /// `(path, save result, doc revision at spawn, version-history error)`.
     /// The snapshot's failure travels with the save's because the worker thread
     /// has nowhere to report to — see `write_history_snapshot`.
-    save_tx: Sender<(PathBuf, Result<(), String>, u64, Option<String>)>,
-    save_rx: Receiver<(PathBuf, Result<(), String>, u64, Option<String>)>,
+    save_tx: Sender<(PathBuf, Result<(), String>, u64, Option<String>, Duration)>,
+    save_rx: Receiver<(PathBuf, Result<(), String>, u64, Option<String>, Duration)>,
+    /// How long the last background save actually took (serialise + gzip +
+    /// write). Drives [`App::autosave_idle`] — see [`AUTOSAVE_SAVE_MULTIPLE`].
+    last_save_took: Option<Duration>,
     status: String,
 
     /// Version-history browse/restore window.
@@ -1827,6 +1848,7 @@ impl TrellisApp {
             saving: false,
             save_tx,
             save_rx,
+            last_save_took: None,
             status,
             backup_cfg,
             history_keep,
@@ -4154,6 +4176,15 @@ impl TrellisApp {
                 // into every snapshot and backup — and it is otherwise invisible
                 // until a backup gets slow.
                 "attachment_bytes": self.doc.attachment_bytes(),
+                // The other half of the same bill, and the bigger one in
+                // practice: pictures on Image cards plus images pasted inline
+                // into a body. Measured on a live work document, images were
+                // 40 MB of a 46 MB file while `attachment_bytes` said 0 — so
+                // the only visible number claimed the document cost nothing
+                // while every autosave was serialising, gzipping and writing
+                // 30 MB. Raw bytes; base64 costs 1.33x this on disk, and image
+                // data barely gzips.
+                "image_bytes": self.doc.image_bytes(),
                 "unsaved_changes": self.dirty,
                 // How many cards assert state that is past its check date.
                 // It rides on `/api/instance` because that is the call every
@@ -4911,9 +4942,15 @@ impl TrellisApp {
         }
     }
 
-    /// Save off the UI thread: clone the document (cheap — raw image bytes), then
-    /// serialize + gzip + write it on a worker. The result is applied in
-    /// `pump_save`. `dirty` clears only if nothing changed while we were saving.
+    /// Save off the UI thread: clone the document, then serialize + gzip + write
+    /// it on a worker. The result is applied in `pump_save`. `dirty` clears only
+    /// if nothing changed while we were saving.
+    ///
+    /// The clone is the one part that does block the UI, and it is not free on a
+    /// large document — **24 ms** measured on a 46 MB work document, against
+    /// ~1.5 s for the serialise + gzip that follows it on the worker. Worth
+    /// knowing before the next reader trusts the word "cheap" that used to be
+    /// here: it is cheap *relative to the save*, not cheap.
     fn spawn_save(&mut self, path: PathBuf) {
         if self.saving {
             return; // one save at a time; a later change re-triggers autosave
@@ -4926,7 +4963,13 @@ impl TrellisApp {
         // Copied out before the move: the worker can't borrow `self`.
         let (keep, gap_secs) = (self.history_keep, self.history_gap_mins * 60);
         std::thread::spawn(move || {
+            // Timed around the save alone, not the snapshot: the snapshot is
+            // already rate-limited by its own gap, so including it would make
+            // the debounce lurch every few minutes on a cost most saves never
+            // pay.
+            let started = Instant::now();
             let res = serialize_and_write(&doc, &path);
+            let took = started.elapsed();
             // The snapshot's failure rides home with the save's, because the
             // worker has nothing to report to: it is not the UI thread and does
             // not own the error log.
@@ -4935,7 +4978,7 @@ impl TrellisApp {
             } else {
                 None
             };
-            let _ = tx.send((path, res, snapshot, snap_err));
+            let _ = tx.send((path, res, snapshot, snap_err, took));
             ctx.request_repaint();
         });
     }
@@ -4943,8 +4986,9 @@ impl TrellisApp {
     /// Apply finished background saves.
     fn pump_save(&mut self) {
         let done: Vec<_> = std::iter::from_fn(|| self.save_rx.try_recv().ok()).collect();
-        for (path, res, snapshot, snap_err) in done {
+        for (path, res, snapshot, snap_err, took) in done {
             self.saving = false;
+            self.last_save_took = Some(took);
             match res {
                 Ok(_) => {
                     // Clear dirty only if the document didn't change mid-save.
@@ -4960,6 +5004,13 @@ impl TrellisApp {
                 self.fail("history", format!("Version history: {e}"), Some(path.display().to_string()));
             }
         }
+    }
+
+    /// How long the document must sit idle before an autosave fires, scaled to
+    /// what a save on THIS document actually costs. See
+    /// [`AUTOSAVE_SAVE_MULTIPLE`] for why it is not a constant.
+    fn autosave_idle(&self) -> Duration {
+        autosave_idle_for(self.last_save_took)
     }
 
     fn save(&mut self) {
@@ -9370,7 +9421,7 @@ impl TrellisApp {
                     ui.collapsing("Endpoints", |ui| {
                         for line in [
                             "GET    /api/health                        (no auth)",
-                            "GET    /api/instance   → which document this port serves",
+                            "GET    /api/instance   → which document this port serves (also attachment_bytes + image_bytes — what the embedded files and pictures cost on EVERY autosave, snapshot and backup)",
                         "GET    /api/plugins    → installed plugins; 'stale' counts ones whose repo release copy is newer (stale_plugins on /api/instance is the same count; updating is Tools → Plugins → Update, never the API)",
                         "GET    /api/docs[?section=examples]   → THIS build's API.md, compiled in (any scope; ~100KB whole)",
                             "GET    /api/settings   → theme, canvas toggles, panels, notifications, retention",
@@ -12409,12 +12460,13 @@ impl eframe::App for TrellisApp {
         // mid-gesture. request_repaint_after wakes the loop at the deadline even
         // when the UI is otherwise idle.
         if self.autosave && self.dirty && !self.saving {
+            let idle = self.autosave_idle();
             match self.last_change {
-                Some(t) if t.elapsed() >= AUTOSAVE_IDLE => {
+                Some(t) if t.elapsed() >= idle => {
                     let path = self.target_path();
                     self.spawn_save(path);
                 }
-                Some(t) => ctx.request_repaint_after(AUTOSAVE_IDLE.saturating_sub(t.elapsed())),
+                Some(t) => ctx.request_repaint_after(idle.saturating_sub(t.elapsed())),
                 None => self.last_change = Some(Instant::now()),
             }
         }
@@ -13537,6 +13589,16 @@ fn format_stamp(name: &str) -> String {
     }
 }
 
+/// The autosave debounce for a document whose last save took `last`.
+/// Split out from [`App::autosave_idle`] so the arithmetic is testable without
+/// standing up an egui context.
+fn autosave_idle_for(last: Option<Duration>) -> Duration {
+    match last {
+        Some(t) => (t * AUTOSAVE_SAVE_MULTIPLE).clamp(AUTOSAVE_IDLE, AUTOSAVE_IDLE_MAX),
+        None => AUTOSAVE_IDLE,
+    }
+}
+
 fn serialize_doc(doc: &Document) -> Result<Vec<u8>, String> {
     use std::io::Write;
     let s = ron::to_string(doc).map_err(|e| e.to_string())?;
@@ -13742,6 +13804,30 @@ fn default_autosave_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    /// The autosave debounce grows with what a save on this document costs, and
+    /// stays put on one where saving is cheap.
+    #[test]
+    fn the_autosave_debounce_scales_with_the_last_save() {
+        use super::{
+            autosave_idle_for, AUTOSAVE_IDLE, AUTOSAVE_IDLE_MAX, AUTOSAVE_SAVE_MULTIPLE,
+        };
+        use std::time::Duration;
+
+        // Nothing saved yet: the flat floor, exactly as before.
+        assert_eq!(autosave_idle_for(None), AUTOSAVE_IDLE);
+        // A cheap document is untouched — 20 ms x 5 is far under the floor.
+        assert_eq!(autosave_idle_for(Some(Duration::from_millis(20))), AUTOSAVE_IDLE);
+        // An expensive one backs off: the 1.5 s measured on the 46 MB work
+        // document buys 7.5 s of quiet instead of 2.
+        assert_eq!(
+            autosave_idle_for(Some(Duration::from_millis(1500))),
+            Duration::from_millis(1500) * AUTOSAVE_SAVE_MULTIPLE
+        );
+        // …but never stops saving: past the cap the answer is a smaller
+        // document, not a longer wait.
+        assert_eq!(autosave_idle_for(Some(Duration::from_secs(60))), AUTOSAVE_IDLE_MAX);
+    }
 
     /// **A schedule must survive a restart.** `plugin_last_run` was an `Instant`
     /// seeded at launch, so the interval was measured from app start: a 6-hour
