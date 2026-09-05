@@ -45,6 +45,12 @@ isn't re-sent on the same day, and agent changes resume from the last change-log
 position it handled. A notifier that repeats itself gets muted, and a muted
 notifier may as well not exist.
 
+A digest longer than Telegram's 4096-character cap is **split into numbered
+parts**, on line boundaries so each part is still valid HTML on its own. Before
+v1.3.0 the Bot API refused the whole thing with *"Bad Request: message is too
+long"* and the notification was simply lost — a digest grows with the document,
+so this was only ever a matter of time.
+
 ## The limitation, stated plainly
 
 **Nothing fires while Trellis is closed.** It is a desktop app, not a service, so

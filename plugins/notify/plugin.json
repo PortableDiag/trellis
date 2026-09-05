@@ -2,7 +2,7 @@
   "name": "notify",
   "title": "Notifications",
   "description": "Tells you what the workspace needs without opening it: a digest of overdue and due-today tasks, a nudge when an agent changes something, and — since 1.2.0 — the actual text of any message posted to a channel card, so a reply from an agent reaches your phone as words rather than as \"something changed\". Every card it names is a link that opens that card in Trellis on the device you tap it from, phone included. Sends to Telegram; with no bot token it prints what it would have sent, so you can see the wording first.",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "command": "python3",
   "args": [
     "notify.py"

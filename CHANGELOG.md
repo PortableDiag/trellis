@@ -6,6 +6,20 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.173.1]
+
+### Fixed
+- **notify plugin 1.3.0: a long digest was dropped, not sent.** Telegram caps one
+  message at 4096 characters and refuses anything longer with *"Bad Request:
+  message is too long"* — which lost a whole digest on 2026-09-05, with the app
+  error log as the only record it had ever been composed. A digest grows with the
+  document, so this was a matter of time. It is now **split into numbered parts
+  on line boundaries**, because `parse_mode=HTML` means each part has to be valid
+  HTML by itself and every tag the plugin emits opens and closes within one line;
+  cutting at an arbitrary character would hand Telegram half an `<a>` tag and lose
+  the message to the same 400. **A plugin release does not install itself** —
+  `stale_plugins` will report it until Tools → Plugins → Update.
+
 ## [0.173.0]
 
 ### Fixed

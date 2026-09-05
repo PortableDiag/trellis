@@ -112,12 +112,53 @@ def yes(cfg, key, default=True):
     return v not in ("no", "off", "false", "0")
 
 
+# Telegram's own cap on `text` is 4096; the slack is for the "(n/m)" footer and
+# for the fact that the cap counts UTF-16 code units, so an emoji costs two.
+TELEGRAM_LIMIT = 3800
+
+
+def split_for_telegram(text, limit=TELEGRAM_LIMIT):
+    """Break a long notification into messages Telegram will accept.
+
+    **Split on LINE boundaries only.** `parse_mode=HTML` means each part has to be
+    valid HTML on its own, and every tag this plugin emits — `<b>`, and the `<a>`
+    from `go_link` — is opened and closed within one line. Cutting at an arbitrary
+    character would hand Telegram half a tag and lose the whole message to a 400,
+    which is the failure this function exists to stop.
+
+    A single line longer than the limit is clipped rather than split, for the same
+    reason: there is no safe place inside it.
+    """
+    parts, cur = [], ""
+    for line in str(text).split("\n"):
+        if len(line) > limit:
+            line = clip(line, limit)
+        if not cur:
+            cur = line
+        elif len(cur) + 1 + len(line) <= limit:
+            cur += "\n" + line
+        else:
+            parts.append(cur)
+            cur = line
+    if cur or not parts:
+        parts.append(cur)
+    if len(parts) == 1:
+        return parts
+    return [f"{p}\n\n<i>({i} of {len(parts)})</i>" for i, p in enumerate(parts, 1)]
+
+
 def send(cfg, text):
     """Deliver, or print when there's nothing to deliver with.
 
     Returns the headline for Trellis's status line. Printing rather than failing
     is the point: an unconfigured plugin that shows you the message is useful,
     while one that just errors teaches you nothing.
+
+    **Long notifications are split, not dropped.** Telegram caps one message at
+    4096 characters and refuses anything longer with *"Bad Request: message is
+    too long"* — which on 2026-09-05 lost a whole digest, the app error log being
+    the only record that it had ever been composed. A digest grows with the
+    document, so this was always going to happen eventually.
     """
     token = (cfg.get("telegram_token") or "").strip()
     chat = (cfg.get("telegram_chat_id") or "").strip()
@@ -127,6 +168,14 @@ def send(cfg, text):
         print("-" * 56)
         return "Previewed a notification — add a Telegram bot token to send it"
 
+    parts = split_for_telegram(text)
+    for part in parts:
+        send_one(cfg, token, chat, part)
+    return "Notification sent" if len(parts) == 1 else f"Notification sent in {len(parts)} parts"
+
+
+def send_one(cfg, token, chat, text):
+    """POST one message that is already known to be within Telegram's limits."""
     body = urllib.parse.urlencode(
         {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"}
     ).encode()
@@ -151,7 +200,6 @@ def send(cfg, text):
         die(f"Telegram: {e}")
     if not out.get("ok"):
         die(f"Telegram refused the message: {out.get('description', out)}")
-    return "Notification sent"
 
 
 # --- state, so the same thing isn't sent twice --------------------------------
