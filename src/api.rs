@@ -3028,6 +3028,55 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
 /// Settings → Endpoints document a route that does not exist. Matching on the
 /// segments alone keeps these out of the route table, which is where they belong:
 /// they are error messages, not endpoints.
+/// Why a checklist-item call just missed, said with enough to correct it.
+///
+/// All five item routes shared the bare string *"no such checklist item on that
+/// card"*, which tells a caller nothing it can act on: item ids are **stable and
+/// arbitrary** (v0.90.0 assigns them, positions do not imply them), so a caller
+/// that guesses wrong has no way to guess better. Seen live on one card twice on
+/// different days, with two different wrong ids — `PATCH …/items/12` and
+/// `POST …/items/64/done` on card 10535.
+///
+/// It also conflated three different mistakes, because the underlying setters
+/// return a bare `bool`: wrong basket, wrong card kind, wrong item id. Each now
+/// says which, and the item case **names the ids that exist** — capped, because a
+/// long working list is the normal case and the point is to correct a call, not
+/// to dump the card.
+fn item_miss(doc: &Document, node: NodeId, card: u64, item: u64) -> ApiResponse {
+    let Some(c) = doc.card(node, card) else {
+        return match doc.locate_card(card) {
+            Some(home) => ApiResponse::err(
+                404,
+                &format!("there is no card {card} in basket {node} — it lives in basket {home}"),
+            ),
+            None => ApiResponse::err(404, &format!("there is no card {card} in basket {node}")),
+        };
+    };
+    let CardKind::Checklist { items } = &c.kind else {
+        return ApiResponse::err(
+            400,
+            &format!(
+                "card {card} is a {} card, not a checklist — only a checklist has items",
+                c.kind.label().to_lowercase()
+            ),
+        );
+    };
+    if items.is_empty() {
+        return ApiResponse::err(404, &format!("checklist card {card} has no items yet"));
+    }
+    const SHOW: usize = 24;
+    let ids: Vec<String> = items.iter().take(SHOW).map(|i| i.id.to_string()).collect();
+    let more = items.len().saturating_sub(ids.len());
+    let tail = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+    ApiResponse::err(
+        404,
+        &format!(
+            "checklist card {card} has no item {item} — its item ids are {}{tail}",
+            ids.join(", ")
+        ),
+    )
+}
+
 /// Why a table op just failed, said precisely.
 ///
 /// Every table op returns a bare `bool`, so the failure message named two
@@ -3671,12 +3720,12 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             if ok {
                 (true, ApiResponse::ok(json!({ "item": item, "key": key, "value": value })))
             } else {
-                (false, ApiResponse::err(404, "no such checklist item on that card"))
+                (false, item_miss(doc, node, card, item))
             }
         }
         ApiRequest::ClearItemProperty { node, card, item, key } => {
             if doc.item_mut(node, card, item).is_none() {
-                return (false, ApiResponse::err(404, "no such checklist item on that card"));
+                return (false, item_miss(doc, node, card, item));
             }
             let cleared = doc.clear_item_property(node, card, item, &key);
             (cleared, ApiResponse::ok(json!({ "item": item, "key": key, "cleared": cleared })))
@@ -3686,7 +3735,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
             if ok {
                 (true, ApiResponse::ok(json!({ "item": item, "done": done })))
             } else {
-                (false, ApiResponse::err(404, "no such checklist item on that card"))
+                (false, item_miss(doc, node, card, item))
             }
         }
         ApiRequest::UpdateItem { node, card, item, input } => {
@@ -3697,7 +3746,7 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 );
             }
             let Some(line) = doc.item_mut(node, card, item) else {
-                return (false, ApiResponse::err(404, "no such checklist item on that card"));
+                return (false, item_miss(doc, node, card, item));
             };
             if let Some(t) = input.text {
                 line.text = t;
@@ -4702,7 +4751,19 @@ pub fn process(doc: &mut Document, req: ApiRequest) -> (bool, ApiResponse) {
                 return (false, ApiResponse::err(400, "not a checklist card"));
             };
             let Some(pos) = items.iter().position(|i| i.id == item) else {
-                return (false, ApiResponse::err(404, "no such checklist item on that card"));
+                let ids: Vec<String> = items.iter().take(24).map(|i| i.id.to_string()).collect();
+                let more = items.len().saturating_sub(ids.len());
+                let tail = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+                return (
+                    false,
+                    ApiResponse::err(
+                        404,
+                        &format!(
+                            "checklist card {card} has no item {item} — its item ids are {}{tail}",
+                            ids.join(", ")
+                        ),
+                    ),
+                );
             };
             items.remove(pos);
             let count = items.len();
@@ -8273,6 +8334,74 @@ mod tests {
         // The plurals themselves are still real routes, not near misses.
         assert!(matches!(route(&Method::Get, "/api/cards/2197", "", ""), Ok(_)));
         assert!(matches!(route(&Method::Get, "/api/nodes/487", "", ""), Ok(_)));
+    }
+
+    /// **A missed checklist item now says enough to correct the call.** Item ids
+    /// are stable and arbitrary, so *"no such checklist item on that card"* left
+    /// a caller with nothing to guess better from — seen live on card 10535
+    /// twice, on different days, with two different wrong ids. It also conflated
+    /// three different mistakes behind one 404.
+    #[test]
+    fn a_missed_checklist_item_names_the_ids_that_exist() {
+        use crate::model::ChecklistItem;
+        let mut doc = Document::empty();
+        let home = doc.add_node(None, "home".into());
+        let other = doc.add_node(None, "elsewhere".into());
+        let cid = doc
+            .add_card(
+                home,
+                egui::pos2(0.0, 0.0),
+                CardKind::Checklist {
+                    items: vec![
+                        ChecklistItem { id: 7, done: false, text: "a".into() },
+                        ChecklistItem { id: 19, done: false, text: "b".into() },
+                    ],
+                },
+            )
+            .unwrap();
+        let text = doc.add_card(home, egui::pos2(0.0, 0.0), CardKind::Text).unwrap();
+
+        // Wrong item id: the ids that exist are named.
+        let (dirty, resp) = process(
+            &mut doc,
+            ApiRequest::SetItemDone { node: home, card: cid, item: 64, done: true },
+        );
+        assert!(!dirty);
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("has no item 64"), "{}", resp.body);
+        assert!(resp.body.contains('7') && resp.body.contains("19"), "names the ids: {}", resp.body);
+
+        // Wrong basket: the card's real home is named, as for a table op.
+        let (_d, resp) = process(
+            &mut doc,
+            ApiRequest::SetItemDone { node: other, card: cid, item: 7, done: true },
+        );
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains(&format!("lives in basket {home}")), "{}", resp.body);
+
+        // Wrong kind: a 400 naming what the card actually is, not a 404.
+        let (_d, resp) = process(
+            &mut doc,
+            ApiRequest::SetItemDone { node: home, card: text, item: 7, done: true },
+        );
+        assert_eq!(resp.status, 400);
+        assert!(resp.body.contains("not a checklist"), "{}", resp.body);
+        assert!(resp.body.contains("text card"), "{}", resp.body);
+
+        // The delete route answers the same way.
+        let (_d, resp) =
+            process(&mut doc, ApiRequest::DeleteItem { node: home, card: cid, item: 999 });
+        assert_eq!(resp.status, 404);
+        assert!(resp.body.contains("has no item 999"), "{}", resp.body);
+        assert!(resp.body.contains("19"), "names the ids: {}", resp.body);
+
+        // A real id still works.
+        let (dirty, resp) = process(
+            &mut doc,
+            ApiRequest::SetItemDone { node: home, card: cid, item: 19, done: true },
+        );
+        assert!(dirty);
+        assert_eq!(resp.status, 200);
     }
 
     #[test]

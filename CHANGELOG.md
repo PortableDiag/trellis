@@ -6,6 +6,28 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.172.4]
+
+### Fixed
+- **A missed checklist item said nothing a caller could act on.** All five item
+  routes shared the bare string *"no such checklist item on that card"*. Item ids
+  are **stable and arbitrary** — v0.90.0 assigns them and a position does not
+  imply one — so a caller that guessed wrong had no way to guess better. Seen on
+  one live card twice, on different days, with two different wrong ids:
+  `PATCH …/cards/10535/items/12` and `POST …/cards/10535/items/64/done`.
+
+  It also hid three different mistakes behind one 404, because the underlying
+  setters return a bare `bool`. Each is now said plainly: **there is no card
+  {cid} in basket {node} — it lives in basket {home}**, **card {cid} is a {kind}
+  card, not a checklist**, or **checklist card {cid} has no item {item} — its
+  item ids are 7, 19**. The id list is capped at 24 with a `(+n more)` tail: a
+  long working list is the normal case, and the point is to correct a call rather
+  than dump the card.
+
+  Same shape as the table-op reason in v0.172.3, and for the same reason — a
+  refusal that names one of several possibilities makes the caller guess, which
+  is how the same wrong call gets made twice.
+
 ## [0.172.3]
 
 ### Fixed
