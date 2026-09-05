@@ -542,6 +542,11 @@ impl Default for ChartSpec {
 /// scroll, exceeding it meant the bottom was **silently clipped** rather than
 /// merely tall. Clipping content is the worse failure, so the cap is generous.
 pub const FIT_MAX_H: f32 = 6000.0;
+/// The widest "Fit to content" will make a card. Lives here rather than as a
+/// `const` inside [`Card::fit_size`] because `app.rs` widens a text card past
+/// the estimate when its content **cannot wrap** — a Markdown table — and the
+/// two must stop at the same place.
+pub const FIT_MAX_W: f32 = 900.0;
 
 pub const TABLE_DEFAULT_COL_W: f32 = 110.0;
 /// The shortest a row is drawn, and the height of every row that holds nothing
@@ -1757,7 +1762,7 @@ impl Card {
         const PAD: f32 = 6.0;
         const MIN_W: f32 = 140.0;
         const MIN_H: f32 = 90.0;
-        const MAX_W: f32 = 900.0;
+        const MAX_W: f32 = FIT_MAX_W;
         const TEXT_WRAP_W: f32 = 560.0; // cap text width; longer paragraphs wrap
 
         let fs = if self.font_scale > 0.0 { self.font_scale } else { 1.0 };

@@ -733,50 +733,127 @@ fn fit_card_size(ctx: &egui::Context, c: &crate::model::Card) -> Option<egui::Ve
     const PAD: f32 = 6.0;
     const MIN_H: f32 = 90.0;
     let fs = if c.font_scale > 0.0 { c.font_scale } else { 1.0 };
-    let w = base.x; // keep the estimate's width; only the height was wrong
-    let wrap_w = (w - PAD * 2.0).max(1.0);
-    // Same text the CommonMark view shows: image markers → alt text, zero-width
-    // markup (`*`, `` ` ``) dropped. Single newlines already break lines in a
-    // galley, matching the card's hard-wrap render.
-    let text = crate::model::strip_size_markup(&crate::model::strip_inline_markers(&c.body));
+    // The estimate's width is the starting point; content that cannot wrap may
+    // widen it below.
+    let mut w = base.x;
+    let mut wrap_w = (w - PAD * 2.0).max(1.0);
 
-    // Read the sizes the renderer will actually use rather than assuming: the
-    // card body draws at TextStyle::Body and headings scale up towards
-    // TextStyle::Heading. Measuring everything at one size under-counts a
-    // heading-heavy card, which is what clipped long notes.
-    let (body_px, heading_px) = {
-        let style = ctx.style();
-        (
-            style.text_styles.get(&egui::TextStyle::Body).map_or(12.5, |f| f.size),
-            style.text_styles.get(&egui::TextStyle::Heading).map_or(18.0, |f| f.size),
-        )
-    };
+    // The text the card really draws, minus the two things this measurement
+    // handles itself: inline images (stripped to their markers here and added
+    // back below, because the scratch context has no `bytes://` loader) and
+    // `![[#id]]` embeds (which need the document, and which the estimate has
+    // never expanded either).
+    let text = crate::model::hard_wrap(&crate::model::split_callout_titles(
+        &crate::model::wikilinks_to_md(&crate::model::html_blocks_to_md(
+            &crate::model::strip_inline_markers(&c.body),
+        )),
+    ));
 
-    // Measure line by line so each heading is laid out at its own size. The card
-    // hard-wraps before rendering, so a line here is a line there.
-    let mut content_h = 0.0;
-    for line in text.lines() {
-        let level = crate::model::heading_level(line);
-        let px = match level {
-            Some(l) => crate::model::heading_font_px(l, body_px, heading_px),
-            None => body_px,
-        } * fs;
-        let galley = ctx.fonts(|f| {
-            f.layout(line.to_owned(), egui::FontId::proportional(px), egui::Color32::WHITE, wrap_w)
-        });
-        content_h += galley.size().y;
-        if level.is_some() {
-            content_h += body_px * fs * 0.5; // the newline the renderer inserts
-        }
+    let mut m = measured_body_size(ctx, &text, wrap_w, fs);
+
+    // **A Markdown table does not wrap, so a card holding one has to be wide
+    // enough for it.** `egui_commonmark` lays a table's cells out as single
+    // unwrapped lines: its height is the same 24 px per row at *every* width, and
+    // its width is whatever its longest row needs — 961 px for the two-row table
+    // measured while fixing this, against the 572 px the estimate had chosen from
+    // the longest source line. The overflow is drawn straight past the card's
+    // right edge and clipped, which is what "fit to content" looked wrong doing.
+    //
+    // This is the rule a **table card** has followed since v0.170.0 — the one
+    // card kind never *narrowed* to fit, because its columns sit side by side and
+    // narrowing hides them. A table inside a text card is the same object and
+    // wants the same rule; the cap is the same `FIT_MAX_W` as the estimate's, so
+    // a table wider than that is still clipped, just no longer needlessly.
+    let want_w = (m.x + PAD * 2.0).min(crate::model::FIT_MAX_W);
+    if want_w > w + 0.5 {
+        w = want_w;
+        wrap_w = (w - PAD * 2.0).max(1.0);
+        // Re-measure: the prose around the table re-wraps at the new width, so
+        // the height taken at the old one is for a layout the card never renders.
+        m = measured_body_size(ctx, &text, wrap_w, fs);
     }
-    if text.lines().next().is_none() {
-        content_h = body_px * fs;
-    }
+
+    let mut content_h = m.y;
     for (_iw, ih) in c.inline_image_sizes(wrap_w) {
         content_h += ih + 6.0; // inline images stack under the text
     }
     let h = (TITLE_H + PAD * 2.0 + content_h).clamp(MIN_H, crate::model::FIT_MAX_H);
     Some(egui::vec2(w, h))
+}
+
+/// Lay a card body out with the **real** Markdown renderer, off-screen, and
+/// return the size it takes at `wrap_w` — including a **width larger than
+/// `wrap_w`** when the content refuses to wrap into it, which is how a Markdown
+/// table reports that it needs a wider card.
+///
+/// This replaces a hand-rolled sum of per-line galley heights, which could not
+/// see any of the block layout the renderer actually performs: the gap between
+/// paragraphs, a list's indent and bullet, and above all a **table**, which is
+/// three lines of pipe syntax in the source and a grid of individually-wrapped
+/// cells on screen. Every previous fix here bolted on another term for one of
+/// those cases — headings measured at their own size, a checklist item measured
+/// at the width it wraps to, a table row measured by its cells. Laying the real
+/// renderer out ends the class rather than adding a fourth.
+///
+/// Measured on the two work cards that prompted this (a proof note and a plan,
+/// both with a Markdown table): fit came out **58 px short** on one — the last
+/// table row and the two paragraphs under it clipped — and **37 px tall** on the
+/// other. Table-free bodies were short by 21 and 94 px, so the gap was never
+/// only tables.
+///
+/// It is a **separate context**, not the app's: `fit_card_size` is called from
+/// inside the app's own frame and `Context::run` is not reentrant. Fonts are
+/// installed once and the style is copied from the live context on every call,
+/// so the measurement wraps where the card wraps whatever theme is on. The
+/// Markdown cache is kept, so re-fitting a card is not a second parse. Two
+/// passes: the first settles anything the renderer sizes lazily, the second is
+/// the layout that results.
+fn measured_body_size(ctx: &egui::Context, text: &str, wrap_w: f32, font_scale: f32) -> egui::Vec2 {
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<
+            Option<(egui::Context, egui_commonmark::CommonMarkCache)>,
+        > = const { std::cell::RefCell::new(None) };
+    }
+    SCRATCH.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let (sctx, cache) = cell.get_or_insert_with(|| {
+            let c = egui::Context::default();
+            setup_fonts(&c);
+            (c, egui_commonmark::CommonMarkCache::default())
+        });
+        let mut style = (*ctx.style()).clone();
+        if font_scale > 0.0 && (font_scale - 1.0).abs() > f32::EPSILON {
+            for (_, f) in style.text_styles.iter_mut() {
+                f.size *= font_scale;
+            }
+        }
+        sctx.set_style(style);
+        // Room for the tallest card that can exist, so nothing is laid out
+        // against a screen edge, plus a margin the panel spends on itself.
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(wrap_w + 64.0, crate::model::FIT_MAX_H + 512.0),
+            )),
+            ..Default::default()
+        };
+        let mut h = egui::Vec2::ZERO;
+        for _ in 0..2 {
+            let _ = sctx.run(input.clone(), |c| {
+                egui::CentralPanel::default().show(c, |ui| {
+                    h = ui
+                        .scope(|ui| {
+                            ui.set_max_width(wrap_w);
+                            crate::canvas::md_viewer().show(ui, cache, text);
+                        })
+                        .response
+                        .rect
+                        .size();
+                });
+            });
+        }
+        h
+    })
 }
 
 /// A short human label for a card kind, used in status messages.
@@ -6588,7 +6665,11 @@ impl TrellisApp {
                     }
                 }
                 CanvasAction::PickSource(cid) => {
-                    if let Some(path) = rfd::FileDialog::new()
+                    // `self.file_dialog()`, never a bare `rfd::FileDialog::new()`:
+                    // an unparented dialog opens BEHIND the app window, which is
+                    // what every other picker in this file already avoids.
+                    if let Some(path) = self
+                        .file_dialog()
                         .set_title("Mirror a file in this card")
                         .pick_file()
                     {
@@ -9457,7 +9538,7 @@ impl TrellisApp {
                             "POST   /api/cards/{cid}/property {key,value}  ·  DELETE …/property?key=due",
                             "POST   /api/cards/{cid}/move {node,pos?} | {before|after|index|to}",
                             "PATCH  /api/cards/{cid}/items/{item}  {text?, done?}   (edit one line)",
-                            "POST   /api/cards/{cid}/items/{item}/done {done}",
+                            "POST   /api/cards/{cid}/items/{item}/done {done?}  (no body = done)",
                             "POST   /api/cards/{cid}/items/{item}/property {key,value}  ·  DELETE /api/cards/{cid}/items/{item}/property?key=due",
                             "POST   /api/cards/{cid}/append {text, at?, separator?}        (add to a shared card without sending the body back)",
                             "POST   /api/cards/{cid}/source/write   ·  GET /api/cards/{cid}/source/diff   (MIRROR WRITE-BACK — write the card over its file, or just show the difference. 409 + the diff if the file moved since the card read it: it asks, it never merges)",
@@ -9483,7 +9564,7 @@ impl TrellisApp {
                             "GET    /api/groups/{gid}/backlinks        (cards whose [[#g…]] links point at this group)",
                             "POST   /api/nodes/{id}/cards/{cid}/items/{item}/property {key, value}   (one checklist LINE)",
                             "DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due",
-                            "POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done}   (tick a line)",
+                            "POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done?}  (no body = tick)",
                             "PATCH  /api/nodes/{id}/cards/{cid}/items/{item}          {text?, done?}   (edit one line in place)",
                             "POST   /api/daily  {date?}                (a day's journal node, created on demand; opt-in per instance)",
                             "GET    /api/daily                         (is it on, and which node is the journal root)",
@@ -14100,6 +14181,66 @@ mod tests {
             crate::model::CardKind::Table { table: crate::model::TableData::empty(2, 2) },
         );
         assert_eq!(fit_card_size(&ctx, &table), table.fit_size());
+    }
+
+    /// **A Markdown table does not wrap, so the card has to be wider.**
+    ///
+    /// "Fit to content" added up per-line galley heights of the *source*, so a
+    /// table measured as its three lines of pipe syntax wrapped as prose. It is
+    /// not prose: `egui_commonmark` draws each cell as one unwrapped line, so the
+    /// table's height is the same at every width and its width is whatever its
+    /// longest row needs — measured at **961 px** for the two rows below, against
+    /// the **572 px** the estimate picked from the longest source line. The
+    /// difference was drawn straight past the card's right edge and clipped.
+    ///
+    /// The pin is implementation-free: the *same words* as a table must fit
+    /// WIDER than as prose, because prose gives way to the width it is offered
+    /// and a table does not.
+    #[test]
+    fn fit_measures_a_markdown_table_as_the_grid_it_draws() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |_| {});
+
+        const ROWS: [(&str, &str); 3] = [
+            ("`/.env.old` without the token", "403, then `/api/healthz` 403: the box's own public IP is banned through the edge for thirty minutes, which is harmless"),
+            ("`/.git/config`, `/wp-login.php`", "403 from Cloudflare itself, never reaching Caddy at all — the durable layer of the two"),
+            ("`/.well-known/x`, `/`, `/api/healthz`", "200, 200, 200 — an ordinary request is untouched by any of this"),
+        ];
+        let mk = |body: String| {
+            let mut c = crate::model::Card::new(
+                1, egui::pos2(0.0, 0.0), crate::model::CardKind::Text);
+            c.title = "Proof".into();
+            c.body = body;
+            c
+        };
+        let mut table = String::from("| request | result |\n|---|---|\n");
+        let mut plain = String::new();
+        for (a, b) in ROWS {
+            table.push_str(&format!("| {a} | {b} |\n"));
+            plain.push_str(&format!("{a} {b}\n"));
+        }
+        let as_table = fit_card_size(&ctx, &mk(table)).expect("text cards can be measured");
+        let as_lines = fit_card_size(&ctx, &mk(plain)).expect("text cards can be measured");
+        assert!(
+            as_table.x > as_lines.x,
+            "a table of these rows fitted to {} wide and the same words as prose to \
+             {} — prose wraps into whatever width it is given and a table does not, \
+             so the card has to be the one that gives way",
+            as_table.x,
+            as_lines.x
+        );
+        assert_eq!(
+            as_table.x,
+            crate::model::FIT_MAX_W,
+            "rows this long want more than the cap, so fit should spend all of it"
+        );
+
+        // And the width is spent on the table, not handed out to everything: the
+        // same prose with no table in it stays at the estimate's text width.
+        assert!(
+            as_lines.x < crate::model::FIT_MAX_W,
+            "prose should not be widened to the cap just because a table would be"
+        );
     }
 
     /// Headings render larger than body text, so a card full of them needs more

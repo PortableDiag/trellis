@@ -6,6 +6,48 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.173.0]
+
+### Fixed
+- **The mirror file picker opened behind the window.** `Mirror a file…` was the
+  one picker in the app calling `rfd::FileDialog::new()` directly instead of the
+  `file_dialog()` helper, so it was never parented to the app window and the
+  dialog appeared behind Trellis. Every other picker in `app.rs` already went
+  through the helper; this one was written before it existed.
+- **A mirrored card could never be renamed.** The title editor lives *inside* the
+  Text arm's body editor, which is gated on `source.is_none()` — correctly, since
+  a mirrored body belongs to the file. The title does not, and it went read-only
+  with it. The title field is now drawn outside that gate, so `Edit title` opens
+  the name and leaves the body exactly as read-only as it was.
+- **"Fit to content" clipped any card holding a Markdown table.** The fit added
+  up per-line galley heights of the card's **source**, which cannot see what the
+  Markdown renderer actually draws. A table is the case where that goes visibly
+  wrong: `egui_commonmark` lays each cell out as one **unwrapped** line, so a
+  table's height is identical at every width and its width is whatever its
+  longest row needs — 961 px for a two-row table, against the 572 px the estimate
+  had chosen from the longest line of pipe syntax. The overflow was drawn past
+  the card's right edge and clipped, and the height was wrong in both directions
+  (58 px short on one work card, 37 px tall on another). Fit now **lays the real
+  renderer out off-screen** and measures that, and **widens a card up to the same
+  `FIT_MAX_W` the estimate stops at** when its content refuses to wrap — the rule
+  a table *card* has followed since v0.170.0, applied to a table inside a text
+  card, which is the same object. Prose is unaffected: it wraps into whatever
+  width it is given, so it is never widened.
+
+### Added
+- **`Change file…` on a mirrored card.** Repointing a mirror meant `Stop
+  mirroring` then `Mirror a file…` — two steps, of which the first detaches the
+  card and leaves the previous file's text behind as its body. Same picker, one
+  step, and the hover names the file it is mirroring now.
+- **`POST …/items/{item}/done` takes no body.** The route name is the whole
+  intent, so an absent or empty body means `{"done": true}`. Six consecutive
+  400s in the personal instance's error log were one agent ticking six lines
+  with no body and landing none of them — *invalid JSON body: EOF while parsing
+  a value at line 1 column 0*, six times, for a call whose meaning was never in
+  doubt. `{"done": false}` still has to be said out loud, because un-ticking is
+  the half the route name does not cover, and a body that is present but broken
+  is refused exactly as before.
+
 ## [0.172.5]
 
 ### Changed

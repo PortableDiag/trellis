@@ -1337,10 +1337,20 @@ pub struct MoveNodeInput {
     to: Option<String>,
 }
 
+/// `POST …/items/{item}/done`. The route name already says what it does, so an
+/// **absent or empty body means `done: true`** — six consecutive 400s in the
+/// error log were one agent posting to `…/done` with no body at all and getting
+/// "EOF while parsing a value at line 1 column 0" for it. `{"done": false}` is
+/// still how a line is un-ticked.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DoneInput {
+    #[serde(default = "yes")]
     pub done: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -2583,7 +2593,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             })
         }
         (Method::Post, ["api", "cards", cid, "items", iid, "done"]) => {
-            let i: DoneInput = parse(body)?;
+            let i: DoneInput = parse_or_default(body)?;
             Ok(ApiRequest::ByCard {
                 card: pid(cid)?,
                 op: CardOp::ItemDone { item: pid(iid)?, done: i.done },
@@ -2709,7 +2719,7 @@ fn route(method: &Method, path: &str, query: &str, body: &str) -> Result<ApiRequ
             })
         }
         (Method::Post, ["api", "nodes", nid, "cards", cid, "items", iid, "done"]) => {
-            let i: DoneInput = parse(body)?;
+            let i: DoneInput = parse_or_default(body)?;
             Ok(ApiRequest::SetItemDone {
                 node: pid(nid)?, card: pid(cid)?, item: pid(iid)?, done: i.done,
             })
@@ -3390,6 +3400,15 @@ fn batch_patch(body: &str) -> Result<(Vec<u64>, UpdateCardInput), (u16, String)>
 
 fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, (u16, String)> {
     serde_json::from_str(body).map_err(|e| (400, format!("invalid JSON body: {e}")))
+}
+
+/// `parse`, but an **empty** body is read as `{}` — for a route whose name
+/// already carries the intent (`…/done`), where a caller sending nothing means
+/// the obvious thing rather than a malformed request. Every field the type needs
+/// must therefore have a `#[serde(default)]`; anything else still 400s, and a
+/// body that is present but broken is reported exactly as before.
+fn parse_or_default<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, (u16, String)> {
+    parse(if body.trim().is_empty() { "{}" } else { body })
 }
 
 /// Lenient `color` deserializer for the API: accepts an `[r,g,b]` array
@@ -7905,6 +7924,43 @@ mod tests {
             r#"{"name":"p.png","data_base64":"aGk="}"#
         )
         .is_ok());
+    }
+
+    /// **`POST …/done` with no body means done.**
+    ///
+    /// The route name carries the whole intent, and a caller that sends nothing
+    /// obviously means "tick it". Until now that was
+    /// *invalid JSON body: EOF while parsing a value at line 1 column 0* — six of
+    /// them in one burst in the personal instance's error log on 2026-09-04, one
+    /// agent ticking six items and landing none of them. Un-ticking still has to
+    /// be said out loud, because that is the half the name does not cover.
+    #[test]
+    fn an_empty_body_on_done_means_done() {
+        for path in ["/api/cards/9/items/4/done", "/api/nodes/3/cards/9/items/4/done"] {
+            for body in ["", "   ", "{}"] {
+                let r = route(&Method::Post, path, "", body)
+                    .unwrap_or_else(|e| panic!("{path} with {body:?}: {} {}", e.0, e.1));
+                let done = match r {
+                    ApiRequest::SetItemDone { done, .. } => done,
+                    ApiRequest::ByCard { op: CardOp::ItemDone { done, .. }, .. } => done,
+                    _ => panic!("wrong request for {path}"),
+                };
+                assert!(done, "{path} with {body:?} should mean done");
+            }
+            // Explicit false still un-ticks, and a broken body is still a 400.
+            let r = route(&Method::Post, path, "", r#"{"done":false}"#).unwrap();
+            let done = match r {
+                ApiRequest::SetItemDone { done, .. } => done,
+                ApiRequest::ByCard { op: CardOp::ItemDone { done, .. }, .. } => done,
+                _ => panic!("wrong request for {path}"),
+            };
+            assert!(!done, "{path}: explicit false must survive");
+            assert!(route(&Method::Post, path, "", "{").is_err(), "{path}: broken JSON still 400s");
+            assert!(
+                route(&Method::Post, path, "", r#"{"finished":true}"#).is_err(),
+                "{path}: an unknown field is still named"
+            );
+        }
     }
 
     /// **A column's width is readable, not only writable.**

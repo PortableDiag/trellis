@@ -501,7 +501,7 @@ POST   /api/cards/{cid}/property           {key, value}   (400 on checklist/tabl
 DELETE /api/cards/{cid}/property?key=due
 POST   /api/cards/{cid}/move               {node, pos?} or {before|after|index|to}
 PATCH  /api/cards/{cid}/items/{item}       {text?, done?}
-POST   /api/cards/{cid}/items/{item}/done  {done}
+POST   /api/cards/{cid}/items/{item}/done  {done?}   (no body = done)
 POST   /api/cards/{cid}/items/{item}/property   {key, value}
 DELETE /api/cards/{cid}/items/{item}/property?key=due
 POST   /api/cards/{cid}/append             {text, at?, separator?}
@@ -1879,7 +1879,7 @@ Address the line, not its position:
 ```sh
 POST   /api/nodes/{id}/cards/{cid}/items/{item}/property {key, value}
 DELETE /api/nodes/{id}/cards/{cid}/items/{item}/property?key=due
-POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done}
+POST   /api/nodes/{id}/cards/{cid}/items/{item}/done     {done?}  (no body = done)
 PATCH  /api/nodes/{id}/cards/{cid}/items/{item}          {text?, done?}
 ```
 
@@ -1888,6 +1888,13 @@ list above is not enough on its own: until it shipped, `/done`, `/property` and
 `DELETE` could each address a line while changing its *wording* meant rewriting
 the whole `items` array — the one call that re-ids lines by position. Both fields
 are optional; sending neither is a 400 rather than a 200 that changed nothing.
+
+**`…/done` takes no body** (v0.173.0). The route name is the whole intent, so an
+absent or empty body means `{"done": true}` — six consecutive 400s in one error
+log were an agent ticking six lines with no body and landing none of them.
+Un-ticking is the half the name does not cover, so `{"done": false}` still has to
+be said out loud, and a body that is present but malformed is refused exactly as
+before.
 
 ```sh
 PATCH  /api/nodes/{id}/cards/{cid}/items/{item}   {text?, done?}
@@ -1931,8 +1938,11 @@ curl -s -H "X-API-Key: $KEY" $API/nodes/$NID/cards/$CID
 curl -s -X POST -H "X-API-Key: $KEY" -d '{"key":"due","value":"2026-08-20"}' \
   $API/nodes/$NID/cards/$CID/items/60/property
 
-# Tick it.
-curl -s -X POST -H "X-API-Key: $KEY" -d '{"done":true}' \
+# Tick it. No body needed — the route name says it.
+curl -s -X POST -H "X-API-Key: $KEY" $API/nodes/$NID/cards/$CID/items/60/done
+
+# Un-tick it. This half has to be said out loud.
+curl -s -X POST -H "X-API-Key: $KEY" -d '{"done":false}' \
   $API/nodes/$NID/cards/$CID/items/60/done
 ```
 

@@ -3265,6 +3265,18 @@ fn kind_ui(ui: &mut egui::Ui, card: &Card, env: &mut Env, zoom: f32, actions: &m
         html_ui(ui, card, h, env, zoom, actions);
         return;
     }
+    // **A mirror locks the BODY, which belongs to the file — never the title,
+    // which is the card's own.** The body arms below gate their editors on
+    // `source.is_none()`, and because the title field lives *inside* the Text
+    // arm's editor that gate took the title with it: a card given a file could
+    // never be renamed again. Draw it out here instead, so `editing` still means
+    // something on a mirrored card while the body stays read-only.
+    if card.editing
+        && card.source.is_some()
+        && matches!(card.kind, CardKind::Text | CardKind::Code { .. })
+    {
+        title_field(ui, card, actions);
+    }
     match &card.kind {
         CardKind::Text => {
             // `source.is_none()`: a mirrored body belongs to the file, so the
@@ -4157,7 +4169,7 @@ fn card_preview_label(c: &Card) -> String {
 /// standing decision), and a glyph outside the bundled font renders as a hollow
 /// box — which has happened before. A right-looking icon that draws as a box is
 /// worse than an approximate one that draws.
-fn md_viewer() -> CommonMarkViewer {
+pub(crate) fn md_viewer() -> CommonMarkViewer {
     CommonMarkViewer::new().alerts(callout_bundle())
 }
 
@@ -4880,9 +4892,26 @@ fn card_menu(
             .strong(),
     );
     ui.separator();
-    if supports_edit(&card.kind) && card.source.is_none() {
-        let label = if card.editing { "Preview" } else { "Edit" };
-        if ui.button(label).clicked() {
+    if supports_edit(&card.kind) {
+        // A mirrored card still has a title of its own, so the toggle stays —
+        // it just opens less. The title bar's "🔗 file" label says why the
+        // body is read-only; this is the way back to the name.
+        let mirrored = card.source.is_some();
+        let label = match (mirrored, card.editing) {
+            (true, false) => "Edit title",
+            (true, true) => "Done",
+            (false, false) => "Edit",
+            (false, true) => "Preview",
+        };
+        let b = ui.button(label);
+        let b = match mirrored {
+            true => b.on_hover_text(
+                "The mirrored body belongs to the file and stays read-only. \
+                 The card's title does not.",
+            ),
+            false => b,
+        };
+        if b.clicked() {
             actions.push(CanvasAction::SetEditing(card.id, !card.editing));
             ui.close_menu();
         }
@@ -5125,6 +5154,21 @@ fn card_menu(
                         actions.push(CanvasAction::DiffSource(card.id));
                         ui.close_menu();
                     }
+                }
+                // Repointing a mirror used to mean "Stop mirroring" then
+                // "Mirror a file…" — two steps, of which the first
+                // detaches the card and leaves the old file's text behind as the
+                // body. Same picker, one step, and the body is never orphaned.
+                if ui
+                    .button("Change file\u{2026}")
+                    .on_hover_text(match card.source.as_deref() {
+                        Some(p) => format!("Mirror a different file.\n\nCurrently: {p}"),
+                        None => "Mirror a different file.".into(),
+                    })
+                    .clicked()
+                {
+                    actions.push(CanvasAction::PickSource(card.id));
+                    ui.close_menu();
                 }
                 if ui
                     .button("Stop mirroring")
