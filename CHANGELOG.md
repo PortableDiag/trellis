@@ -6,6 +6,20 @@ All notable changes to Trellis. Format loosely follows
 
 ## [Unreleased]
 
+## [0.172.5]
+
+### Changed
+- **The docs catch up with the day.** README gains the two behaviours a reader
+  meets without reading the API: `image_bytes` beside `attachment_bytes` as the
+  running cost of what is embedded, and the fact that the autosave wait **grows
+  with how long the last save took**, so a large document is not caught saving
+  most of the time you are working in it.
+- **API.md's worked Examples gain the three patterns that shipped today**, because
+  a reference without a copy-paste example is a route an agent still gets wrong:
+  listing a card's images, the table read-modify-write round trip, and — new as a
+  documented habit — **read the refusal**, which now names the one thing that went
+  wrong instead of offering two and leaving the caller to guess.
+
 ## [0.172.4]
 
 ### Fixed

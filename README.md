@@ -125,7 +125,10 @@ document**, not a path to them, so the file travels with the notes to the phone,
 backup or another machine. Drop it on a card to attach it there, or on empty canvas
 for a card of its own; click it to save a copy back out. Above 10 MB it asks first,
 because the document is written whole on every save — an embedded file is re-written
-on each autosave and copied into every snapshot and backup.
+on each autosave and copied into every snapshot and backup. `GET /api/instance`
+reports the running cost as two numbers: `attachment_bytes` for dropped files and
+**`image_bytes`** for pictures, which is usually the larger of the two and used to
+be invisible entirely.
 
 **Notes from other apps keep their metadata.** A dropped `.md` with a YAML
 frontmatter block (Obsidian, Jekyll, Hugo) has it read: `tags:` become `#tags`,
@@ -529,6 +532,9 @@ drawn hollow in their accent where a resident card is a solid block.
   `app-errors.log`. An instance serves one document, so **the port
   addresses the document** — `GET /api/instance` reports which one is open, and
   edits are autosaved a couple of seconds later without anyone pressing Save.
+  **A couple of seconds on a document where saving is cheap**: the wait grows with
+  how long the last save actually took, so a large document is not caught saving
+  most of the time you are working in it.
   Enable it in **Tools → Settings**, where **Examples** gives you copy-paste
   `curl` commands already filled in with this instance's host, port and key; see
   [API.md](API.md).

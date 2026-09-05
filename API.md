@@ -3116,8 +3116,27 @@ curl -s -H "X-API-Key: $KEY" \
 curl -s -H "X-API-Key: $KEY" "$API/cards/1391/export?format=markdown"
 ```
 
-Use the table op surface rather than rebuilding `rows`: a wholesale rewrite resets
-every column width, which is a deliberate layout thrown away.
+Prefer the table op surface for a targeted edit. A `rows` rewrite is fine when you
+mean to replace the data — since v0.172.1 it keeps the column widths, the header
+flag, the chart spec and the formatting rules, and it accepts **the same cell shape
+`GET` hands back**, so read-modify-write finally works:
+
+```sh
+# Read the table, change one cell, send it straight back. A cell may be a bare
+# value or the {text,bg,fg} object the read returns — both in the same array.
+curl -s -H "X-API-Key: $KEY" $API/cards/1391 \
+  | jq '.card.rows | .[1][0].text = "Silas"' \
+  | xargs -0 -I{} curl -s -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+      -d "{\"rows\": {}}" -X PATCH $API/cards/1391
+```
+
+**Read the refusal — it names the one thing that went wrong.** A failed table op
+says *there is no card 2071 in basket 119 — it lives in basket 469*, or *card 2071
+is a text card, not a table*, or *an index is out of range*; it used to offer two
+of those and leave you to guess. A missed checklist item lists **the item ids that
+exist**, because ids are stable and arbitrary and a wrong guess had nothing to
+correct from. And a singular path (`/api/card/1391`) names its plural rather than
+handing you the generic 404.
 
 ### Closing out a list of tasks the agenda handed you
 
@@ -3582,6 +3601,14 @@ curl -s -H "X-API-Key: $KEY" -d '{"op":"set_header","header":false}'            
 curl -s -H "X-API-Key: $KEY" \
   -d "{\"name\":\"receipt.png\",\"data_base64\":\"$(base64 -w0 receipt.png)\"}" \
   $API/nodes/$NID/cards/1/images
+
+# ...then ask what the card carries. Names and SIZES, never bytes (v0.172.2).
+# `images` is exactly what `…/images/{idx}` fetches, in the same order; pictures
+# pasted into a body come back under `inline_images` with no index, because that
+# route does not address them.
+curl -s -H "X-API-Key: $KEY" $API/nodes/$NID/cards/1/images
+# → {"card":1,"images":[{"index":0,"name":"receipt.png","bytes":81234}],
+#    "inline_images":[]}
 
 # Add existing card 3 to group 1 (then it moves with the group)
 curl -s -H "X-API-Key: $KEY" -d '{"group":1}' $API/nodes/$NID/cards/3/group
